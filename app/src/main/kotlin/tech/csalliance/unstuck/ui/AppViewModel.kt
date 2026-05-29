@@ -11,6 +11,9 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.encodeToString
+import kotlinx.serialization.json.Json
 import tech.csalliance.unstuck.AppGraph
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.applyCompletion
@@ -252,6 +255,29 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun upsertCollection(c: ItemCollection) = launchWrite { write?.upsertCollection(c) }
     fun deleteCollection(id: String) = launchWrite { write?.deleteCollection(id) }
 
+    // Collection item ops — whole-row upserts (the JSONB row carries its items),
+    // mirroring the web use-collections mutations.
+    fun addCollectionItem(col: ItemCollection, body: String) = launchWrite {
+        val text = body.trim(); if (text.isEmpty()) return@launchWrite
+        write?.upsertCollection(col.copy(items = col.items + tech.csalliance.unstuck.core.model.CollectionItem(newUuid(), text, at = isoNow())))
+    }
+    fun updateCollectionItemBody(col: ItemCollection, itemId: String, body: String) = launchWrite {
+        write?.upsertCollection(col.copy(items = col.items.map { if (it.id == itemId) it.copy(body = body.trim()) else it }))
+    }
+    fun toggleCollectionItemPin(col: ItemCollection, itemId: String) = launchWrite {
+        write?.upsertCollection(col.copy(items = col.items.map { if (it.id == itemId) it.copy(pinned = !(it.pinned ?: false)) else it }))
+    }
+    fun toggleCollectionItemDone(col: ItemCollection, itemId: String) = launchWrite {
+        write?.upsertCollection(col.copy(items = col.items.map { if (it.id == itemId) it.copy(done = !(it.done ?: false)) else it }))
+    }
+    fun removeCollectionItem(col: ItemCollection, itemId: String) = launchWrite {
+        write?.upsertCollection(col.copy(items = col.items.filterNot { it.id == itemId }))
+    }
+    fun renameCollection(col: ItemCollection, name: String) = launchWrite {
+        val nm = name.trim(); if (nm.isNotEmpty()) write?.upsertCollection(col.copy(name = nm))
+    }
+    fun recolorCollection(col: ItemCollection, color: String) = launchWrite { write?.upsertCollection(col.copy(color = color)) }
+
     // --- tags & areas ---
 
     fun upsertTag(t: TagRow) = launchWrite { write?.upsertTag(t) }
@@ -324,10 +350,45 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         auth?.sendMagicLink(email) ?: AuthOutcome.Error("Not configured")
     suspend fun googleSignIn(): AuthOutcome =
         auth?.signInWithGoogle() ?: AuthOutcome.Error("Not configured")
+    suspend fun resetPassword(email: String): AuthOutcome =
+        auth?.resetPassword(email) ?: AuthOutcome.Error("Not configured")
+    suspend fun changePassword(password: String): AuthOutcome =
+        auth?.changePassword(password) ?: AuthOutcome.Error("Not configured")
+    suspend fun updateDisplayName(name: String): AuthOutcome =
+        auth?.updateDisplayName(name) ?: AuthOutcome.Error("Not configured")
+    suspend fun deleteAccount(): AuthOutcome =
+        auth?.deleteAccount() ?: AuthOutcome.Error("Not configured")
+    val hasPassword: Boolean get() = auth?.hasPassword ?: true
     fun signOut() = launchWrite { auth?.signOut() }
+
+    /** Serialise every user-owned collection into one JSON bundle (matches web exportAll). */
+    fun exportJson(): String = EXPORT_JSON.encodeToString(
+        ExportBundle(
+            exportedAt = isoNow(), email = currentEmail,
+            tasks = tasks.value, sessions = sessions.value, calBlocks = blocks.value,
+            captures = captures.value, reasonLogs = reasonLogs.value,
+            collections = collections.value, tags = tags.value, lifeAreas = lifeAreas.value,
+        ),
+    )
 
     companion object {
         private val ISO: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
+        private val EXPORT_JSON = Json { prettyPrint = true; encodeDefaults = true }
     }
 }
+
+/** One-shot JSON snapshot of all user-owned data (matches the web export bundle). */
+@Serializable
+data class ExportBundle(
+    val exportedAt: String,
+    val email: String?,
+    val tasks: List<TaskItem>,
+    val sessions: List<Session>,
+    val calBlocks: List<CalBlock>,
+    val captures: List<Capture>,
+    val reasonLogs: List<ReasonLog>,
+    val collections: List<ItemCollection>,
+    val tags: List<TagRow>,
+    val lifeAreas: List<LifeArea>,
+)

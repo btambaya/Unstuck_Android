@@ -1,5 +1,7 @@
 package tech.csalliance.unstuck.ui.settings
 
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -23,8 +25,13 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -153,11 +160,59 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
 
 @Composable
 private fun AccountContent(vm: AppViewModel) {
+    val c = UTheme.colors
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    var showName by remember { mutableStateOf(false) }
+    var showPassword by remember { mutableStateOf(false) }
+    var showDelete by remember { mutableStateOf(false) }
+    var msg by remember { mutableStateOf<String?>(null) }
+    val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) {
+            runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(vm.exportJson().toByteArray()) } }
+                .fold({ msg = "Exported." }, { msg = "Export failed." })
+        }
+    }
+
     SettingsCard {
-        SettingRow("Signed in", vm.currentEmail ?: vm.currentName ?: "—") {}
-        SettingRow("Export everything", "JSON bundle") {}
+        SettingRow("Display name", vm.currentName ?: "Set a name") { showName = true }
+        SettingRow("Signed in", vm.currentEmail ?: "—") {}
+        SettingRow(if (vm.hasPassword) "Change password" else "Add a password", "Update your sign-in password") { showPassword = true }
+        SettingRow("Export everything", "One-shot JSON snapshot") { exporter.launch("unstuck-export.json") }
+        SettingRow("Delete my account", "Permanently removes your data") { showDelete = true }
         SettingRow("Sign out", "End this session", last = true) { vm.signOut() }
     }
+    msg?.let { Text(it, style = UFont.sans(12), color = c.green, modifier = Modifier.padding(top = 10.dp)) }
+
+    if (showName) FieldDialog("Display name", "Your name", initial = vm.currentName ?: "", onSave = { scope.launch { vm.updateDisplayName(it) }; showName = false }, onDismiss = { showName = false })
+    if (showPassword) FieldDialog(if (vm.hasPassword) "Change password" else "Add a password", "New password", password = true, onSave = { scope.launch { vm.changePassword(it) }; showPassword = false }, onDismiss = { showPassword = false })
+    if (showDelete) AlertDialog(
+        onDismissRequest = { showDelete = false },
+        title = { Text("Delete your account?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+        text = { Text("This permanently removes your tasks, sessions and everything else. This cannot be undone.", style = UFont.sans(13), color = c.ink2) },
+        confirmButton = { TextButton(onClick = { showDelete = false; scope.launch { vm.deleteAccount() } }) { Text("Delete forever", color = c.red) } },
+        dismissButton = { TextButton(onClick = { showDelete = false }) { Text("Cancel", color = c.ink2) } },
+        containerColor = c.surface,
+    )
+}
+
+@Composable
+private fun FieldDialog(title: String, label: String, initial: String = "", password: Boolean = false, onSave: (String) -> Unit, onDismiss: () -> Unit) {
+    val c = UTheme.colors
+    var value by remember { mutableStateOf(initial) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(title, style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+        text = {
+            OutlinedTextField(
+                value = value, onValueChange = { value = it }, label = { Text(label) }, singleLine = true,
+                visualTransformation = if (password) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
+            )
+        },
+        confirmButton = { TextButton(enabled = value.isNotBlank(), onClick = { onSave(value.trim()) }) { Text("Save", color = c.primaryDeep) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = c.ink2) } },
+        containerColor = c.surface,
+    )
 }
 
 @Composable

@@ -5,6 +5,7 @@ import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.providers.Google
 import io.github.jan.supabase.auth.providers.builtin.Email
 import io.github.jan.supabase.auth.providers.builtin.OTP
+import io.github.jan.supabase.functions.functions
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -52,6 +53,28 @@ class AuthService(private val client: SupabaseClient) {
     suspend fun resetPassword(email: String): AuthOutcome =
         runCatching { client.auth.resetPasswordForEmail(email) }
             .fold({ AuthOutcome.Ok }, { AuthOutcome.Error(friendly(it)) })
+
+    /** Change / add the account password (auth.updateUser). */
+    suspend fun changePassword(newPassword: String): AuthOutcome =
+        runCatching { client.auth.updateUser { password = newPassword } }
+            .fold({ AuthOutcome.Ok }, { AuthOutcome.Error(friendly(it)) })
+
+    /** Update the display name in user metadata. */
+    suspend fun updateDisplayName(name: String): AuthOutcome =
+        runCatching {
+            client.auth.updateUser { data = buildJsonObject { put("full_name", name); put("display_name", name) } }
+        }.fold({ AuthOutcome.Ok }, { AuthOutcome.Error(friendly(it)) })
+
+    /** Delete the account via the server-side `account-delete` Edge Function, then sign out. */
+    suspend fun deleteAccount(): AuthOutcome =
+        runCatching {
+            client.functions.invoke("account-delete")
+            client.auth.signOut()
+        }.fold({ AuthOutcome.Ok }, { AuthOutcome.Error(friendly(it)) })
+
+    /** True if the account has an email/password identity (vs Google-only). */
+    val hasPassword: Boolean
+        get() = client.auth.currentUserOrNull()?.identities?.any { it.provider == "email" } ?: true
 
     suspend fun signOut() {
         runCatching { client.auth.signOut() }

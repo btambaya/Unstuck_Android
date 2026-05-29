@@ -46,6 +46,7 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
     val c = UTheme.colors
     val collections by vm.collections.collectAsStateWithLifecycle()
     var query by remember { mutableStateOf("") }
+    var showNew by remember { mutableStateOf(false) }
     val shown = collections.sortedBy { it.sortOrder }.filter {
         query.isBlank() || it.name.contains(query, true) || it.items.any { i -> i.body.contains(query, true) }
     }
@@ -62,17 +63,22 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
                 Column {
                     Text("Things you don't need to remember.", style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.padding(top = 4.dp))
                     Text("A calm shelf. Nothing here is a task.", style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(top = 8.dp, bottom = 8.dp))
-                    Row(
-                        Modifier.fillMaxWidth().clip(RoundedCornerShape(999.dp)).background(c.bg2).padding(horizontal = 14.dp, vertical = 10.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
-                    ) {
-                        Icon(Icons.Outlined.Search, contentDescription = null, tint = c.ink3, modifier = Modifier.size(16.dp))
-                        BasicTextField(
-                            value = query, onValueChange = { query = it },
-                            textStyle = UFont.sans(13).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink),
-                            modifier = Modifier.fillMaxWidth(),
-                            decorationBox = { inner -> if (query.isEmpty()) Text("Search collections", style = UFont.sans(13), color = c.ink3); inner() },
-                        )
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Row(
+                            Modifier.weight(1f).clip(RoundedCornerShape(999.dp)).background(c.bg2).padding(horizontal = 14.dp, vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        ) {
+                            Icon(Icons.Outlined.Search, contentDescription = null, tint = c.ink3, modifier = Modifier.size(16.dp))
+                            BasicTextField(
+                                value = query, onValueChange = { query = it },
+                                textStyle = UFont.sans(13).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink),
+                                modifier = Modifier.fillMaxWidth(),
+                                decorationBox = { inner -> if (query.isEmpty()) Text("Search collections", style = UFont.sans(13), color = c.ink3); inner() },
+                            )
+                        }
+                        Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.coral).clickable { showNew = true }.padding(horizontal = 14.dp, vertical = 9.dp)) {
+                            Text("+ New", style = UFont.sans(13, FontWeight.SemiBold), color = androidx.compose.ui.graphics.Color.White)
+                        }
                     }
                 }
             }
@@ -97,4 +103,6 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
             item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(2) }) { Box(Modifier.padding(28.dp)) {} }
         }
     }
+
+    if (showNew) NewCollectionSheet(vm, onCreated = { id -> showNew = false; onOpen(id) }, onDismiss = { showNew = false })
 }

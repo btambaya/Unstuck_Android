@@ -116,6 +116,10 @@ fun AuthScreen(vm: AppViewModel) {
         )
         Spacer(Modifier.height(8.dp))
         Text("Email me a magic link instead", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable { run { vm.magicLink(email.trim()) } })
+        if (!signUp) {
+            Spacer(Modifier.height(8.dp))
+            Text("Forgot your password?", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable { run { vm.resetPassword(email.trim()) } })
+        }
         Spacer(Modifier.weight(1f))
         Text(
             if (signUp) "Quiet clarity, with momentum." else "The anchor stays steady. You move around it.",

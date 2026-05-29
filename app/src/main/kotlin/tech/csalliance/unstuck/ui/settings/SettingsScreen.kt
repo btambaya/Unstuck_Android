@@ -40,6 +40,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.newUuid
 import tech.csalliance.unstuck.core.model.Density
 import tech.csalliance.unstuck.core.model.LifeArea
+import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.ThemePref
 import tech.csalliance.unstuck.design.component.AppBar
 import tech.csalliance.unstuck.design.theme.AccentPalette
@@ -62,12 +63,13 @@ enum class SettingsSection(val title: String, val eyebrow: String) {
     INTERFACE("How things look.", "SETTINGS · INTERFACE"),
     BACKUP("Your data is yours.", "SETTINGS · BACKUP"),
     AREAS("One list. The whole life.", "SETTINGS · LIFE AREAS"),
+    TAGS("Your tag vocabulary.", "SETTINGS · TAGS"),
 }
 
 private val HUB = listOf(
     "Account" to SettingsSection.ACCOUNT, "Focus" to SettingsSection.FOCUS, "Sound" to SettingsSection.SOUND,
     "Accessibility" to SettingsSection.A11Y, "Interface" to SettingsSection.INTERFACE, "Backup" to SettingsSection.BACKUP,
-    "Life areas" to SettingsSection.AREAS,
+    "Life areas" to SettingsSection.AREAS, "Tags" to SettingsSection.TAGS,
 )
 
 @Composable
@@ -103,6 +105,7 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
             Text(section.title, style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
             when (section) {
                 SettingsSection.AREAS -> AreasContent(vm)
+                SettingsSection.TAGS -> TagsContent(vm)
                 SettingsSection.ACCOUNT -> AccountContent(vm)
                 SettingsSection.FOCUS -> SettingsCard {
                     SegRow("Default focus length", listOf("15", "25", "45"), s.focusDefaultMin.toString()) { v ->
@@ -199,6 +202,57 @@ private fun AreasContent(vm: AppViewModel) {
             }
             UButton("Add", kind = ButtonKind.DARK, fill = false) {
                 if (draft.isNotBlank()) { vm.upsertLifeArea(LifeArea(newUuid(), draft.trim(), palette[areas.size % palette.size], areas.size)); draft = "" }
+            }
+        }
+    }
+}
+
+@Composable
+private fun TagsContent(vm: AppViewModel) {
+    val c = UTheme.colors
+    val tags by vm.tags.collectAsStateWithLifecycle()
+    val tasks by vm.tasks.collectAsStateWithLifecycle()
+    var draft by remember { mutableStateOf("") }
+    val palette = listOf("indigo", "coral", "violet", "green", "amber", "blue")
+    Text("Tags cut across areas — apply as many as you like.", style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(bottom = 14.dp))
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        tags.sortedBy { it.sortOrder }.forEach { tag ->
+            val uses = tasks.count { it.tags?.contains(tag.name) == true }
+            var menu by remember(tag.id) { mutableStateOf(false) }
+            var editing by remember(tag.id) { mutableStateOf(false) }
+            var nameDraft by remember(tag.id) { mutableStateOf(tag.name) }
+            var palOpen by remember(tag.id) { mutableStateOf(false) }
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
+                Box {
+                    Box(Modifier.clickable { palOpen = true }) { ColorChip(c.areaColor(tag.color), box = 26, dot = 8) }
+                    DropdownMenu(expanded = palOpen, onDismissRequest = { palOpen = false }) {
+                        Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            palette.forEach { col -> Box(Modifier.clickable { vm.recolorTag(tag, col); palOpen = false }) { ColorChip(c.areaColor(col), box = 26, dot = 8) } }
+                        }
+                    }
+                }
+                if (editing) {
+                    BasicTextField(value = nameDraft, onValueChange = { nameDraft = it }, textStyle = UFont.sans(14, FontWeight.SemiBold).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
+                    Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable { vm.renameTag(tag, nameDraft); editing = false }.padding(4.dp))
+                } else {
+                    Text("#${tag.name}", style = UFont.sans(14, FontWeight.SemiBold), color = c.ink, modifier = Modifier.weight(1f).clickable { nameDraft = tag.name; editing = true })
+                }
+                Text("$uses", style = UFont.sans(12), color = c.ink3)
+                Box {
+                    Icon(Icons.Filled.MoreVert, contentDescription = "Tag options", tint = c.ink3, modifier = Modifier.size(20.dp).clickable { menu = true })
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("Rename", style = UFont.sans(14), color = c.ink) }, onClick = { menu = false; nameDraft = tag.name; editing = true })
+                        DropdownMenuItem(text = { Text("Delete", style = UFont.sans(14), color = c.red) }, onClick = { menu = false; vm.deleteTag(tag.id) })
+                    }
+                }
+            }
+        }
+        Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Box(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 10.dp)) {
+                BasicTextField(value = draft, onValueChange = { draft = it }, textStyle = UFont.sans(14).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), decorationBox = { inner -> if (draft.isEmpty()) Text("New tag", style = UFont.sans(14), color = c.ink3); inner() })
+            }
+            UButton("Add", kind = ButtonKind.DARK, fill = false) {
+                if (draft.isNotBlank()) { vm.upsertTag(TagRow(newUuid(), draft.trim(), palette[tags.size % palette.size], tags.size)); draft = "" }
             }
         }
     }

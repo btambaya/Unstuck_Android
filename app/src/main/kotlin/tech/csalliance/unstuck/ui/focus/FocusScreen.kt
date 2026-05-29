@@ -58,6 +58,7 @@ import tech.csalliance.unstuck.ui.tasks.SelectableChip
 fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
     val c = UTheme.colors
     val live by vm.liveSession.collectAsStateWithLifecycle()
+    val settings by vm.settings.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     LaunchedEffect(task.id) { vm.startFocus(task) }
@@ -70,6 +71,7 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
 
     var showCapture by remember { mutableStateOf(false) }
     var showReflect by remember { mutableStateOf(false) }
+    var showPauseReasons by remember { mutableStateOf(false) }
     var reflectElapsed by remember { mutableStateOf(0) }
 
     val l = live
@@ -137,7 +139,11 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 FocusBtn("Capture", soft = true) { showCapture = true }
-                FocusBtn(if (paused) "Resume" else "Pause", soft = true) { if (paused) vm.resumeFocus() else vm.pauseFocus() }
+                FocusBtn(if (paused) "Resume" else "Pause", soft = true) {
+                    if (paused) vm.resumeFocus()
+                    else if (settings.focusPauseReasons) showPauseReasons = true
+                    else vm.pauseFocus()
+                }
                 // "Done" = end for now (records the session, keeps the task open).
                 FocusBtn("Done", soft = false) { reflectElapsed = FocusTimer.elapsedSec(l ?: return@FocusBtn, nowMs); vm.finishFocus(task); showReflect = true }
             }
@@ -153,6 +159,31 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
 
         if (showCapture) CaptureSheet(vm, task, live?.id) { showCapture = false }
         if (showReflect) ReflectSheet(reflectElapsed) { showReflect = false; onClose() }
+        if (showPauseReasons) {
+            PauseReasons(
+                onPick = { reason -> vm.saveReasonLog(task.id, reason); vm.pauseFocus(); showPauseReasons = false },
+                onDismiss = { vm.pauseFocus(); showPauseReasons = false },
+            )
+        }
+    }
+}
+
+private val PAUSE_REASONS = listOf("Bathroom", "Drink", "Quick question", "Stuck — need a moment", "Other")
+
+@Composable
+private fun PauseReasons(onPick: (String) -> Unit, onDismiss: () -> Unit) {
+    Box(Modifier.fillMaxSize().background(Color(0xCC0B0B14)).clickable(onClick = onDismiss), contentAlignment = Alignment.Center) {
+        Column(
+            Modifier.padding(28.dp).clip(RoundedCornerShape(20.dp)).background(Color(0xFF1A1B26)).padding(20.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            SectionLabel("WHY ARE YOU PAUSING?", color = Color.White.copy(alpha = 0.55f))
+            PAUSE_REASONS.forEach { r ->
+                Box(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color.White.copy(alpha = 0.08f)).clickable { onPick(r) }.padding(horizontal = 16.dp, vertical = 13.dp),
+                ) { Text(r, style = UFont.sans(14, FontWeight.Medium), color = Color.White) }
+            }
+        }
     }
 }
 

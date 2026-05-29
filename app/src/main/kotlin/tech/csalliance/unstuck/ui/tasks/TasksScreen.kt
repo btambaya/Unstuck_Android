@@ -104,6 +104,16 @@ fun TasksScreen(
                             Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                                 AreaDotColor(areaColorFor(t.lifeArea, areas, c), size = 5)
                                 Text(t.lifeArea ?: "—", style = UFont.sans(12), color = c.ink3)
+                                if (t.recurrence != null) Text("· ↻", style = UFont.sans(12), color = c.ink3)
+                            }
+                            if (!t.tags.isNullOrEmpty()) {
+                                Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                    t.tags!!.take(3).forEach { tn ->
+                                        Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
+                                            Text("#$tn", style = UFont.sans(10, FontWeight.Medium), color = c.primaryDeep)
+                                        }
+                                    }
+                                }
                             }
                         }
                         Text("${t.estimateMin}m", style = UFont.mono(11), color = c.ink3)

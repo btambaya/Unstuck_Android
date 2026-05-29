@@ -88,6 +88,7 @@ fun NewTaskSheet(vm: AppViewModel, onDismiss: () -> Unit) {
     var firstMove by remember { mutableStateOf("") }
     var recurrence by remember { mutableStateOf<tech.csalliance.unstuck.core.model.Recurrence?>(null) }
     var showDatePicker by remember { mutableStateOf(false) }
+    val tags = remember { mutableStateListOf<String>() }
     val drafts = remember { mutableStateListOf<DraftCapture>() }
 
     val effectiveDate: String? = when (whenSel) {
@@ -156,6 +157,9 @@ fun NewTaskSheet(vm: AppViewModel, onDismiss: () -> Unit) {
             SectionLabel("First step", color = c.coral)
             OutlinedTextField(value = firstMove, onValueChange = { firstMove = it }, label = { Text("The smallest concrete step…") }, singleLine = true, modifier = Modifier.fillMaxWidth())
 
+            SectionLabel("Tags")
+            tech.csalliance.unstuck.ui.components.TagPicker(vm, tags.toList()) { tags.clear(); tags.addAll(it) }
+
             tech.csalliance.unstuck.ui.components.RecurrenceEditor(recurrence) { recurrence = it }
 
             // Capture-a-thought drafts (saved against the new task on submit).
@@ -180,7 +184,7 @@ fun NewTaskSheet(vm: AppViewModel, onDismiss: () -> Unit) {
 
             UButton("Add task", kind = ButtonKind.DARK, enabled = canSubmit) {
                 val t = vm.addTask(
-                    name = name, estimateMin = estimate, lifeArea = area,
+                    name = name, estimateMin = estimate, lifeArea = area, tags = tags.toList().ifEmpty { null },
                     firstPhysicalAction = firstMove.trim().ifEmpty { null }, recurrence = recurrence,
                     later = whenSel == "Later",
                 )

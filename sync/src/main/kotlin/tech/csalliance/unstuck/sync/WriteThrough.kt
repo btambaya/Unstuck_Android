@@ -68,6 +68,8 @@ class WriteThrough(private val store: LocalStore) {
     suspend fun deleteLifeArea(id: String) = deleteLocalAndEnqueue(Tables.LIFE_AREAS, id)
     suspend fun deleteCollection(id: String) = deleteLocalAndEnqueue(Tables.COLLECTIONS, id)
     suspend fun deleteSession(id: String) = deleteLocalAndEnqueue(Tables.SESSIONS, id)
+    suspend fun deleteCapture(id: String) = deleteLocalAndEnqueue(Tables.CAPTURES, id)
+    suspend fun deleteReasonLog(id: String) = deleteLocalAndEnqueue(Tables.REASON_LOGS, id)
 
     private suspend fun deleteLocalAndEnqueue(table: String, id: String) {
         store.delete(table, id)

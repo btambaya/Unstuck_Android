@@ -117,7 +117,31 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         write?.upsertTask(task.copy(later = later, updatedAt = isoNow()))
     }
 
-    fun deleteTask(id: String) = launchWrite { write?.deleteTask(id) }
+    /** Delete a task and cascade to its cal_blocks + captures (so realtime
+     *  listeners don't pull orphans back), mirroring the web deleteTask. */
+    fun deleteTask(id: String) = launchWrite {
+        blocks.value.filter { it.taskId == id }.forEach { write?.deleteCalBlock(it.id) }
+        captures.value.filter { it.taskId == id }.forEach { write?.deleteCapture(it.id) }
+        write?.deleteTask(id)
+    }
+
+    /** Set/clear a task's recurrence and realign its future cal_blocks. */
+    fun setRecurrence(task: TaskItem, recurrence: Recurrence?) = launchWrite {
+        val updated = task.copy(recurrence = recurrence, updatedAt = isoNow())
+        write?.upsertTask(updated)
+        val existing = blocks.value
+        val anchor = existing.filter { it.taskId == task.id && tech.csalliance.unstuck.core.logic.isTaskBlock(it) }
+            .minWithOrNull(compareBy({ it.date }, { it.startTime }))
+        val startTime = anchor?.startTime ?: "09:00"
+        val startDate = anchor?.date?.split("-")?.mapNotNull { it.toIntOrNull() }?.takeIf { it.size == 3 }
+            ?.let { tech.csalliance.unstuck.core.time.Time.civil(it[0], it[1], it[2]) }
+            ?: tech.csalliance.unstuck.core.time.Time.startOfDayMillis(nowMs())
+        val plan = tech.csalliance.unstuck.core.logic.regenerateForTask(
+            updated, recurrence, existing, tech.csalliance.unstuck.core.time.Clock.todayIso(), startTime, startDate,
+        )
+        plan.toDelete.forEach { write?.deleteCalBlock(it) }
+        plan.toUpsert.forEach { write?.upsertCalBlock(it) }
+    }
 
     // --- scheduling (cal blocks) ---
 
@@ -206,6 +230,15 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         write?.upsertReasonLog(ReasonLog(id = newUuid(), taskId = taskId, reason = reason, action = action, at = isoNow(), durationSec = durationSec))
     }
 
+    fun deleteCapture(id: String) = launchWrite { write?.deleteCapture(id) }
+
+    /** Promote a capture into a standalone task (named from the capture body), then remove the capture. */
+    fun promoteCapture(capture: Capture): TaskItem {
+        val t = addTask(name = capture.body)
+        deleteCapture(capture.id)
+        return t
+    }
+
     // --- collections ---
 
     fun upsertCollection(c: ItemCollection) = launchWrite { write?.upsertCollection(c) }
@@ -215,6 +248,26 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun upsertTag(t: TagRow) = launchWrite { write?.upsertTag(t) }
     fun deleteTag(id: String) = launchWrite { write?.deleteTag(id) }
+
+    /** Add a tag to the vocabulary if its name is new; returns the name. */
+    fun ensureTag(name: String): String {
+        val nm = name.trim()
+        if (nm.isNotEmpty() && tags.value.none { it.name.equals(nm, ignoreCase = true) }) {
+            launchWrite { write?.upsertTag(TagRow(newUuid(), nm, null, tags.value.size)) }
+        }
+        return nm
+    }
+
+    /** Rename a tag and cascade the change across every task that uses it. */
+    fun renameTag(tag: TagRow, newName: String) = launchWrite {
+        val nm = newName.trim(); if (nm.isEmpty() || nm == tag.name) return@launchWrite
+        write?.upsertTag(tag.copy(name = nm))
+        tasks.value.filter { it.tags?.contains(tag.name) == true }.forEach { t ->
+            write?.upsertTask(t.copy(tags = t.tags?.map { if (it == tag.name) nm else it }, updatedAt = isoNow()))
+        }
+    }
+
+    fun recolorTag(tag: TagRow, color: String?) = launchWrite { write?.upsertTag(tag.copy(color = color)) }
     fun upsertLifeArea(a: LifeArea) = launchWrite { write?.upsertLifeArea(a) }
     fun deleteLifeArea(id: String) = launchWrite { write?.deleteLifeArea(id) }
 

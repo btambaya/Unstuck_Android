@@ -19,3 +19,4 @@ google-services.json
 
 # OS
 .DS_Store
+firebase-service-account.json

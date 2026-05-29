@@ -9,6 +9,7 @@ plugins {
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.kotlin.compose)
+    alias(libs.plugins.firebase.appdistribution)
 }
 
 // FCM: the google-services plugin is applied automatically once you drop the
@@ -81,6 +82,19 @@ android {
         compose = true
         buildConfig = true
     }
+}
+
+// Firebase App Distribution — `./gradlew :app:appDistributionUploadRelease`
+// uploads the signed release to testers. Auth uses the gitignored
+// firebase-service-account.json. Override the invite list with
+// -PappDistTesters="a@x.com,b@y.com" (defaults to the owner).
+firebaseAppDistribution {
+    appId = "1:806563895083:android:1673707a78b9d39039976e"
+    artifactType = "APK"
+    val sa = rootProject.file("firebase-service-account.json")
+    if (sa.exists()) serviceCredentialsFile = sa.path
+    testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
+    releaseNotes = "Unstuck Android — internal test build."
 }
 
 dependencies {

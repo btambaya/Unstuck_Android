@@ -25,6 +25,7 @@ robolectric = "4.14.1"
 androidxTest = "1.6.1"
 androidxTestExt = "1.2.1"
 googleServices = "4.4.2"
+firebaseAppDist = "5.1.1"
 splashscreen = "1.0.1"
 
 [libraries]
@@ -98,3 +99,4 @@ kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "ko
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
 google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }
+firebase-appdistribution = { id = "com.google.firebase.appdistribution", version.ref = "firebaseAppDist" }

@@ -66,7 +66,7 @@ fun AuthScreen(vm: AppViewModel) {
         SectionLabel(if (signUp) "BEGIN AGAIN" else "WELCOME BACK", color = c.primaryDeep)
         Text(
             if (signUp) "You don't need more discipline." else "Pick up where\nyou left off.",
-            style = UFont.serifItalic(30), color = c.ink, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 8.dp),
+            style = UFont.serifItalic(40), color = c.ink, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 8.dp),
         )
         Text(
             if (signUp) "Unstuck reduces friction at the moment behavior breaks." else "Quiet clarity, with momentum.",

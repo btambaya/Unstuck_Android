@@ -1,9 +1,13 @@
 package tech.csalliance.unstuck.ui
 
+import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material.icons.outlined.Inbox
@@ -74,8 +78,16 @@ fun MainScaffold(vm: AppViewModel) {
     fun push(r: Route) = stack.add(r)
     fun pop() { if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex) }
 
+    // System back, top layer wins. NewTask / Avatar ride on ModalBottomSheet which
+    // intercepts back itself, so we only handle the focus overlay, the route stack,
+    // and the non-Today tab fall-back. (Leaving focus keeps the live session running.)
+    val sheetOpen = showNewTask || sheet != null
+    BackHandler(enabled = focusTask != null) { focusTask = null }
+    BackHandler(enabled = focusTask == null && !sheetOpen && stack.isNotEmpty()) { pop() }
+    BackHandler(enabled = focusTask == null && !sheetOpen && stack.isEmpty() && tab != "today") { tab = "today" }
+
     Box(Modifier.fillMaxSize().background(c.bg)) {
-        Column(Modifier.fillMaxSize()) {
+        Column(Modifier.fillMaxSize().statusBarsPadding()) {
             Box(Modifier.weight(1f)) {
                 when (tab) {
                     "today" -> TodayScreen(
@@ -91,12 +103,12 @@ fun MainScaffold(vm: AppViewModel) {
                     "lists" -> CollectionsScreen(vm, onOpen = { push(Route.Collection(it)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Avatar })
                 }
             }
-            BottomNavBar(NAV, tab, onSelect = { tab = it; stack.clear() }, onFab = { showNewTask = true })
+            BottomNavBar(NAV, tab, onSelect = { tab = it; stack.clear() }, onFab = { showNewTask = true }, modifier = Modifier.navigationBarsPadding())
         }
 
-        // Full-screen overlays (top of the stack).
+        // Full-screen overlays (top of the stack) — inset from both system bars.
         stack.lastOrNull()?.let { route ->
-            Box(Modifier.fillMaxSize().background(c.bg)) {
+            Box(Modifier.fillMaxSize().background(c.bg).systemBarsPadding()) {
                 when (route) {
                     is Route.Detail -> {
                         val t = tasks.firstOrNull { it.id == route.taskId }

@@ -23,13 +23,29 @@ Day/Week/Month, Collections 2-col grid + detail, Insights report + deep,
 Settings hub + 6 subpages + Areas, Onboarding 4-step, Command palette
 full-screen, Avatar menu. `:design` token test added (185+ tests still green).
 
-**Remaining:** full **post-auth on-device screenshot pass** (needs a signed-in
-session) to pixel-tune Today/Focus/etc.; **OS-surface pixel-match** (custom
-RemoteViews live-focus notification + richer Glance widget per mockups 19–21 —
-currently functional but not redesigned); **settings persistence** (theme/density/
-accent/focus/sound/a11y toggles are wired to local state, not yet a DataStore +
-reactive theme); drag-to-schedule day-grid restyle. Behavior spot-checks vs web
-still to run.
+**Audit + fix pass (v0.2.1, 2026-05-29):** a 28-agent workflow audited every
+screen/sheet/component against the mockup JSX + web behavior (37 high / 61 med /
+54 low verified findings → `audit-ui-findings.md`). Fixed this pass: system **back
+button** (overlays/focus/tab), **status- & nav-bar insets** (edge-to-edge no longer
+collides), **completed-today tasks now show on Today** (green check + strikethrough),
+**running-vs-paused live card** with a real **progress ring**, focus **"Mark complete"**
+action + **"← Out" no longer discards** the session, calendar **NOW line** + **life-area
+block colors**, **per-tag capture colors**, **real signed-in account** in avatar +
+Settings, **collections search**, new-task **no longer double-books** (passes real
+blocks), and the **priority picker removed** (web/DB has no priority UI — per the
+"web wins over mockup" rule). Build green, 185 module tests green.
+
+**Remaining (tracked in `audit-ui-findings.md`):** larger build-outs not yet done —
+Insights report/deep charts (weekday bars, calibration scatter, interruption bins,
+heatmap headers) + Week/Month range toggle; Calendar **Week 7-col grid** + sidebar
+stats + **Month grid header/nav**; Collections **new-collection / item pin·edit·remove
+/ recolor·rename·delete**; **Settings persistence** (DataStore + reactive theme/
+density/accent/focus/sound/a11y); Task-detail **inline edit + recurrence + capture
+promote/discard**; new-task **date picker / time-slot chips / conflict warning**;
+auth **surface card**; **OS-surface pixel-match** (custom RemoteViews live-focus
+notification + richer Glance widget, mockups 19–21). Full **post-auth on-device
+screenshot pass** is blocked on the emulator (Supabase `mailer_autoconfirm=false`,
+so no session without a real sign-in) — verify on a signed-in device instead.
 
 ## Status snapshot
 

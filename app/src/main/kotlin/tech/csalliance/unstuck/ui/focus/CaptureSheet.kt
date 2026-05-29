@@ -54,8 +54,17 @@ fun CaptureSheet(vm: AppViewModel, task: TaskItem, sessionId: String?, onDismiss
             Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 TAGS.forEach { (t, label) ->
                     val sel = tag == t
-                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(if (sel) c.primarySoft else c.surface).then(if (sel) Modifier else Modifier.border(1.dp, c.line2, RoundedCornerShape(999.dp))).clickable { tag = t }.padding(horizontal = 11.dp, vertical = 5.dp)) {
-                        Text(label, style = UFont.sans(12, FontWeight.Medium), color = if (sel) c.primaryDeep else c.ink3)
+                    // Each tag carries its own soft-bg / dark-ink color pair (per the mockup).
+                    val (selBg, selFg) = when (t) {
+                        CaptureTag.FOLLOW_UP -> c.primarySoft to c.primaryDeep
+                        CaptureTag.IDEA -> c.amberSoft to c.amberInk
+                        CaptureTag.EDIT -> c.blueSoft to c.blueInk
+                        CaptureTag.QUESTION -> c.greenSoft to c.greenInk
+                        CaptureTag.DISTRACTION -> c.coralSoft to c.coralDeep
+                        else -> c.primarySoft to c.primaryDeep
+                    }
+                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(if (sel) selBg else c.surface).then(if (sel) Modifier else Modifier.border(1.dp, c.line2, RoundedCornerShape(999.dp))).clickable { tag = t }.padding(horizontal = 11.dp, vertical = 5.dp)) {
+                        Text(label, style = UFont.sans(12, FontWeight.Medium), color = if (sel) selFg else c.ink3)
                     }
                 }
             }

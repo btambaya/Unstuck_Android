@@ -21,7 +21,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import tech.csalliance.unstuck.core.model.Priority
 import tech.csalliance.unstuck.design.component.ButtonKind
 import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.component.SheetHandle
@@ -36,11 +35,11 @@ fun NewTaskSheet(vm: AppViewModel, onDismiss: () -> Unit) {
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val c = UTheme.colors
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
+    val blocks by vm.blocks.collectAsStateWithLifecycle()
 
     var name by remember { mutableStateOf("") }
     var whenSel by remember { mutableStateOf("Today") }
     var estimate by remember { mutableStateOf(25) }
-    var priority by remember { mutableStateOf<Priority?>(null) }
     var area by remember { mutableStateOf<String?>(null) }
     var firstMove by remember { mutableStateOf("") }
     var recurrence by remember { mutableStateOf<tech.csalliance.unstuck.core.model.Recurrence?>(null) }
@@ -63,11 +62,6 @@ fun NewTaskSheet(vm: AppViewModel, onDismiss: () -> Unit) {
                 listOf(15, 25, 45, 60, 90).forEach { m -> SelectableChip("${m}m", selected = estimate == m) { estimate = m } }
             }
 
-            SectionLabel("Priority")
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                Priority.entries.forEach { p -> SelectableChip(p.name.lowercase(), selected = priority == p) { priority = if (priority == p) null else p } }
-            }
-
             if (areas.isNotEmpty()) {
                 SectionLabel("Area")
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -82,7 +76,7 @@ fun NewTaskSheet(vm: AppViewModel, onDismiss: () -> Unit) {
 
             UButton("Add task", kind = ButtonKind.DARK, enabled = name.isNotBlank()) {
                 val t = vm.addTask(
-                    name = name, estimateMin = estimate, priority = priority, lifeArea = area,
+                    name = name, estimateMin = estimate, lifeArea = area,
                     firstPhysicalAction = firstMove.trim().ifEmpty { null }, recurrence = recurrence,
                     later = whenSel == "Later",
                 )
@@ -91,7 +85,7 @@ fun NewTaskSheet(vm: AppViewModel, onDismiss: () -> Unit) {
                     val date = tech.csalliance.unstuck.core.time.Clock.dateIso(
                         tech.csalliance.unstuck.core.time.Time.addDaysMillis(tech.csalliance.unstuck.core.time.Time.startOfDayMillis(vm.nowMs()), days),
                     )
-                    val slot = tech.csalliance.unstuck.core.logic.findFreeSlotsForDate(emptyList(), estimate, date, vm.nowMs(), limit = 1).firstOrNull()
+                    val slot = tech.csalliance.unstuck.core.logic.findFreeSlotsForDate(blocks, estimate, date, vm.nowMs(), limit = 1).firstOrNull()
                     if (slot != null) vm.scheduleTask(t, date, slot.startTime)
                 }
                 onDismiss()

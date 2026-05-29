@@ -1,5 +1,6 @@
 package tech.csalliance.unstuck.ui.today
 
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,6 +21,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -31,14 +33,22 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.formatMMSS
+import tech.csalliance.unstuck.core.logic.isCompletedToday
 import tech.csalliance.unstuck.core.logic.pickStartNext
 import tech.csalliance.unstuck.core.logic.visibleTasks
+import tech.csalliance.unstuck.core.model.LiveSession
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.model.TaskListView
 import tech.csalliance.unstuck.design.color.oklch
@@ -75,7 +85,11 @@ fun TodayScreen(
     var areaFilter by remember { mutableStateOf<String?>(null) }
 
     val startNext = pickStartNext(tasks, blocks, liveId, areaFilter)
-    val todayAll = visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false)
+    // Today = open tasks scheduled/intended for today, plus anything completed today
+    // (sorted last), matching the web today-list which keeps today's completions visible.
+    val todayOpen = visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false)
+    val todayDone = tasks.filter { isCompletedToday(it, now) && todayOpen.none { o -> o.id == it.id } }
+    val todayAll = todayOpen + todayDone
     val rows = todayAll.filter { (areaFilter == null || it.lifeArea == areaFilter) && it.id != startNext?.id && it.id != liveId }
     val liveTask = liveId?.let { id -> tasks.firstOrNull { it.id == id } }
     val empty = todayAll.isEmpty() && live == null
@@ -120,7 +134,14 @@ fun TodayScreen(
                 }
             }
             if (liveTask != null && live != null) {
-                item { PausedCard(liveTask, formatMMSS(live!!.priorAccumulatedSec ?: 0)) { onStartFocus(liveTask) } }
+                item {
+                    LiveSessionCard(
+                        liveTask, live!!, now,
+                        onReturn = { onStartFocus(liveTask) },
+                        onPause = { vm.pauseFocus() },
+                        onResume = { vm.resumeFocus() },
+                    )
+                }
             }
             items(rows, key = { it.id }) { t -> TaskRow(t, areaColorFor(t.lifeArea, areas, c)) { onOpen(t) } }
         }
@@ -150,22 +171,50 @@ private fun StartNextHero(task: TaskItem, onStart: () -> Unit) {
     }
 }
 
+/**
+ * The in-progress focus session, surfaced on Today. Branches running vs paused
+ * (matching the web LiveTaskRow): running → coral ring + "In focus" + Pause;
+ * paused → amber ring + "Paused" + Resume. Tapping the card returns to focus.
+ */
 @Composable
-private fun PausedCard(task: TaskItem, elapsed: String, onResume: () -> Unit) {
+private fun LiveSessionCard(
+    task: TaskItem,
+    live: LiveSession,
+    now: Long,
+    onReturn: () -> Unit,
+    onPause: () -> Unit,
+    onResume: () -> Unit,
+) {
     val c = UTheme.colors
+    val paused = live.paused
+    val elapsed = FocusTimer.elapsedSec(live, now)
+    val estimateSec = (task.estimateMin * 60).coerceAtLeast(1)
+    val progress = (elapsed.toFloat() / estimateSec).coerceIn(0f, 1f)
+    val accent = if (paused) c.amber else c.coral
     Row(
-        Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 3.dp).clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(14.dp)).clickable(onClick = onResume).padding(12.dp),
+        Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 3.dp).clip(RoundedCornerShape(14.dp)).background(c.surface)
+            .border(1.dp, if (paused) c.line2 else c.coral.copy(alpha = 0.55f), RoundedCornerShape(14.dp)).clickable(onClick = onReturn).padding(12.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp),
     ) {
-        Box(Modifier.size(30.dp).clip(CircleShape).background(c.amberSoft), contentAlignment = Alignment.Center) {
-            Text(elapsed, style = UFont.mono(8, FontWeight.Bold), color = c.ink2)
+        Box(Modifier.size(30.dp), contentAlignment = Alignment.Center) {
+            Canvas(Modifier.size(30.dp)) {
+                val sw = 3.dp.toPx()
+                val r = size.minDimension / 2f - sw / 2f
+                val cen = Offset(size.width / 2f, size.height / 2f)
+                drawArc(c.line, 0f, 360f, false, Offset(cen.x - r, cen.y - r), Size(r * 2, r * 2), style = Stroke(width = sw))
+                drawArc(accent, -90f, 360f * progress, false, Offset(cen.x - r, cen.y - r), Size(r * 2, r * 2), style = Stroke(width = sw, cap = StrokeCap.Round))
+            }
+            Text(formatMMSS(elapsed), style = UFont.mono(7, FontWeight.Bold), color = c.ink2)
         }
         Column(Modifier.weight(1f)) {
-            Text("Paused · ${task.name}", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink, maxLines = 1)
-            Text("${task.estimateMin}m · paused", style = UFont.sans(11), color = c.ink3)
+            Text(if (paused) "Paused · ${task.name}" else "In focus · ${task.name}", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink, maxLines = 1)
+            Text(if (paused) "${task.estimateMin}m · paused" else "running for ${formatMMSS(elapsed)}", style = UFont.sans(11), color = c.ink3)
         }
-        Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.ink).padding(horizontal = 14.dp, vertical = 6.dp)) {
-            Text("Resume", style = UFont.sans(12, FontWeight.SemiBold), color = c.bg)
+        Box(
+            Modifier.clip(RoundedCornerShape(999.dp)).background(if (paused) c.ink else c.bg2)
+                .clickable(onClick = if (paused) onResume else onPause).padding(horizontal = 14.dp, vertical = 6.dp),
+        ) {
+            Text(if (paused) "Resume" else "Pause", style = UFont.sans(12, FontWeight.SemiBold), color = if (paused) c.bg else c.ink)
         }
     }
 }
@@ -177,8 +226,17 @@ private fun TaskRow(task: TaskItem, areaColor: Color, onOpen: () -> Unit) {
         Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 3.dp).clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).clickable(onClick = onOpen).padding(horizontal = 12.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
+        if (task.done) {
+            Icon(Icons.Filled.CheckCircle, contentDescription = "Done", tint = c.green, modifier = Modifier.size(18.dp))
+        }
         Column(Modifier.weight(1f)) {
-            Text(task.name, style = UFont.sans(14, FontWeight.Medium), color = c.ink, maxLines = 1)
+            Text(
+                task.name,
+                style = UFont.sans(14, FontWeight.Medium),
+                color = if (task.done) c.ink3 else c.ink,
+                textDecoration = if (task.done) TextDecoration.LineThrough else null,
+                maxLines = 1,
+            )
             Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 AreaDotColor(areaColor, size = 5)
                 Text(task.lifeArea ?: "—", style = UFont.sans(12), color = c.ink3)

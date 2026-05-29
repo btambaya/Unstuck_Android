@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "0.2.0"
+        versionCode = 3
+        versionName = "0.2.1"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.2.0 — full UI redesign to the Android Mockups (soft coral, M3 chrome, new Today/Focus/Tasks/Calendar/Settings/onboarding/auth)."
+    releaseNotes = "v0.2.1 — audit fixes: system back button, status/nav-bar insets, completed-today tasks on Today, running-vs-paused live card + progress ring, focus 'Mark complete' + no-data-loss exit, calendar NOW line + area colors, per-tag capture colors, real account in avatar/settings, collections search, no double-booking, no priority picker."
 }
 
 dependencies {

@@ -32,15 +32,18 @@ import tech.csalliance.unstuck.ui.AppViewModel
 fun AvatarMenu(vm: AppViewModel, onInsights: () -> Unit, onSettings: () -> Unit, onDismiss: () -> Unit) {
     val c = UTheme.colors
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val name = vm.currentName ?: "Your account"
+    val email = vm.currentEmail ?: "Signed in"
+    val initials = name.split(' ', '.', '@').mapNotNull { it.firstOrNull()?.uppercaseChar() }.take(2).joinToString("").ifEmpty { "U" }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = SheetScrim, dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } }) {
         Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
             Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 6.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
                 Box(Modifier.size(36.dp).clip(CircleShape).background(c.greenSoft), contentAlignment = Alignment.Center) {
-                    Text("UN", style = UFont.sans(13, FontWeight.SemiBold), color = c.greenInk)
+                    Text(initials, style = UFont.sans(13, FontWeight.SemiBold), color = c.greenInk)
                 }
                 Column(Modifier.weight(1f)) {
-                    Text("Unstuck", style = UFont.sans(14, FontWeight.SemiBold), color = c.ink)
-                    Text(vm.auth?.currentUserId?.let { "Signed in" } ?: "unstuck@kazaure.com", style = UFont.sans(11), color = c.ink3)
+                    Text(name, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink, maxLines = 1)
+                    Text(email, style = UFont.sans(11), color = c.ink3, maxLines = 1)
                 }
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))

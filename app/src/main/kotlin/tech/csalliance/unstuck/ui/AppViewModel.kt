@@ -164,13 +164,22 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun setTreatment(t: FocusTreatment) = launchWrite { mutateLive { FocusTimer.setTreatment(it, t) } }
     fun extendFocus(minutes: Int) = launchWrite { mutateLive { FocusTimer.extend(it, minutes) } }
 
-    fun finishFocus(task: TaskItem) = launchWrite {
+    /**
+     * End the focus session. Mirrors the web's two finish actions:
+     * - markDone = false → "End for now": record the session, keep the task open
+     *   (returning later resumes at the accumulated total). This is the safe default.
+     * - markDone = true → "Mark complete / Done early": also flip the task done.
+     */
+    fun finishFocus(task: TaskItem, markDone: Boolean = false) = launchWrite {
         val live = store.getLiveSession() ?: return@launchWrite
         val elapsed = FocusTimer.elapsedSec(live, nowMs())
         write?.upsertSession(
             Session(id = newUuid(), taskId = task.id, taskName = task.name, estimateMin = task.estimateMin, actualSec = elapsed, completedAt = isoNow()),
         )
-        write?.upsertTask(task.copy(totalFocused = task.totalFocused + elapsed, updatedAt = isoNow()))
+        val focused = task.copy(totalFocused = task.totalFocused + elapsed, updatedAt = isoNow())
+        write?.upsertTask(
+            if (markDone) applyCompletion(focused.copy(done = true), prior = task, nowISO = isoNow()) else focused,
+        )
         store.setLiveSession(null)
     }
 
@@ -223,6 +232,10 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     }
 
     // --- auth ---
+
+    /** Signed-in identity for the avatar / account UI (null when signed out). */
+    val currentEmail: String? get() = auth?.currentEmail
+    val currentName: String? get() = auth?.currentName
 
     suspend fun signIn(email: String, password: String): AuthOutcome =
         auth?.signIn(email, password) ?: AuthOutcome.Error("Not configured")

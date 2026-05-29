@@ -11,14 +11,20 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -130,7 +136,7 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
 @Composable
 private fun AccountContent(vm: AppViewModel) {
     SettingsCard {
-        SettingRow("Signed in", "Your account") {}
+        SettingRow("Signed in", vm.currentEmail ?: vm.currentName ?: "—") {}
         SettingRow("Export everything", "JSON bundle") {}
         SettingRow("Sign out", "End this session", last = true) { vm.signOut() }
     }
@@ -147,14 +153,30 @@ private fun AreasContent(vm: AppViewModel) {
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         areas.sortedBy { it.sortOrder }.forEach { a ->
             val open = tasks.count { it.lifeArea == a.name && !it.done }
+            var menu by remember(a.id) { mutableStateOf(false) }
+            var confirm by remember(a.id) { mutableStateOf(false) }
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
                 ColorChip(c.areaColor(a.color), box = 30, dot = 9)
                 Column(Modifier.weight(1f)) {
                     Text(a.name, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink)
                     Text("Custom area.", style = UFont.sans(11), color = c.ink3)
                 }
-                Text("$open open", style = UFont.sans(12), color = c.ink2, modifier = Modifier.clickable { vm.deleteLifeArea(a.id) })
+                Text("$open open", style = UFont.sans(12), color = c.ink2)
+                Box {
+                    Icon(Icons.Filled.MoreVert, contentDescription = "Area options", tint = c.ink3, modifier = Modifier.size(20.dp).clickable { menu = true })
+                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("Delete area", style = UFont.sans(14), color = c.red) }, onClick = { menu = false; confirm = true })
+                    }
+                }
             }
+            if (confirm) AlertDialog(
+                onDismissRequest = { confirm = false },
+                title = { Text("Delete \"${a.name}\"?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+                text = { Text("Tasks keep their data — they just lose this area label.", style = UFont.sans(13), color = c.ink2) },
+                confirmButton = { TextButton(onClick = { confirm = false; vm.deleteLifeArea(a.id) }) { Text("Delete", color = c.red) } },
+                dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel", color = c.ink2) } },
+                containerColor = c.surface,
+            )
         }
         Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 10.dp)) {

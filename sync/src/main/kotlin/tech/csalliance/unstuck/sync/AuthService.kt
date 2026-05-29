@@ -6,6 +6,8 @@ import io.github.jan.supabase.auth.providers.Google
 import io.github.jan.supabase.auth.providers.builtin.Email
 import io.github.jan.supabase.auth.providers.builtin.OTP
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import tech.csalliance.unstuck.core.logic.AuthErrorInfo
 import tech.csalliance.unstuck.core.logic.humanizeAuthError
@@ -56,4 +58,16 @@ class AuthService(private val client: SupabaseClient) {
     }
 
     val currentUserId: String? get() = client.auth.currentUserOrNull()?.id
+
+    /** The signed-in user's email, or null when signed out. */
+    val currentEmail: String? get() = client.auth.currentUserOrNull()?.email
+
+    /** display_name / full_name from user metadata, falling back to the email's local part. */
+    val currentName: String? get() {
+        val u = client.auth.currentUserOrNull() ?: return null
+        val md = u.userMetadata
+        val named = md?.get("display_name")?.jsonPrimitive?.contentOrNull
+            ?: md?.get("full_name")?.jsonPrimitive?.contentOrNull
+        return named?.takeIf { it.isNotBlank() } ?: u.email?.substringBefore('@')
+    }
 }

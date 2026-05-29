@@ -10,8 +10,10 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.Canvas
 import androidx.compose.material3.Text
@@ -83,9 +85,11 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
     val bg = Brush.radialGradient(listOf(oklch(0.30, 0.10, 280.0), oklch(0.16, 0.02, 280.0)), center = Offset(0.5f, 0f), radius = 1400f)
 
     Box(Modifier.fillMaxSize().background(bg)) {
-        Column(Modifier.fillMaxSize().padding(horizontal = 24.dp, vertical = 14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+        Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(horizontal = 24.dp, vertical = 14.dp), horizontalAlignment = Alignment.CenterHorizontally) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.10f)).clickable { vm.cancelFocus(); onClose() }.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                // "← Out" leaves the timer RUNNING (the live session persists so you
+                // can return) — it does NOT discard. Matches the web's leave-focus flow.
+                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.10f)).clickable { onClose() }.padding(horizontal = 12.dp, vertical = 6.dp)) {
                     Text("← Out", style = UFont.sans(12), color = Color.White.copy(alpha = 0.7f))
                 }
                 Box {}
@@ -131,10 +135,19 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
 
             Spacer(Modifier.weight(1f))
 
-            Row(Modifier.padding(bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 FocusBtn("Capture", soft = true) { showCapture = true }
                 FocusBtn(if (paused) "Resume" else "Pause", soft = true) { if (paused) vm.resumeFocus() else vm.pauseFocus() }
+                // "Done" = end for now (records the session, keeps the task open).
                 FocusBtn("Done", soft = false) { reflectElapsed = FocusTimer.elapsedSec(l ?: return@FocusBtn, nowMs); vm.finishFocus(task); showReflect = true }
+            }
+            // "Mark complete" = the web's "Done early" — also flips task.done.
+            Box(
+                Modifier.padding(top = 12.dp, bottom = 6.dp).clip(RoundedCornerShape(999.dp))
+                    .clickable { reflectElapsed = FocusTimer.elapsedSec(l ?: return@clickable, nowMs); vm.finishFocus(task, markDone = true); showReflect = true }
+                    .padding(horizontal = 14.dp, vertical = 8.dp),
+            ) {
+                Text("✓ Mark complete", style = UFont.sans(13, FontWeight.Medium), color = Color.White.copy(alpha = 0.72f))
             }
         }
 

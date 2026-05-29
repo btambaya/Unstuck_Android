@@ -30,6 +30,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -40,12 +41,14 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.formatTime
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.model.CalBlock
+import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.ui.components.areaColorFor
 import kotlin.math.roundToInt
 
 private const val START_HOUR = 6
@@ -70,6 +73,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
     val c = UTheme.colors
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
+    val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     val density = LocalDensity.current
     val hourPx = with(density) { HOUR_HEIGHT.toPx() }
 
@@ -133,15 +137,35 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
                     if (topMin >= 0) {
                         val topDp = HOUR_HEIGHT * (topMin / 60f)
                         val hDp = HOUR_HEIGHT * (b.durationMinutes / 60f)
+                        // Color by source: external = blue, a task = its life-area swatch,
+                        // placeholder = neutral. Mirrors the web bgFor().
+                        val area = if (isTaskBlock(b)) tasks.firstOrNull { it.id == b.taskId }?.lifeArea else null
+                        val fill = when {
+                            b.kind == CalBlockKind.EXTERNAL -> c.blueSoft
+                            isTaskBlock(b) -> c.areaSwatch(areaColorFor(area, areas, c))
+                            else -> c.bg2
+                        }
                         Box(
                             Modifier.padding(start = 70.dp, end = 12.dp).offset(y = topDp).fillMaxWidth()
                                 .height(hDp.coerceAtLeast(22.dp))
                                 .clip(RoundedCornerShape(8.dp))
-                                .background(if (isTaskBlock(b)) c.coralSoft else c.bg2)
+                                .background(fill)
                                 .border(1.dp, c.line, RoundedCornerShape(8.dp))
                                 .padding(6.dp),
                         ) {
                             Text(b.taskName, style = UFont.sans(12, FontWeight.Medium), color = c.ink, maxLines = 1)
+                        }
+                    }
+                }
+                // "NOW" line on today's grid.
+                if (date == Clock.todayIso()) {
+                    val lt = java.time.LocalTime.now()
+                    val nowMin = lt.hour * 60 + lt.minute - START_HOUR * 60
+                    if (nowMin in 0..((END_HOUR - START_HOUR) * 60)) {
+                        val topDp = HOUR_HEIGHT * (nowMin / 60f)
+                        Box(Modifier.padding(start = 64.dp, end = 12.dp).offset(y = topDp).fillMaxWidth().height(1.5.dp).background(c.coral))
+                        Box(Modifier.offset(y = topDp - 8.dp).padding(start = 8.dp).clip(RoundedCornerShape(999.dp)).background(c.coral).padding(horizontal = 6.dp, vertical = 1.dp)) {
+                            Text("NOW", style = UFont.mono(8, FontWeight.Bold), color = Color.White)
                         }
                     }
                 }

@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.EditNote
+import androidx.compose.material.icons.outlined.VolumeOff
+import androidx.compose.material.icons.outlined.VolumeUp
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -76,6 +78,17 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
     var showReasons by remember { mutableStateOf(false) }
     var showCapture by remember { mutableStateOf(false) }
     var captureText by remember { mutableStateOf("") }
+    var soundOn by remember { mutableStateOf(true) }
+
+    // Ambient loop while focusing on the "ambient" treatment with sound on.
+    val ambientOn = soundOn && live?.treatment == FocusTreatment.AMBIENT && live?.paused == false
+    LaunchedEffect(ambientOn) {
+        if (ambientOn) tech.csalliance.unstuck.surface.AmbientAudio.start(context)
+        else tech.csalliance.unstuck.surface.AmbientAudio.stop()
+    }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { tech.csalliance.unstuck.surface.AmbientAudio.stop() }
+    }
 
     val l = live
     Box(Modifier.fillMaxSize().background(if (l?.treatment == FocusTreatment.COCKPIT) c.bg2 else c.bg)) {
@@ -90,7 +103,15 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 IconButton(onClick = { vm.cancelFocus(); onClose() }) { Icon(Icons.Outlined.Close, contentDescription = "Cancel", tint = c.ink3) }
                 SectionLabel("Focus")
-                IconButton(onClick = { showCapture = true }) { Icon(Icons.Outlined.EditNote, contentDescription = "Capture", tint = c.ink3) }
+                Row {
+                    IconButton(onClick = { soundOn = !soundOn }) {
+                        Icon(
+                            if (soundOn) Icons.Outlined.VolumeUp else Icons.Outlined.VolumeOff,
+                            contentDescription = "Toggle sound", tint = c.ink3,
+                        )
+                    }
+                    IconButton(onClick = { showCapture = true }) { Icon(Icons.Outlined.EditNote, contentDescription = "Capture", tint = c.ink3) }
+                }
             }
 
             if (l.treatment != FocusTreatment.MONK) {

@@ -12,6 +12,7 @@ captures/
 
 # Secrets — never commit. Anon key + FCM service account go here / in local.properties.
 secrets.properties
+keystore.properties
 google-services.json
 *.keystore
 *.jks

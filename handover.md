@@ -67,9 +67,22 @@ Focus / task-detail / settings as overlays.
     onboarding (struggles → user_preferences + seeds canonical life areas),
     ✅ command palette (search tasks + actions, from the Today header),
     ✅ adaptive launcher icon (Orbit mark), ✅ dark via
-    `UnstuckTheme(isSystemInDarkTheme())`. TODO (cosmetic/optional): bundled
-    Geist/Instrument-Serif/IBM-Plex-Mono fonts, drag-to-schedule day grid,
-    ambient focus audio, Play release signing keystore.
+    `UnstuckTheme(isSystemInDarkTheme())`, ✅ **bundled brand fonts** (Geist
+    variable + Instrument Serif + IBM Plex Mono in `:design/res/font`, wired in
+    Type.kt — verified rendering on-device), ✅ **ambient focus audio**
+    (`res/raw/ambient_focus.wav` brown-noise loop + `AmbientAudio` MediaPlayer,
+    speaker toggle in Focus), ✅ **drag-to-schedule day grid** (`DayGrid` —
+    long-press a tray task, drop on an hour slot → schedules; Calendar tab has
+    an Agenda/Grid toggle), ✅ **release signing** (`signingConfigs.release`
+    reads gitignored `keystore.properties`; `./gradlew :app:assembleRelease`
+    produces a signed APK — verified v1+v2).
+
+### Release builds
+`keystore.properties` + `unstuck-release.keystore` exist locally (gitignored;
+dev passphrase `unstuck-dev`). `./gradlew :app:assembleRelease` → signed
+`app/build/outputs/apk/release/app-release.apk`. For Play, swap in your own
+upload key (enable Play App Signing): regenerate the keystore + update
+`keystore.properties`.
 
 **Validated on-device** (Pixel_Fold emulator, API 35): installs + launches with
 no crashes; Supabase client initialises (`SupabaseClient created!`); Room + DI +

@@ -8,11 +8,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -45,7 +49,20 @@ fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
         .sortedWith(compareBy({ it.date }, { it.startTime }))
         .groupBy { it.date }
 
-    Column(Modifier.fillMaxWidth()) {
+    var grid by remember { mutableStateOf(false) }
+
+    Column(Modifier.fillMaxSize()) {
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            tech.csalliance.unstuck.ui.tasks.SelectableChip("Agenda", selected = !grid) { grid = false }
+            tech.csalliance.unstuck.ui.tasks.SelectableChip("Day grid", selected = grid) { grid = true }
+        }
+        if (grid) {
+            DayGridScreen(vm, onOpen)
+            return@Column
+        }
         ScreenHeader("Calendar", subtitle = "Upcoming blocks")
         if (grouped.isEmpty()) {
             EmptyState("No blocks scheduled. Schedule a task from its detail sheet.")

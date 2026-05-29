@@ -20,6 +20,14 @@ val secrets = Properties().apply {
 val supabaseUrl = secrets.getProperty("SUPABASE_URL") ?: "https://uaxfteluwctrlgwmmfzi.supabase.co"
 val supabaseAnonKey = secrets.getProperty("SUPABASE_ANON_KEY") ?: ""
 
+// Release signing config from keystore.properties (gitignored). Absent on CI /
+// fresh clones → release builds fall back to unsigned (debug builds unaffected).
+val keystoreProps = Properties().apply {
+    val f = rootProject.file("keystore.properties")
+    if (f.exists()) f.inputStream().use { load(it) }
+}
+val hasReleaseKeystore = keystoreProps.getProperty("storeFile")?.let { rootProject.file(it).exists() } == true
+
 android {
     namespace = "tech.csalliance.unstuck"
     compileSdk = 35
@@ -34,10 +42,28 @@ android {
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
 
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = rootProject.file(keystoreProps.getProperty("storeFile"))
+                storePassword = keystoreProps.getProperty("storePassword")
+                keyAlias = keystoreProps.getProperty("keyAlias")
+                keyPassword = keystoreProps.getProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
+            if (hasReleaseKeystore) signingConfig = signingConfigs.getByName("release")
         }
+    }
+
+    lint {
+        // False positive: we use registerForActivityResult on a Compose
+        // ComponentActivity (androidx.activity), not a Fragment.
+        disable += "InvalidFragmentVersionForActivityResult"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

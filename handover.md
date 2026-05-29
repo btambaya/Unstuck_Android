@@ -39,11 +39,23 @@ Single source of truth for "where is the Android build?". Update as phases land.
    Total tests green so far: **157 (:core) + 7 (:design) + 6 (:data) + 15 (:sync) = 185.**
 3. **P1b — backend FCM delta** (in the `unstuck` repo: migration 018 `fcm_token`,
    `_shared/fcm.ts`, platform branches in the senders, deploy)
-4. **P2 — Tasks + Today** (visibleTasks filters, create/edit, recurrence, slip; Start/Up Next)
-5. **P3 — Focus** (timer + 3 treatments + reasons + captures + FocusTimerService + ambient audio)
-6. **P4 — Calendar** (day grid + drag-to-schedule + block-time + Google connect + push/pull)
-7. **P5 — Collections / Tags & Areas / Captures**
-8. **P6 — Insights / Settings / Onboarding / Command palette**
+4. **P2 — Tasks + Today** ✅ — Today (Start Next / Up Next / in-progress resume),
+   Tasks (visibleTasks filter views + area + slip toggle + create/edit + schedule-next-free-slot).
+5. **P3 — Focus** ✅ (core) — full-screen timer on FocusTimer + 1s ticker, 3 treatments,
+   pause reasons → reason_logs, mid-session captures, extend-on-overrun. *Pending: FocusTimerService
+   foreground notification + ambient audio (surfaces phase).*
+6. **P4 — Calendar** ✅ (agenda) — upcoming blocks grouped by day, unschedule, external g_ blocks,
+   schedule via free-slot. *Pending: drag-to-schedule day grid + Google connect UI (Custom Tabs).*
+7. **P5 — Collections / Tags & Areas** ✅ — lists with items (add/toggle/delete), areas + tags CRUD in Settings.
+8. **P6 — Insights / Settings / Auth** ✅ — Insights (topInsights + stats + pause anatomy + slipping),
+   Settings (areas/tags/sync/sign-out), Auth (email/password + sign-up + magic link + Google).
+   *Pending: onboarding struggles flow, command palette, recurrence editor UI (model + label done).*
+
+**`:app` builds — `./gradlew :app:assembleDebug` → 20 MB debug APK.** Manual DI
+(`AppGraph`) instead of Hilt (fewer codegen moving parts). Central `AppViewModel`
+exposes every collection as a StateFlow off the Room store + all write actions
+through the sync engine. Bottom nav Today · Tasks · [+] · Calendar · Lists, with
+Focus / task-detail / settings as overlays.
 9. **Surfaces** — `:shared` DataStore → FCM register/receive → Glance widget →
    foreground notification → WorkManager paused-check
 10. **P7 — Polish** — Material You / dark, dynamic type, empty/error/sync-status,

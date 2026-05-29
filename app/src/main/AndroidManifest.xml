@@ -33,5 +33,36 @@
                 <data android:scheme="unstuck" />
             </intent-filter>
         </activity>
+
+        <!-- Foreground focus-session timer (chronometer notification). -->
+        <service
+            android:name=".surface.FocusTimerService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="focus_timer" />
+        </service>
+
+        <!-- FCM receiver (dormant until google-services.json is added). -->
+        <service
+            android:name=".surface.UnstuckMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Glance Start-Next home-screen widget. -->
+        <receiver
+            android:name=".surface.StartNextWidgetReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/start_next_widget_info" />
+        </receiver>
     </application>
 </manifest>

@@ -53,6 +53,14 @@ class SyncCoordinator(
         observeJob = null
     }
 
+    /** Manual best-effort sync (flush outbox → hydrate) for the periodic
+     *  WorkManager job. No-op when signed out. */
+    suspend fun syncNow() {
+        val uid = auth.currentUserId ?: return
+        flusher.flush(uid)
+        hydrator.hydrate()
+    }
+
     private suspend fun handle(status: SessionStatus) {
         when (status) {
             is SessionStatus.Authenticated -> {

@@ -22,6 +22,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.glance.appwidget.updateAll
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.pickStartNext
 import tech.csalliance.unstuck.core.logic.pickUpNext
@@ -50,6 +51,13 @@ fun TodayScreen(vm: AppViewModel, onStartFocus: (TaskItem) -> Unit, onOpen: (Tas
     val upNext = pickUpNext(tasks, blocks, liveId, startNext?.id, limit = 4)
     val todayTasks = visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false)
     val liveTask = liveId?.let { id -> tasks.firstOrNull { it.id == id } }
+
+    // Keep the Glance Start-Next widget in sync with the recommendation.
+    val context = androidx.compose.ui.platform.LocalContext.current
+    androidx.compose.runtime.LaunchedEffect(startNext?.id, startNext?.name) {
+        tech.csalliance.unstuck.surface.writeStartNext(context, startNext?.name, startNext?.estimateMin)
+        runCatching { tech.csalliance.unstuck.surface.StartNextWidget().updateAll(context) }
+    }
 
     LazyColumn(Modifier.fillMaxWidth()) {
         item {

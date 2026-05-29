@@ -44,6 +44,7 @@ import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.component.UButton
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
+import tech.csalliance.unstuck.surface.FocusTimerService
 import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.tasks.SelectableChip
 
@@ -56,6 +57,16 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
 
     // Resume-aware start (the engine no-ops if already running for this task).
     LaunchedEffect(task.id) { vm.startFocus(task) }
+
+    // Foreground chronometer notification while focusing.
+    val context = androidx.compose.ui.platform.LocalContext.current
+    val sessionStart = live?.sessionStart
+    LaunchedEffect(sessionStart) {
+        if (sessionStart != null) FocusTimerService.start(context, task.name, sessionStart)
+    }
+    androidx.compose.runtime.DisposableEffect(Unit) {
+        onDispose { FocusTimerService.stop(context) }
+    }
 
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {

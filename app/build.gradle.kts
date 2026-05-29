@@ -78,6 +78,13 @@ dependencies {
     implementation(libs.browser)
     implementation(libs.datastore.preferences)
 
+    // surfaces
+    implementation(libs.glance.appwidget)
+    implementation(libs.glance.material3)
+    implementation(libs.work.runtime.ktx)
+    implementation(platform(libs.firebase.bom))
+    implementation(libs.firebase.messaging)
+
     // supabase (for handleDeeplinks in MainActivity)
     implementation(platform(libs.supabase.bom))
     implementation(libs.supabase.auth)

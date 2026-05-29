@@ -56,10 +56,15 @@ Single source of truth for "where is the Android build?". Update as phases land.
 exposes every collection as a StateFlow off the Room store + all write actions
 through the sync engine. Bottom nav Today · Tasks · [+] · Calendar · Lists, with
 Focus / task-detail / settings as overlays.
-9. **Surfaces** — `:shared` DataStore → FCM register/receive → Glance widget →
-   foreground notification → WorkManager paused-check
-10. **P7 — Polish** — Material You / dark, dynamic type, empty/error/sync-status,
-    accessibility, Play release signing
+9. **Surfaces** ✅ — `StartNextSnapshot` (DataStore) → Glance `StartNextWidget`
+   (updates when the recommendation changes), `FocusTimerService` (foreground
+   chronometer notification, started/stopped by FocusScreen), `UnstuckMessagingService`
+   + `registerFcmToken` (FCM — dormant until google-services.json), `SyncWorker`
+   (30-min periodic flush+hydrate via `SyncCoordinator.syncNow()`),
+   POST_NOTIFICATIONS runtime request. Widget/snapshot live in :app (no :shared module).
+10. **P7 — Polish** (remaining) — dark wired via `UnstuckTheme(isSystemInDarkTheme())`;
+    TODO: bundled fonts + app icon, onboarding struggles, command palette,
+    recurrence editor, drag-to-schedule day grid, Play release signing.
 
 ## Critical gotchas (inherited from the iOS build)
 

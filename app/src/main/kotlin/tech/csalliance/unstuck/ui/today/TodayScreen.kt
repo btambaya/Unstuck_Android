@@ -11,6 +11,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -39,7 +40,7 @@ import tech.csalliance.unstuck.ui.components.ScreenHeader
 import tech.csalliance.unstuck.ui.components.TaskRow
 
 @Composable
-fun TodayScreen(vm: AppViewModel, onStartFocus: (TaskItem) -> Unit, onOpen: (TaskItem) -> Unit, onSettings: () -> Unit) {
+fun TodayScreen(vm: AppViewModel, onStartFocus: (TaskItem) -> Unit, onOpen: (TaskItem) -> Unit, onSettings: () -> Unit, onSearch: () -> Unit) {
     val c = UTheme.colors
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
@@ -62,7 +63,10 @@ fun TodayScreen(vm: AppViewModel, onStartFocus: (TaskItem) -> Unit, onOpen: (Tas
     LazyColumn(Modifier.fillMaxWidth()) {
         item {
             ScreenHeader("Today", subtitle = todaySubtitle(todayTasks.size)) {
-                IconButton(onClick = onSettings) { Icon(Icons.Outlined.Settings, contentDescription = "Settings", tint = c.ink3) }
+                androidx.compose.foundation.layout.Row {
+                    IconButton(onClick = onSearch) { Icon(Icons.Outlined.Search, contentDescription = "Search", tint = c.ink3) }
+                    IconButton(onClick = onSettings) { Icon(Icons.Outlined.Settings, contentDescription = "Settings", tint = c.ink3) }
+                }
             }
         }
 

@@ -58,6 +58,7 @@ fun MainScaffold(vm: AppViewModel) {
     var focusTask by remember { mutableStateOf<TaskItem?>(null) }
     var detailTask by remember { mutableStateOf<TaskItem?>(null) }
     var showSettings by remember { mutableStateOf(false) }
+    var showPalette by remember { mutableStateOf(false) }
     var onboarding by remember { mutableStateOf(!vm.onboarded) }
     val c = UTheme.colors
 
@@ -84,12 +85,23 @@ fun MainScaffold(vm: AppViewModel) {
     ) { padding ->
         Box(Modifier.fillMaxSize().padding(padding)) {
             when (tab) {
-                Tab.TODAY -> TodayScreen(vm, onStartFocus = { focusTask = it }, onOpen = { detailTask = it }, onSettings = { showSettings = true })
+                Tab.TODAY -> TodayScreen(vm, onStartFocus = { focusTask = it }, onOpen = { detailTask = it }, onSettings = { showSettings = true }, onSearch = { showPalette = true })
                 Tab.TASKS -> TasksScreen(vm, onStartFocus = { focusTask = it }, onOpen = { detailTask = it })
                 Tab.CALENDAR -> CalendarScreen(vm, onOpen = { detailTask = it })
                 Tab.LISTS -> CollectionsScreen(vm)
             }
         }
+    }
+
+    if (showPalette) {
+        tech.csalliance.unstuck.ui.palette.CommandPalette(
+            vm,
+            onDismiss = { showPalette = false },
+            onOpenTask = { detailTask = it },
+            onNewTask = { showNewTask = true },
+            onTab = { i -> tab = Tab.entries[i] },
+            onSettings = { showSettings = true },
+        )
     }
 
     if (showNewTask) NewTaskSheet(vm, onDismiss = { showNewTask = false })

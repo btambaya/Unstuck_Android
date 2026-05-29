@@ -65,8 +65,11 @@ Focus / task-detail / settings as overlays.
 10. **P6/P7 polish** — ✅ recurrence editor (`RecurrenceEditor` in new/edit
     sheets; `scheduleTask` materialises the horizon series), ✅ first-run
     onboarding (struggles → user_preferences + seeds canonical life areas),
-    ✅ dark via `UnstuckTheme(isSystemInDarkTheme())`. TODO: bundled fonts +
-    app icon, command palette, drag-to-schedule day grid, Play release signing.
+    ✅ command palette (search tasks + actions, from the Today header),
+    ✅ adaptive launcher icon (Orbit mark), ✅ dark via
+    `UnstuckTheme(isSystemInDarkTheme())`. TODO (cosmetic/optional): bundled
+    Geist/Instrument-Serif/IBM-Plex-Mono fonts, drag-to-schedule day grid,
+    ambient focus audio, Play release signing keystore.
 
 **Validated on-device** (Pixel_Fold emulator, API 35): installs + launches with
 no crashes; Supabase client initialises (`SupabaseClient created!`); Room + DI +

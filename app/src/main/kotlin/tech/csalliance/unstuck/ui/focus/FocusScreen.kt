@@ -141,8 +141,7 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
                 FocusBtn("Capture", soft = true) { showCapture = true }
                 FocusBtn(if (paused) "Resume" else "Pause", soft = true) {
                     if (paused) vm.resumeFocus()
-                    else if (settings.focusPauseReasons) showPauseReasons = true
-                    else vm.pauseFocus()
+                    else { vm.pauseFocus(); if (settings.focusPauseReasons) showPauseReasons = true }
                 }
                 // "Done" = end for now (records the session, keeps the task open).
                 FocusBtn("Done", soft = false) { reflectElapsed = FocusTimer.elapsedSec(l ?: return@FocusBtn, nowMs); vm.finishFocus(task); showReflect = true }
@@ -160,9 +159,10 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
         if (showCapture) CaptureSheet(vm, task, live?.id) { showCapture = false }
         if (showReflect) ReflectSheet(reflectElapsed) { showReflect = false; onClose() }
         if (showPauseReasons) {
+            // Already paused; this just records WHY (optional). Dismiss = skip logging.
             PauseReasons(
-                onPick = { reason -> vm.saveReasonLog(task.id, reason); vm.pauseFocus(); showPauseReasons = false },
-                onDismiss = { vm.pauseFocus(); showPauseReasons = false },
+                onPick = { reason -> vm.saveReasonLog(task.id, reason); showPauseReasons = false },
+                onDismiss = { showPauseReasons = false },
             )
         }
     }

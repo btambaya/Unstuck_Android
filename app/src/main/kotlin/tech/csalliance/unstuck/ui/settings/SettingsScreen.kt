@@ -51,6 +51,7 @@ import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.ThemePref
 import tech.csalliance.unstuck.design.component.AppBar
 import tech.csalliance.unstuck.design.theme.AccentPalette
+import tech.csalliance.unstuck.sync.AuthOutcome
 import tech.csalliance.unstuck.design.component.ColorChip
 import tech.csalliance.unstuck.design.component.Leading
 import tech.csalliance.unstuck.design.component.MdSegment
@@ -184,14 +185,70 @@ private fun AccountContent(vm: AppViewModel) {
     }
     msg?.let { Text(it, style = UFont.sans(12), color = c.green, modifier = Modifier.padding(top = 10.dp)) }
 
-    if (showName) FieldDialog("Display name", "Your name", initial = vm.currentName ?: "", onSave = { scope.launch { vm.updateDisplayName(it) }; showName = false }, onDismiss = { showName = false })
-    if (showPassword) FieldDialog(if (vm.hasPassword) "Change password" else "Add a password", "New password", password = true, onSave = { scope.launch { vm.changePassword(it) }; showPassword = false }, onDismiss = { showPassword = false })
-    if (showDelete) AlertDialog(
-        onDismissRequest = { showDelete = false },
-        title = { Text("Delete your account?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
-        text = { Text("This permanently removes your tasks, sessions and everything else. This cannot be undone.", style = UFont.sans(13), color = c.ink2) },
-        confirmButton = { TextButton(onClick = { showDelete = false; scope.launch { vm.deleteAccount() } }) { Text("Delete forever", color = c.red) } },
-        dismissButton = { TextButton(onClick = { showDelete = false }) { Text("Cancel", color = c.ink2) } },
+    if (showName) FieldDialog("Display name", "Your name", initial = vm.currentName ?: "", onSave = { showName = false; scope.launch { val r = vm.updateDisplayName(it); msg = if (r is AuthOutcome.Error) r.message else "Name updated." } }, onDismiss = { showName = false })
+    if (showPassword) PasswordDialog(
+        hasPassword = vm.hasPassword,
+        onSave = { current, newPw ->
+            showPassword = false
+            scope.launch {
+                if (vm.hasPassword) {
+                    val reauth = vm.signIn(vm.currentEmail ?: "", current)
+                    if (reauth is AuthOutcome.Error) { msg = "Current password incorrect."; return@launch }
+                }
+                val r = vm.changePassword(newPw)
+                msg = if (r is AuthOutcome.Error) r.message else "Password updated."
+            }
+        },
+        onDismiss = { showPassword = false },
+    )
+    if (showDelete) {
+        var typed by remember { mutableStateOf("") }
+        val email = vm.currentEmail ?: ""
+        AlertDialog(
+            onDismissRequest = { showDelete = false },
+            title = { Text("Delete your account?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("This permanently removes everything and cannot be undone. Type your email to confirm.", style = UFont.sans(13), color = c.ink2)
+                    OutlinedTextField(value = typed, onValueChange = { typed = it }, label = { Text("Email") }, singleLine = true)
+                }
+            },
+            confirmButton = {
+                TextButton(enabled = email.isNotBlank() && typed.trim().equals(email, ignoreCase = true), onClick = {
+                    showDelete = false; scope.launch { val r = vm.deleteAccount(); if (r is AuthOutcome.Error) msg = r.message }
+                }) { Text("Delete forever", color = c.red) }
+            },
+            dismissButton = { TextButton(onClick = { showDelete = false }) { Text("Cancel", color = c.ink2) } },
+            containerColor = c.surface,
+        )
+    }
+}
+
+@Composable
+private fun PasswordDialog(hasPassword: Boolean, onSave: (current: String, newPw: String) -> Unit, onDismiss: () -> Unit) {
+    val c = UTheme.colors
+    var current by remember { mutableStateOf("") }
+    var pw by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    val error = when {
+        pw.isNotEmpty() && pw.length < 8 -> "At least 8 characters."
+        confirm.isNotEmpty() && confirm != pw -> "Passwords don't match."
+        else -> null
+    }
+    val canSave = pw.length >= 8 && pw == confirm && (!hasPassword || current.isNotBlank())
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text(if (hasPassword) "Change password" else "Add a password", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                if (hasPassword) OutlinedTextField(value = current, onValueChange = { current = it }, label = { Text("Current password") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
+                OutlinedTextField(value = pw, onValueChange = { pw = it }, label = { Text("New password") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
+                OutlinedTextField(value = confirm, onValueChange = { confirm = it }, label = { Text("Confirm password") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
+                error?.let { Text(it, style = UFont.sans(12), color = c.red) }
+            }
+        },
+        confirmButton = { TextButton(enabled = canSave, onClick = { onSave(current, pw) }) { Text("Save", color = c.primaryDeep) } },
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = c.ink2) } },
         containerColor = c.surface,
     )
 }
@@ -307,7 +364,11 @@ private fun TagsContent(vm: AppViewModel) {
                 BasicTextField(value = draft, onValueChange = { draft = it }, textStyle = UFont.sans(14).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), decorationBox = { inner -> if (draft.isEmpty()) Text("New tag", style = UFont.sans(14), color = c.ink3); inner() })
             }
             UButton("Add", kind = ButtonKind.DARK, fill = false) {
-                if (draft.isNotBlank()) { vm.upsertTag(TagRow(newUuid(), draft.trim(), palette[tags.size % palette.size], tags.size)); draft = "" }
+                val nm = draft.trim()
+                if (nm.isNotBlank() && tags.none { it.name.equals(nm, ignoreCase = true) }) {
+                    vm.upsertTag(TagRow(newUuid(), nm, palette[tags.size % palette.size], tags.size))
+                }
+                draft = ""
             }
         }
     }

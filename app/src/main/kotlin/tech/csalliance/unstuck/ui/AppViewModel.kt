@@ -9,8 +9,11 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
@@ -243,11 +246,14 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun deleteCapture(id: String) = launchWrite { write?.deleteCapture(id) }
 
-    /** Promote a capture into a standalone task (named from the capture body), then remove the capture. */
+    /**
+     * Promote a capture into a standalone task. Mirrors the web capture-actions:
+     * the capture is PRESERVED (not deleted), and the new task is seeded with
+     * lifeArea "Work" + tags ["from-capture", <captureTag>].
+     */
     fun promoteCapture(capture: Capture): TaskItem {
-        val t = addTask(name = capture.body)
-        deleteCapture(capture.id)
-        return t
+        val tagName = capture.tag.name.lowercase().replace('_', '-')
+        return addTask(name = capture.body, estimateMin = 25, lifeArea = "Work", tags = listOf("from-capture", tagName))
     }
 
     // --- collections ---
@@ -255,28 +261,33 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun upsertCollection(c: ItemCollection) = launchWrite { write?.upsertCollection(c) }
     fun deleteCollection(id: String) = launchWrite { write?.deleteCollection(id) }
 
-    // Collection item ops — whole-row upserts (the JSONB row carries its items),
-    // mirroring the web use-collections mutations.
-    fun addCollectionItem(col: ItemCollection, body: String) = launchWrite {
-        val text = body.trim(); if (text.isEmpty()) return@launchWrite
-        write?.upsertCollection(col.copy(items = col.items + tech.csalliance.unstuck.core.model.CollectionItem(newUuid(), text, at = isoNow())))
+    // Collection item ops — whole-row upserts (the JSONB row carries its items).
+    // Each mutation is serialized + re-resolves the LATEST collection from Room
+    // first, so rapid fast-add / pin bursts can't persist a stale snapshot and
+    // drop items typed in between (matches the web's functional-update guard).
+    private val collectionMutex = Mutex()
+    private fun mutateCollection(id: String, transform: (ItemCollection) -> ItemCollection) = launchWrite {
+        collectionMutex.withLock {
+            val latest = store.collections().first().firstOrNull { it.id == id } ?: return@withLock
+            write?.upsertCollection(transform(latest))
+        }
     }
-    fun updateCollectionItemBody(col: ItemCollection, itemId: String, body: String) = launchWrite {
-        write?.upsertCollection(col.copy(items = col.items.map { if (it.id == itemId) it.copy(body = body.trim()) else it }))
+    fun addCollectionItem(col: ItemCollection, body: String) {
+        val text = body.trim(); if (text.isEmpty()) return
+        mutateCollection(col.id) { it.copy(items = it.items + tech.csalliance.unstuck.core.model.CollectionItem(newUuid(), text, at = isoNow())) }
     }
-    fun toggleCollectionItemPin(col: ItemCollection, itemId: String) = launchWrite {
-        write?.upsertCollection(col.copy(items = col.items.map { if (it.id == itemId) it.copy(pinned = !(it.pinned ?: false)) else it }))
+    fun updateCollectionItemBody(col: ItemCollection, itemId: String, body: String) =
+        mutateCollection(col.id) { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(body = body.trim()) else it }) }
+    fun toggleCollectionItemPin(col: ItemCollection, itemId: String) =
+        mutateCollection(col.id) { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(pinned = !(it.pinned ?: false)) else it }) }
+    fun toggleCollectionItemDone(col: ItemCollection, itemId: String) =
+        mutateCollection(col.id) { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(done = !(it.done ?: false)) else it }) }
+    fun removeCollectionItem(col: ItemCollection, itemId: String) =
+        mutateCollection(col.id) { c -> c.copy(items = c.items.filterNot { it.id == itemId }) }
+    fun renameCollection(col: ItemCollection, name: String) {
+        val nm = name.trim(); if (nm.isNotEmpty()) mutateCollection(col.id) { it.copy(name = nm) }
     }
-    fun toggleCollectionItemDone(col: ItemCollection, itemId: String) = launchWrite {
-        write?.upsertCollection(col.copy(items = col.items.map { if (it.id == itemId) it.copy(done = !(it.done ?: false)) else it }))
-    }
-    fun removeCollectionItem(col: ItemCollection, itemId: String) = launchWrite {
-        write?.upsertCollection(col.copy(items = col.items.filterNot { it.id == itemId }))
-    }
-    fun renameCollection(col: ItemCollection, name: String) = launchWrite {
-        val nm = name.trim(); if (nm.isNotEmpty()) write?.upsertCollection(col.copy(name = nm))
-    }
-    fun recolorCollection(col: ItemCollection, color: String) = launchWrite { write?.upsertCollection(col.copy(color = color)) }
+    fun recolorCollection(col: ItemCollection, color: String) = mutateCollection(col.id) { it.copy(color = color) }
 
     // --- tags & areas ---
 

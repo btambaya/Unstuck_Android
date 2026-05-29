@@ -61,11 +61,19 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
     var range by remember { mutableStateOf("Week") }   // Week | Month | All
 
     val now = vm.nowMs()
-    val cutoff = when (range) { "Week" -> now - 7L * 86_400_000; "Month" -> now - 30L * 86_400_000; else -> 0L }
+    // Calendar-anchored windows (web parity): week = since Monday 00:00, month = since the 1st.
+    val zone = java.time.ZoneId.systemDefault()
+    val day = java.time.LocalDate.now(zone)
+    val cutoff = when (range) {
+        "Week" -> day.minusDays(((day.dayOfWeek.value + 6) % 7).toLong()).atStartOfDay(zone).toInstant().toEpochMilli()
+        "Month" -> day.withDayOfMonth(1).atStartOfDay(zone).toInstant().toEpochMilli()
+        else -> 0L
+    }
     fun inWin(iso: String): Boolean = (Time.parseMillis(iso) ?: 0L) >= cutoff
     val sessions = allSessions.filter { inWin(it.completedAt) }
     val captures = allCaptures.filter { inWin(it.at) }
     val reasons = allReasons.filter { inWin(it.at) }
+    val enough = sessions.size >= 5   // REAL_DATA_THRESHOLD — below this, show placeholders not numbers
 
     val dots = calibrationDots(sessions, tasks)
     val hit = if (dots.isNotEmpty()) (calibrationHitRate(dots) * 100).roundToInt() else 0
@@ -84,27 +92,31 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
             }
 
             if (!deep) {
+                if (!enough) item { ThresholdNote(sessions.size) }
                 item {
                     Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        StatCard("Estimates", "$hit%", "${sessions.size} sessions", c.greenSoft, c.greenInk, "landed within 5 min")
-                        StatCard("Focus", "${totalMin / 60}h ${totalMin % 60}m", "${sessions.size} sessions", c.blueSoft, c.blueInk, "completed this window")
+                        StatCard("Estimates", if (enough) "$hit%" else "—", "${sessions.size} sessions", c.greenSoft, c.greenInk, "landed within 5 min")
+                        StatCard("Re-entries", if (enough) "${sessions.size}" else "—", "${captures.size} captures", c.blueSoft, c.blueInk, "focus sessions this window")
                         StatCard("Gentle friction", "${slips.size} tasks", if (slips.isEmpty()) "All clear." else "Watch these", if (slips.isEmpty()) c.greenSoft else c.amberSoft, if (slips.isEmpty()) c.greenInk else c.amberInk, "slipping")
                     }
                 }
-                item { StackedBars("When focus happens", weekdayAreaHours(sessions, tasks).map { it.d to it.data }, DEFAULT_AREAS) }
-                item { Histogram("When interruptions happen", interruptionBins(captures, sessions), c.coral) }
-                item {
-                    val insights = topInsights(sessions, tasks, captures, reasons)
-                    if (insights.isNotEmpty()) {
-                        SectionLabel("Worth noticing", Modifier.padding(top = 18.dp, bottom = 6.dp))
-                        insights.take(4).forEach { ins ->
-                            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), radius = 14) {
-                                Column { Text(ins.title, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink); Text(ins.sub, style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 4.dp)) }
+                if (enough) {
+                    item { StackedBars("When focus happens", weekdayAreaHours(sessions, tasks).map { it.d to it.data }, DEFAULT_AREAS) }
+                    item { Histogram("When interruptions happen", interruptionBins(captures, sessions), c.coral) }
+                    item {
+                        val insights = topInsights(sessions, tasks, captures, reasons)
+                        if (insights.isNotEmpty()) {
+                            SectionLabel("Worth noticing", Modifier.padding(top = 18.dp, bottom = 6.dp))
+                            insights.take(4).forEach { ins ->
+                                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), radius = 14) {
+                                    Column { Text(ins.title, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink); Text(ins.sub, style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 4.dp)) }
+                                }
                             }
                         }
                     }
                 }
             } else {
+                if (!enough) item { ThresholdNote(sessions.size) }
                 item {
                     val mins = sessions.map { it.actualSec / 60 }.sorted()
                     val median = if (mins.isEmpty()) 0 else mins[mins.size / 2]
@@ -112,11 +124,11 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                     val reentryPct = reentry.sum().let { if (it == 0) 0 else (reentry[0] * 100 / it) }
                     Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            StatCard("Median", "${median}m", caption = "across ${sessions.size} sessions", modifier = Modifier.weight(1f))
-                            StatCard("On estimate", "$hit%", caption = "within 5 min", modifier = Modifier.weight(1f))
+                            StatCard("Median", if (enough) "${median}m" else "—", caption = "across ${sessions.size} sessions", modifier = Modifier.weight(1f))
+                            StatCard("On estimate", if (enough) "$hit%" else "—", caption = "within 5 min", modifier = Modifier.weight(1f))
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            StatCard("Re-entry <5m", "$reentryPct%", caption = "fast comebacks", modifier = Modifier.weight(1f))
+                            StatCard("Re-entry <5m", if (enough) "$reentryPct%" else "—", caption = "fast comebacks", modifier = Modifier.weight(1f))
                             StatCard("Captures", "${captures.size}", caption = "kept this window", modifier = Modifier.weight(1f))
                         }
                     }
@@ -162,6 +174,17 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                 item { Heatmap(timeOfDayHeatmap(sessions)) }
             }
             item { Box(Modifier.padding(24.dp)) {} }
+        }
+    }
+}
+
+@Composable
+private fun ThresholdNote(n: Int) {
+    val c = UTheme.colors
+    Card(Modifier.fillMaxWidth().padding(top = 8.dp), radius = 14) {
+        Column {
+            Text("Patterns appear after a few sessions.", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
+            Text("$n of 5 focus sessions so far — numbers stay gentle until then.", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 4.dp))
         }
     }
 }

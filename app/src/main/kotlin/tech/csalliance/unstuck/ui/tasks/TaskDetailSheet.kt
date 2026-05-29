@@ -66,6 +66,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     val captures by vm.captures.collectAsStateWithLifecycle()
     var scheduled by remember(task.id) { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
+    var showEstimate by remember { mutableStateOf(false) }
     val taskSessions = sessions.filter { it.taskId == task.id }
     val taskCaptures = captures.filter { it.taskId == task.id }
     val myBlocks = blocks.filter { it.taskId == task.id }.sortedWith(compareBy({ it.date }, { it.startTime }))
@@ -89,7 +90,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                 color = if (task.done) c.ink3 else c.ink,
                 strike = task.done,
                 modifier = Modifier.padding(top = 6.dp),
-            ) { vm.updateTask(task.copy(name = it)) }
+            ) { if (it.isNotBlank() && it != task.name) vm.updateTask(task.copy(name = it)) }
 
             Box(Modifier.fillMaxWidth().padding(top = 14.dp).clip(RoundedCornerShape(14.dp)).background(c.bg2).padding(horizontal = 16.dp, vertical = 14.dp)) {
                 Column {
@@ -99,7 +100,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                         style = UFont.sans(14).copy(fontStyle = FontStyle.Italic),
                         color = if (task.firstPhysicalAction == null) c.ink3 else c.ink,
                         modifier = Modifier.padding(top = 6.dp),
-                    ) { vm.updateTask(task.copy(firstPhysicalAction = it.trim().ifEmpty { null })) }
+                    ) { val v = it.trim().ifEmpty { null }; if (v != task.firstPhysicalAction) vm.updateTask(task.copy(firstPhysicalAction = v)) }
                 }
             }
 
@@ -121,9 +122,12 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                     Column {
                         SectionLabel("Estimate")
                         Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            listOf(15, 25, 45, 60, 90).forEach { m ->
+                            val presets = listOf(15, 25, 45, 60, 90)
+                            presets.forEach { m ->
                                 SelectableChip("${m}m", selected = task.estimateMin == m) { vm.updateTask(task.copy(estimateMin = m)) }
                             }
+                            if (task.estimateMin !in presets) SelectableChip("${task.estimateMin}m", selected = true) { showEstimate = true }
+                            SelectableChip("Custom…", selected = false) { showEstimate = true }
                         }
                     }
                     Column {
@@ -160,6 +164,23 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
 
             UButton("Delete", kind = ButtonKind.DANGER, fill = false, modifier = Modifier.padding(top = 22.dp)) { confirmDelete = true }
         }
+    }
+
+    if (showEstimate) {
+        var v by remember { mutableStateOf(task.estimateMin.toString()) }
+        AlertDialog(
+            onDismissRequest = { showEstimate = false },
+            title = { Text("Estimate (minutes)", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+            text = {
+                androidx.compose.material3.OutlinedTextField(
+                    value = v, onValueChange = { s -> v = s.filter { it.isDigit() }.take(4) }, singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                )
+            },
+            confirmButton = { TextButton(onClick = { v.toIntOrNull()?.takeIf { it > 0 }?.let { vm.updateTask(task.copy(estimateMin = it)) }; showEstimate = false }) { Text("Save", color = c.primaryDeep) } },
+            dismissButton = { TextButton(onClick = { showEstimate = false }) { Text("Cancel", color = c.ink2) } },
+            containerColor = c.surface,
+        )
     }
 
     if (confirmDelete) AlertDialog(

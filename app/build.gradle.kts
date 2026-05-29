@@ -11,6 +11,13 @@ plugins {
     alias(libs.plugins.kotlin.compose)
 }
 
+// FCM: the google-services plugin is applied automatically once you drop the
+// Firebase config (app/google-services.json) in — until then it's skipped so
+// the app still builds without Firebase configured.
+if (file("google-services.json").exists()) {
+    apply(plugin = "com.google.gms.google-services")
+}
+
 // Secrets live in secrets.properties (gitignored). Anon key surfaced via
 // BuildConfig; the project URL defaults to the known ref.
 val secrets = Properties().apply {

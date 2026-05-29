@@ -58,7 +58,13 @@ fun MainScaffold(vm: AppViewModel) {
     var focusTask by remember { mutableStateOf<TaskItem?>(null) }
     var detailTask by remember { mutableStateOf<TaskItem?>(null) }
     var showSettings by remember { mutableStateOf(false) }
+    var onboarding by remember { mutableStateOf(!vm.onboarded) }
     val c = UTheme.colors
+
+    if (onboarding) {
+        tech.csalliance.unstuck.ui.onboarding.OnboardingScreen(vm, onDone = { onboarding = false })
+        return
+    }
 
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val live by vm.liveSession.collectAsStateWithLifecycle()

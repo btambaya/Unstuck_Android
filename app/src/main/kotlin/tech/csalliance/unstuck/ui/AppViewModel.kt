@@ -121,11 +121,24 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     // --- scheduling (cal blocks) ---
 
     fun scheduleTask(task: TaskItem, date: String, startTime: String) = launchWrite {
-        val block = CalBlock(
-            id = newUuid(), taskId = task.id, taskName = task.name, startTime = startTime,
-            durationMinutes = task.estimateMin, date = date, kind = CalBlockKind.TASK,
-        )
-        write?.upsertCalBlock(block)
+        val recurrence = task.recurrence
+        if (recurrence != null) {
+            val parts = date.split("-").mapNotNull { it.toIntOrNull() }
+            val startDate = if (parts.size == 3) {
+                tech.csalliance.unstuck.core.time.Time.civil(parts[0], parts[1], parts[2])
+            } else {
+                tech.csalliance.unstuck.core.time.Time.startOfDayMillis(nowMs())
+            }
+            tech.csalliance.unstuck.core.logic.materializeOccurrences(recurrence, startDate, startTime).forEach { o ->
+                write?.upsertCalBlock(
+                    CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = o.startTime, durationMinutes = task.estimateMin, date = o.date, kind = CalBlockKind.TASK),
+                )
+            }
+        } else {
+            write?.upsertCalBlock(
+                CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = startTime, durationMinutes = task.estimateMin, date = date, kind = CalBlockKind.TASK),
+            )
+        }
         // Rescheduling an existing task bumps its move count (slip detector).
         write?.upsertTask(bumpMoveCount(task, isoNow()))
     }
@@ -190,6 +203,24 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun deleteTag(id: String) = launchWrite { write?.deleteTag(id) }
     fun upsertLifeArea(a: LifeArea) = launchWrite { write?.upsertLifeArea(a) }
     fun deleteLifeArea(id: String) = launchWrite { write?.deleteLifeArea(id) }
+
+    // --- onboarding ---
+
+    val onboarded: Boolean get() = graph.onboarded
+
+    fun completeOnboarding(struggles: List<String>) = launchWrite {
+        if (lifeAreas.value.isEmpty()) {
+            val colors = listOf("indigo", "coral", "violet", "green")
+            listOf("Work", "Personal", "Home", "Health").forEachIndexed { i, n ->
+                write?.upsertLifeArea(LifeArea(id = newUuid(), name = n, color = colors[i], sortOrder = i))
+            }
+        }
+        val uid = auth?.currentUserId
+        if (uid != null && struggles.isNotEmpty()) {
+            runCatching { graph.coordinator?.preferences?.setAdhdStruggles(uid, struggles) }
+        }
+        graph.onboarded = true
+    }
 
     // --- auth ---
 

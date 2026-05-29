@@ -62,9 +62,17 @@ Focus / task-detail / settings as overlays.
    + `registerFcmToken` (FCM — dormant until google-services.json), `SyncWorker`
    (30-min periodic flush+hydrate via `SyncCoordinator.syncNow()`),
    POST_NOTIFICATIONS runtime request. Widget/snapshot live in :app (no :shared module).
-10. **P7 — Polish** (remaining) — dark wired via `UnstuckTheme(isSystemInDarkTheme())`;
-    TODO: bundled fonts + app icon, onboarding struggles, command palette,
-    recurrence editor, drag-to-schedule day grid, Play release signing.
+10. **P6/P7 polish** — ✅ recurrence editor (`RecurrenceEditor` in new/edit
+    sheets; `scheduleTask` materialises the horizon series), ✅ first-run
+    onboarding (struggles → user_preferences + seeds canonical life areas),
+    ✅ dark via `UnstuckTheme(isSystemInDarkTheme())`. TODO: bundled fonts +
+    app icon, command palette, drag-to-schedule day grid, Play release signing.
+
+**Validated on-device** (Pixel_Fold emulator, API 35): installs + launches with
+no crashes; Supabase client initialises (`SupabaseClient created!`); Room + DI +
+Compose theme + oklch brand colours render — the auth screen shows the serif
+wordmark + coralDeep CTA. With `secrets.properties` (anon key) it reaches the
+live auth screen; without it, the setup screen.
 
 ## Critical gotchas (inherited from the iOS build)
 

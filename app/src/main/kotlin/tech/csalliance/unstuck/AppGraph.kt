@@ -27,6 +27,11 @@ class AppGraph(context: Context) {
     val coordinator: SyncCoordinator? =
         provider?.let { SyncCoordinator(it, store, context.applicationContext, scope) }
 
+    private val appPrefs = context.applicationContext.getSharedPreferences("unstuck.app", Context.MODE_PRIVATE)
+    var onboarded: Boolean
+        get() = appPrefs.getBoolean("onboarded", false)
+        set(value) { appPrefs.edit().putBoolean("onboarded", value).apply() }
+
     fun start() {
         coordinator?.start()
     }

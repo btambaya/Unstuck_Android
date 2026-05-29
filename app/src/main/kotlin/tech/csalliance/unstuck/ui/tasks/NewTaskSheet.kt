@@ -37,6 +37,7 @@ fun NewTaskSheet(vm: AppViewModel, onDismiss: () -> Unit) {
     var priority by remember { mutableStateOf<Priority?>(null) }
     var area by remember { mutableStateOf<String?>(null) }
     var firstMove by remember { mutableStateOf("") }
+    var recurrence by remember { mutableStateOf<tech.csalliance.unstuck.core.model.Recurrence?>(null) }
 
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.bg) {
         Column(Modifier.fillMaxWidth().imePadding().padding(horizontal = 20.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -66,10 +67,12 @@ fun NewTaskSheet(vm: AppViewModel, onDismiss: () -> Unit) {
 
             OutlinedTextField(value = firstMove, onValueChange = { firstMove = it }, label = { Text("First physical action (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth())
 
+            tech.csalliance.unstuck.ui.components.RecurrenceEditor(recurrence) { recurrence = it }
+
             UButton("Add task", enabled = name.isNotBlank()) {
                 vm.addTask(
                     name = name, estimateMin = estimate, priority = priority, lifeArea = area,
-                    firstPhysicalAction = firstMove.trim().ifEmpty { null },
+                    firstPhysicalAction = firstMove.trim().ifEmpty { null }, recurrence = recurrence,
                 )
                 onDismiss()
             }

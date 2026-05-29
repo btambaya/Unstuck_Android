@@ -49,7 +49,9 @@ fun TaskDetailSheet(vm: AppViewModel, task: TaskItem, onDismiss: () -> Unit, onS
     var later by remember(task.id) { mutableStateOf(task.later == true) }
     var scheduled by remember(task.id) { mutableStateOf<String?>(null) }
 
-    fun persist() = vm.updateTask(task.copy(name = name.trim(), estimateMin = estimate, priority = priority, lifeArea = area, later = later))
+    var recurrence by remember(task.id) { mutableStateOf(task.recurrence) }
+
+    fun persist() = vm.updateTask(task.copy(name = name.trim(), estimateMin = estimate, priority = priority, lifeArea = area, later = later, recurrence = recurrence))
 
     ModalBottomSheet(onDismissRequest = { persist(); onDismiss() }, sheetState = sheet, containerColor = c.bg) {
         Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 20.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -73,7 +75,8 @@ fun TaskDetailSheet(vm: AppViewModel, task: TaskItem, onDismiss: () -> Unit, onS
                 }
             }
 
-            task.recurrence?.let { Text(recurrenceLabel(it), style = UFont.sans(13), color = c.ink3) }
+            tech.csalliance.unstuck.ui.components.RecurrenceEditor(recurrence) { recurrence = it }
+            recurrence?.let { Text(recurrenceLabel(it), style = UFont.sans(12), color = c.ink3) }
 
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Text("Save for later", style = UFont.sans(14), color = c.ink)

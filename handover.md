@@ -103,11 +103,15 @@ live auth screen; without it, the setup screen.
 - **Dates:** java.time + `ZoneId.systemDefault()` reproduce JS Date LOCAL math;
   ISO strings compare lexicographically; tests run `TZ=UTC`.
 
-## Manual prerequisites (owner — the FCM/Play analogs of the Apple steps)
+## Manual prerequisites (owner)
 
-1. Firebase project → Android app (package `tech.csalliance.unstuck`) →
-   `app/google-services.json`; service account → `FCM_SERVICE_ACCOUNT` (JSON) +
-   `FCM_PROJECT_ID` Supabase secrets.
-2. `SUPABASE_ANON_KEY` → `secrets.properties` (→ `BuildConfig`, gitignored).
-3. Google OAuth `/calendar-callback` redirect already registered (shared w/ iOS).
-4. Release signing keystore + Play Console (debug builds need none).
+1. ✅ **DONE** — Firebase/FCM configured: project `unstuck-46e8c`, Android app
+   (`tech.csalliance.unstuck`), `app/google-services.json` in place (gitignored;
+   plugin auto-applies), Supabase secrets `FCM_PROJECT_ID` + `FCM_SERVICE_ACCOUNT`
+   set. FCM is live end-to-end (token registers on sign-in; senders route
+   Android→FCM / iOS→APNs).
+2. ✅ `SUPABASE_ANON_KEY` → `secrets.properties` (gitignored) — set for local runs.
+3. ✅ Google OAuth `/calendar-callback` redirect registered (shared w/ iOS).
+4. **Remaining (optional, store only):** Play upload key — release builds sign
+   with the gitignored dev keystore today; swap in your own upload key in
+   `keystore.properties` + Play Console for distribution.

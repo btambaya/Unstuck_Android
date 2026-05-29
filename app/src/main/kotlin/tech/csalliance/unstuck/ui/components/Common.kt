@@ -116,3 +116,35 @@ fun TaskRow(
         trailing?.invoke()
     }
 }
+
+// ---- shared, non-composable helpers ----
+
+/** Resolve a task's life-area NAME to its color via the areas list. */
+fun areaColorFor(
+    name: String?,
+    areas: List<tech.csalliance.unstuck.core.model.LifeArea>,
+    colors: tech.csalliance.unstuck.design.theme.UnstuckColors,
+): androidx.compose.ui.graphics.Color =
+    areas.firstOrNull { it.name == name }?.let { colors.areaColor(it.color) } ?: colors.ink4
+
+private val DOW = listOf("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY")
+
+/** "FRIDAY · 12:12 PM" for the Today eyebrow. */
+fun dateEyebrow(nowMs: Long): String {
+    val z = java.time.Instant.ofEpochMilli(nowMs).atZone(java.time.ZoneId.systemDefault())
+    val day = DOW[z.dayOfWeek.value - 1]
+    val h = z.hour; val m = z.minute
+    val period = if (h >= 12) "PM" else "AM"
+    val h12 = ((h + 11) % 12) + 1
+    return "$day · $h12:${"%02d".format(m)} $period"
+}
+
+/** "Good morning," / "Good afternoon," / "Good evening," by local hour. */
+fun greeting(nowMs: Long): String {
+    val h = java.time.Instant.ofEpochMilli(nowMs).atZone(java.time.ZoneId.systemDefault()).hour
+    return when {
+        h < 12 -> "Good morning,"
+        h < 18 -> "Good afternoon,"
+        else -> "Good evening,"
+    }
+}

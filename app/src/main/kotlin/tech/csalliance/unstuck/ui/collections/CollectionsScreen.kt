@@ -1,130 +1,75 @@
 package tech.csalliance.unstuck.ui.collections
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.text.KeyboardActions
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.RadioButtonUnchecked
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.OutlinedTextField
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateMapOf
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
-import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import tech.csalliance.unstuck.core.logic.newUuid
-import tech.csalliance.unstuck.core.model.CollectionItem
-import tech.csalliance.unstuck.core.model.ItemCollection
-import tech.csalliance.unstuck.design.component.AreaDot
-import tech.csalliance.unstuck.design.component.Card
-import tech.csalliance.unstuck.design.component.SectionLabel
+import tech.csalliance.unstuck.design.component.AppBar
+import tech.csalliance.unstuck.design.component.ColorChip
+import tech.csalliance.unstuck.design.component.Leading
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
-import tech.csalliance.unstuck.ui.components.EmptyState
-import tech.csalliance.unstuck.ui.components.ScreenHeader
 
 @Composable
-fun CollectionsScreen(vm: AppViewModel) {
+fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit) {
     val c = UTheme.colors
     val collections by vm.collections.collectAsStateWithLifecycle()
-    var showAdd by remember { mutableStateOf(false) }
-    val drafts = remember { mutableStateMapOf<String, String>() }
 
-    Column(Modifier.fillMaxWidth()) {
-        ScreenHeader("Lists", subtitle = "${collections.size} collections") {
-            IconButton(onClick = { showAdd = true }) { Icon(Icons.Outlined.Add, contentDescription = "New list", tint = c.ink2) }
-        }
-        if (collections.isEmpty()) {
-            EmptyState("No lists yet. Tap + to make one (groceries, ideas, someday…).")
-        } else {
-            LazyColumn(Modifier.fillMaxWidth()) {
-                items(collections.sortedBy { it.sortOrder }, key = { it.id }) { col ->
-                    Card(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 6.dp)) {
-                        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                AreaDot(col.color)
-                                Text(col.name, style = UFont.sans(16, FontWeight.SemiBold), color = c.ink, modifier = Modifier.weight(1f))
-                                Text("Delete", style = UFont.sans(12), color = c.coralDeep, modifier = Modifier.clickable { vm.deleteCollection(col.id) })
-                            }
-                            col.items.sortedByDescending { it.pinned == true }.forEach { item ->
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                    IconButton(onClick = { toggleItem(vm, col, item) }, modifier = Modifier.size(26.dp)) {
-                                        Icon(
-                                            if (item.done == true) Icons.Filled.CheckCircle else Icons.Outlined.RadioButtonUnchecked,
-                                            contentDescription = null,
-                                            tint = if (item.done == true) c.green else c.ink3,
-                                        )
-                                    }
-                                    Text(item.body, style = UFont.sans(14), color = if (item.done == true) c.ink3 else c.ink, modifier = Modifier.weight(1f))
-                                }
-                            }
-                            val draft = drafts[col.id] ?: ""
-                            OutlinedTextField(
-                                value = draft,
-                                onValueChange = { drafts[col.id] = it },
-                                label = { Text("Add item") },
-                                singleLine = true,
-                                modifier = Modifier.fillMaxWidth(),
-                                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                                keyboardActions = KeyboardActions(onDone = {
-                                    if (draft.isNotBlank()) { addItem(vm, col, draft.trim()); drafts[col.id] = "" }
-                                }),
-                            )
+    Column(Modifier.fillMaxSize()) {
+        AppBar(title = "Collections", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch)
+        LazyVerticalGrid(
+            columns = GridCells.Fixed(2),
+            modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp),
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(2) }) {
+                Column {
+                    Text("Things you don't need to remember.", style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.padding(top = 4.dp))
+                    Text("A calm shelf. Nothing here is a task.", style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(top = 8.dp, bottom = 8.dp))
+                }
+            }
+            items(collections.sortedBy { it.sortOrder }, key = { it.id }) { col ->
+                val color = c.areaColor(col.color)
+                Column(
+                    Modifier.fillMaxWidth().heightIn(min = 130.dp).clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp)).clickable { onOpen(col.id) }.padding(14.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
+                        ColorChip(color, box = 26, dot = 8)
+                        Text("${col.items.size}", style = UFont.sans(11), color = c.ink3)
+                    }
+                    Text(col.name, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink)
+                    Column(Modifier.weight(1f, fill = false).padding(top = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        col.items.take(2).forEach { item ->
+                            Text("· ${item.body}", style = UFont.sans(11), color = c.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
                     }
                 }
-                item { Text("", Modifier.padding(28.dp)) }
             }
+            item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(2) }) { Box(Modifier.padding(28.dp)) {} }
         }
     }
-
-    if (showAdd) {
-        var name by remember { mutableStateOf("") }
-        AlertDialog(
-            onDismissRequest = { showAdd = false },
-            confirmButton = {
-                TextButton(onClick = {
-                    if (name.isNotBlank()) {
-                        vm.upsertCollection(ItemCollection(id = newUuid(), name = name.trim(), color = "indigo", subtitle = null, items = emptyList(), sortOrder = collections.size))
-                    }
-                    showAdd = false
-                }) { Text("Create") }
-            },
-            dismissButton = { TextButton(onClick = { showAdd = false }) { Text("Cancel") } },
-            title = { Text("New list") },
-            text = { OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") }, singleLine = true) },
-        )
-    }
-}
-
-private fun addItem(vm: AppViewModel, col: ItemCollection, body: String) {
-    val item = CollectionItem(id = newUuid(), body = body, at = vm.isoNow())
-    vm.upsertCollection(col.copy(items = col.items + item))
-}
-
-private fun toggleItem(vm: AppViewModel, col: ItemCollection, item: CollectionItem) {
-    val updated = col.items.map { if (it.id == item.id) it.copy(done = !(it.done ?: false)) else it }
-    vm.upsertCollection(col.copy(items = updated))
 }

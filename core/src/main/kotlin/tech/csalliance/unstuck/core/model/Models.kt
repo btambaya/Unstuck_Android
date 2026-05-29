@@ -1,0 +1,204 @@
+package tech.csalliance.unstuck.core.model
+
+import kotlinx.serialization.KSerializer
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.SerializationException
+import kotlinx.serialization.descriptors.SerialDescriptor
+import kotlinx.serialization.descriptors.buildClassSerialDescriptor
+import kotlinx.serialization.encoding.Decoder
+import kotlinx.serialization.encoding.Encoder
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonEncoder
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.int
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+
+// Domain models. Mirror lib/types.ts (web) + UnstuckCore/Models (iOS).
+// camelCase throughout — the snake_case PostgREST mapping lives in :data's
+// DbRowCodec. Embedded JSONB types (Objective/Comment/CollectionItem/
+// Recurrence) keep camelCase keys (that IS the server JSONB shape).
+
+@Serializable
+data class Objective(val text: String, val done: Boolean? = null, val minutes: Int? = null)
+
+@Serializable
+data class Comment(val text: String, val at: String? = null)
+
+/** Recurring schedule. `null` (the optional) = does not repeat. Encodes the
+ *  tagged-union JSON the web uses: {kind, daysOfWeek?, until?}. daysOfWeek
+ *  is 0=Sun…6=Sat. `until` (YYYY-MM-DD) inclusive. */
+@Serializable(with = RecurrenceSerializer::class)
+sealed class Recurrence {
+    abstract val until: String?
+    data class Daily(override val until: String? = null) : Recurrence()
+    data class Weekly(val daysOfWeek: List<Int>, override val until: String? = null) : Recurrence()
+    data class Monthly(override val until: String? = null) : Recurrence()
+}
+
+object RecurrenceSerializer : KSerializer<Recurrence> {
+    override val descriptor: SerialDescriptor = buildClassSerialDescriptor("Recurrence")
+
+    override fun serialize(encoder: Encoder, value: Recurrence) {
+        val json = encoder as? JsonEncoder ?: throw SerializationException("Recurrence needs JSON")
+        val obj = buildJsonObject {
+            when (value) {
+                is Recurrence.Daily -> put("kind", "daily")
+                is Recurrence.Monthly -> put("kind", "monthly")
+                is Recurrence.Weekly -> {
+                    put("kind", "weekly")
+                    put("daysOfWeek", JsonArray(value.daysOfWeek.map { JsonPrimitive(it) }))
+                }
+            }
+            value.until?.let { put("until", it) }
+        }
+        json.encodeJsonElement(obj)
+    }
+
+    override fun deserialize(decoder: Decoder): Recurrence {
+        val json = decoder as? JsonDecoder ?: throw SerializationException("Recurrence needs JSON")
+        val obj = json.decodeJsonElement().jsonObject
+        val until = obj["until"]?.jsonPrimitive?.contentOrNull
+        return when (obj["kind"]?.jsonPrimitive?.content) {
+            "daily" -> Recurrence.Daily(until)
+            "monthly" -> Recurrence.Monthly(until)
+            "weekly" -> Recurrence.Weekly(
+                obj["daysOfWeek"]?.jsonArray?.map { it.jsonPrimitive.int } ?: emptyList(), until)
+            else -> throw SerializationException("Unknown recurrence kind")
+        }
+    }
+}
+
+@Serializable
+data class TaskItem(
+    val id: String,
+    val name: String,
+    val estimateMin: Int,
+    val totalFocused: Int = 0,
+    val done: Boolean = false,
+    val priority: Priority? = null,
+    val tags: List<String>? = null,
+    val objectives: List<Objective>? = null,
+    val comments: List<Comment>? = null,
+    val intentWhen: String? = null,
+    val intentThen: String? = null,
+    val lifeArea: String? = null,
+    val firstPhysicalAction: String? = null,
+    val moveCount: Int? = null,
+    val completedAt: String? = null,
+    val later: Boolean? = null,
+    val recurrence: Recurrence? = null,
+    val createdAt: String,
+    val updatedAt: String,
+)
+
+@Serializable
+data class Session(
+    val id: String,
+    val taskId: String? = null,
+    val taskName: String,
+    val tags: List<String>? = null,
+    val estimateMin: Int? = null,
+    val actualSec: Int,
+    val completedAt: String,
+)
+
+@Serializable
+data class CalBlock(
+    val id: String,
+    val taskId: String?,
+    val taskName: String,
+    val startTime: String,        // HH:MM
+    val durationMinutes: Int,
+    val date: String,             // YYYY-MM-DD
+    val externalEventId: String? = null,
+    val externalConnectionId: String? = null,
+    val kind: CalBlockKind? = null,
+)
+
+@Serializable
+data class ReasonLog(
+    val id: String,
+    val taskId: String? = null,
+    val reason: String,
+    val action: ReasonAction,
+    val at: String,
+    val durationSec: Int? = null,
+)
+
+@Serializable
+data class Capture(
+    val id: String,
+    val taskId: String? = null,
+    val sessionId: String? = null,
+    val tag: CaptureTag,
+    val body: String,
+    val at: String,
+)
+
+@Serializable
+data class CalendarConnection(
+    val id: String,
+    val provider: CalendarProvider,
+    val accountEmail: String,
+    val displayName: String,
+    val selectedCalendarIds: List<String>,
+    val colorSlot: Int,
+    val lastSyncCursor: String? = null,
+    val connectedAt: String,
+)
+
+@Serializable
+data class ExternalEvent(
+    val id: String,
+    val connectionId: String,
+    val calendarId: String,
+    val summary: String,
+    val start: String,
+    val end: String,
+)
+
+@Serializable
+data class CollectionItem(
+    val id: String,
+    val body: String,
+    val pinned: Boolean? = null,
+    val done: Boolean? = null,
+    val at: String,
+)
+
+@Serializable
+data class ItemCollection(
+    val id: String,
+    val name: String,
+    val color: String,
+    val subtitle: String? = null,
+    val items: List<CollectionItem>,
+    val sortOrder: Int,
+)
+
+@Serializable
+data class TagRow(val id: String, val name: String, val color: String? = null, val sortOrder: Int)
+
+@Serializable
+data class LifeArea(val id: String, val name: String, val color: String, val sortOrder: Int)
+
+/** Device-local live focus session (mirrors the web unstuck-session). */
+@Serializable
+data class LiveSession(
+    val id: String?,
+    val taskId: String,
+    val sessionStart: Long? = null,    // epoch ms
+    val paused: Boolean = false,
+    val pausedAt: Long? = null,        // epoch ms
+    val sessionEstimateMin: Int,
+    val nudge80Fired: Boolean = false,
+    val overrunPromptFired: Boolean = false,
+    val treatment: FocusTreatment,
+    val priorAccumulatedSec: Int? = null,
+)

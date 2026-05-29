@@ -83,6 +83,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
     var gridBounds by remember { mutableStateOf(Rect.Zero) }
     var dragTask by remember { mutableStateOf<TaskItem?>(null) }
     var dragPos by remember { mutableStateOf(Offset.Zero) } // window coords
+    var editingBlock by remember { mutableStateOf<CalBlock?>(null) }
 
     val dayBlocks = blocks.filter { it.date == date }
     val scheduledIds = dayBlocks.filter { isTaskBlock(it) }.mapNotNull { it.taskId }.toSet()
@@ -151,6 +152,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(fill)
                                 .border(1.dp, c.line, RoundedCornerShape(8.dp))
+                                .clickable { editingBlock = b }
                                 .padding(6.dp),
                         ) {
                             Text(b.taskName, style = UFont.sans(12, FontWeight.Medium), color = c.ink, maxLines = 1)
@@ -212,6 +214,43 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
             ) {
                 Text(t.name, style = UFont.sans(12, FontWeight.Medium), color = androidx.compose.ui.graphics.Color.White, maxLines = 1)
             }
+        }
+
+        editingBlock?.let { blk -> CalBlockEditSheet(vm, blk) { editingBlock = null } }
+    }
+}
+
+/** Tap a scheduled block → reschedule (free-slot chips), resize (duration chips),
+ *  or unschedule. Mirrors the web cal-block-edit-modal. */
+@OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+@Composable
+private fun CalBlockEditSheet(vm: AppViewModel, block: CalBlock, onDismiss: () -> Unit) {
+    val c = UTheme.colors
+    val sheet = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    val blocks by vm.blocks.collectAsStateWithLifecycle()
+    // Track the live block so sequential edits compose + the selection follows.
+    val live = blocks.firstOrNull { it.id == block.id } ?: block
+    val slots = tech.csalliance.unstuck.core.logic.findFreeSlotsForDate(blocks, live.durationMinutes, live.date, vm.nowMs(), limit = 5)
+    val times = (listOf(live.startTime) + slots.map { it.startTime }).distinct()
+    androidx.compose.material3.ModalBottomSheet(
+        onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = tech.csalliance.unstuck.design.component.SheetScrim,
+        dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { tech.csalliance.unstuck.design.component.SheetHandle() } },
+    ) {
+        Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            tech.csalliance.unstuck.design.component.SectionLabel("Edit block")
+            Text(live.taskName, style = UFont.sans(18, FontWeight.SemiBold), color = c.ink)
+
+            tech.csalliance.unstuck.design.component.SectionLabel("Start time")
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                times.forEach { t -> tech.csalliance.unstuck.ui.tasks.SelectableChip(formatTime(t), selected = live.startTime == t) { vm.moveBlock(live, live.date, t) } }
+            }
+
+            tech.csalliance.unstuck.design.component.SectionLabel("Duration")
+            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                listOf(15, 25, 45, 60, 90).forEach { m -> tech.csalliance.unstuck.ui.tasks.SelectableChip("${m}m", selected = live.durationMinutes == m) { vm.resizeBlock(live, m) } }
+            }
+
+            tech.csalliance.unstuck.design.component.UButton("Unschedule", kind = tech.csalliance.unstuck.design.component.ButtonKind.DANGER, fill = false) { vm.unschedule(live.id); onDismiss() }
         }
     }
 }

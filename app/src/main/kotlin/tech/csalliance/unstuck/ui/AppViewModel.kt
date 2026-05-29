@@ -170,6 +170,14 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun unschedule(blockId: String) = launchWrite { write?.deleteCalBlock(blockId) }
 
+    /** Reschedule / resize an existing block (the block-edit sheet). */
+    fun moveBlock(block: CalBlock, date: String, startTime: String) = launchWrite {
+        write?.upsertCalBlock(block.copy(date = date, startTime = startTime))
+    }
+    fun resizeBlock(block: CalBlock, durationMinutes: Int) = launchWrite {
+        write?.upsertCalBlock(block.copy(durationMinutes = durationMinutes.coerceIn(15, 360)))
+    }
+
     fun blockTime(date: String, startTime: String, durationMinutes: Int, label: String) = launchWrite {
         write?.upsertCalBlock(
             CalBlock(id = newUuid(), taskId = "placeholder", taskName = label, startTime = startTime, durationMinutes = durationMinutes, date = date, kind = CalBlockKind.PLACEHOLDER),

@@ -42,7 +42,7 @@ import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
 
 @Composable
-fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit) {
+fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, avatarInitials: String) {
     val c = UTheme.colors
     val collections by vm.collections.collectAsStateWithLifecycle()
     var query by remember { mutableStateOf("") }
@@ -51,7 +51,7 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
     }
 
     Column(Modifier.fillMaxSize()) {
-        AppBar(title = "Collections", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch)
+        AppBar(title = "Collections", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch, onAvatar = onAvatar, avatarInitials = avatarInitials)
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
             modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp),

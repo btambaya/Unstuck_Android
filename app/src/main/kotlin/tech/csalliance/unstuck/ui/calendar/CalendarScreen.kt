@@ -1,6 +1,8 @@
 package tech.csalliance.unstuck.ui.calendar
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -9,6 +11,7 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
@@ -40,42 +43,79 @@ import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
 
 @Composable
-fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit) {
+fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, avatarInitials: String) {
     val c = UTheme.colors
     var view by remember { mutableStateOf("Day") }
     Column(Modifier.fillMaxSize()) {
-        AppBar(title = "Calendar", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch)
+        AppBar(title = "Calendar", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch, onAvatar = onAvatar, avatarInitials = avatarInitials)
         Box(Modifier.padding(horizontal = 18.dp, vertical = 4.dp)) {
             MdSegment(listOf("Day", "Week", "Month"), view) { view = it }
         }
         when (view) {
             "Day" -> DayGridScreen(vm, onOpen)
-            "Week" -> WeekView(vm)
+            "Week" -> WeekView(vm, onOpen)
             else -> MonthView(vm)
         }
     }
 }
 
 @Composable
-private fun WeekView(vm: AppViewModel) {
+private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
     val c = UTheme.colors
     val blocks by vm.blocks.collectAsStateWithLifecycle()
-    val now = vm.nowMs()
-    val days = (0..6).map { Clock.dateIso(Time.addDaysMillis(Time.startOfDayMillis(now), it - 3)) }
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
-        SectionLabel("Week", color = c.primaryDeep, modifier = Modifier.padding(top = 8.dp))
-        Text("Next 7 days", style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
-        days.forEach { d ->
-            val dayBlocks = blocks.filter { it.date == d }.sortedBy { it.startTime }
-            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), radius = 14) {
-                Column {
-                    Text(d, style = UFont.mono(11, FontWeight.Medium), color = c.ink3)
-                    if (dayBlocks.isEmpty()) Text("Open", style = UFont.sans(13), color = c.ink4, modifier = Modifier.padding(top = 4.dp))
-                    dayBlocks.forEach { b -> Text("${b.startTime} · ${b.taskName}", style = UFont.sans(13), color = c.ink, modifier = Modifier.padding(top = 4.dp)) }
+    val tasks by vm.tasks.collectAsStateWithLifecycle()
+    val areas by vm.lifeAreas.collectAsStateWithLifecycle()
+    // Monday-anchored week containing today.
+    val today = java.time.LocalDate.now()
+    val monday = today.minusDays(((today.dayOfWeek.value + 6) % 7).toLong())
+    val days = (0..6).map { monday.plusDays(it.toLong()) }
+    val dows = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+    val plannedByDay = days.map { d -> blocks.filter { it.date == d.toString() && isTaskBlock(it) }.sumOf { it.durationMinutes } }
+    val totalPlanned = plannedByDay.sum()
+    val busiest = days.getOrNull(plannedByDay.indexOf(plannedByDay.maxOrNull() ?: 0))
+    val lightest = days.getOrNull(plannedByDay.indexOf(plannedByDay.minOrNull() ?: 0))
+
+    Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
+        SectionLabel("This week", color = c.primaryDeep, modifier = Modifier.padding(top = 8.dp))
+        Text("${monday.month.name.lowercase().replaceFirstChar { it.uppercase() }} ${monday.dayOfMonth}–${days.last().dayOfMonth}", style = UFont.serifItalic(24), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp))
+        Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            RollupStat("Focus planned", if (totalPlanned >= 60) "${totalPlanned / 60}h ${totalPlanned % 60}m" else "${totalPlanned}m", c.primarySoft, c.primaryDeep, Modifier.weight(1f))
+            RollupStat("Busiest", busiest?.let { dows[((it.dayOfWeek.value + 6) % 7)] } ?: "—", c.amberSoft, c.amberInk, Modifier.weight(1f))
+            RollupStat("Lightest", lightest?.let { dows[((it.dayOfWeek.value + 6) % 7)] } ?: "—", c.greenSoft, c.greenInk, Modifier.weight(1f))
+        }
+        Row(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            days.forEachIndexed { i, d ->
+                val isToday = d == today
+                val dayBlocks = blocks.filter { it.date == d.toString() }.sortedBy { it.startTime }
+                Column(Modifier.width(116.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
+                        Text(dows[i], style = UFont.mono(10, FontWeight.Medium), color = if (isToday) c.coral else c.ink3)
+                        Text("${d.dayOfMonth}", style = UFont.sans(15, FontWeight.SemiBold), color = if (isToday) c.coral else c.ink)
+                    }
+                    if (dayBlocks.isEmpty()) Text("Open", style = UFont.sans(11), color = c.ink4, modifier = Modifier.padding(top = 2.dp))
+                    dayBlocks.forEach { b ->
+                        val area = if (isTaskBlock(b)) tasks.firstOrNull { it.id == b.taskId }?.lifeArea else null
+                        val fill = if (isTaskBlock(b)) c.areaSwatch(tech.csalliance.unstuck.ui.components.areaColorFor(area, areas, c)) else c.bg2
+                        Column(
+                            Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(fill)
+                                .clickable { tasks.firstOrNull { it.id == b.taskId }?.let(onOpen) }.padding(7.dp),
+                        ) {
+                            Text(b.startTime, style = UFont.mono(9), color = c.ink3)
+                            Text(b.taskName, style = UFont.sans(11, FontWeight.Medium), color = c.ink, maxLines = 2)
+                        }
+                    }
                 }
             }
         }
-        Box(Modifier.padding(24.dp)) {}
+        Box(Modifier.padding(16.dp)) {}
+    }
+}
+
+@Composable
+private fun RollupStat(label: String, value: String, bg: androidx.compose.ui.graphics.Color, fg: androidx.compose.ui.graphics.Color, modifier: Modifier = Modifier) {
+    Column(modifier.clip(RoundedCornerShape(12.dp)).background(bg).padding(horizontal = 10.dp, vertical = 8.dp)) {
+        Text(label, style = UFont.mono(9, FontWeight.Medium), color = fg)
+        Text(value, style = UFont.sans(14, FontWeight.SemiBold), color = fg, modifier = Modifier.padding(top = 2.dp))
     }
 }
 
@@ -83,31 +123,51 @@ private fun WeekView(vm: AppViewModel) {
 private fun MonthView(vm: AppViewModel) {
     val c = UTheme.colors
     val sessions by vm.sessions.collectAsStateWithLifecycle()
-    val now = vm.nowMs()
-    // Density: focus seconds per local day for the last 35 days.
-    val byDay = HashMap<String, Int>()
-    sessions.forEach { s -> Time.parseMillis(s.completedAt)?.let { byDay[Clock.dateIso(it)] = (byDay[Clock.dateIso(it)] ?: 0) + s.actualSec } }
-    val start = Time.addDaysMillis(Time.startOfDayMillis(now), -34)
-    val cells = (0..34).map { Clock.dateIso(Time.addDaysMillis(start, it)) }
+    var ym by remember { mutableStateOf(java.time.YearMonth.now()) }
+    val byDay = remember(sessions) {
+        HashMap<String, Int>().apply {
+            sessions.forEach { s -> Time.parseMillis(s.completedAt)?.let { val k = Clock.dateIso(it); put(k, (get(k) ?: 0) + s.actualSec) } }
+        }
+    }
+    val first = ym.atDay(1)
+    val lead = (first.dayOfWeek.value + 6) % 7
+    val cells: List<java.time.LocalDate?> = List(lead) { null } + (1..ym.lengthOfMonth()).map { ym.atDay(it) }
     val max = (byDay.values.maxOrNull() ?: 1).coerceAtLeast(1)
+    val dows = listOf("M", "T", "W", "T", "F", "S", "S")
+    val todayIso = Clock.todayIso()
+
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
-        SectionLabel("Month", color = c.primaryDeep, modifier = Modifier.padding(top = 8.dp))
-        Text("Focus density", style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(ym.month.name.lowercase().replaceFirstChar { it.uppercase() } + " " + ym.year, style = UFont.serifItalic(24), color = c.ink, modifier = Modifier.weight(1f))
+            Text("‹", style = UFont.serifItalic(24), color = c.ink2, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { ym = ym.minusMonths(1) }.padding(horizontal = 10.dp, vertical = 2.dp))
+            Text("Today", style = UFont.sans(12, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { ym = java.time.YearMonth.now() }.padding(horizontal = 8.dp, vertical = 4.dp))
+            Text("›", style = UFont.serifItalic(24), color = c.ink2, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { ym = ym.plusMonths(1) }.padding(horizontal = 10.dp, vertical = 2.dp))
+        }
+        Text("Focus density", style = UFont.mono(10, FontWeight.Medium), color = c.ink3, modifier = Modifier.padding(top = 2.dp, bottom = 10.dp))
+        Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+            dows.forEach { Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { Text(it, style = UFont.mono(10), color = c.ink4) } }
+        }
         Card(Modifier.fillMaxWidth(), radius = 18) {
             Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 cells.chunked(7).forEach { week ->
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                         week.forEach { d ->
-                            val v = byDay[d] ?: 0
-                            val t = (v.toFloat() / max).coerceIn(0f, 1f)
-                            val today = d == Clock.todayIso()
-                            Box(
-                                Modifier.weight(1f).aspectRatio(1f).clip(RoundedCornerShape(7.dp)).background(if (today) c.coral else if (v == 0) c.bg2 else lerp(c.bg2, c.primary, 0.2f + 0.6f * t)),
-                                contentAlignment = Alignment.Center,
-                            ) {
-                                Text(d.takeLast(2).trimStart('0'), style = UFont.sans(11, FontWeight.SemiBold), color = if (today || t > 0.5f) c.bg else c.ink2, textAlign = TextAlign.Center)
+                            if (d == null) {
+                                Box(Modifier.weight(1f).aspectRatio(1f))
+                            } else {
+                                val iso = d.toString()
+                                val v = byDay[iso] ?: 0
+                                val t = (v.toFloat() / max).coerceIn(0f, 1f)
+                                val isToday = iso == todayIso
+                                Box(
+                                    Modifier.weight(1f).aspectRatio(1f).clip(RoundedCornerShape(7.dp)).background(if (isToday) c.coral else if (v == 0) c.bg2 else lerp(c.bg2, c.primary, 0.2f + 0.6f * t)),
+                                    contentAlignment = Alignment.Center,
+                                ) {
+                                    Text("${d.dayOfMonth}", style = UFont.sans(11, FontWeight.SemiBold), color = if (isToday || t > 0.5f) c.bg else c.ink2, textAlign = TextAlign.Center)
+                                }
                             }
                         }
+                        repeat(7 - week.size) { Box(Modifier.weight(1f).aspectRatio(1f)) }
                     }
                 }
             }

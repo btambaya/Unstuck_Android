@@ -38,8 +38,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.newUuid
+import tech.csalliance.unstuck.core.model.Density
 import tech.csalliance.unstuck.core.model.LifeArea
+import tech.csalliance.unstuck.core.model.ThemePref
 import tech.csalliance.unstuck.design.component.AppBar
+import tech.csalliance.unstuck.design.theme.AccentPalette
 import tech.csalliance.unstuck.design.component.ColorChip
 import tech.csalliance.unstuck.design.component.Leading
 import tech.csalliance.unstuck.design.component.MdSegment
@@ -92,6 +95,7 @@ fun SettingsHub(vm: AppViewModel, onBack: () -> Unit, onSection: (SettingsSectio
 @Composable
 fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> Unit) {
     val c = UTheme.colors
+    val s by vm.settings.collectAsStateWithLifecycle()
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(title = section.name.lowercase().replaceFirstChar { it.uppercase() }, leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
@@ -101,30 +105,41 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
                 SettingsSection.AREAS -> AreasContent(vm)
                 SettingsSection.ACCOUNT -> AccountContent(vm)
                 SettingsSection.FOCUS -> SettingsCard {
-                    SegRow("Default focus length", listOf("15", "25", "45"), "25")
-                    SegRow("Soft overrun", listOf("Off", "5", "10"), "5")
-                    ToggleRow("Hide right rail while focusing", true)
-                    ToggleRow("Soft exit", true)
-                    ToggleRow("Pause reasons", false, last = true)
+                    SegRow("Default focus length", listOf("15", "25", "45"), s.focusDefaultMin.toString()) { v ->
+                        vm.updateSettings { it.copy(focusDefaultMin = v.toIntOrNull() ?: 25) }
+                    }
+                    SegRow("Soft overrun", listOf("Off", "5", "10"), if (s.focusOverrunMin == 0) "Off" else s.focusOverrunMin.toString()) { v ->
+                        vm.updateSettings { it.copy(focusOverrunMin = v.toIntOrNull() ?: 0) }
+                    }
+                    ToggleRow("Hide right rail while focusing", s.focusCollapseRail) { v -> vm.updateSettings { it.copy(focusCollapseRail = v) } }
+                    ToggleRow("Soft exit", s.focusSoftExit) { v -> vm.updateSettings { it.copy(focusSoftExit = v) } }
+                    ToggleRow("Pause reasons", s.focusPauseReasons, last = true) { v -> vm.updateSettings { it.copy(focusPauseReasons = v) } }
                 }
                 SettingsSection.SOUND -> SettingsCard {
-                    ToggleRow("Start chime", true)
-                    ToggleRow("Overrun bell", true)
-                    ToggleRow("Completion sound", false)
-                    SegRow("Ambient", listOf("off", "brown", "pink"), "off", last = true)
+                    ToggleRow("Start chime", s.soundStartChime) { v -> vm.updateSettings { it.copy(soundStartChime = v) } }
+                    ToggleRow("Overrun bell", s.soundOverrunBell) { v -> vm.updateSettings { it.copy(soundOverrunBell = v) } }
+                    ToggleRow("Completion sound", s.soundCompletion) { v -> vm.updateSettings { it.copy(soundCompletion = v) } }
+                    SegRow("Ambient", listOf("off", "brown", "pink"), s.ambient, last = true) { v -> vm.updateSettings { it.copy(ambient = v) } }
                 }
                 SettingsSection.A11Y -> SettingsCard {
-                    ToggleRow("Reduce motion", false)
-                    ToggleRow("Larger type", false)
-                    ToggleRow("High contrast", false)
-                    ToggleRow("Keyboard hints", true, last = true)
+                    ToggleRow("Reduce motion", s.reduceMotion) { v -> vm.updateSettings { it.copy(reduceMotion = v) } }
+                    ToggleRow("Larger type", s.largerType) { v -> vm.updateSettings { it.copy(largerType = v) } }
+                    ToggleRow("High contrast", s.highContrast) { v -> vm.updateSettings { it.copy(highContrast = v) } }
+                    ToggleRow("Keyboard hints", s.keyboardHints, last = true) { v -> vm.updateSettings { it.copy(keyboardHints = v) } }
                 }
                 SettingsSection.INTERFACE -> SettingsCard {
-                    SegRow("Theme", listOf("system", "light", "dark"), "system")
-                    SegRow("Density", listOf("compact", "regular", "comfy"), "regular", last = true)
+                    SegRow("Theme", listOf("system", "light", "dark"), s.theme.name.lowercase()) { v ->
+                        vm.updateSettings { it.copy(theme = ThemePref.valueOf(v.uppercase())) }
+                    }
+                    SegRow("Accent", listOf("indigo", "rose", "forest"), accentKey(s.accent)) { v ->
+                        vm.updateSettings { it.copy(accent = accentFromKey(v)) }
+                    }
+                    SegRow("Density", listOf("compact", "regular", "comfy"), s.density.name.lowercase(), last = true) { v ->
+                        vm.updateSettings { it.copy(density = Density.valueOf(v.uppercase())) }
+                    }
                 }
                 SettingsSection.BACKUP -> SettingsCard {
-                    ToggleRow("Auto-export every Sunday", true)
+                    ToggleRow("Auto-export every Sunday", true) {}
                     SettingRow("Export now", "One-shot JSON.", last = true) {}
                 }
             }
@@ -208,23 +223,33 @@ private fun SettingRow(label: String, sub: String?, last: Boolean = false, onCli
 }
 
 @Composable
-private fun ToggleRow(label: String, initial: Boolean, last: Boolean = false) {
+private fun ToggleRow(label: String, value: Boolean, last: Boolean = false, onChange: (Boolean) -> Unit) {
     val c = UTheme.colors
-    var on by remember { mutableStateOf(initial) }
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink, modifier = Modifier.weight(1f))
-        MdToggle(on, { on = it })
+        MdToggle(value, onChange)
     }
     if (!last) Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
 }
 
 @Composable
-private fun SegRow(label: String, options: List<String>, initial: String, last: Boolean = false) {
+private fun SegRow(label: String, options: List<String>, selected: String, last: Boolean = false, onSelect: (String) -> Unit) {
     val c = UTheme.colors
-    var sel by remember { mutableStateOf(initial) }
     Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
         Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink, modifier = Modifier.weight(1f))
-        MdSegment(options, sel) { sel = it }
+        MdSegment(options, selected) { onSelect(it) }
     }
     if (!last) Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
+}
+
+private fun accentKey(a: AccentPalette): String = when (a) {
+    AccentPalette.INDIGO_CORAL -> "indigo"
+    AccentPalette.PERIWINKLE_ROSE -> "rose"
+    AccentPalette.FOREST_AMBER -> "forest"
+}
+
+private fun accentFromKey(k: String): AccentPalette = when (k) {
+    "rose" -> AccentPalette.PERIWINKLE_ROSE
+    "forest" -> AccentPalette.FOREST_AMBER
+    else -> AccentPalette.INDIGO_CORAL
 }

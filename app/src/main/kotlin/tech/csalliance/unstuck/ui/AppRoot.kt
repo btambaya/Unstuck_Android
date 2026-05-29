@@ -1,5 +1,6 @@
 package tech.csalliance.unstuck.ui
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -17,25 +18,36 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.lifecycle.viewmodel.initializer
 import androidx.lifecycle.viewmodel.viewModelFactory
 import tech.csalliance.unstuck.AppGraph
+import tech.csalliance.unstuck.core.model.ThemePref
 import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
+import tech.csalliance.unstuck.design.theme.UnstuckTheme
 import tech.csalliance.unstuck.ui.auth.AuthScreen
 
 @Composable
 fun AppRoot(graph: AppGraph) {
     val vm: AppViewModel = viewModel(factory = viewModelFactory { initializer { AppViewModel(graph) } })
 
-    if (!vm.configured) {
-        SetupScreen()
-        return
-    }
+    // Theme is reactive off the persisted settings: theme pref + accent +
+    // density/larger-type font scale. Everything renders inside this wrapper
+    // so a Settings change re-themes the whole app immediately.
+    val settings by vm.settings.collectAsStateWithLifecycle()
+    val systemDark = isSystemInDarkTheme()
+    val dark = settings.theme == ThemePref.DARK || (settings.theme == ThemePref.SYSTEM && systemDark)
 
-    val authed by vm.authed.collectAsStateWithLifecycle()
-    when (authed) {
-        null -> LoadingScreen()
-        false -> AuthScreen(vm)
-        true -> MainScaffold(vm)
+    UnstuckTheme(dark = dark, accent = settings.accent, fontScale = settings.fontScale) {
+        when {
+            !vm.configured -> SetupScreen()
+            else -> {
+                val authed by vm.authed.collectAsStateWithLifecycle()
+                when (authed) {
+                    null -> LoadingScreen()
+                    false -> AuthScreen(vm)
+                    true -> MainScaffold(vm)
+                }
+            }
+        }
     }
 }
 

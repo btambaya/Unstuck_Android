@@ -42,7 +42,7 @@ private val NAV = listOf(
     NavSpec("today", "Today", Icons.Outlined.Schedule),
     NavSpec("tasks", "Tasks", Icons.Outlined.Inbox),
     NavSpec("calendar", "Calendar", Icons.Outlined.CalendarMonth),
-    NavSpec("lists", "Lists", Icons.Outlined.Layers),
+    NavSpec("lists", "Collections", Icons.Outlined.Layers),
 )
 
 /** Full-screen overlay routes (pushed on top of the tab content). */
@@ -57,6 +57,7 @@ private sealed interface Route {
 
 private sealed interface Sheet {
     data object Avatar : Sheet
+    data object Areas : Sheet
 }
 
 @Composable
@@ -66,8 +67,12 @@ fun MainScaffold(vm: AppViewModel) {
     var sheet by remember { mutableStateOf<Sheet?>(null) }
     var showNewTask by remember { mutableStateOf(false) }
     var focusTask by remember { mutableStateOf<TaskItem?>(null) }
+    var activeArea by remember { mutableStateOf<String?>(null) }
     var onboarding by remember { mutableStateOf(!vm.onboarded) }
     val c = UTheme.colors
+    val initials = remember(vm.currentName) {
+        (vm.currentName ?: "U").split(' ', '.', '@').mapNotNull { it.firstOrNull()?.uppercaseChar() }.take(2).joinToString("").ifEmpty { "U" }
+    }
 
     if (onboarding) {
         tech.csalliance.unstuck.ui.onboarding.OnboardingScreen(vm, onDone = { onboarding = false })
@@ -98,9 +103,9 @@ fun MainScaffold(vm: AppViewModel) {
                         onSearch = { push(Route.Palette) },
                         onInsights = { push(Route.Insights(false)) },
                     )
-                    "tasks" -> TasksScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Avatar })
-                    "calendar" -> CalendarScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Avatar })
-                    "lists" -> CollectionsScreen(vm, onOpen = { push(Route.Collection(it)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Avatar })
+                    "tasks" -> TasksScreen(vm, activeArea = activeArea, onClearArea = { activeArea = null }, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, avatarInitials = initials)
+                    "calendar" -> CalendarScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, avatarInitials = initials)
+                    "lists" -> CollectionsScreen(vm, onOpen = { push(Route.Collection(it)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, avatarInitials = initials)
                 }
             }
             BottomNavBar(NAV, tab, onSelect = { tab = it; stack.clear() }, onFab = { showNewTask = true }, modifier = Modifier.navigationBarsPadding())
@@ -137,6 +142,11 @@ fun MainScaffold(vm: AppViewModel) {
                 vm,
                 onInsights = { sheet = null; push(Route.Insights(false)) },
                 onSettings = { sheet = null; push(Route.Settings) },
+                onDismiss = { sheet = null },
+            )
+            Sheet.Areas -> tech.csalliance.unstuck.ui.components.AreasMenu(
+                vm,
+                onPick = { area -> activeArea = area; tab = "tasks"; stack.clear(); sheet = null },
                 onDismiss = { sheet = null },
             )
             null -> {}

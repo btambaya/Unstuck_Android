@@ -10,6 +10,8 @@ import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.compose.ui.unit.dp
 import tech.csalliance.unstuck.design.color.hexColor
 import tech.csalliance.unstuck.design.color.oklch
@@ -97,12 +99,31 @@ object UTheme {
         @Composable get() = LocalUnstuckColors.current
 }
 
+/** Accent palettes — mirror the web theme-context ACCENT_PALETTES. */
+enum class AccentPalette { INDIGO_CORAL, PERIWINKLE_ROSE, FOREST_AMBER }
+
+/** Override the primary/coral ramp on a base palette for the chosen accent.
+ *  INDIGO_CORAL is the brand default (no change). */
+fun UnstuckColors.withAccent(accent: AccentPalette): UnstuckColors = when (accent) {
+    AccentPalette.INDIGO_CORAL -> this
+    AccentPalette.PERIWINKLE_ROSE -> copy(
+        primary = oklch(0.62, 0.14, 265.0), primaryDeep = oklch(0.42, 0.16, 265.0), primarySoft = oklch(0.94, 0.04, 265.0),
+        coral = oklch(0.74, 0.14, 15.0), coralSoft = oklch(0.95, 0.05, 15.0), coralDeep = oklch(0.50, 0.16, 15.0),
+    )
+    AccentPalette.FOREST_AMBER -> copy(
+        primary = oklch(0.55, 0.10, 170.0), primaryDeep = oklch(0.38, 0.10, 170.0), primarySoft = oklch(0.94, 0.04, 170.0),
+        coral = oklch(0.74, 0.14, 65.0), coralSoft = oklch(0.95, 0.05, 65.0), coralDeep = oklch(0.48, 0.13, 65.0),
+    )
+}
+
 @Composable
 fun UnstuckTheme(
     dark: Boolean = isSystemInDarkTheme(),
+    accent: AccentPalette = AccentPalette.INDIGO_CORAL,
+    fontScale: Float = 1f,
     content: @Composable () -> Unit,
 ) {
-    val colors = if (dark) UnstuckColors.dark else UnstuckColors.light
+    val colors = (if (dark) UnstuckColors.dark else UnstuckColors.light).withAccent(accent)
     val scheme = if (dark) {
         darkColorScheme(
             primary = colors.primary, onPrimary = colors.bg, secondary = colors.coral,
@@ -117,6 +138,11 @@ fun UnstuckTheme(
         )
     }
     CompositionLocalProvider(LocalUnstuckColors provides colors) {
-        MaterialTheme(colorScheme = scheme, typography = UnstuckTypography, content = content)
+        // Density + larger-type both fold into one font-scale multiplier so
+        // every sp text size responds (mirrors the web density / larger-type).
+        val base = LocalDensity.current
+        CompositionLocalProvider(LocalDensity provides Density(base.density, base.fontScale * fontScale)) {
+            MaterialTheme(colorScheme = scheme, typography = UnstuckTypography, content = content)
+        }
     }
 }

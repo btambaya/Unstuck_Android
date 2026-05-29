@@ -6,6 +6,7 @@ import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.status.SessionStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
@@ -156,12 +157,16 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun startFocus(task: TaskItem) = launchWrite {
         val cur = store.getLiveSession() ?: FocusTimer.empty
         val live = FocusTimer.start(cur, task.id, estimateMin = task.estimateMin, now = nowMs())
-        store.setLiveSession(live)
+        // Apply the persisted treatment preference on a fresh session.
+        store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
     }
 
     fun pauseFocus() = launchWrite { mutateLive { FocusTimer.pause(it, nowMs()) } }
     fun resumeFocus() = launchWrite { mutateLive { FocusTimer.resume(it, nowMs()) } }
-    fun setTreatment(t: FocusTreatment) = launchWrite { mutateLive { FocusTimer.setTreatment(it, t) } }
+    fun setTreatment(t: FocusTreatment) = launchWrite {
+        mutateLive { FocusTimer.setTreatment(it, t) }
+        updateSettings { it.copy(treatment = t) }
+    }
     fun extendFocus(minutes: Int) = launchWrite { mutateLive { FocusTimer.extend(it, minutes) } }
 
     /**
@@ -229,6 +234,19 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
             runCatching { graph.coordinator?.preferences?.setAdhdStruggles(uid, struggles) }
         }
         graph.onboarded = true
+    }
+
+    // --- settings (device-local prefs: theme / focus / sound / a11y) ---
+
+    private val settingsStore = graph.settings
+    private val _settings = MutableStateFlow(settingsStore.load())
+    val settings: StateFlow<tech.csalliance.unstuck.SettingsState> = _settings.asStateFlow()
+
+    /** Mutate + persist settings in one call: `updateSettings { it.copy(theme = …) }`. */
+    fun updateSettings(transform: (tech.csalliance.unstuck.SettingsState) -> tech.csalliance.unstuck.SettingsState) {
+        val next = transform(_settings.value)
+        _settings.value = next
+        settingsStore.save(next)
     }
 
     // --- auth ---

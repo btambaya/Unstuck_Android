@@ -15,7 +15,6 @@ import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.handleDeeplinks
 import io.github.jan.supabase.auth.status.SessionStatus
 import kotlinx.coroutines.launch
-import tech.csalliance.unstuck.design.theme.UnstuckTheme
 import tech.csalliance.unstuck.surface.SyncWorker
 import tech.csalliance.unstuck.surface.registerFcmToken
 import tech.csalliance.unstuck.ui.AppRoot
@@ -50,9 +49,9 @@ class MainActivity : ComponentActivity() {
         SyncWorker.schedule(this)
 
         setContent {
-            UnstuckTheme {
-                AppRoot(graph)
-            }
+            // AppRoot owns UnstuckTheme so it reacts to the persisted
+            // theme / accent / density settings.
+            AppRoot(graph)
         }
     }
 

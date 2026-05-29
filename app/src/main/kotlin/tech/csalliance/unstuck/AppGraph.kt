@@ -32,6 +32,9 @@ class AppGraph(context: Context) {
         get() = appPrefs.getBoolean("onboarded", false)
         set(value) { appPrefs.edit().putBoolean("onboarded", value).apply() }
 
+    /** Device-local settings (theme / focus / sound / a11y). */
+    val settings = SettingsStore(context.applicationContext)
+
     fun start() {
         coordinator?.start()
     }

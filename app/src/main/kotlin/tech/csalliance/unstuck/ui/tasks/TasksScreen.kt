@@ -38,26 +38,56 @@ import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.components.areaColorFor
 
+// Tab order mirrors the web TaskListPane: Backlog first (the triage stack),
+// then All / Today / Upcoming / Later / Completed. Default is Today.
+private val TAB_ORDER = listOf(
+    TaskListView.BACKLOG, TaskListView.ALL, TaskListView.TODAY,
+    TaskListView.UPCOMING, TaskListView.LATER, TaskListView.COMPLETED,
+)
+
 @Composable
-fun TasksScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit) {
+fun TasksScreen(
+    vm: AppViewModel,
+    activeArea: String?,
+    onClearArea: () -> Unit,
+    onOpen: (TaskItem) -> Unit,
+    onSearch: () -> Unit,
+    onMenu: () -> Unit,
+    onAvatar: () -> Unit,
+    avatarInitials: String,
+) {
     val c = UTheme.colors
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     var view by remember { mutableStateOf(TaskListView.TODAY) }
-    val list = visibleTasks(view, tasks, blocks, vm.nowMs(), activeArea = null, slipMode = false)
+    // Today is area-agnostic on purpose (web parity) — the area filter applies
+    // to every other view.
+    val list = visibleTasks(view, tasks, blocks, vm.nowMs(), activeArea = if (view == TaskListView.TODAY) null else activeArea, slipMode = false)
 
     Column(Modifier.fillMaxSize()) {
-        AppBar(title = "Tasks", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch)
+        AppBar(title = "Tasks", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch, onAvatar = onAvatar, avatarInitials = avatarInitials)
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
             item { Text("Your tasks", style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)) }
             item {
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 14.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    TaskListView.entries.forEach { v ->
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    TAB_ORDER.forEach { v ->
                         val active = v == view
                         Box(Modifier.clip(RoundedCornerShape(999.dp)).background(if (active) c.ink else c.bg2).clickable { view = v }.padding(horizontal = 14.dp, vertical = 7.dp)) {
                             Text(v.label, style = UFont.sans(12, FontWeight.Medium), color = if (active) c.bg else c.ink2)
                         }
+                    }
+                }
+            }
+            if (activeArea != null && view != TaskListView.TODAY) {
+                item {
+                    Row(
+                        Modifier.padding(bottom = 12.dp).clip(RoundedCornerShape(999.dp)).background(c.primarySoft).clickable(onClick = onClearArea).padding(horizontal = 11.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text("Filtering by ", style = UFont.sans(12), color = c.primaryDeep)
+                        Text(activeArea, style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
+                        Text("✕", style = UFont.sans(12), color = c.primaryDeep)
                     }
                 }
             }

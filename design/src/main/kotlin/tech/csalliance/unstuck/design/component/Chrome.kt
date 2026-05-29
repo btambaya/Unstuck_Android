@@ -48,6 +48,8 @@ fun AppBar(
     dark: Boolean = false,
     onLeading: () -> Unit = {},
     onSearch: () -> Unit = {},
+    avatarInitials: String? = null,
+    onAvatar: (() -> Unit)? = null,
 ) {
     val c = UTheme.colors
     val iconTint = if (dark) Color.White else c.ink2
@@ -62,6 +64,12 @@ fun AppBar(
             color = if (dark) Color.White else c.ink,
         )
         if (trailingSearch) BarIcon(Icons.Outlined.Search, iconTint, onSearch)
+        if (onAvatar != null) {
+            Box(
+                Modifier.size(40.dp).padding(4.dp).clip(CircleShape).background(c.greenSoft).clickable(onClick = onAvatar),
+                contentAlignment = Alignment.Center,
+            ) { Text(avatarInitials ?: "U", style = UFont.sans(12, FontWeight.SemiBold), color = c.greenInk) }
+        }
     }
 }
 

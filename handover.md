@@ -47,6 +47,16 @@ notification + richer Glance widget, mockups 19–21). Full **post-auth on-devic
 screenshot pass** is blocked on the emulator (Supabase `mailer_autoconfirm=false`,
 so no session without a real sign-in) — verify on a signed-in device instead.
 
+**Web-parity pass (2026-05-29, on emulator — NOT yet on Firebase):** Google logo
+on the auth button; **settings now work** (SettingsStore + reactive `UnstuckTheme`
+off theme/accent/density/larger-type — theme flips live; focus/sound/a11y persist);
+**Tasks** tabs reordered to the web (Backlog·All·Today·Upcoming·Later·Completed,
+default Today) + area filter; the **hamburger menu now shows Areas to filter** and
+the **avatar holds account/Settings** on every screen; **new-task sheet** rebuilt to
+the web create modal (WHEN incl. pick-date, free-slot chips + conflict warning,
+capture drafts, no priority); **Lists → Collections**; **Calendar** Week = 7-col grid
++ rollup, Month = calendar grid + weekday headers + month nav. Build + 185 tests green.
+
 ## Status snapshot
 
 - **P0 — Foundation: DONE.** Gradle multi-module scaffold (wrapper 8.9, AGP

@@ -2,6 +2,35 @@
 
 Single source of truth for "where is the Android build?". Update as phases land.
 
+## UI redesign → Android Mockups (in progress)
+
+The app is being reconciled to the official **Android Mockups** (Claude-Design
+bundle `unstuck-v2`; `Android Mockups.html` = 39 screens, source of truth for
+look) and to the **web app** for behavior. Plan: `~/.claude/plans/streamed-juggling-book.md`.
+
+**Done + on-device-verified:** the **design system** — exact mockup tokens (soft
+coral `#E89077`, ink `#1A1C26`, …), M3 chrome (`AppBar`, `BottomNavBar` filled
+pill, 56dp rounded-square `CoralFab`, `MdField`/`MdToggle`/`MdSegment`,
+`FilterPill`, `StatCard`, `ItemRow`, `ColorChip`, `Orbit` mark, sheets). The
+**auth screen renders pixel-faithful to mockup 16** (Orbit, serif headline,
+notched outlined fields, dark-ink submit).
+
+**Reconciled (compile-green, built into the APK):** MainScaffold (M3 nav + coral
+FAB + overlay route stack), Today (gradient Start-Next hero, filter pills, paused
+ring, empty hero), Tasks (app bar + tabs), full-screen Task detail, New-task +
+WHEN, Focus (dark ring + Orbit + 3 treatments) + Capture + Reflect, Calendar
+Day/Week/Month, Collections 2-col grid + detail, Insights report + deep,
+Settings hub + 6 subpages + Areas, Onboarding 4-step, Command palette
+full-screen, Avatar menu. `:design` token test added (185+ tests still green).
+
+**Remaining:** full **post-auth on-device screenshot pass** (needs a signed-in
+session) to pixel-tune Today/Focus/etc.; **OS-surface pixel-match** (custom
+RemoteViews live-focus notification + richer Glance widget per mockups 19–21 —
+currently functional but not redesigned); **settings persistence** (theme/density/
+accent/focus/sound/a11y toggles are wired to local state, not yet a DataStore +
+reactive theme); drag-to-schedule day-grid restyle. Behavior spot-checks vs web
+still to run.
+
 ## Status snapshot
 
 - **P0 — Foundation: DONE.** Gradle multi-module scaffold (wrapper 8.9, AGP

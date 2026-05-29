@@ -21,6 +21,11 @@ ktor = "3.0.1"
 browser = "1.8.0"
 firebaseBom = "33.7.0"
 junit = "4.13.2"
+robolectric = "4.14.1"
+androidxTest = "1.6.1"
+androidxTestExt = "1.2.1"
+googleServices = "4.4.2"
+splashscreen = "1.0.1"
 
 [libraries]
 # core (pure Kotlin/JVM)
@@ -73,6 +78,16 @@ browser = { module = "androidx.browser:browser", version.ref = "browser" }
 firebase-bom = { module = "com.google.firebase:firebase-bom", version.ref = "firebaseBom" }
 firebase-messaging = { module = "com.google.firebase:firebase-messaging" }
 
+# androidx misc
+androidx-core-splashscreen = { module = "androidx.core:core-splashscreen", version.ref = "splashscreen" }
+androidx-lifecycle-runtime-compose = { module = "androidx.lifecycle:lifecycle-runtime-compose", version.ref = "lifecycle" }
+
+# test
+robolectric = { module = "org.robolectric:robolectric", version.ref = "robolectric" }
+androidx-test-core = { module = "androidx.test:core", version.ref = "androidxTest" }
+androidx-test-runner = { module = "androidx.test:runner", version.ref = "androidxTest" }
+androidx-test-ext-junit = { module = "androidx.test.ext:junit", version.ref = "androidxTestExt" }
+
 [plugins]
 android-application = { id = "com.android.application", version.ref = "agp" }
 android-library = { id = "com.android.library", version.ref = "agp" }
@@ -82,3 +97,4 @@ kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", versi
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
 ksp = { id = "com.google.devtools.ksp", version.ref = "ksp" }
 hilt = { id = "com.google.dagger.hilt.android", version.ref = "hilt" }
+google-services = { id = "com.google.gms.google-services", version.ref = "googleServices" }

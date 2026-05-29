@@ -21,7 +21,22 @@ Single source of truth for "where is the Android build?". Update as phases land.
 ## Roadmap (powering through P0→P7)
 
 1. **P0 — Foundation** ✅
-2. **P1 — `:data` (Room + outbox + DbRowCodec) + `:sync` (supabase-kt engine)**
+2. **`:design`** ✅ — oklch→sRGB converter (7 tests), brand `UnstuckColors` light/dark,
+   `UnstuckTheme` (CompositionLocal + M3), type scale, components (UButton/Chip/Card/
+   SectionLabel/AreaDot). Builds to AAR.
+2b. **P1 — `:data` + `:sync`** ✅
+   - `:data` — Room single `records` table (JSON blob per row) + `outbox` + `live_session`;
+     `LocalStore` typed Flows; **6 Robolectric round-trip tests** (incl. JSONB shape +
+     external `g_` preservation + outbox FIFO).
+   - `:sync` — `DbRowCodec` (PostgREST boundary, **10 tests**: snake_case top-level /
+     camelCase JSONB / explicit-null clear / duration_sec omit / uuid-or-null / round-trip),
+     `SyncDecision` (**5 tests**), `SupabaseClientProvider` (PKCE, `unstuck://auth-callback`),
+     `AuthService`, `SyncGateway`, `Hydrator`, `WriteThrough`, `OutboxFlusher`,
+     `RealtimeMirror`, `CalendarClient`, `PushClient` (FCM), `NotificationsClient`,
+     `PreferencesClient`, `SyncCoordinator` (sessionStatus → wipe-rule → flush → hydrate →
+     subscribe). Compiles against supabase-kt 3.0.3.
+
+   Total tests green so far: **157 (:core) + 7 (:design) + 6 (:data) + 15 (:sync) = 185.**
 3. **P1b — backend FCM delta** (in the `unstuck` repo: migration 018 `fcm_token`,
    `_shared/fcm.ts`, platform branches in the senders, deploy)
 4. **P2 — Tasks + Today** (visibleTasks filters, create/edit, recurrence, slip; Start/Up Next)

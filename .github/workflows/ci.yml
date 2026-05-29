@@ -23,11 +23,13 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
           key: gradle-${{ hashFiles('**/*.gradle.kts', 'gradle/libs.versions.toml') }}
-      - name: :core:test (headless logic)
-        run: ./gradlew :core:test --console=plain --stacktrace
-      - name: Upload test report
+      - name: Unit tests (all modules)
+        run: ./gradlew :core:test :design:testDebugUnitTest :data:testDebugUnitTest :sync:testDebugUnitTest --console=plain --stacktrace
+      - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: core-test-report
-          path: core/build/reports/tests/test
+          name: test-reports
+          path: |
+            core/build/reports/tests
+            "**/build/reports/tests/testDebugUnitTest"

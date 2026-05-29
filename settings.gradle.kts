@@ -22,3 +22,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "Unstuck"
 include(":core")
+include(":design")
+include(":data")
+include(":sync")

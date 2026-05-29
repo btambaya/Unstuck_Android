@@ -10,7 +10,11 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.lifecycleScope
+import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.handleDeeplinks
+import io.github.jan.supabase.auth.status.SessionStatus
+import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.design.theme.UnstuckTheme
 import tech.csalliance.unstuck.surface.SyncWorker
 import tech.csalliance.unstuck.surface.registerFcmToken
@@ -32,7 +36,17 @@ class MainActivity : ComponentActivity() {
         ) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        registerFcmToken(application as UnstuckApp)
+        // Register the FCM token once a session exists (so it lands on first
+        // sign-in, and re-registers on a later sign-in / token refresh). The
+        // StateFlow emits its current value immediately, covering relaunches
+        // while already signed in.
+        graph.provider?.client?.let { client ->
+            lifecycleScope.launch {
+                client.auth.sessionStatus.collect { status ->
+                    if (status is SessionStatus.Authenticated) registerFcmToken(application as UnstuckApp)
+                }
+            }
+        }
         SyncWorker.schedule(this)
 
         setContent {

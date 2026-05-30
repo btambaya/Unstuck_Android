@@ -90,7 +90,9 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
     }
 
     var gridBounds by remember { mutableStateOf(Rect.Zero) }
+    var rootOrigin by remember { mutableStateOf(Offset.Zero) } // window coords of this screen's top-left
     var dragTask by remember { mutableStateOf<TaskItem?>(null) }
+    var dragBlock by remember { mutableStateOf<CalBlock?>(null) }
     var dragPos by remember { mutableStateOf(Offset.Zero) } // window coords
     var editingBlock by remember { mutableStateOf<CalBlock?>(null) }
 
@@ -98,20 +100,29 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
     val scheduledIds = dayBlocks.filter { isTaskBlock(it) }.mapNotNull { it.taskId }.toSet()
     val unscheduled = tasks.filter { !it.done && it.later != true && it.id !in scheduledIds }
 
+    // Map the current drag position (window coords) to a snapped HH:MM on the grid.
+    fun dropTimeOrNull(): String? {
+        if (!gridBounds.contains(dragPos)) return null
+        val yInGrid = (dragPos.y - gridBounds.top) + scroll.value
+        val totalMin = START_HOUR * 60 + ((yInGrid / hourPx) * 60).roundToInt()
+        val clamped = ((totalMin / 15) * 15).coerceIn(START_HOUR * 60, END_HOUR * 60 - 15)
+        return "%02d:%02d".format(clamped / 60, clamped % 60)
+    }
+
     fun drop() {
         val t = dragTask ?: return
-        if (gridBounds.contains(dragPos)) {
-            val yInGrid = (dragPos.y - gridBounds.top) + scroll.value
-            val totalMin = START_HOUR * 60 + ((yInGrid / hourPx) * 60).roundToInt()
-            val snapped = (totalMin / 15) * 15
-            val clamped = snapped.coerceIn(START_HOUR * 60, END_HOUR * 60 - 15)
-            val hh = "%02d:%02d".format(clamped / 60, clamped % 60)
-            vm.scheduleTask(t, date, hh)
-        }
+        dropTimeOrNull()?.let { vm.scheduleTask(t, date, it) }
         dragTask = null
     }
 
-    Box(Modifier.fillMaxSize()) {
+    // Drop an already-scheduled block onto a new slot → reschedule in place.
+    fun dropBlock() {
+        val b = dragBlock ?: return
+        dropTimeOrNull()?.let { vm.moveBlock(b, date, it) }
+        dragBlock = null
+    }
+
+    Box(Modifier.fillMaxSize().onGloballyPositioned { rootOrigin = it.localToWindow(Offset.Zero) }) {
         Column(Modifier.fillMaxSize()) {
             // Day switcher.
             Row(
@@ -165,13 +176,27 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                             isTaskBlock(b) -> c.areaSwatch(areaColorFor(bt?.lifeArea, areas, c))
                             else -> c.bg2
                         }
+                        var blockOrigin by remember(b.id) { mutableStateOf(Offset.Zero) }
                         Box(
                             Modifier.padding(start = 70.dp, end = 12.dp).offset(y = topDp).fillMaxWidth()
                                 .height(hDp.coerceAtLeast(22.dp))
+                                .onGloballyPositioned { blockOrigin = it.localToWindow(Offset.Zero) }
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(fill)
                                 .border(1.dp, c.line, RoundedCornerShape(8.dp))
                                 .clickable { editingBlock = b }
+                                // Task blocks: long-press to drag to a new slot (external/Google
+                                // blocks stay tap-only — they mirror the remote calendar).
+                                .then(
+                                    if (isTaskBlock(b)) Modifier.pointerInput(b.id) {
+                                        detectDragGesturesAfterLongPress(
+                                            onDragStart = { local -> dragBlock = b; dragPos = blockOrigin + local },
+                                            onDrag = { change, delta -> change.consume(); dragPos += delta },
+                                            onDragEnd = { dropBlock() },
+                                            onDragCancel = { dragBlock = null },
+                                        )
+                                    } else Modifier,
+                                )
                                 .padding(6.dp),
                         ) {
                             Text(
@@ -226,16 +251,18 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
             }
         }
 
-        // Drag ghost.
-        dragTask?.let { t ->
+        // Drag ghost — follows the finger. dragPos is in window coords, so subtract
+        // this Box's window origin to draw it in local space (1:1 with the finger).
+        val ghostLabel = dragTask?.name ?: dragBlock?.taskName
+        ghostLabel?.let { label ->
             Box(
                 Modifier
-                    .offset { IntOffset(dragPos.x.roundToInt() - 80, dragPos.y.roundToInt() - 24) }
+                    .offset { IntOffset((dragPos.x - rootOrigin.x).roundToInt() - 70, (dragPos.y - rootOrigin.y).roundToInt() - 18) }
                     .clip(RoundedCornerShape(10.dp))
                     .background(c.coralDeep)
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
-                Text(t.name, style = UFont.sans(12, FontWeight.Medium), color = androidx.compose.ui.graphics.Color.White, maxLines = 1)
+                Text(label, style = UFont.sans(12, FontWeight.Medium), color = androidx.compose.ui.graphics.Color.White, maxLines = 1)
             }
         }
 

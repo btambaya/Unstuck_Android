@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 8
-        versionName = "0.3.4"
+        versionCode = 9
+        versionName = "0.3.5"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.3.4 — Create task: removed the time picker (pick a free-slot chip or leave it timeless) + added a Custom estimate; the sheet now scrolls and lifts above the keyboard (same for task detail, collections, settings, onboarding, command palette). Capture-a-thought: ✕ to drop a draft, Add sits before the tags, and capture tags now use the Area pill style. Tags now show on the Today card, inline with the area, on both Today and Tasks. Dark theme: fixed the washed-out Start-Next hero and invisible selected chips. Add-task button turns coral once it's ready. Google Calendar: connect updates the bar immediately and now surfaces errors instead of failing silently."
+    releaseNotes = "v0.3.5 — Calendar fixes. Google Calendar connect / sync / disconnect now actually work from Android (the POST requests were missing their Content-Type and provider field, and the connections response wasn't being parsed — all fixed; failures now show a message instead of failing silently). Disconnect updates the bar immediately. Week view is now a full 24 hours. Drag-to-schedule tracks your finger 1:1, and you can now drag an already-scheduled block to a new slot to reschedule it. NOTE: finishing a Google connection still hits a Google 'Access blocked / invalid_request' page — that's a Google Cloud OAuth console setting (the unstuck:// redirect URI), a backend fix, not the app."
 }
 
 dependencies {

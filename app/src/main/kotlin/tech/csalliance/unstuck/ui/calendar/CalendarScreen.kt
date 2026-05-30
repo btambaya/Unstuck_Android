@@ -53,8 +53,8 @@ import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
 
 // Week grid bounds (compact 6am–11pm window in a vertical scroll).
-private const val WSTART = 6
-private const val WEND = 23
+private const val WSTART = 0
+private const val WEND = 24
 private val WHOUR = 44.dp
 private fun hhmmToMin(s: String): Int {
     val p = s.split(":")

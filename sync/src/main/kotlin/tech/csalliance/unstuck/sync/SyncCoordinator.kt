@@ -14,6 +14,7 @@ import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.core.logic.externalEventToBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.data.LocalStore
+import tech.csalliance.unstuck.data.db.Tables
 import java.time.LocalDate
 
 // SyncCoordinator — the orchestrator (port of bootstrap-listener.tsx). Observes
@@ -112,9 +113,13 @@ class SyncCoordinator(
             .forEach { write.deleteCalBlock(it.id) }
     }
 
-    /** Disconnect an account and immediately purge its external blocks. */
+    /** Disconnect an account and immediately purge its connection row + external blocks. */
     suspend fun disconnectCalendar(connectionId: String) {
         runCatching { calendar.disconnect(connectionId) }
+            .onFailure { Log.w(TAG, "calendar disconnect failed", it) }
+        // Drop the connection row locally so the bar flips back to "Connect" now
+        // (the server row is gone; a later hydrate would reach the same state).
+        store.delete(Tables.CALENDAR_CONNECTIONS, connectionId)
         store.blocks().first()
             .filter { it.kind == CalBlockKind.EXTERNAL && it.externalConnectionId == connectionId }
             .forEach { write.deleteCalBlock(it.id) }

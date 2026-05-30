@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.3.7"
+        versionCode = 12
+        versionName = "0.3.8"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.3.7 — Two-way Google Calendar sync. Scheduling a task now creates an event on your primary Google Calendar (and moving/resizing/unscheduling updates/removes it); Google events still pull into the grid. Previously Android only pulled — it never pushed your tasks to Google. Verified: scheduling pushes a real event; deleting removes it. (Pushes always target your primary, always-writable calendar.)"
+    releaseNotes = "v0.3.8 — Pull fix: Google events now show up in the Unstuck calendar. The pull was sending Google a date-only range (2026-05-31), which Google rejects (it needs full RFC3339 timestamps), so it silently returned zero events. Now sends proper timestamps like the web. Two-way sync is complete: your tasks push to Google AND your Google events appear in the grid."
 }
 
 dependencies {

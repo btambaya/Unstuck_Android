@@ -110,9 +110,15 @@ class SyncCoordinator(
             .onFailure { Log.w(TAG, "calendar listConnections failed", it) }.getOrNull() ?: return
         if (conns.isEmpty()) return
         val today = LocalDate.now()
-        val from = today.minusDays(7).toString()
-        val to = today.plusDays(30).toString()
-        val events = runCatching { calendar.pullEvents(from, to) }
+        val fromDate = today.minusDays(7)
+        val toDate = today.plusDays(30)
+        // Google's events.list requires RFC3339 timestamps for timeMin/timeMax — a bare
+        // YYYY-MM-DD is rejected (400) and silently yields zero events. Send full instants
+        // (like the web's .toISOString()); reconcile locally with the date-only bounds.
+        val zone = java.time.ZoneId.systemDefault()
+        val fromIso = fromDate.atStartOfDay(zone).toInstant().toString()
+        val toIso = toDate.plusDays(1).atStartOfDay(zone).toInstant().toString()
+        val events = runCatching { calendar.pullEvents(fromIso, toIso) }
             .onFailure { Log.w(TAG, "calendar pullEvents failed", it) }.getOrNull() ?: return
         // Don't mirror events we pushed ourselves — the originating task block already
         // represents them (avoids a duplicate g_ block sitting next to the task block).
@@ -123,8 +129,10 @@ class SyncCoordinator(
         val keep = blocks.map { it.id }.toSet()
         blocks.forEach { write.upsertCalBlock(it) }
         // Reconcile deletions: drop in-window EXTERNAL blocks Google no longer returns.
+        val fromYmd = fromDate.toString()
+        val toYmd = toDate.toString()
         store.blocks().first()
-            .filter { it.kind == CalBlockKind.EXTERNAL && it.date >= from && it.date <= to && it.id !in keep }
+            .filter { it.kind == CalBlockKind.EXTERNAL && it.date >= fromYmd && it.date <= toYmd && it.id !in keep }
             .forEach { write.deleteCalBlock(it.id) }
     }
 

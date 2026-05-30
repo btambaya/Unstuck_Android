@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "0.3.0"
+        versionCode = 5
+        versionName = "0.3.1"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.3.0 — web-parity pass: full Tags (picker/filter/manage), editable task detail (name/first-action/estimate/area/repeat/tags + delete), capture promote/discard/add, focus pause-reasons + Save-for-later, Collections CRUD, Account (password/export/delete), Insights charts + Week/Month/All, Google Calendar connect+pull, colored task tabs + area pills, Today backlog, 24h calendar + real Week grid, settings that actually work (theme/accent/density)."
+    releaseNotes = "v0.3.1 — Today header avatar now shows your real initials (was hardcoded). Builds on v0.3.0's web-parity pass (tags, editable task detail, captures, focus save-for-later, Collections CRUD, Account, Insights, Google Calendar, colored tabs + area pills, Today backlog, 24h calendar + Week grid, working theme/accent/density)."
 }
 
 dependencies {

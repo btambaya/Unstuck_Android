@@ -85,6 +85,9 @@ fun TodayScreen(
     val liveId = live?.taskId
     var areaFilter by remember { mutableStateOf<String?>(null) }
     var backlogActive by remember { mutableStateOf(false) }
+    val initials = remember(vm.currentName) {
+        (vm.currentName ?: "U").split(' ', '.', '@').mapNotNull { it.firstOrNull()?.uppercaseChar() }.take(2).joinToString("").ifEmpty { "U" }
+    }
 
     val startNext = pickStartNext(tasks, blocks, liveId, areaFilter)
     // Today = open tasks scheduled/intended for today, plus anything completed today
@@ -106,7 +109,7 @@ fun TodayScreen(
             Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 Orbit(size = 24)
                 Box(Modifier.size(32.dp).clip(CircleShape).background(c.greenSoft).clickable(onClick = onAvatar), contentAlignment = Alignment.Center) {
-                    Text("UN", style = UFont.sans(12, FontWeight.SemiBold), color = c.greenInk)
+                    Text(initials, style = UFont.sans(12, FontWeight.SemiBold), color = c.greenInk)
                 }
             }
         }

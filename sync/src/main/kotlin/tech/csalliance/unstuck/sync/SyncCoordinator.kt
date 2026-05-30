@@ -156,6 +156,11 @@ class SyncCoordinator(
     companion object {
         private const val TAG = "UnstuckSync"
         private const val KEY_PREV_USER = "unstuck.prevUserId"
-        private const val CAL_REDIRECT = "unstuck://calendar-callback"
+        // Google rejects custom schemes (unstuck://) on a Web OAuth client, so the
+        // redirect_uri we hand Google is the HTTPS bounce page the web app serves
+        // (the same one iOS uses). That page forwards ?code&state to
+        // unstuck://calendar-callback, which MainActivity captures. This EXACT URL
+        // must be registered as an Authorized redirect URI on the Google Web OAuth client.
+        private const val CAL_REDIRECT = "https://unstuck-602.pages.dev/calendar-callback"
     }
 }

@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 9
-        versionName = "0.3.5"
+        versionCode = 10
+        versionName = "0.3.6"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.3.5 — Calendar fixes. Google Calendar connect / sync / disconnect now actually work from Android (the POST requests were missing their Content-Type and provider field, and the connections response wasn't being parsed — all fixed; failures now show a message instead of failing silently). Disconnect updates the bar immediately. Week view is now a full 24 hours. Drag-to-schedule tracks your finger 1:1, and you can now drag an already-scheduled block to a new slot to reschedule it. NOTE: finishing a Google connection still hits a Google 'Access blocked / invalid_request' page — that's a Google Cloud OAuth console setting (the unstuck:// redirect URI), a backend fix, not the app."
+    releaseNotes = "v0.3.6 — Google Calendar connect now uses the HTTPS bounce redirect (https://unstuck-602.pages.dev/calendar-callback) instead of the unstuck:// scheme that Google blocks for web OAuth clients — same pattern iOS uses. REQUIRES a one-time Google Cloud Console step: add that exact HTTPS URL to the Web OAuth client's Authorized redirect URIs. Once that's done, connect should complete (sync/disconnect already work as of 0.3.5)."
 }
 
 dependencies {

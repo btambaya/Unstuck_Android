@@ -28,7 +28,12 @@ import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.platform.LocalContext
+import androidx.browser.customtabs.CustomTabsIntent
+import android.net.Uri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
@@ -51,10 +56,40 @@ fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () ->
         Box(Modifier.padding(horizontal = 18.dp, vertical = 4.dp)) {
             MdSegment(listOf("Day", "Week", "Month"), view) { view = it }
         }
+        CalendarSyncBar(vm)
         when (view) {
             "Day" -> DayGridScreen(vm, onOpen)
             "Week" -> WeekView(vm, onOpen)
             else -> MonthView(vm)
+        }
+    }
+}
+
+/** Connect / sync / disconnect Google Calendar. Opens consent in a Custom Tab;
+ *  the `unstuck://calendar-callback` return is handled in MainActivity. */
+@Composable
+private fun CalendarSyncBar(vm: AppViewModel) {
+    val c = UTheme.colors
+    val conns by vm.connections.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    var busy by remember { mutableStateOf(false) }
+    Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        if (conns.isEmpty()) {
+            Box(
+                Modifier.clip(RoundedCornerShape(999.dp)).background(c.bg2).clickable(enabled = !busy) {
+                    scope.launch {
+                        busy = true
+                        val url = vm.beginGoogleConnect()
+                        busy = false
+                        if (url != null) runCatching { CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url)) }
+                    }
+                }.padding(horizontal = 12.dp, vertical = 8.dp),
+            ) { Text(if (busy) "Connecting…" else "＋ Connect Google Calendar", style = UFont.sans(12, FontWeight.Medium), color = c.ink2) }
+        } else {
+            Text("Synced · ${conns.first().accountEmail}", style = UFont.sans(12), color = c.ink3, modifier = Modifier.weight(1f))
+            Text("Sync now", style = UFont.sans(12, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { scope.launch { vm.syncCalendar() } }.padding(horizontal = 8.dp, vertical = 4.dp))
+            Text("Disconnect", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { conns.forEach { vm.disconnectCalendar(it.id) } }.padding(horizontal = 8.dp, vertical = 4.dp))
         }
     }
 }

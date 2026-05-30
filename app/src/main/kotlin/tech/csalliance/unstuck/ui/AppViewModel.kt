@@ -184,6 +184,13 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         write?.upsertCalBlock(block.copy(durationMinutes = durationMinutes.coerceIn(15, 360)))
     }
 
+    // --- google calendar ---
+    /** Begin OAuth consent — returns the authorize URL to open in a Custom Tab. */
+    suspend fun beginGoogleConnect(): String? = graph.coordinator?.beginGoogleConnect()
+    /** Pull external events now (manual refresh). */
+    suspend fun syncCalendar() { graph.coordinator?.pullCalendar() }
+    fun disconnectCalendar(id: String) = launchWrite { graph.coordinator?.disconnectCalendar(id) }
+
     fun blockTime(date: String, startTime: String, durationMinutes: Int, label: String) = launchWrite {
         write?.upsertCalBlock(
             CalBlock(id = newUuid(), taskId = "placeholder", taskName = label, startTime = startTime, durationMinutes = durationMinutes, date = date, kind = CalBlockKind.PLACEHOLDER),

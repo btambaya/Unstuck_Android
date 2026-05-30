@@ -27,8 +27,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        // OAuth / magic-link PKCE callback (unstuck://auth-callback).
-        graph.provider?.client?.handleDeeplinks(intent)
+        // OAuth / magic-link PKCE callback (unstuck://auth-callback) + Google
+        // Calendar consent return (unstuck://calendar-callback).
+        handleAuthOrCalendar(intent)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -58,6 +59,21 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         setIntent(intent)
-        graph.provider?.client?.handleDeeplinks(intent)
+        handleAuthOrCalendar(intent)
+    }
+
+    /** Route `unstuck://calendar-callback?code&state` to the calendar connect flow;
+     *  everything else goes to Supabase's PKCE deep-link handler. */
+    private fun handleAuthOrCalendar(intent: Intent?) {
+        val data = intent?.data
+        if (data?.scheme == "unstuck" && data.host == "calendar-callback") {
+            val code = data.getQueryParameter("code")
+            val state = data.getQueryParameter("state")
+            if (code != null && state != null) {
+                lifecycleScope.launch { graph.coordinator?.completeGoogleConnect(code, state) }
+                return
+            }
+        }
+        intent?.let { graph.provider?.client?.handleDeeplinks(it) }
     }
 }

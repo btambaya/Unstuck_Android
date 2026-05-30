@@ -132,13 +132,10 @@ fun TasksScreen(
                                 AreaDotColor(areaColorFor(t.lifeArea, areas, c), size = 5)
                                 Text(t.lifeArea ?: "—", style = UFont.sans(12), color = c.ink3)
                                 if (t.recurrence != null) Text("· ↻", style = UFont.sans(12), color = c.ink3)
-                            }
-                            if (!t.tags.isNullOrEmpty()) {
-                                Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                                    t.tags!!.take(3).forEach { tn ->
-                                        Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).clickable { activeTag = tn }.padding(horizontal = 7.dp, vertical = 2.dp)) {
-                                            Text("#$tn", style = UFont.sans(10, FontWeight.Medium), color = c.primaryDeep)
-                                        }
+                                // Tags inline on the same line as the area.
+                                t.tags?.take(3)?.forEach { tn ->
+                                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).clickable { activeTag = tn }.padding(horizontal = 7.dp, vertical = 2.dp)) {
+                                        Text("#$tn", style = UFont.sans(10, FontWeight.Medium), color = c.primaryDeep)
                                     }
                                 }
                             }

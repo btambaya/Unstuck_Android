@@ -88,23 +88,31 @@ private fun CalendarSyncBar(vm: AppViewModel) {
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
     var busy by remember { mutableStateOf(false) }
-    Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-        if (conns.isEmpty()) {
-            Box(
-                Modifier.clip(RoundedCornerShape(999.dp)).background(c.bg2).clickable(enabled = !busy) {
-                    scope.launch {
-                        busy = true
-                        val url = vm.beginGoogleConnect()
-                        busy = false
-                        if (url != null) runCatching { CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url)) }
-                    }
-                }.padding(horizontal = 12.dp, vertical = 8.dp),
-            ) { Text(if (busy) "Connecting…" else "＋ Connect Google Calendar", style = UFont.sans(12, FontWeight.Medium), color = c.ink2) }
-        } else {
-            Text("Synced · ${conns.first().accountEmail}", style = UFont.sans(12), color = c.ink3, modifier = Modifier.weight(1f))
-            Text("Sync now", style = UFont.sans(12, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { scope.launch { vm.syncCalendar() } }.padding(horizontal = 8.dp, vertical = 4.dp))
-            Text("Disconnect", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { conns.forEach { vm.disconnectCalendar(it.id) } }.padding(horizontal = 8.dp, vertical = 4.dp))
+    var error by remember { mutableStateOf<String?>(null) }
+    Column(Modifier.fillMaxWidth()) {
+        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            if (conns.isEmpty()) {
+                Box(
+                    Modifier.clip(RoundedCornerShape(999.dp)).background(c.bg2).clickable(enabled = !busy) {
+                        scope.launch {
+                            busy = true; error = null
+                            val url = vm.beginGoogleConnect()
+                            busy = false
+                            // Surface failures: a null URL means the authorize call failed
+                            // (no more silent no-ops). Otherwise open the consent tab.
+                            if (url == null) error = "Couldn't reach Google. Check your connection and try again."
+                            else runCatching { CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url)) }
+                                .onFailure { error = "No browser available to open Google sign-in." }
+                        }
+                    }.padding(horizontal = 12.dp, vertical = 8.dp),
+                ) { Text(if (busy) "Connecting…" else "＋ Connect Google Calendar", style = UFont.sans(12, FontWeight.Medium), color = c.ink2) }
+            } else {
+                Text("Synced · ${conns.first().accountEmail}", style = UFont.sans(12), color = c.ink3, modifier = Modifier.weight(1f))
+                Text("Sync now", style = UFont.sans(12, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { scope.launch { vm.syncCalendar() } }.padding(horizontal = 8.dp, vertical = 4.dp))
+                Text("Disconnect", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { conns.forEach { vm.disconnectCalendar(it.id) } }.padding(horizontal = 8.dp, vertical = 4.dp))
+            }
         }
+        error?.let { Text(it, style = UFont.sans(11), color = c.red, modifier = Modifier.padding(horizontal = 18.dp).padding(bottom = 6.dp)) }
     }
 }
 

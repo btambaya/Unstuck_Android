@@ -62,6 +62,7 @@ import tech.csalliance.unstuck.design.component.Orbit
 import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.component.UButton
 import tech.csalliance.unstuck.design.theme.UFont
+import tech.csalliance.unstuck.design.theme.UnstuckColors
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.components.areaColorFor
@@ -174,13 +175,21 @@ fun TodayScreen(
     }
 }
 
+/** The Start-Next / empty hero gradient — light lavender→pink in light mode,
+ *  a deep indigo→plum in dark mode so the (light) hero text stays legible. */
+private fun heroBrush(c: UnstuckColors): Brush =
+    if (c.isDark)
+        Brush.linearGradient(listOf(oklch(0.34, 0.09, 280.0), oklch(0.30, 0.07, 322.0)))
+    else
+        Brush.linearGradient(listOf(oklch(0.96, 0.04, 280.0), oklch(0.95, 0.05, 320.0)))
+
 @Composable
 private fun StartNextHero(task: TaskItem, onStart: () -> Unit) {
     val c = UTheme.colors
     Column(Modifier.padding(horizontal = 18.dp).padding(top = 20.dp)) {
-        Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Brush.linearGradient(listOf(oklch(0.96, 0.04, 280.0), oklch(0.95, 0.05, 320.0)))).padding(18.dp)) {
+        Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(heroBrush(c)).padding(18.dp)) {
             Column {
-                Row(Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.7f)).padding(horizontal = 9.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Row(Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = if (c.isDark) 0.12f else 0.7f)).padding(horizontal = 9.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Icon(Icons.Filled.Bolt, contentDescription = null, tint = c.primaryDeep, modifier = Modifier.size(11.dp))
                     SectionLabel("Start next", color = c.primaryDeep)
                 }
@@ -265,6 +274,12 @@ private fun TaskRow(task: TaskItem, areaColor: Color, ageDays: Int? = null, onOp
             Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 AreaDotColor(areaColor, size = 5)
                 Text(task.lifeArea ?: "—", style = UFont.sans(12), color = c.ink3)
+                // Tags inline on the same line as the area (matches the Tasks list).
+                task.tags?.take(3)?.forEach { tn ->
+                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
+                        Text("#$tn", style = UFont.sans(10, FontWeight.Medium), color = c.primaryDeep)
+                    }
+                }
             }
         }
         if (ageDays != null) {
@@ -281,7 +296,7 @@ private fun EmptyHero(onAdd: () -> Unit) {
     val c = UTheme.colors
     Column(Modifier.padding(horizontal = 18.dp).padding(top = 22.dp)) {
         Column(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(Brush.linearGradient(listOf(oklch(0.96, 0.04, 280.0), oklch(0.95, 0.05, 320.0)))).padding(vertical = 32.dp, horizontal = 22.dp),
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(heroBrush(c)).padding(vertical = 32.dp, horizontal = 22.dp),
             horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             Orbit(size = 48)

@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 7
-        versionName = "0.3.3"
+        versionCode = 8
+        versionName = "0.3.4"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.3.3 — fixes: pick any time when creating a task; pause→save-for-later now asks the interruption reason (on by default); done tasks strike through on the calendar; tap an empty calendar slot to create a task there; capture 'Add' button always visible; 'Life Areas' → 'Areas'; focus 'Done' now marks the task complete (+ 'End for now'); the app reopens on the tab you left."
+    releaseNotes = "v0.3.4 — Create task: removed the time picker (pick a free-slot chip or leave it timeless) + added a Custom estimate; the sheet now scrolls and lifts above the keyboard (same for task detail, collections, settings, onboarding, command palette). Capture-a-thought: ✕ to drop a draft, Add sits before the tags, and capture tags now use the Area pill style. Tags now show on the Today card, inline with the area, on both Today and Tasks. Dark theme: fixed the washed-out Start-Next hero and invisible selected chips. Add-task button turns coral once it's ready. Google Calendar: connect updates the bar immediately and now surfaces errors instead of failing silently."
 }
 
 dependencies {

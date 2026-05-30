@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -79,7 +80,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
 
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 AreaDotColor(areaColorFor(task.lifeArea, areas, c), size = 6)
                 SectionLabel("${(task.lifeArea ?: "Task").uppercase()} · TASK")
@@ -255,19 +256,22 @@ private fun AddCaptureRow(onAdd: (CaptureTag, String) -> Unit) {
         CaptureTag.QUESTION to "question", CaptureTag.DISTRACTION to "distraction",
     )
     Column(Modifier.fillMaxWidth().padding(top = 6.dp).clip(RoundedCornerShape(14.dp)).background(c.bg2).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        BasicTextField(
-            value = body, onValueChange = { body = it }, textStyle = UFont.sans(14).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink),
-            modifier = Modifier.fillMaxWidth(),
-            decorationBox = { inner -> if (body.isEmpty()) Text("Capture a thought…", style = UFont.sans(14), color = c.ink3); inner() },
-        )
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
-            tags.forEach { (t, label) -> SelectableChip(label, selected = tag == t) { tag = t } }
+        // Field + Add on one row — Add sits before the tags so it's always visible
+        // and you can add without scrolling past the chips.
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            BasicTextField(
+                value = body, onValueChange = { body = it }, textStyle = UFont.sans(14).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink),
+                modifier = Modifier.weight(1f),
+                decorationBox = { inner -> if (body.isEmpty()) Text("Capture a thought…", style = UFont.sans(14), color = c.ink3); inner() },
+            )
+            if (body.isNotBlank()) {
+                Box(
+                    Modifier.clip(RoundedCornerShape(999.dp)).background(c.ink).clickable { onAdd(tag, body.trim()); body = "" }.padding(horizontal = 16.dp, vertical = 7.dp),
+                ) { Text("Add", style = UFont.sans(12, FontWeight.SemiBold), color = c.bg) }
+            }
         }
-        // "Add" on its own line so it's always visible (not lost off the end of the chips).
-        if (body.isNotBlank()) {
-            Box(
-                Modifier.align(Alignment.End).clip(RoundedCornerShape(999.dp)).background(c.ink).clickable { onAdd(tag, body.trim()); body = "" }.padding(horizontal = 16.dp, vertical = 7.dp),
-            ) { Text("Add", style = UFont.sans(12, FontWeight.SemiBold), color = c.bg) }
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+            tags.forEach { (t, label) -> FilterPill(label, selected = tag == t, dotColor = captureTagDot(t)) { tag = t } }
         }
     }
 }

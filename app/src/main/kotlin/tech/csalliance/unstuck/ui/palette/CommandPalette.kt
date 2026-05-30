@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -60,7 +61,7 @@ fun CommandPalette(vm: AppViewModel, onDismiss: () -> Unit, onOpenTask: (TaskIte
         .take(4).map { cap -> Result(cap.body, cap.tag.name.lowercase(), "NOTE") { onDismiss() } }
     val results = taskResults + noteResults + actions
 
-    Column(Modifier.fillMaxSize().background(c.bg)) {
+    Column(Modifier.fillMaxSize().background(c.bg).imePadding()) {
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(Modifier.weight(1f).clip(RoundedCornerShape(999.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(999.dp)).padding(horizontal = 14.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 Icon(Icons.Outlined.Search, contentDescription = null, tint = c.ink3, modifier = Modifier.size(15.dp))

@@ -11,9 +11,13 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material3.Icon
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -32,9 +36,9 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -64,15 +68,6 @@ private val CAPTURE_TAGS = listOf(
 
 private fun tomorrowIso(now: Long): String = Clock.dateIso(Time.addDaysMillis(Time.startOfDayMillis(now), 1))
 
-/** Native time picker — lets the user choose any time (not just free-slot chips). */
-private fun pickTime(context: android.content.Context, initial: String?, onPick: (String) -> Unit) {
-    val cal = java.util.Calendar.getInstance()
-    val parts = initial?.split(":")
-    val h = parts?.getOrNull(0)?.toIntOrNull() ?: cal.get(java.util.Calendar.HOUR_OF_DAY)
-    val m = parts?.getOrNull(1)?.toIntOrNull() ?: 0
-    android.app.TimePickerDialog(context, { _, hh, mm -> onPick("%02d:%02d".format(hh, mm)) }, h, m, true).show()
-}
-
 /**
  * New-task sheet — scheduler-first, mirroring the web task-create-modal:
  * WHEN is mandatory (today / tomorrow / pick a date / later), free-slot time
@@ -84,7 +79,6 @@ private fun pickTime(context: android.content.Context, initial: String?, onPick:
 fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: String? = null, onDismiss: () -> Unit) {
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val c = UTheme.colors
-    val context = LocalContext.current
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
@@ -102,6 +96,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     var firstMove by remember { mutableStateOf("") }
     var recurrence by remember { mutableStateOf<tech.csalliance.unstuck.core.model.Recurrence?>(null) }
     var showDatePicker by remember { mutableStateOf(false) }
+    var showEstimate by remember { mutableStateOf(false) }
     val tags = remember { mutableStateListOf<String>() }
     val drafts = remember { mutableStateListOf<DraftCapture>() }
 
@@ -121,13 +116,15 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
         else if (autoTime) pickedTime = slots.firstOrNull()?.startTime
     }
     val conflicts = if (effectiveDate != null && pickedTime != null) findConflicts(effectiveDate, pickedTime!!, estimate, blocks) else emptyList()
-    val canSubmit = name.isNotBlank() && (whenSel == "Later" || pickedTime != null)
+    val canSubmit = name.isNotBlank()
 
     ModalBottomSheet(
         onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = SheetScrim,
         dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } },
     ) {
-        Column(Modifier.fillMaxWidth().imePadding().padding(horizontal = 22.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        // Scrollable + keyboard-aware: imePadding lifts the content above the keyboard,
+        // verticalScroll lets every field be reached when the IME is open.
+        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 22.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             SectionLabel("New task")
             OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("What's the next thing on your mind?") }, singleLine = true, modifier = Modifier.fillMaxWidth())
 
@@ -142,16 +139,17 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                 }
             }
 
-            // Free-slot time chips + a "Pick…" manual time + conflict warning (hidden for Later).
+            // Free-slot time chips + conflict warning (hidden for Later).
             if (whenSel != "Later") {
                 SectionLabel("Time")
-                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    slots.forEach { s -> SelectableChip(formatTime(s.startTime), selected = pickedTime == s.startTime) { pickedTime = s.startTime; autoTime = false } }
-                    val pt = pickedTime
-                    if (pt != null && slots.none { it.startTime == pt }) {
-                        SelectableChip(formatTime(pt), selected = true) { pickTime(context, pt) { pickedTime = it; autoTime = false } }
+                if (slots.isEmpty()) {
+                    Text("No free slots that day — it'll be added without a set time.", style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink3)
+                } else {
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val pt = pickedTime
+                        if (pt != null && slots.none { it.startTime == pt }) SelectableChip(formatTime(pt), selected = true) {}
+                        slots.forEach { s -> SelectableChip(formatTime(s.startTime), selected = pickedTime == s.startTime) { pickedTime = s.startTime; autoTime = false } }
                     }
-                    SelectableChip("Pick…", selected = false) { pickTime(context, pickedTime) { pickedTime = it; autoTime = false } }
                 }
                 if (conflicts.isNotEmpty()) {
                     Box(Modifier.clip(RoundedCornerShape(8.dp)).background(c.amberSoft).padding(horizontal = 10.dp, vertical = 6.dp)) {
@@ -162,7 +160,10 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
 
             SectionLabel("Estimate")
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(15, 25, 45, 60, 90).forEach { m -> SelectableChip("${m}m", selected = estimate == m) { estimate = m } }
+                val presets = listOf(15, 25, 45, 60, 90)
+                presets.forEach { m -> SelectableChip("${m}m", selected = estimate == m) { estimate = m } }
+                if (estimate !in presets) SelectableChip("${estimate}m", selected = true) { showEstimate = true }
+                SelectableChip("Custom…", selected = false) { showEstimate = true }
             }
 
             if (areas.isNotEmpty()) {
@@ -181,19 +182,23 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
 
             tech.csalliance.unstuck.ui.components.RecurrenceEditor(recurrence) { recurrence = it }
 
-            // Capture-a-thought drafts (saved against the new task on submit).
+            // Capture-a-thought drafts — these auto-save against the new task when
+            // you hit "Add task", so there's no per-draft Add: just a cancel (✕) to
+            // drop one. Tags use the dotted Area-pill aesthetic.
             SectionLabel("Capture a thought", color = c.primaryDeep)
             drafts.forEachIndexed { idx, d ->
                 Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.bg2).padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    BasicTextField(
-                        value = d.body, onValueChange = { d.body = it },
-                        textStyle = tech.csalliance.unstuck.design.theme.UFont.sans(13).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink),
-                        modifier = Modifier.fillMaxWidth(),
-                        decorationBox = { inner -> if (d.body.isEmpty()) Text("Something on your mind…", style = tech.csalliance.unstuck.design.theme.UFont.sans(13), color = c.ink3); inner() },
-                    )
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        BasicTextField(
+                            value = d.body, onValueChange = { d.body = it },
+                            textStyle = tech.csalliance.unstuck.design.theme.UFont.sans(13).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink),
+                            modifier = Modifier.weight(1f),
+                            decorationBox = { inner -> if (d.body.isEmpty()) Text("Something on your mind…", style = tech.csalliance.unstuck.design.theme.UFont.sans(13), color = c.ink3); inner() },
+                        )
+                        Icon(Icons.Filled.Close, contentDescription = "Remove", tint = c.ink3, modifier = Modifier.size(18.dp).clickable { drafts.removeAt(idx) })
+                    }
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        CAPTURE_TAGS.forEach { (t, label) -> SelectableChip(label, selected = d.tag == t) { d.tag = t } }
-                        Text("Remove", style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink3, modifier = Modifier.clickable { drafts.removeAt(idx) }.padding(horizontal = 6.dp, vertical = 5.dp))
+                        CAPTURE_TAGS.forEach { (t, label) -> tech.csalliance.unstuck.design.component.FilterPill(label, selected = d.tag == t, dotColor = captureTagDot(t)) { d.tag = t } }
                     }
                 }
             }
@@ -201,7 +206,8 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                 Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, c.line2, RoundedCornerShape(999.dp)).clickable { drafts.add(DraftCapture()) }.padding(horizontal = 12.dp, vertical = 7.dp),
             ) { Text("+ Capture", style = tech.csalliance.unstuck.design.theme.UFont.sans(12, FontWeight.Medium), color = c.ink2) }
 
-            UButton("Add task", kind = ButtonKind.DARK, enabled = canSubmit) {
+            // Coral accent once the form is valid (a name is entered); muted dark until then.
+            UButton("Add task", kind = if (canSubmit) ButtonKind.CORAL else ButtonKind.DARK, enabled = canSubmit) {
                 val t = vm.addTask(
                     name = name, estimateMin = estimate, lifeArea = area, tags = tags.toList().ifEmpty { null },
                     firstPhysicalAction = firstMove.trim().ifEmpty { null }, recurrence = recurrence,
@@ -228,5 +234,22 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
             },
             dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("Cancel") } },
         ) { DatePicker(state = dpState) }
+    }
+
+    if (showEstimate) {
+        var v by remember { mutableStateOf(estimate.toString()) }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showEstimate = false },
+            title = { Text("Estimate (minutes)") },
+            text = {
+                OutlinedTextField(
+                    value = v, onValueChange = { s -> v = s.filter { it.isDigit() }.take(4) }, singleLine = true,
+                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                )
+            },
+            confirmButton = { TextButton(onClick = { v.toIntOrNull()?.takeIf { it > 0 }?.let { estimate = it }; showEstimate = false }) { Text("Save") } },
+            dismissButton = { TextButton(onClick = { showEstimate = false }) { Text("Cancel") } },
+            containerColor = c.surface,
+        )
     }
 }

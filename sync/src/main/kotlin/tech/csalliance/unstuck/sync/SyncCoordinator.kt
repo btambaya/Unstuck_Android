@@ -1,6 +1,7 @@
 package tech.csalliance.unstuck.sync
 
 import android.content.Context
+import android.util.Log
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.status.SessionSource
@@ -75,27 +76,33 @@ class SyncCoordinator(
         val r = calendar.authorize(CAL_REDIRECT)
         pendingCalState = r.state
         r.url
-    }.getOrNull()
+    }.onFailure { Log.w(TAG, "calendar authorize failed", it) }.getOrNull()
 
     /** Finish consent from the `unstuck://calendar-callback?code&state` deep link. */
     suspend fun completeGoogleConnect(code: String, state: String): Boolean = runCatching {
         val expected = pendingCalState
-        if (expected != null && expected != state) return false  // CSRF guard
+        if (expected != null && expected != state) {                 // CSRF guard
+            Log.w(TAG, "calendar connect: state mismatch — ignoring callback")
+            return false
+        }
         calendar.connectGoogle(code, CAL_REDIRECT, state)
         pendingCalState = null
+        hydrator.hydrate()   // pull the new calendar_connections row so the UI flips to "Synced" now, not on next launch
         pullCalendar()
         true
-    }.getOrElse { false }
+    }.getOrElse { Log.w(TAG, "calendar connect failed", it); false }
 
     /** Pull external events for [-7d, +30d] and reconcile them into local EXTERNAL blocks. */
     suspend fun pullCalendar() {
         auth.currentUserId ?: return
-        val conns = runCatching { calendar.listConnections() }.getOrNull() ?: return
+        val conns = runCatching { calendar.listConnections() }
+            .onFailure { Log.w(TAG, "calendar listConnections failed", it) }.getOrNull() ?: return
         if (conns.isEmpty()) return
         val today = LocalDate.now()
         val from = today.minusDays(7).toString()
         val to = today.plusDays(30).toString()
-        val events = runCatching { calendar.pullEvents(from, to) }.getOrNull() ?: return
+        val events = runCatching { calendar.pullEvents(from, to) }
+            .onFailure { Log.w(TAG, "calendar pullEvents failed", it) }.getOrNull() ?: return
         val blocks = events.map { externalEventToBlock(it, it.calendarId) }
         val keep = blocks.map { it.id }.toSet()
         blocks.forEach { write.upsertCalBlock(it) }
@@ -142,6 +149,7 @@ class SyncCoordinator(
     }
 
     companion object {
+        private const val TAG = "UnstuckSync"
         private const val KEY_PREV_USER = "unstuck.prevUserId"
         private const val CAL_REDIRECT = "unstuck://calendar-callback"
     }

@@ -151,27 +151,36 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
 
     // --- scheduling (cal blocks) ---
 
+    /**
+     * Schedule or RE-schedule a task. Mirrors the web persistOrMove:
+     * - first-time placement creates a block and does NOT bump moveCount;
+     * - moving an existing block updates it in place and bumps moveCount only
+     *   when the date/time actually changed (so the slip detector stays honest);
+     * - recurring tasks diff via regenerateForTask instead of blindly inserting a
+     *   whole new horizon every tap.
+     */
     fun scheduleTask(task: TaskItem, date: String, startTime: String) = launchWrite {
         val recurrence = task.recurrence
+        val existing = blocks.value.filter { it.taskId == task.id && tech.csalliance.unstuck.core.logic.isTaskBlock(it) }
         if (recurrence != null) {
             val parts = date.split("-").mapNotNull { it.toIntOrNull() }
-            val startDate = if (parts.size == 3) {
-                tech.csalliance.unstuck.core.time.Time.civil(parts[0], parts[1], parts[2])
-            } else {
-                tech.csalliance.unstuck.core.time.Time.startOfDayMillis(nowMs())
-            }
-            tech.csalliance.unstuck.core.logic.materializeOccurrences(recurrence, startDate, startTime).forEach { o ->
-                write?.upsertCalBlock(
-                    CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = o.startTime, durationMinutes = task.estimateMin, date = o.date, kind = CalBlockKind.TASK),
-                )
-            }
+            val startDate = if (parts.size == 3) tech.csalliance.unstuck.core.time.Time.civil(parts[0], parts[1], parts[2])
+            else tech.csalliance.unstuck.core.time.Time.startOfDayMillis(nowMs())
+            val plan = tech.csalliance.unstuck.core.logic.regenerateForTask(task, recurrence, blocks.value, tech.csalliance.unstuck.core.time.Clock.todayIso(), startTime, startDate)
+            plan.toDelete.forEach { write?.deleteCalBlock(it) }
+            plan.toUpsert.forEach { write?.upsertCalBlock(it) }
+            if (existing.isNotEmpty()) write?.upsertTask(bumpMoveCount(task, isoNow()))
         } else {
-            write?.upsertCalBlock(
-                CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = startTime, durationMinutes = task.estimateMin, date = date, kind = CalBlockKind.TASK),
-            )
+            val cur = existing.minWithOrNull(compareBy({ it.date }, { it.startTime }))
+            if (cur != null) {
+                if (cur.date != date || cur.startTime != startTime) {
+                    write?.upsertCalBlock(cur.copy(date = date, startTime = startTime))
+                    write?.upsertTask(bumpMoveCount(task, isoNow()))
+                }
+            } else {
+                write?.upsertCalBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = startTime, durationMinutes = task.estimateMin, date = date, kind = CalBlockKind.TASK))
+            }
         }
-        // Rescheduling an existing task bumps its move count (slip detector).
-        write?.upsertTask(bumpMoveCount(task, isoNow()))
     }
 
     fun unschedule(blockId: String) = launchWrite { write?.deleteCalBlock(blockId) }
@@ -200,9 +209,13 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     // --- focus / live session ---
 
     fun startFocus(task: TaskItem) = launchWrite {
-        val cur = store.getLiveSession() ?: FocusTimer.empty
-        val live = FocusTimer.start(cur, task.id, estimateMin = task.estimateMin, now = nowMs())
-        // Apply the persisted treatment preference on a fresh session.
+        val cur = store.getLiveSession()
+        // Re-entering the SAME task's live session keeps its current state — a
+        // paused session stays paused (the user resumes explicitly), it isn't
+        // auto-resumed just by opening the focus screen.
+        if (cur?.taskId == task.id) return@launchWrite
+        val base = cur ?: FocusTimer.empty
+        val live = FocusTimer.start(base, task.id, estimateMin = task.estimateMin, now = nowMs())
         store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
     }
 
@@ -299,7 +312,15 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     // --- tags & areas ---
 
     fun upsertTag(t: TagRow) = launchWrite { write?.upsertTag(t) }
-    fun deleteTag(id: String) = launchWrite { write?.deleteTag(id) }
+
+    /** Delete a tag and strip its name from every task (case-insensitive cascade). */
+    fun deleteTag(id: String) = launchWrite {
+        val name = tags.value.firstOrNull { it.id == id }?.name
+        write?.deleteTag(id)
+        if (name != null) tasks.value.filter { t -> t.tags?.any { it.equals(name, ignoreCase = true) } == true }.forEach { t ->
+            write?.upsertTask(t.copy(tags = t.tags?.filterNot { it.equals(name, ignoreCase = true) }?.ifEmpty { null }, updatedAt = isoNow()))
+        }
+    }
 
     /** Add a tag to the vocabulary if its name is new; returns the name. */
     fun ensureTag(name: String): String {
@@ -310,29 +331,49 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         return nm
     }
 
-    /** Rename a tag and cascade the change across every task that uses it. */
+    /** Rename a tag and cascade across every task that uses it — case-insensitive
+     *  match + de-dupe so renaming A→B on a task tagged [A,B] yields [B], not [B,B]. */
     fun renameTag(tag: TagRow, newName: String) = launchWrite {
         val nm = newName.trim(); if (nm.isEmpty() || nm == tag.name) return@launchWrite
         write?.upsertTag(tag.copy(name = nm))
-        tasks.value.filter { it.tags?.contains(tag.name) == true }.forEach { t ->
-            write?.upsertTask(t.copy(tags = t.tags?.map { if (it == tag.name) nm else it }, updatedAt = isoNow()))
+        tasks.value.filter { t -> t.tags?.any { it.equals(tag.name, ignoreCase = true) } == true }.forEach { t ->
+            write?.upsertTask(t.copy(tags = t.tags?.map { if (it.equals(tag.name, ignoreCase = true)) nm else it }?.distinct(), updatedAt = isoNow()))
         }
     }
 
     fun recolorTag(tag: TagRow, color: String?) = launchWrite { write?.upsertTag(tag.copy(color = color)) }
     fun upsertLifeArea(a: LifeArea) = launchWrite { write?.upsertLifeArea(a) }
-    fun deleteLifeArea(id: String) = launchWrite { write?.deleteLifeArea(id) }
+
+    /** Delete an area and clear its label off every task (no dangling lifeArea). */
+    fun deleteLifeArea(id: String) = launchWrite {
+        val name = lifeAreas.value.firstOrNull { it.id == id }?.name
+        write?.deleteLifeArea(id)
+        if (name != null) tasks.value.filter { it.lifeArea == name }.forEach { t ->
+            write?.upsertTask(t.copy(lifeArea = null, updatedAt = isoNow()))
+        }
+    }
+
+    /** Rename an area + cascade the new name onto its tasks (web parity). */
+    fun renameLifeArea(area: LifeArea, newName: String) = launchWrite {
+        val nm = newName.trim(); if (nm.isEmpty() || nm == area.name) return@launchWrite
+        write?.upsertLifeArea(area.copy(name = nm))
+        tasks.value.filter { it.lifeArea == area.name }.forEach { t -> write?.upsertTask(t.copy(lifeArea = nm, updatedAt = isoNow())) }
+    }
+
+    fun recolorLifeArea(area: LifeArea, color: String) = launchWrite { write?.upsertLifeArea(area.copy(color = color)) }
 
     // --- onboarding ---
 
     val onboarded: Boolean get() = graph.onboarded
 
-    fun completeOnboarding(struggles: List<String>) = launchWrite {
+    fun completeOnboarding(struggles: List<String>, areas: List<String> = emptyList()) = launchWrite {
+        // Seed the user's PICKED areas (or canonical defaults if they picked none).
+        // Single source of seeding — onboarding no longer also writes areas itself,
+        // so we don't double-seed (picked + defaults).
         if (lifeAreas.value.isEmpty()) {
-            val colors = listOf("indigo", "coral", "violet", "green")
-            listOf("Work", "Personal", "Home", "Health").forEachIndexed { i, n ->
-                write?.upsertLifeArea(LifeArea(id = newUuid(), name = n, color = colors[i], sortOrder = i))
-            }
+            val palette = listOf("indigo", "coral", "violet", "green", "amber", "blue")
+            val seed = areas.ifEmpty { listOf("Work", "Personal", "Home", "Health") }
+            seed.forEachIndexed { i, n -> write?.upsertLifeArea(LifeArea(id = newUuid(), name = n, color = palette[i % palette.size], sortOrder = i)) }
         }
         val uid = auth?.currentUserId
         if (uid != null && struggles.isNotEmpty()) {

@@ -64,7 +64,7 @@ fun NewCollectionSheet(vm: AppViewModel, onCreated: (String) -> Unit, onDismiss:
                 }
             }
             UButton("Create", kind = ButtonKind.DARK, enabled = name.isNotBlank()) {
-                val col = ItemCollection(id = newUuid(), name = name.trim(), color = color, items = emptyList(), sortOrder = collections.size)
+                val col = ItemCollection(id = newUuid(), name = name.trim(), color = color, items = emptyList(), sortOrder = (collections.maxOfOrNull { it.sortOrder } ?: -1) + 1)
                 vm.upsertCollection(col)
                 onCreated(col.id)
             }

@@ -285,16 +285,31 @@ private fun AreasContent(vm: AppViewModel) {
             val open = tasks.count { it.lifeArea == a.name && !it.done }
             var menu by remember(a.id) { mutableStateOf(false) }
             var confirm by remember(a.id) { mutableStateOf(false) }
+            var editing by remember(a.id) { mutableStateOf(false) }
+            var nameDraft by remember(a.id) { mutableStateOf(a.name) }
+            var palOpen by remember(a.id) { mutableStateOf(false) }
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
-                ColorChip(c.areaColor(a.color), box = 30, dot = 9)
-                Column(Modifier.weight(1f)) {
-                    Text(a.name, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink)
-                    Text("Custom area.", style = UFont.sans(11), color = c.ink3)
+                Box {
+                    Box(Modifier.clickable { palOpen = true }) { ColorChip(c.areaColor(a.color), box = 30, dot = 9) }
+                    DropdownMenu(expanded = palOpen, onDismissRequest = { palOpen = false }) {
+                        Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                            palette.forEach { col -> Box(Modifier.clickable { vm.recolorLifeArea(a, col); palOpen = false }) { ColorChip(c.areaColor(col), box = 26, dot = 8) } }
+                        }
+                    }
                 }
-                Text("$open open", style = UFont.sans(12), color = c.ink2)
+                if (editing) {
+                    BasicTextField(value = nameDraft, onValueChange = { nameDraft = it }, textStyle = UFont.sans(14, FontWeight.SemiBold).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
+                    Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable { vm.renameLifeArea(a, nameDraft); editing = false }.padding(4.dp))
+                } else {
+                    Column(Modifier.weight(1f)) {
+                        Text(a.name, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink)
+                        Text("$open open", style = UFont.sans(11), color = c.ink3)
+                    }
+                }
                 Box {
                     Icon(Icons.Filled.MoreVert, contentDescription = "Area options", tint = c.ink3, modifier = Modifier.size(20.dp).clickable { menu = true })
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                        DropdownMenuItem(text = { Text("Rename", style = UFont.sans(14), color = c.ink) }, onClick = { menu = false; nameDraft = a.name; editing = true })
                         DropdownMenuItem(text = { Text("Delete area", style = UFont.sans(14), color = c.red) }, onClick = { menu = false; confirm = true })
                     }
                 }

@@ -57,6 +57,28 @@ the web create modal (WHEN incl. pick-date, free-slot chips + conflict warning,
 capture drafts, no priority); **Lists → Collections**; **Calendar** Week = 7-col grid
 + rollup, Month = calendar grid + weekday headers + month nav. Build + 185 tests green.
 
+**Web-parity batches → Firebase (v0.3.0–0.3.2, testers ahmad@/justtesting6363@/zyzkazaure@):**
+Two 16-area agent sweeps (web = source of truth, mockup = cue only) drove this — full
+gap+bug lists in `audit-web-parity-gaps.md` + `audit-sweep2.md`. Landed: Tags end-to-end
+(picker/filter/manage + cascade rename/delete, dedup + case-insensitive), editable Task
+detail (name/first-action/estimate-incl-custom/area/repeat/tags + cascade delete), capture
+promote/discard/add, focus pause-reasons + Save-for-later, Collections CRUD, Account
+(password+reauth/export/delete-with-email-confirm), Insights charts + Week/Month/All +
+real-data threshold, Google Calendar **connect+pull** (push still TODO), colored task tabs
++ area pills, Today backlog (calendar-day age chips), 24h day grid + real Week hour-grid,
+reactive theme/accent/density, area rename/recolor. **v0.3.2 bug sweep fixed:** external
+Google `g_` blocks no longer enqueued (was stalling the outbox); `scheduleTask` reschedules
+in place (no dup blocks) + only bumps moveCount on real moves (slip detector was inflated);
+re-opening a paused focus stays paused; onboarding seeds picked areas once + persists
+treatment.
+
+**Known remaining (next batch, in `audit-sweep2.md`):** Google Calendar **push**
+(insert/patch/delete local blocks) + `listConnections` snake_case decode; focus **sounds**
+(chimes/bell) + **ambient** wiring + **overrun-extend** flow + soft-overrun grace at runtime;
+command-palette completeness (areas/capture-jump/route shortcuts); account email-verification
+flows; onboarding struggles + first-action steps; recurrence **until** date; calendar
+**block-time** UI + fuller block-edit sheet; a11y toggles' runtime effects.
+
 ## Status snapshot
 
 - **P0 — Foundation: DONE.** Gradle multi-module scaffold (wrapper 8.9, AGP

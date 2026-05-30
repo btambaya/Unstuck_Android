@@ -2,6 +2,7 @@ package tech.csalliance.unstuck.sync
 
 import tech.csalliance.unstuck.core.logic.isUuid
 import tech.csalliance.unstuck.core.model.CalBlock
+import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.LifeArea
@@ -28,6 +29,10 @@ class WriteThrough(private val store: LocalStore) {
 
     suspend fun upsertCalBlock(b: CalBlock) {
         store.upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id)
+        // External Google events (g_ ids) are mirrored read-only — never push them
+        // to our cal_blocks table (the row id/shape isn't ours; it would fail forever
+        // and stall the outbox).
+        if (b.kind == CalBlockKind.EXTERNAL || b.id.startsWith("g_")) return
         val dependsOn = b.taskId?.let { if (isUuid(it)) it else null } // wait for parent task op
         enqueue("cal_blocks", b.id, "upsert", DbRowCodec.encodeCalBlock(b).toString(), dependsOn)
     }
@@ -63,7 +68,10 @@ class WriteThrough(private val store: LocalStore) {
     }
 
     suspend fun deleteTask(id: String) = deleteLocalAndEnqueue(Tables.TASKS, id)
-    suspend fun deleteCalBlock(id: String) = deleteLocalAndEnqueue(Tables.CAL_BLOCKS, id)
+    suspend fun deleteCalBlock(id: String) {
+        store.delete(Tables.CAL_BLOCKS, id)
+        if (!id.startsWith("g_")) enqueue(Tables.CAL_BLOCKS, id, "delete", null) // external rows aren't ours
+    }
     suspend fun deleteTag(id: String) = deleteLocalAndEnqueue(Tables.TAGS, id)
     suspend fun deleteLifeArea(id: String) = deleteLocalAndEnqueue(Tables.LIFE_AREAS, id)
     suspend fun deleteCollection(id: String) = deleteLocalAndEnqueue(Tables.COLLECTIONS, id)

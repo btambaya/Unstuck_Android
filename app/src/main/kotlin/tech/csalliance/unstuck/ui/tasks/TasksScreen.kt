@@ -67,9 +67,10 @@ fun TasksScreen(
     val blocks by vm.blocks.collectAsStateWithLifecycle()
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     var view by remember { mutableStateOf(TaskListView.TODAY) }
+    var activeTag by remember { mutableStateOf<String?>(null) }
     // Today is area-agnostic on purpose (web parity) — the area filter applies
-    // to every other view.
-    val list = visibleTasks(view, tasks, blocks, vm.nowMs(), activeArea = if (view == TaskListView.TODAY) null else activeArea, slipMode = false)
+    // to every other view. The tag filter applies to every view.
+    val list = visibleTasks(view, tasks, blocks, vm.nowMs(), activeArea = if (view == TaskListView.TODAY) null else activeArea, activeTag = activeTag, slipMode = false)
 
     Column(Modifier.fillMaxSize()) {
         AppBar(title = "Tasks", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch, onAvatar = onAvatar, avatarInitials = avatarInitials)
@@ -105,6 +106,18 @@ fun TasksScreen(
                     areas.forEach { a -> FilterPill(a.name, activeArea == a.name, dotColor = c.areaColor(a.color)) { onAreaPick(if (activeArea == a.name) null else a.name) } }
                 }
             }
+            if (activeTag != null) {
+                item {
+                    Row(
+                        Modifier.padding(bottom = 12.dp).clip(RoundedCornerShape(999.dp)).background(c.primarySoft).clickable { activeTag = null }.padding(horizontal = 11.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        Text("Filtering by tag ", style = UFont.sans(12), color = c.primaryDeep)
+                        Text("#${activeTag}", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
+                        Text("✕", style = UFont.sans(12), color = c.primaryDeep)
+                    }
+                }
+            }
             if (list.isEmpty()) {
                 item { Text("No ${view.label.lowercase()} tasks.", style = UFont.sans(14), color = c.ink3, modifier = Modifier.padding(vertical = 32.dp)) }
             } else {
@@ -123,7 +136,7 @@ fun TasksScreen(
                             if (!t.tags.isNullOrEmpty()) {
                                 Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
                                     t.tags!!.take(3).forEach { tn ->
-                                        Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
+                                        Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).clickable { activeTag = tn }.padding(horizontal = 7.dp, vertical = 2.dp)) {
                                             Text("#$tn", style = UFont.sans(10, FontWeight.Medium), color = c.primaryDeep)
                                         }
                                     }

@@ -56,6 +56,7 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
     val c = UTheme.colors
     val allSessions by vm.sessions.collectAsStateWithLifecycle()
     val tasks by vm.tasks.collectAsStateWithLifecycle()
+    val lifeAreas by vm.lifeAreas.collectAsStateWithLifecycle()
     val allCaptures by vm.captures.collectAsStateWithLifecycle()
     val allReasons by vm.reasonLogs.collectAsStateWithLifecycle()
     var range by remember { mutableStateOf("Week") }   // Week | Month | All
@@ -101,7 +102,7 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                     }
                 }
                 if (enough) {
-                    item { StackedBars("When focus happens", weekdayAreaHours(sessions, tasks).map { it.d to it.data }, DEFAULT_AREAS) }
+                    item { StackedBars("When focus happens", weekdayAreaHours(sessions, tasks).map { it.d to it.data }, DEFAULT_AREAS, lifeAreas) }
                     item { Histogram("When interruptions happen", interruptionBins(captures, sessions), c.coral) }
                     item {
                         val insights = topInsights(sessions, tasks, captures, reasons)
@@ -190,7 +191,7 @@ private fun ThresholdNote(n: Int) {
 }
 
 @Composable
-private fun StackedBars(title: String, bars: List<Pair<String, List<Double>>>, areas: List<String>) {
+private fun StackedBars(title: String, bars: List<Pair<String, List<Double>>>, areas: List<String>, lifeAreas: List<tech.csalliance.unstuck.core.model.LifeArea>) {
     val c = UTheme.colors
     val max = bars.maxOfOrNull { it.second.sum() }?.coerceAtLeast(0.001) ?: 0.001
     Card(Modifier.fillMaxWidth().padding(top = 12.dp), radius = 18) {
@@ -202,13 +203,13 @@ private fun StackedBars(title: String, bars: List<Pair<String, List<Double>>>, a
                     Row(Modifier.weight(1f).height(14.dp).clip(RoundedCornerShape(4.dp)).background(c.bg2)) {
                         data.forEachIndexed { i, v ->
                             val frac = (v / max).toFloat().coerceIn(0f, 1f)
-                            if (frac > 0f) Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(c.areaColor(areas.getOrElse(i) { "" })))
+                            if (frac > 0f) Box(Modifier.fillMaxWidth(frac).fillMaxHeight().background(tech.csalliance.unstuck.ui.components.areaColorFor(areas.getOrElse(i) { "" }, lifeAreas, c)))
                         }
                     }
                 }
             }
             Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                areas.forEach { a -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) { Box(Modifier.height(8.dp).width(8.dp).clip(RoundedCornerShape(2.dp)).background(c.areaColor(a))); Text(a, style = UFont.sans(9), color = c.ink3) } }
+                areas.forEach { a -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) { Box(Modifier.height(8.dp).width(8.dp).clip(RoundedCornerShape(2.dp)).background(tech.csalliance.unstuck.ui.components.areaColorFor(a, lifeAreas, c))); Text(a, style = UFont.sans(9), color = c.ink3) } }
             }
         }
     }

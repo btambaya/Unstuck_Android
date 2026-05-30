@@ -57,9 +57,10 @@ fun OnboardingScreen(vm: AppViewModel, onDone: () -> Unit) {
     var treatment by remember { mutableStateOf(FocusTreatment.AMBIENT) }
 
     fun finish() {
-        pickedAreas.forEachIndexed { i, a -> vm.upsertLifeArea(LifeArea(newUuid(), a, AREA_PALETTE[i % AREA_PALETTE.size], i)) }
-        if (firstTask.isNotBlank()) vm.addTask(name = firstTask.trim(), estimateMin = 15, lifeArea = "Personal")
-        vm.completeOnboarding(emptyList())
+        // completeOnboarding seeds the picked areas (single source — no double seed).
+        vm.updateSettings { it.copy(treatment = treatment) }   // persist chosen treatment
+        if (firstTask.isNotBlank()) vm.addTask(name = firstTask.trim(), estimateMin = 15, lifeArea = pickedAreas.firstOrNull())
+        vm.completeOnboarding(struggles = emptyList(), areas = pickedAreas.toList())
         onDone()
     }
 

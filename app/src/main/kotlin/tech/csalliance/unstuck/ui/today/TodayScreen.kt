@@ -26,7 +26,9 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -87,6 +89,11 @@ fun TodayScreen(
     var backlogActive by remember { mutableStateOf(false) }
     val initials = remember(vm.currentName) {
         (vm.currentName ?: "U").split(' ', '.', '@').mapNotNull { it.firstOrNull()?.uppercaseChar() }.take(2).joinToString("").ifEmpty { "U" }
+    }
+    // 1s ticker so the running live-session card timer/ring animate (paused → frozen).
+    var nowTick by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(live?.id, live?.paused) {
+        while (live != null && live?.paused != true) { nowTick = System.currentTimeMillis(); kotlinx.coroutines.delay(1000) }
     }
 
     val startNext = pickStartNext(tasks, blocks, liveId, areaFilter)
@@ -154,7 +161,7 @@ fun TodayScreen(
             if (liveTask != null && live != null) {
                 item {
                     LiveSessionCard(
-                        liveTask, live!!, now,
+                        liveTask, live!!, nowTick,
                         onReturn = { onStartFocus(liveTask) },
                         onPause = { vm.pauseFocus() },
                         onResume = { vm.resumeFocus() },

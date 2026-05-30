@@ -25,7 +25,7 @@ data class SettingsState(
     val focusOverrunMin: Int = 5,          // 0 = Never
     val focusCollapseRail: Boolean = true,
     val focusSoftExit: Boolean = true,
-    val focusPauseReasons: Boolean = false,
+    val focusPauseReasons: Boolean = true,
     val soundStartChime: Boolean = true,
     val soundOverrunBell: Boolean = true,
     val soundCompletion: Boolean = false,
@@ -59,7 +59,7 @@ class SettingsStore(context: Context) {
         focusOverrunMin = p.getInt("focusOverrunMin", 5),
         focusCollapseRail = p.getBoolean("focusCollapseRail", true),
         focusSoftExit = p.getBoolean("focusSoftExit", true),
-        focusPauseReasons = p.getBoolean("focusPauseReasons", false),
+        focusPauseReasons = p.getBoolean("focusPauseReasons", true),
         soundStartChime = p.getBoolean("soundStartChime", true),
         soundOverrunBell = p.getBoolean("soundOverrunBell", true),
         soundCompletion = p.getBoolean("soundCompletion", false),

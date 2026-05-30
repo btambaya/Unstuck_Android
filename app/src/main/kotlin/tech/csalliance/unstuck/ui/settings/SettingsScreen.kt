@@ -70,14 +70,14 @@ enum class SettingsSection(val title: String, val eyebrow: String) {
     A11Y("Adjust to your brain.", "SETTINGS · ACCESSIBILITY"),
     INTERFACE("How things look.", "SETTINGS · INTERFACE"),
     BACKUP("Your data is yours.", "SETTINGS · BACKUP"),
-    AREAS("One list. The whole life.", "SETTINGS · LIFE AREAS"),
+    AREAS("One list. The whole life.", "SETTINGS · AREAS"),
     TAGS("Your tag vocabulary.", "SETTINGS · TAGS"),
 }
 
 private val HUB = listOf(
     "Account" to SettingsSection.ACCOUNT, "Focus" to SettingsSection.FOCUS, "Sound" to SettingsSection.SOUND,
     "Accessibility" to SettingsSection.A11Y, "Interface" to SettingsSection.INTERFACE, "Backup" to SettingsSection.BACKUP,
-    "Life areas" to SettingsSection.AREAS, "Tags" to SettingsSection.TAGS,
+    "Areas" to SettingsSection.AREAS, "Tags" to SettingsSection.TAGS,
 )
 
 @Composable

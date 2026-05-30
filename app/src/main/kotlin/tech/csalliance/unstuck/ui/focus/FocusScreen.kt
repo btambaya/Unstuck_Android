@@ -72,6 +72,7 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
     var showCapture by remember { mutableStateOf(false) }
     var showReflect by remember { mutableStateOf(false) }
     var showPauseReasons by remember { mutableStateOf(false) }
+    var exitAfterReason by remember { mutableStateOf(false) }
     var reflectElapsed by remember { mutableStateOf(0) }
 
     val l = live
@@ -143,19 +144,23 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
                     if (paused) vm.resumeFocus()
                     else { vm.pauseFocus(); if (settings.focusPauseReasons) showPauseReasons = true }
                 }
-                // "Done" = end for now (records the session, keeps the task open).
-                FocusBtn("Done", soft = false) { reflectElapsed = FocusTimer.elapsedSec(l ?: return@FocusBtn, nowMs); vm.finishFocus(task); showReflect = true }
+                // "Done" marks the task complete (records the session + flips done).
+                FocusBtn("Done", soft = false) { reflectElapsed = FocusTimer.elapsedSec(l ?: return@FocusBtn, nowMs); vm.finishFocus(task, markDone = true); showReflect = true }
             }
-            // Secondary actions: "Save for later" pauses + exits (session persists as
-            // paused → resumable from Today); "Mark complete" = the web's "Done early".
+            // Secondary actions: "Save for later" pauses + exits (resumable from Today,
+            // prompting an interruption reason when enabled); "End for now" records the
+            // session without completing the task.
             Row(Modifier.padding(top = 12.dp, bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "Save for later", style = UFont.sans(13, FontWeight.Medium), color = Color.White.copy(alpha = 0.72f),
-                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { vm.pauseFocus(); onClose() }.padding(horizontal = 14.dp, vertical = 8.dp),
+                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable {
+                        vm.pauseFocus()
+                        if (settings.focusPauseReasons) { exitAfterReason = true; showPauseReasons = true } else onClose()
+                    }.padding(horizontal = 14.dp, vertical = 8.dp),
                 )
                 Text(
-                    "✓ Mark complete", style = UFont.sans(13, FontWeight.Medium), color = Color.White.copy(alpha = 0.72f),
-                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { reflectElapsed = FocusTimer.elapsedSec(l ?: return@clickable, nowMs); vm.finishFocus(task, markDone = true); showReflect = true }.padding(horizontal = 14.dp, vertical = 8.dp),
+                    "End for now", style = UFont.sans(13, FontWeight.Medium), color = Color.White.copy(alpha = 0.72f),
+                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { reflectElapsed = FocusTimer.elapsedSec(l ?: return@clickable, nowMs); vm.finishFocus(task, markDone = false); showReflect = true }.padding(horizontal = 14.dp, vertical = 8.dp),
                 )
             }
         }
@@ -163,10 +168,11 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
         if (showCapture) CaptureSheet(vm, task, live?.id) { showCapture = false }
         if (showReflect) ReflectSheet(reflectElapsed) { showReflect = false; onClose() }
         if (showPauseReasons) {
-            // Already paused; this just records WHY (optional). Dismiss = skip logging.
+            // Already paused; this records WHY (optional). When triggered by
+            // "Save for later", we exit the focus screen after the reason.
             PauseReasons(
-                onPick = { reason -> vm.saveReasonLog(task.id, reason); showPauseReasons = false },
-                onDismiss = { showPauseReasons = false },
+                onPick = { reason -> vm.saveReasonLog(task.id, reason); showPauseReasons = false; if (exitAfterReason) { exitAfterReason = false; onClose() } },
+                onDismiss = { showPauseReasons = false; if (exitAfterReason) { exitAfterReason = false; onClose() } },
             )
         }
     }

@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.3.2"
+        versionCode = 7
+        versionName = "0.3.3"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.3.2 — bug-fix sweep (2nd parity audit): no more sync stall from Google blocks; scheduling no longer false-bumps the slip detector or duplicates blocks; tag/area rename+delete now cascade to tasks (dedup, case-insensitive); area rename/recolor added; onboarding no longer double-seeds areas + persists your treatment; re-opening a paused focus stays paused; Insights bars use real area colors; tag filtering on Tasks; live-session card now ticks."
+    releaseNotes = "v0.3.3 — fixes: pick any time when creating a task; pause→save-for-later now asks the interruption reason (on by default); done tasks strike through on the calendar; tap an empty calendar slot to create a task there; capture 'Add' button always visible; 'Life Areas' → 'Areas'; focus 'Done' now marks the task complete (+ 'End for now'); the app reopens on the tab you left."
 }
 
 dependencies {

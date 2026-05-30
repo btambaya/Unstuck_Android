@@ -18,6 +18,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -62,10 +63,11 @@ private sealed interface Sheet {
 
 @Composable
 fun MainScaffold(vm: AppViewModel) {
-    var tab by remember { mutableStateOf("today") }
+    var tab by rememberSaveable { mutableStateOf("today") }
     val stack = remember { mutableStateListOf<Route>() }
     var sheet by remember { mutableStateOf<Sheet?>(null) }
     var showNewTask by remember { mutableStateOf(false) }
+    var newTaskPrefill by remember { mutableStateOf<Pair<String, String>?>(null) }
     var focusTask by remember { mutableStateOf<TaskItem?>(null) }
     var activeArea by remember { mutableStateOf<String?>(null) }
     var onboarding by remember { mutableStateOf(!vm.onboarded) }
@@ -104,7 +106,7 @@ fun MainScaffold(vm: AppViewModel) {
                         onInsights = { push(Route.Insights(false)) },
                     )
                     "tasks" -> TasksScreen(vm, activeArea = activeArea, onClearArea = { activeArea = null }, onAreaPick = { activeArea = it }, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, avatarInitials = initials)
-                    "calendar" -> CalendarScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, avatarInitials = initials)
+                    "calendar" -> CalendarScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, avatarInitials = initials, onCreateAt = { d, t -> newTaskPrefill = d to t; showNewTask = true })
                     "lists" -> CollectionsScreen(vm, onOpen = { push(Route.Collection(it)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, avatarInitials = initials)
                 }
             }
@@ -136,7 +138,7 @@ fun MainScaffold(vm: AppViewModel) {
         }
 
         // Sheets.
-        if (showNewTask) NewTaskSheet(vm, onDismiss = { showNewTask = false })
+        if (showNewTask) NewTaskSheet(vm, prefillDate = newTaskPrefill?.first, prefillTime = newTaskPrefill?.second, onDismiss = { showNewTask = false; newTaskPrefill = null })
         when (sheet) {
             Sheet.Avatar -> AvatarMenu(
                 vm,

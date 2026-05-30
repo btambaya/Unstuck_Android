@@ -260,11 +260,14 @@ private fun AddCaptureRow(onAdd: (CaptureTag, String) -> Unit) {
             modifier = Modifier.fillMaxWidth(),
             decorationBox = { inner -> if (body.isEmpty()) Text("Capture a thought…", style = UFont.sans(14), color = c.ink3); inner() },
         )
-        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
             tags.forEach { (t, label) -> SelectableChip(label, selected = tag == t) { tag = t } }
-            if (body.isNotBlank()) {
-                Text("Add", style = UFont.sans(12, FontWeight.SemiBold), color = c.primaryDeep, modifier = Modifier.clickable { onAdd(tag, body.trim()); body = "" }.padding(horizontal = 8.dp, vertical = 5.dp))
-            }
+        }
+        // "Add" on its own line so it's always visible (not lost off the end of the chips).
+        if (body.isNotBlank()) {
+            Box(
+                Modifier.align(Alignment.End).clip(RoundedCornerShape(999.dp)).background(c.ink).clickable { onAdd(tag, body.trim()); body = "" }.padding(horizontal = 16.dp, vertical = 7.dp),
+            ) { Text("Add", style = UFont.sans(12, FontWeight.SemiBold), color = c.bg) }
         }
     }
 }

@@ -4,6 +4,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -70,7 +71,7 @@ private fun shiftDate(iso: String, days: Int): String {
 /** Day grid with drag-to-schedule: long-press an unscheduled task in the tray
  *  and drop it onto an hour slot to create a cal_block at that time. */
 @Composable
-fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
+fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (String, String) -> Unit) {
     val c = UTheme.colors
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
@@ -128,7 +129,16 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
                 Modifier.weight(1f).fillMaxWidth().verticalScroll(scroll)
                     .onGloballyPositioned { gridBounds = it.boundsInWindow() },
             ) {
-                Column {
+                // Tap an empty area → create a task prefilled at that snapped time.
+                Column(
+                    Modifier.pointerInput(date) {
+                        detectTapGestures { off ->
+                            val totalMin = START_HOUR * 60 + ((off.y / hourPx) * 60).roundToInt()
+                            val snapped = ((totalMin / 15) * 15).coerceIn(START_HOUR * 60, END_HOUR * 60 - 15)
+                            onCreateAt(date, "%02d:%02d".format(snapped / 60, snapped % 60))
+                        }
+                    },
+                ) {
                     for (h in START_HOUR until END_HOUR) {
                         Row(Modifier.fillMaxWidth().height(HOUR_HEIGHT)) {
                             Text(
@@ -148,10 +158,11 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
                         val hDp = HOUR_HEIGHT * (b.durationMinutes / 60f)
                         // Color by source: external = blue, a task = its life-area swatch,
                         // placeholder = neutral. Mirrors the web bgFor().
-                        val area = if (isTaskBlock(b)) tasks.firstOrNull { it.id == b.taskId }?.lifeArea else null
+                        val bt = if (isTaskBlock(b)) tasks.firstOrNull { it.id == b.taskId } else null
+                        val done = bt?.done == true
                         val fill = when {
                             b.kind == CalBlockKind.EXTERNAL -> c.blueSoft
-                            isTaskBlock(b) -> c.areaSwatch(areaColorFor(area, areas, c))
+                            isTaskBlock(b) -> c.areaSwatch(areaColorFor(bt?.lifeArea, areas, c))
                             else -> c.bg2
                         }
                         Box(
@@ -163,7 +174,11 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
                                 .clickable { editingBlock = b }
                                 .padding(6.dp),
                         ) {
-                            Text(b.taskName, style = UFont.sans(12, FontWeight.Medium), color = c.ink, maxLines = 1)
+                            Text(
+                                b.taskName, style = UFont.sans(12, FontWeight.Medium),
+                                color = if (done) c.ink3 else c.ink, maxLines = 1,
+                                textDecoration = if (done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
+                            )
                         }
                     }
                 }

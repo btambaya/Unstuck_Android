@@ -62,7 +62,7 @@ private fun hhmmToMin(s: String): Int {
 }
 
 @Composable
-fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, avatarInitials: String) {
+fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, avatarInitials: String, onCreateAt: (String, String) -> Unit) {
     val c = UTheme.colors
     var view by remember { mutableStateOf("Day") }
     Column(Modifier.fillMaxSize()) {
@@ -72,7 +72,7 @@ fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () ->
         }
         CalendarSyncBar(vm)
         when (view) {
-            "Day" -> DayGridScreen(vm, onOpen)
+            "Day" -> DayGridScreen(vm, onOpen, onCreateAt)
             "Week" -> WeekView(vm, onOpen)
             else -> MonthView(vm)
         }
@@ -159,14 +159,15 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
                     db.forEach { b ->
                         val top = hhmmToMin(b.startTime) - WSTART * 60
                         if (top in 0..((WEND - WSTART) * 60)) {
-                            val area = if (isTaskBlock(b)) tasks.firstOrNull { it.id == b.taskId }?.lifeArea else null
-                            val fill = if (isTaskBlock(b)) c.areaSwatch(tech.csalliance.unstuck.ui.components.areaColorFor(area, areas, c)) else c.blueSoft
+                            val bt = if (isTaskBlock(b)) tasks.firstOrNull { it.id == b.taskId } else null
+                            val done = bt?.done == true
+                            val fill = if (isTaskBlock(b)) c.areaSwatch(tech.csalliance.unstuck.ui.components.areaColorFor(bt?.lifeArea, areas, c)) else c.blueSoft
                             Box(
                                 Modifier.fillMaxWidth().padding(horizontal = 1.dp).offset(y = WHOUR * (top / 60f))
                                     .height((WHOUR * (b.durationMinutes / 60f)).coerceAtLeast(13.dp))
                                     .clip(RoundedCornerShape(3.dp)).background(fill)
                                     .clickable { tasks.firstOrNull { it.id == b.taskId }?.let(onOpen) },
-                            ) { Text(b.taskName, style = UFont.sans(8, FontWeight.Medium), color = c.ink, maxLines = 1) }
+                            ) { Text(b.taskName, style = UFont.sans(8, FontWeight.Medium), color = if (done) c.ink3 else c.ink, maxLines = 1, textDecoration = if (done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null) }
                         }
                     }
                 }

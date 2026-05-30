@@ -34,6 +34,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -63,6 +64,15 @@ private val CAPTURE_TAGS = listOf(
 
 private fun tomorrowIso(now: Long): String = Clock.dateIso(Time.addDaysMillis(Time.startOfDayMillis(now), 1))
 
+/** Native time picker — lets the user choose any time (not just free-slot chips). */
+private fun pickTime(context: android.content.Context, initial: String?, onPick: (String) -> Unit) {
+    val cal = java.util.Calendar.getInstance()
+    val parts = initial?.split(":")
+    val h = parts?.getOrNull(0)?.toIntOrNull() ?: cal.get(java.util.Calendar.HOUR_OF_DAY)
+    val m = parts?.getOrNull(1)?.toIntOrNull() ?: 0
+    android.app.TimePickerDialog(context, { _, hh, mm -> onPick("%02d:%02d".format(hh, mm)) }, h, m, true).show()
+}
+
 /**
  * New-task sheet — scheduler-first, mirroring the web task-create-modal:
  * WHEN is mandatory (today / tomorrow / pick a date / later), free-slot time
@@ -71,18 +81,22 @@ private fun tomorrowIso(now: Long): String = Clock.dateIso(Time.addDaysMillis(Ti
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun NewTaskSheet(vm: AppViewModel, onDismiss: () -> Unit) {
+fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: String? = null, onDismiss: () -> Unit) {
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val c = UTheme.colors
+    val context = LocalContext.current
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
     val now = vm.nowMs()
+    val todayIso = Clock.dateIso(Time.startOfDayMillis(now))
+    val tmrwIso = tomorrowIso(now)
 
     var name by remember { mutableStateOf("") }
-    var whenSel by remember { mutableStateOf("Today") }       // Today | Tomorrow | Pick date | Later
-    var pickedDate by remember { mutableStateOf(tomorrowIso(now)) }
-    var pickedTime by remember { mutableStateOf<String?>(null) }
+    var whenSel by remember { mutableStateOf(when (prefillDate) { null, todayIso -> "Today"; tmrwIso -> "Tomorrow"; else -> "Pick date" }) }
+    var pickedDate by remember { mutableStateOf(prefillDate?.takeIf { it != todayIso && it != tmrwIso } ?: tmrwIso) }
+    var pickedTime by remember { mutableStateOf(prefillTime) }
+    var autoTime by remember { mutableStateOf(prefillTime == null) }  // false once the user/prefill sets a time
     var estimate by remember { mutableStateOf(settings.focusDefaultMin) }
     var area by remember { mutableStateOf<String?>(null) }
     var firstMove by remember { mutableStateOf("") }
@@ -93,16 +107,18 @@ fun NewTaskSheet(vm: AppViewModel, onDismiss: () -> Unit) {
 
     val effectiveDate: String? = when (whenSel) {
         "Later" -> null
-        "Today" -> Clock.dateIso(Time.startOfDayMillis(now))
-        "Tomorrow" -> tomorrowIso(now)
+        "Today" -> todayIso
+        "Tomorrow" -> tmrwIso
         else -> pickedDate
     }
     val slots = remember(effectiveDate, estimate, blocks) {
         if (effectiveDate == null) emptyList() else findFreeSlotsForDate(blocks, estimate, effectiveDate, now, limit = 4)
     }
-    // Auto-pick the first free slot when the date / estimate changes.
+    // Auto-pick the first free slot when the date/estimate changes — unless the
+    // user (or a calendar-slot prefill) chose a specific time.
     LaunchedEffect(effectiveDate, estimate, whenSel) {
-        pickedTime = if (whenSel == "Later") null else slots.firstOrNull()?.startTime
+        if (whenSel == "Later") pickedTime = null
+        else if (autoTime) pickedTime = slots.firstOrNull()?.startTime
     }
     val conflicts = if (effectiveDate != null && pickedTime != null) findConflicts(effectiveDate, pickedTime!!, estimate, blocks) else emptyList()
     val canSubmit = name.isNotBlank() && (whenSel == "Later" || pickedTime != null)
@@ -120,20 +136,22 @@ fun NewTaskSheet(vm: AppViewModel, onDismiss: () -> Unit) {
                 listOf("Today", "Tomorrow", "Pick date", "Later").forEach { w ->
                     SelectableChip(if (w == "Pick date" && whenSel == "Pick date") pickedDate.takeLast(5) else w, selected = whenSel == w) {
                         whenSel = w
+                        autoTime = true   // re-auto-pick a slot for the new date
                         if (w == "Pick date") showDatePicker = true
                     }
                 }
             }
 
-            // Free-slot time chips + conflict warning (hidden for Later).
+            // Free-slot time chips + a "Pick…" manual time + conflict warning (hidden for Later).
             if (whenSel != "Later") {
                 SectionLabel("Time")
-                if (slots.isEmpty()) {
-                    Text("No free slots that day — it'll still be scheduled.", style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink3)
-                } else {
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        slots.forEach { s -> SelectableChip(formatTime(s.startTime), selected = pickedTime == s.startTime) { pickedTime = s.startTime } }
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    slots.forEach { s -> SelectableChip(formatTime(s.startTime), selected = pickedTime == s.startTime) { pickedTime = s.startTime; autoTime = false } }
+                    val pt = pickedTime
+                    if (pt != null && slots.none { it.startTime == pt }) {
+                        SelectableChip(formatTime(pt), selected = true) { pickTime(context, pt) { pickedTime = it; autoTime = false } }
                     }
+                    SelectableChip("Pick…", selected = false) { pickTime(context, pickedTime) { pickedTime = it; autoTime = false } }
                 }
                 if (conflicts.isNotEmpty()) {
                     Box(Modifier.clip(RoundedCornerShape(8.dp)).background(c.amberSoft).padding(horizontal = 10.dp, vertical = 6.dp)) {

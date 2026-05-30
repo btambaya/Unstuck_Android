@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.3.6"
+        versionCode = 11
+        versionName = "0.3.7"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.3.6 — Google Calendar connect now uses the HTTPS bounce redirect (https://unstuck-602.pages.dev/calendar-callback) instead of the unstuck:// scheme that Google blocks for web OAuth clients — same pattern iOS uses. REQUIRES a one-time Google Cloud Console step: add that exact HTTPS URL to the Web OAuth client's Authorized redirect URIs. Once that's done, connect should complete (sync/disconnect already work as of 0.3.5)."
+    releaseNotes = "v0.3.7 — Two-way Google Calendar sync. Scheduling a task now creates an event on your primary Google Calendar (and moving/resizing/unscheduling updates/removes it); Google events still pull into the grid. Previously Android only pulled — it never pushed your tasks to Google. Verified: scheduling pushes a real event; deleting removes it. (Pushes always target your primary, always-writable calendar.)"
 }
 
 dependencies {

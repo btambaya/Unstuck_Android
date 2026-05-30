@@ -12,7 +12,10 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.core.logic.externalEventToBlock
+import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
+import tech.csalliance.unstuck.core.model.CalendarConnection
+import tech.csalliance.unstuck.core.model.CalendarProvider
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.Tables
 import java.time.LocalDate
@@ -46,6 +49,13 @@ class SyncCoordinator(
 
     private val prefs = context.getSharedPreferences("unstuck.sync", Context.MODE_PRIVATE)
     private var observeJob: Job? = null
+
+    init {
+        // Two-way Google sync: WriteThrough fires these when a task block is
+        // written/removed so the change mirrors to Google (best-effort).
+        write.pushCalBlock = { pushBlockUpsert(it) }
+        write.pushCalBlockDelete = { pushBlockDelete(it) }
+    }
 
     fun start() {
         if (observeJob != null) return
@@ -104,7 +114,12 @@ class SyncCoordinator(
         val to = today.plusDays(30).toString()
         val events = runCatching { calendar.pullEvents(from, to) }
             .onFailure { Log.w(TAG, "calendar pullEvents failed", it) }.getOrNull() ?: return
-        val blocks = events.map { externalEventToBlock(it, it.calendarId) }
+        // Don't mirror events we pushed ourselves — the originating task block already
+        // represents them (avoids a duplicate g_ block sitting next to the task block).
+        val ownEventIds = store.blocks().first()
+            .filter { it.kind == CalBlockKind.TASK && !it.externalEventId.isNullOrBlank() }
+            .mapNotNull { it.externalEventId }.toSet()
+        val blocks = events.filter { it.id !in ownEventIds }.map { externalEventToBlock(it, it.calendarId) }
         val keep = blocks.map { it.id }.toSet()
         blocks.forEach { write.upsertCalBlock(it) }
         // Reconcile deletions: drop in-window EXTERNAL blocks Google no longer returns.
@@ -123,6 +138,56 @@ class SyncCoordinator(
         store.blocks().first()
             .filter { it.kind == CalBlockKind.EXTERNAL && it.externalConnectionId == connectionId }
             .forEach { write.deleteCalBlock(it.id) }
+    }
+
+    // --- Push (Unstuck → Google). Best-effort; mirrors web lib/sync/google-sync. ---
+
+    private suspend fun googleConn(): CalendarConnection? =
+        store.connections().first().firstOrNull { it.provider == CalendarProvider.GOOGLE }
+
+    /** A task block's date+HH:MM → UTC ISO start/end (anchored in the device's
+     *  local zone, like the web's new Date(...).toISOString()). */
+    private fun blockIsoRange(b: CalBlock): Pair<String, String> {
+        val d = b.date.split("-").mapNotNull { it.toIntOrNull() }
+        val t = b.startTime.split(":").mapNotNull { it.toIntOrNull() }
+        if (d.size != 3 || t.size < 2) return "" to ""
+        val start = LocalDate.of(d[0], d[1], d[2]).atTime(t[0], t[1]).atZone(java.time.ZoneId.systemDefault())
+        val end = start.plusMinutes(b.durationMinutes.coerceAtLeast(1).toLong())
+        val fmt = java.time.format.DateTimeFormatter.ISO_INSTANT
+        return fmt.format(start.toInstant()) to fmt.format(end.toInstant())
+    }
+
+    /** PATCH if the block already has a Google event id, else INSERT and return
+     *  the new id (which WriteThrough persists on the block). No-op without a
+     *  Google connection or for non-task blocks. */
+    suspend fun pushBlockUpsert(block: CalBlock): String? {
+        if (block.kind != CalBlockKind.TASK) return null
+        val conn = googleConn() ?: return null
+        // Always write task blocks to the user's PRIMARY calendar — selectedCalendarIds
+        // can include read-only/subscribed calendars (which 403 on insert). "primary" is
+        // Google's alias for the main, always-writable calendar.
+        val calId = "primary"
+        val (start, end) = blockIsoRange(block)
+        if (start.isEmpty()) return null
+        val existing = block.externalEventId
+        return if (!existing.isNullOrBlank()) {
+            runCatching { calendar.patchEvent(existing, conn.id, calId, block.taskName, start, end) }
+                .onFailure { Log.w(TAG, "calendar push patch failed", it) }
+            existing
+        } else {
+            runCatching { calendar.insertEvent(conn.id, calId, block.taskName, start, end) }
+                .onFailure { Log.w(TAG, "calendar push insert failed", it) }.getOrNull()
+        }
+    }
+
+    /** Delete the Google event a locally-removed task block mapped to. */
+    suspend fun pushBlockDelete(block: CalBlock) {
+        val eventId = block.externalEventId?.takeIf { it.isNotBlank() } ?: return
+        if (block.kind == CalBlockKind.EXTERNAL) return
+        val conn = googleConn() ?: return
+        val calId = "primary"   // task blocks are inserted on "primary" — patch/delete there too
+        runCatching { calendar.deleteEvent(eventId, conn.id, calId) }
+            .onFailure { Log.w(TAG, "calendar push delete failed", it) }
     }
 
     private suspend fun handle(status: SessionStatus) {

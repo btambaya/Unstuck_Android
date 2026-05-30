@@ -10,6 +10,7 @@ import tech.csalliance.unstuck.core.model.ReasonLog
 import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.TaskItem
+import kotlinx.coroutines.flow.first
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.OutboxEntity
 import tech.csalliance.unstuck.data.db.Tables
@@ -22,6 +23,12 @@ import tech.csalliance.unstuck.data.db.Tables
 
 class WriteThrough(private val store: LocalStore) {
 
+    // Google Calendar push hooks — wired by SyncCoordinator. `pushCalBlock` returns
+    // the (new/existing) Google event id to persist on the block; both no-op when
+    // there's no Google connection. Kept as a seam so :data/:core stay Google-agnostic.
+    internal var pushCalBlock: (suspend (CalBlock) -> String?)? = null
+    internal var pushCalBlockDelete: (suspend (CalBlock) -> Unit)? = null
+
     suspend fun upsertTask(t: TaskItem) {
         store.upsert(Tables.TASKS, t, TaskItem.serializer(), t.id, t.updatedAt)
         enqueue("tasks", t.id, "upsert", DbRowCodec.encodeTask(t).toString())
@@ -31,10 +38,19 @@ class WriteThrough(private val store: LocalStore) {
         store.upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id)
         // External Google events (g_ ids) are mirrored read-only — never push them
         // to our cal_blocks table (the row id/shape isn't ours; it would fail forever
-        // and stall the outbox).
+        // and stall the outbox) and never re-push them to Google.
         if (b.kind == CalBlockKind.EXTERNAL || b.id.startsWith("g_")) return
         val dependsOn = b.taskId?.let { if (isUuid(it)) it else null } // wait for parent task op
         enqueue("cal_blocks", b.id, "upsert", DbRowCodec.encodeCalBlock(b).toString(), dependsOn)
+        // Mirror to Google (best-effort). An INSERT mints an event id we persist on the
+        // block so later edits PATCH the same event and a pull won't duplicate it.
+        val push = pushCalBlock ?: return
+        val eventId = push(b)
+        if (!eventId.isNullOrBlank() && eventId != b.externalEventId) {
+            val stamped = b.copy(externalEventId = eventId)
+            store.upsert(Tables.CAL_BLOCKS, stamped, CalBlock.serializer(), stamped.id)
+            enqueue("cal_blocks", stamped.id, "upsert", DbRowCodec.encodeCalBlock(stamped).toString(), dependsOn)
+        }
     }
 
     suspend fun upsertSession(s: Session) {
@@ -69,8 +85,12 @@ class WriteThrough(private val store: LocalStore) {
 
     suspend fun deleteTask(id: String) = deleteLocalAndEnqueue(Tables.TASKS, id)
     suspend fun deleteCalBlock(id: String) {
+        // Read the block first so we can push the Google delete (needs its event id).
+        // Skip the read for g_ (external) ids — those are never pushed.
+        val block = if (!id.startsWith("g_")) store.blocks().first().firstOrNull { it.id == id } else null
         store.delete(Tables.CAL_BLOCKS, id)
         if (!id.startsWith("g_")) enqueue(Tables.CAL_BLOCKS, id, "delete", null) // external rows aren't ours
+        block?.let { pushCalBlockDelete?.invoke(it) }
     }
     suspend fun deleteTag(id: String) = deleteLocalAndEnqueue(Tables.TAGS, id)
     suspend fun deleteLifeArea(id: String) = deleteLocalAndEnqueue(Tables.LIFE_AREAS, id)

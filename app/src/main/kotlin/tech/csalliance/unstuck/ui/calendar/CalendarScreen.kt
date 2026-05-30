@@ -1,15 +1,20 @@
 package tech.csalliance.unstuck.ui.calendar
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
@@ -46,6 +51,15 @@ import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+
+// Week grid bounds (compact 6am–11pm window in a vertical scroll).
+private const val WSTART = 6
+private const val WEND = 23
+private val WHOUR = 44.dp
+private fun hhmmToMin(s: String): Int {
+    val p = s.split(":")
+    return (p.getOrNull(0)?.toIntOrNull() ?: 0) * 60 + (p.getOrNull(1)?.toIntOrNull() ?: 0)
+}
 
 @Composable
 fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, avatarInitials: String) {
@@ -118,25 +132,41 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
             RollupStat("Busiest", busiest?.let { dows[((it.dayOfWeek.value + 6) % 7)] } ?: "—", c.amberSoft, c.amberInk, Modifier.weight(1f))
             RollupStat("Lightest", lightest?.let { dows[((it.dayOfWeek.value + 6) % 7)] } ?: "—", c.greenSoft, c.greenInk, Modifier.weight(1f))
         }
-        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // Weekday header (gutter + 7 day labels).
+        Row(Modifier.fillMaxWidth()) {
+            Spacer(Modifier.width(26.dp))
             days.forEachIndexed { i, d ->
                 val isToday = d == today
-                val dayBlocks = blocks.filter { it.date == d.toString() }.sortedBy { it.startTime }
-                Column(Modifier.width(116.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally, modifier = Modifier.fillMaxWidth()) {
-                        Text(dows[i], style = UFont.mono(10, FontWeight.Medium), color = if (isToday) c.coral else c.ink3)
-                        Text("${d.dayOfMonth}", style = UFont.sans(15, FontWeight.SemiBold), color = if (isToday) c.coral else c.ink)
+                Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(dows[i].take(1), style = UFont.mono(9, FontWeight.Medium), color = if (isToday) c.coral else c.ink3)
+                    Text("${d.dayOfMonth}", style = UFont.sans(13, FontWeight.SemiBold), color = if (isToday) c.coral else c.ink)
+                }
+            }
+        }
+        // Hour grid: time gutter + 7 day columns with positioned blocks.
+        Row(Modifier.fillMaxWidth().height(WHOUR * (WEND - WSTART)).padding(top = 6.dp)) {
+            Column(Modifier.width(26.dp)) {
+                for (h in WSTART until WEND) {
+                    Box(Modifier.height(WHOUR)) { Text("%02d".format(h), style = UFont.mono(8), color = c.ink4) }
+                }
+            }
+            days.forEach { d ->
+                val db = blocks.filter { it.date == d.toString() }
+                Box(Modifier.weight(1f).fillMaxHeight()) {
+                    Column(Modifier.fillMaxSize()) {
+                        repeat(WEND - WSTART) { Box(Modifier.fillMaxWidth().height(WHOUR).border(0.5.dp, c.line.copy(alpha = 0.6f))) }
                     }
-                    if (dayBlocks.isEmpty()) Text("Open", style = UFont.sans(11), color = c.ink4, modifier = Modifier.padding(top = 2.dp))
-                    dayBlocks.forEach { b ->
-                        val area = if (isTaskBlock(b)) tasks.firstOrNull { it.id == b.taskId }?.lifeArea else null
-                        val fill = if (isTaskBlock(b)) c.areaSwatch(tech.csalliance.unstuck.ui.components.areaColorFor(area, areas, c)) else c.bg2
-                        Column(
-                            Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(fill)
-                                .clickable { tasks.firstOrNull { it.id == b.taskId }?.let(onOpen) }.padding(7.dp),
-                        ) {
-                            Text(b.startTime, style = UFont.mono(9), color = c.ink3)
-                            Text(b.taskName, style = UFont.sans(11, FontWeight.Medium), color = c.ink, maxLines = 2)
+                    db.forEach { b ->
+                        val top = hhmmToMin(b.startTime) - WSTART * 60
+                        if (top in 0..((WEND - WSTART) * 60)) {
+                            val area = if (isTaskBlock(b)) tasks.firstOrNull { it.id == b.taskId }?.lifeArea else null
+                            val fill = if (isTaskBlock(b)) c.areaSwatch(tech.csalliance.unstuck.ui.components.areaColorFor(area, areas, c)) else c.blueSoft
+                            Box(
+                                Modifier.fillMaxWidth().padding(horizontal = 1.dp).offset(y = WHOUR * (top / 60f))
+                                    .height((WHOUR * (b.durationMinutes / 60f)).coerceAtLeast(13.dp))
+                                    .clip(RoundedCornerShape(3.dp)).background(fill)
+                                    .clickable { tasks.firstOrNull { it.id == b.taskId }?.let(onOpen) },
+                            ) { Text(b.taskName, style = UFont.sans(8, FontWeight.Medium), color = c.ink, maxLines = 1) }
                         }
                     }
                 }

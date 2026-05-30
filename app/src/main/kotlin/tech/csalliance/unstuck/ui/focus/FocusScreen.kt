@@ -146,13 +146,17 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
                 // "Done" = end for now (records the session, keeps the task open).
                 FocusBtn("Done", soft = false) { reflectElapsed = FocusTimer.elapsedSec(l ?: return@FocusBtn, nowMs); vm.finishFocus(task); showReflect = true }
             }
-            // "Mark complete" = the web's "Done early" — also flips task.done.
-            Box(
-                Modifier.padding(top = 12.dp, bottom = 6.dp).clip(RoundedCornerShape(999.dp))
-                    .clickable { reflectElapsed = FocusTimer.elapsedSec(l ?: return@clickable, nowMs); vm.finishFocus(task, markDone = true); showReflect = true }
-                    .padding(horizontal = 14.dp, vertical = 8.dp),
-            ) {
-                Text("✓ Mark complete", style = UFont.sans(13, FontWeight.Medium), color = Color.White.copy(alpha = 0.72f))
+            // Secondary actions: "Save for later" pauses + exits (session persists as
+            // paused → resumable from Today); "Mark complete" = the web's "Done early".
+            Row(Modifier.padding(top = 12.dp, bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Save for later", style = UFont.sans(13, FontWeight.Medium), color = Color.White.copy(alpha = 0.72f),
+                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { vm.pauseFocus(); onClose() }.padding(horizontal = 14.dp, vertical = 8.dp),
+                )
+                Text(
+                    "✓ Mark complete", style = UFont.sans(13, FontWeight.Medium), color = Color.White.copy(alpha = 0.72f),
+                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { reflectElapsed = FocusTimer.elapsedSec(l ?: return@clickable, nowMs); vm.finishFocus(task, markDone = true); showReflect = true }.padding(horizontal = 14.dp, vertical = 8.dp),
+                )
             }
         }
 

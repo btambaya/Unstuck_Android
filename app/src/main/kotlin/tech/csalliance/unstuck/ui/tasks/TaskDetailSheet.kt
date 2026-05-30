@@ -45,6 +45,7 @@ import tech.csalliance.unstuck.design.component.AppBar
 import tech.csalliance.unstuck.design.component.AreaDotColor
 import tech.csalliance.unstuck.design.component.ButtonKind
 import tech.csalliance.unstuck.design.component.Card
+import tech.csalliance.unstuck.design.component.FilterPill
 import tech.csalliance.unstuck.design.component.Leading
 import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.component.UButton
@@ -133,8 +134,8 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                     Column {
                         SectionLabel("Area")
                         Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            SelectableChip("Unassigned", selected = task.lifeArea == null) { vm.updateTask(task.copy(lifeArea = null)) }
-                            areas.forEach { a -> SelectableChip(a.name, selected = task.lifeArea == a.name) { vm.updateTask(task.copy(lifeArea = a.name)) } }
+                            FilterPill("Unassigned", task.lifeArea == null) { vm.updateTask(task.copy(lifeArea = null)) }
+                            areas.forEach { a -> FilterPill(a.name, task.lifeArea == a.name, dotColor = c.areaColor(a.color)) { vm.updateTask(task.copy(lifeArea = if (task.lifeArea == a.name) null else a.name)) } }
                         }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {

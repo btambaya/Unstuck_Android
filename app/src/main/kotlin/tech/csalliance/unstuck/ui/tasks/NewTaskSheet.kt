@@ -150,7 +150,8 @@ fun NewTaskSheet(vm: AppViewModel, onDismiss: () -> Unit) {
             if (areas.isNotEmpty()) {
                 SectionLabel("Area")
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    areas.forEach { a -> SelectableChip(a.name, selected = area == a.name) { area = if (area == a.name) null else a.name } }
+                    tech.csalliance.unstuck.design.component.FilterPill("Unassigned", area == null) { area = null }
+                    areas.forEach { a -> tech.csalliance.unstuck.design.component.FilterPill(a.name, area == a.name, dotColor = c.areaColor(a.color)) { area = if (area == a.name) null else a.name } }
                 }
             }
 

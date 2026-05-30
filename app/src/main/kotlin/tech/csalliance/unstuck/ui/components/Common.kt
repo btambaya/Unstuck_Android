@@ -27,9 +27,19 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import tech.csalliance.unstuck.core.model.Priority
 import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.time.DAY_MS
+import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.design.component.AreaDot
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
+
+/** Whole CALENDAR days since the task was created (0 = made today). Backlog
+ *  excludes today's tasks, so a task made late yesterday should read "1d",
+ *  not "today" — hence calendar-day diff, not floored elapsed time. */
+fun ageDays(createdAt: String?, now: Long): Int {
+    val ms = createdAt?.let { Time.parseMillis(it) } ?: return 0
+    return ((Time.startOfDayMillis(now) - Time.startOfDayMillis(ms)) / DAY_MS).toInt().coerceAtLeast(0)
+}
 
 @Composable
 fun ScreenHeader(title: String, subtitle: String? = null, trailing: (@Composable () -> Unit)? = null) {

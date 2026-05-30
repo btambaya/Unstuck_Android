@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.2.1"
+        versionCode = 4
+        versionName = "0.3.0"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.2.1 — audit fixes: system back button, status/nav-bar insets, completed-today tasks on Today, running-vs-paused live card + progress ring, focus 'Mark complete' + no-data-loss exit, calendar NOW line + area colors, per-tag capture colors, real account in avatar/settings, collections search, no double-booking, no priority picker."
+    releaseNotes = "v0.3.0 — web-parity pass: full Tags (picker/filter/manage), editable task detail (name/first-action/estimate/area/repeat/tags + delete), capture promote/discard/add, focus pause-reasons + Save-for-later, Collections CRUD, Account (password/export/delete), Insights charts + Week/Month/All, Google Calendar connect+pull, colored task tabs + area pills, Today backlog, 24h calendar + real Week grid, settings that actually work (theme/accent/density)."
 }
 
 dependencies {

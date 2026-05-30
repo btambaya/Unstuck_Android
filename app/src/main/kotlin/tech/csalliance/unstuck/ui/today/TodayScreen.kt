@@ -158,7 +158,7 @@ fun TodayScreen(
                     )
                 }
             }
-            items(displayRows, key = { it.id }) { t -> TaskRow(t, areaColorFor(t.lifeArea, areas, c), ageDays = if (backlogActive) daysSinceCreated(t, now) else null) { onOpen(t) } }
+            items(displayRows, key = { it.id }) { t -> TaskRow(t, areaColorFor(t.lifeArea, areas, c), ageDays = if (backlogActive) tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, now) else null) { onOpen(t) } }
         }
         item { Spacer(Modifier.height(24.dp)) }
     }
@@ -259,7 +259,7 @@ private fun TaskRow(task: TaskItem, areaColor: Color, ageDays: Int? = null, onOp
         }
         if (ageDays != null) {
             Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
-                Text(if (ageDays == 0) "today" else "${ageDays}d", style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
+                Text("${ageDays.coerceAtLeast(1)}d", style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
             }
         }
         Text("${task.estimateMin}m", style = UFont.mono(11), color = c.ink3)

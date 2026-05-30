@@ -131,9 +131,9 @@ fun TasksScreen(
                             }
                         }
                         if (view == TaskListView.BACKLOG) {
-                            val age = daysSinceCreated(t, vm.nowMs())
+                            val age = tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, vm.nowMs())
                             Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
-                                Text(if (age == 0) "today" else "${age}d", style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
+                                Text("${age.coerceAtLeast(1)}d", style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
                             }
                         }
                         Text("${t.estimateMin}m", style = UFont.mono(11), color = c.ink3)

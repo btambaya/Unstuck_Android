@@ -13,9 +13,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,11 +30,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tech.csalliance.unstuck.core.logic.daysSinceCreated
 import tech.csalliance.unstuck.core.logic.visibleTasks
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.model.TaskListView
 import tech.csalliance.unstuck.design.component.AppBar
 import tech.csalliance.unstuck.design.component.AreaDotColor
+import tech.csalliance.unstuck.design.component.FilterPill
 import tech.csalliance.unstuck.design.component.Leading
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
@@ -50,6 +55,7 @@ fun TasksScreen(
     vm: AppViewModel,
     activeArea: String?,
     onClearArea: () -> Unit,
+    onAreaPick: (String?) -> Unit,
     onOpen: (TaskItem) -> Unit,
     onSearch: () -> Unit,
     onMenu: () -> Unit,
@@ -73,22 +79,30 @@ fun TasksScreen(
                 Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     TAB_ORDER.forEach { v ->
                         val active = v == view
-                        Box(Modifier.clip(RoundedCornerShape(999.dp)).background(if (active) c.ink else c.bg2).clickable { view = v }.padding(horizontal = 14.dp, vertical = 7.dp)) {
-                            Text(v.label, style = UFont.sans(12, FontWeight.Medium), color = if (active) c.bg else c.ink2)
+                        // Per-tab accent (web parity: Backlog=amber, Completed=green, …).
+                        val pair: Pair<Color, Color>? = when (v) {
+                            TaskListView.BACKLOG -> c.amberSoft to c.amberInk
+                            TaskListView.TODAY -> c.coralSoft to c.coralDeep
+                            TaskListView.UPCOMING -> c.blueSoft to c.blueInk
+                            TaskListView.LATER -> c.primarySoft to c.primaryDeep
+                            TaskListView.COMPLETED -> c.greenSoft to c.greenInk
+                            else -> null
+                        }
+                        Box(Modifier.clip(RoundedCornerShape(999.dp)).background(if (active) (pair?.first ?: c.ink) else c.bg2).clickable { view = v }.padding(horizontal = 14.dp, vertical = 7.dp)) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                if (pair != null && !active) Box(Modifier.size(6.dp).clip(CircleShape).background(pair.second))
+                                Text(v.label, style = UFont.sans(12, FontWeight.Medium), color = if (active) (pair?.second ?: c.bg) else c.ink2)
+                            }
                         }
                     }
                 }
             }
-            if (activeArea != null && view != TaskListView.TODAY) {
-                item {
-                    Row(
-                        Modifier.padding(bottom = 12.dp).clip(RoundedCornerShape(999.dp)).background(c.primarySoft).clickable(onClick = onClearArea).padding(horizontal = 11.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Text("Filtering by ", style = UFont.sans(12), color = c.primaryDeep)
-                        Text(activeArea, style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
-                        Text("✕", style = UFont.sans(12), color = c.primaryDeep)
-                    }
+            // Area filter pills (web parity: filter the list by life area). Today
+            // is area-agnostic, so the pills only bite on the other tabs.
+            item {
+                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    FilterPill("All", activeArea == null) { onAreaPick(null) }
+                    areas.forEach { a -> FilterPill(a.name, activeArea == a.name, dotColor = c.areaColor(a.color)) { onAreaPick(if (activeArea == a.name) null else a.name) } }
                 }
             }
             if (list.isEmpty()) {
@@ -114,6 +128,12 @@ fun TasksScreen(
                                         }
                                     }
                                 }
+                            }
+                        }
+                        if (view == TaskListView.BACKLOG) {
+                            val age = daysSinceCreated(t, vm.nowMs())
+                            Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
+                                Text(if (age == 0) "today" else "${age}d", style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
                             }
                         }
                         Text("${t.estimateMin}m", style = UFont.mono(11), color = c.ink3)

@@ -44,6 +44,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.FocusTimer
+import tech.csalliance.unstuck.core.logic.daysSinceCreated
 import tech.csalliance.unstuck.core.logic.formatMMSS
 import tech.csalliance.unstuck.core.logic.isCompletedToday
 import tech.csalliance.unstuck.core.logic.pickStartNext
@@ -83,6 +84,7 @@ fun TodayScreen(
     val now = vm.nowMs()
     val liveId = live?.taskId
     var areaFilter by remember { mutableStateOf<String?>(null) }
+    var backlogActive by remember { mutableStateOf(false) }
 
     val startNext = pickStartNext(tasks, blocks, liveId, areaFilter)
     // Today = open tasks scheduled/intended for today, plus anything completed today
@@ -91,8 +93,12 @@ fun TodayScreen(
     val todayDone = tasks.filter { isCompletedToday(it, now) && todayOpen.none { o -> o.id == it.id } }
     val todayAll = todayOpen + todayDone
     val rows = todayAll.filter { (areaFilter == null || it.lifeArea == areaFilter) && it.id != startNext?.id && it.id != liveId }
+    // Backlog view (web parity): the unplanned + overdue stack, area-agnostic.
+    val backlogRows = visibleTasks(TaskListView.BACKLOG, tasks, blocks, now, activeArea = null, slipMode = false)
+        .filter { it.id != startNext?.id && it.id != liveId }
+    val displayRows = if (backlogActive) backlogRows else rows
     val liveTask = liveId?.let { id -> tasks.firstOrNull { it.id == id } }
-    val empty = todayAll.isEmpty() && live == null
+    val empty = todayAll.isEmpty() && live == null && backlogRows.isEmpty()
     val weekMin = sessions.filter { (now - (it.completedAtMs() ?: 0)) in 0..(7L * 86_400_000) }.sumOf { it.actualSec } / 60
 
     LazyColumn(Modifier.fillMaxWidth()) {
@@ -126,10 +132,19 @@ fun TodayScreen(
             if (startNext != null) item { StartNextHero(startNext) { onStartFocus(startNext) } }
             item {
                 Column {
-                    Text("Today", style = UFont.sans(15, FontWeight.SemiBold), color = c.ink, modifier = Modifier.padding(start = 18.dp, top = 22.dp, bottom = 8.dp))
+                    Text(if (backlogActive) "Backlog" else "Today", style = UFont.sans(15, FontWeight.SemiBold), color = c.ink, modifier = Modifier.padding(start = 18.dp, top = 22.dp, bottom = 8.dp))
                     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 18.dp, end = 18.dp, bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        FilterPill("All", areaFilter == null) { areaFilter = null }
-                        areas.forEach { a -> FilterPill(a.name, areaFilter == a.name, dotColor = c.areaColor(a.color)) { areaFilter = if (areaFilter == a.name) null else a.name } }
+                        // Backlog toggle — amber accent (web parity); entering it clears the area filter.
+                        Box(
+                            Modifier.clip(RoundedCornerShape(999.dp)).background(if (backlogActive) c.amberSoft else c.bg2).clickable { backlogActive = !backlogActive; if (backlogActive) areaFilter = null }.padding(horizontal = 12.dp, vertical = 6.dp),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                if (!backlogActive) Box(Modifier.size(6.dp).clip(CircleShape).background(c.amber))
+                                Text("Backlog", style = UFont.sans(12, FontWeight.Medium), color = if (backlogActive) c.amberInk else c.ink2)
+                            }
+                        }
+                        FilterPill("All", !backlogActive && areaFilter == null) { backlogActive = false; areaFilter = null }
+                        areas.forEach { a -> FilterPill(a.name, !backlogActive && areaFilter == a.name, dotColor = c.areaColor(a.color)) { backlogActive = false; areaFilter = if (areaFilter == a.name) null else a.name } }
                     }
                 }
             }
@@ -143,7 +158,7 @@ fun TodayScreen(
                     )
                 }
             }
-            items(rows, key = { it.id }) { t -> TaskRow(t, areaColorFor(t.lifeArea, areas, c)) { onOpen(t) } }
+            items(displayRows, key = { it.id }) { t -> TaskRow(t, areaColorFor(t.lifeArea, areas, c), ageDays = if (backlogActive) daysSinceCreated(t, now) else null) { onOpen(t) } }
         }
         item { Spacer(Modifier.height(24.dp)) }
     }
@@ -220,7 +235,7 @@ private fun LiveSessionCard(
 }
 
 @Composable
-private fun TaskRow(task: TaskItem, areaColor: Color, onOpen: () -> Unit) {
+private fun TaskRow(task: TaskItem, areaColor: Color, ageDays: Int? = null, onOpen: () -> Unit) {
     val c = UTheme.colors
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 3.dp).clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).clickable(onClick = onOpen).padding(horizontal = 12.dp, vertical = 11.dp),
@@ -240,6 +255,11 @@ private fun TaskRow(task: TaskItem, areaColor: Color, onOpen: () -> Unit) {
             Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 AreaDotColor(areaColor, size = 5)
                 Text(task.lifeArea ?: "—", style = UFont.sans(12), color = c.ink3)
+            }
+        }
+        if (ageDays != null) {
+            Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
+                Text(if (ageDays == 0) "today" else "${ageDays}d", style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
             }
         }
         Text("${task.estimateMin}m", style = UFont.mono(11), color = c.ink3)

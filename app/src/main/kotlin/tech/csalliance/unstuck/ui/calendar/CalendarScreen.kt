@@ -110,7 +110,7 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
     val busiest = days.getOrNull(plannedByDay.indexOf(plannedByDay.maxOrNull() ?: 0))
     val lightest = days.getOrNull(plannedByDay.indexOf(plannedByDay.minOrNull() ?: 0))
 
-    Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
+    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
         SectionLabel("This week", color = c.primaryDeep, modifier = Modifier.padding(top = 8.dp))
         Text("${monday.month.name.lowercase().replaceFirstChar { it.uppercase() }} ${monday.dayOfMonth}–${days.last().dayOfMonth}", style = UFont.serifItalic(24), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp))
         Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -118,7 +118,7 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
             RollupStat("Busiest", busiest?.let { dows[((it.dayOfWeek.value + 6) % 7)] } ?: "—", c.amberSoft, c.amberInk, Modifier.weight(1f))
             RollupStat("Lightest", lightest?.let { dows[((it.dayOfWeek.value + 6) % 7)] } ?: "—", c.greenSoft, c.greenInk, Modifier.weight(1f))
         }
-        Row(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             days.forEachIndexed { i, d ->
                 val isToday = d == today
                 val dayBlocks = blocks.filter { it.date == d.toString() }.sortedBy { it.startTime }

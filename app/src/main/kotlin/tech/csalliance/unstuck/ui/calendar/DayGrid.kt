@@ -20,6 +20,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -51,8 +52,8 @@ import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.components.areaColorFor
 import kotlin.math.roundToInt
 
-private const val START_HOUR = 6
-private const val END_HOUR = 22
+private const val START_HOUR = 0
+private const val END_HOUR = 24
 private val HOUR_HEIGHT = 56.dp
 
 private fun parseHhmm(hhmm: String): Int {
@@ -79,6 +80,13 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
 
     var date by remember { mutableStateOf(Clock.todayIso()) }
     val scroll = rememberScrollState()
+    // Open today's grid scrolled to roughly an hour before now.
+    LaunchedEffect(date) {
+        if (date == Clock.todayIso()) {
+            val lt = java.time.LocalTime.now()
+            scroll.scrollTo((((lt.hour - 1).coerceAtLeast(0)) * hourPx).toInt())
+        }
+    }
 
     var gridBounds by remember { mutableStateOf(Rect.Zero) }
     var dragTask by remember { mutableStateOf<TaskItem?>(null) }

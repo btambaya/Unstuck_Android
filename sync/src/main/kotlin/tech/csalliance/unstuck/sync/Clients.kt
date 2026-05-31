@@ -20,7 +20,12 @@ class PushClient(private val client: SupabaseClient) {
     private data class RegisterBody(
         val deviceId: String,
         val fcmToken: String?,
-        val platform: String = "android",
+        // NO default: kotlinx omits default-valued fields from JSON (encodeDefaults
+        // off), so a `= "android"` default would drop `platform` from the body and
+        // the server falls through to its `'ios'` branch (register-push-token:47),
+        // mislabeling the row → send-* filters on platform === 'android' never route
+        // FCM to it. Always serialize it by keeping it required + set explicitly below.
+        val platform: String,
         val timezone: String,
     )
 
@@ -30,7 +35,7 @@ class PushClient(private val client: SupabaseClient) {
         client.functions.invoke("register-push-token") {
             method = HttpMethod.Post
             contentType(ContentType.Application.Json)
-            setBody(RegisterBody(deviceId = deviceId, fcmToken = fcmToken, timezone = timezone))
+            setBody(RegisterBody(deviceId = deviceId, fcmToken = fcmToken, platform = "android", timezone = timezone))
         }
     }
 }

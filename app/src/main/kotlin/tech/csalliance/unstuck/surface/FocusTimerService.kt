@@ -28,7 +28,13 @@ class FocusTimerService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         when (intent?.action) {
             ACTION_STOP -> { stopSelf(); return START_NOT_STICKY }
-            ACTION_UPDATE -> paused = intent.getBooleanExtra(EXTRA_PAUSED, paused)
+            ACTION_UPDATE -> {
+                paused = intent.getBooleanExtra(EXTRA_PAUSED, paused)
+                // Refresh the chronometer base on resume — FocusTimer.resume shifts
+                // sessionStart past the pause gap, so the running notification counts
+                // true focus time (not wall-clock incl. the pause).
+                if (intent.hasExtra(EXTRA_START)) startMs = intent.getLongExtra(EXTRA_START, startMs)
+            }
             else -> {
                 name = intent?.getStringExtra(EXTRA_NAME) ?: name
                 startMs = intent?.getLongExtra(EXTRA_START, startMs) ?: startMs
@@ -42,7 +48,10 @@ class FocusTimerService : Service() {
         } else {
             startForeground(NotifIds.FOCUS, notification)
         }
-        return START_STICKY
+        // NOT_STICKY: don't let the system recreate us with a null intent (which would
+        // rebuild a stale/generic notification). The focus-screen live-session observer
+        // re-arms the service from real state when needed.
+        return START_NOT_STICKY
     }
 
     private fun broadcast(action: String): PendingIntent = PendingIntent.getBroadcast(
@@ -95,11 +104,12 @@ class FocusTimerService : Service() {
             context.startForegroundService(i)
         }
 
-        /** Flip the live notification between running and paused in place. */
-        fun update(context: Context, paused: Boolean) {
-            context.startService(
-                Intent(context, FocusTimerService::class.java).setAction(ACTION_UPDATE).putExtra(EXTRA_PAUSED, paused),
-            )
+        /** Flip the live notification between running and paused in place. Pass the
+         *  current sessionStart so the resumed chronometer counts true focus time. */
+        fun update(context: Context, paused: Boolean, startMs: Long? = null) {
+            val i = Intent(context, FocusTimerService::class.java).setAction(ACTION_UPDATE).putExtra(EXTRA_PAUSED, paused)
+            if (startMs != null) i.putExtra(EXTRA_START, startMs)
+            context.startService(i)
         }
 
         fun stop(context: Context) {

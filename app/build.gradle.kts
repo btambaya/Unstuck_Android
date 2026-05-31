@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 14
-        versionName = "0.4.1"
+        versionCode = 15
+        versionName = "0.4.2"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.4.1 — In-app nudges (no push): Today surfaces a quiet card when something is slipping (a task waiting 3+ weeks or rescheduled repeatedly) or when a follow-up note is worth turning into a task — one at a time, dismissible. Builds on v0.4.0 (pre-task reminders + the live focus notification with Pause/Capture and an amber paused check-in)."
+    releaseNotes = "v0.4.2 — Notification review fixes. Tapping a reminder/recap/brief now opens the right place (deep-links were dead — landed on Today), and the live-notification Capture button opens capture. The paused check-in dismisses on Snooze, and the resumed focus timer no longer over-counts the paused gap. Backend: the morning-brief cron no longer double-fires, and the push-budget function is locked to the server. Builds on v0.4.0/0.4.1 (pre-task reminders, live focus notification, paused check-in, recap card, in-app nudges)."
 }
 
 dependencies {

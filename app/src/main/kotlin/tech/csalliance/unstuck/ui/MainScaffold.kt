@@ -14,6 +14,7 @@ import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
@@ -84,6 +85,27 @@ fun MainScaffold(vm: AppViewModel) {
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     fun push(r: Route) = stack.add(r)
     fun pop() { if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex) }
+
+    // Consume notification deep links set by MainActivity: route to the task / today /
+    // recap / brief, or open quick-capture (the live focus screen, else a new task).
+    val deepLink by vm.pendingDeepLink.collectAsStateWithLifecycle()
+    val liveSession by vm.liveSession.collectAsStateWithLifecycle()
+    LaunchedEffect(deepLink) {
+        val dl = deepLink ?: return@LaunchedEffect
+        when {
+            dl == "capture" -> {
+                val liveTask = tasks.firstOrNull { it.id == liveSession?.taskId }
+                if (liveTask != null) focusTask = liveTask else showNewTask = true
+            }
+            dl.startsWith("unstuck://task/") -> {
+                val id = dl.removePrefix("unstuck://task/")
+                tab = "today"; stack.clear()
+                if (tasks.any { it.id == id }) push(Route.Detail(id))
+            }
+            else -> { tab = "today"; stack.clear() }   // unstuck://today, /recap, /brief
+        }
+        vm.consumeDeepLink()
+    }
 
     // System back, top layer wins. NewTask / Avatar ride on ModalBottomSheet which
     // intercepts back itself, so we only handle the focus overlay, the route stack,

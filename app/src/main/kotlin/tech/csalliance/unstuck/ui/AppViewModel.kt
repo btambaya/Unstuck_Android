@@ -206,6 +206,10 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun reminderOverride(taskId: String): Int? = graph.settings.reminderOverride(taskId)
     fun setReminderOverride(taskId: String, leadMin: Int?) = graph.settings.setReminderOverride(taskId, leadMin)
 
+    // --- notification deep links (set by MainActivity from the launch intent) ---
+    val pendingDeepLink: StateFlow<String?> get() = graph.pendingDeepLink
+    fun consumeDeepLink() { graph.pendingDeepLink.value = null }
+
     // --- in-app nudges (things slipping / follow-ups) — surfaced quietly on Today, no push ---
     private val _dismissedNudges = MutableStateFlow<Set<String>>(emptySet())
     fun dismissNudge(id: String) { _dismissedNudges.value = _dismissedNudges.value + id }

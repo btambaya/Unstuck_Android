@@ -2,6 +2,20 @@
 
 Single source of truth for "where is the Android build?". Update as phases land.
 
+> **New engineer? Start with the onboarding handbook: [`docs/handbook/`](docs/handbook/README.md)** (8 deep chapters) + the quick [`docs/APP_GUIDE.md`](docs/APP_GUIDE.md).
+
+## Calendar + Notifications (v0.3.x–v0.4.x, 2026-05-31)
+
+**Two-way Google Calendar sync — shipped & working (v0.3.5–v0.3.8).** Connect uses the HTTPS bounce page `https://unstuck-602.pages.dev/calendar-callback` (registered on the Google Cloud **Web** OAuth client — custom schemes are rejected). Tasks push to the user's **primary** Google calendar (selectedCalendarIds can be read-only → 403); pull sends **RFC3339** timestamps (bare dates → 0 events). Root fixes along the way: ktor `contentType(application/json)` on every `functions.invoke{setBody}`; kotlinx omits default values (made `provider` explicit); snake_case `/connections` DTO.
+
+**Notifications — shipped (v0.4.0–v0.4.2) + backend deployed.** Pre-task reminders (Settings→Focus default + per-task override on New Task; exact AlarmManager, boot reschedule); live focus notification ("FOCUSING · LIVE" + Pause/Capture ↔ amber "Did you step away?" + Resume/Snooze/End); paused-too-long WorkManager check-in; session-end recap (+ Today card); morning brief (server cron, live); in-app slipping/follow-up nudges; per-purpose channels + lock-screen privacy; notification deep-links + Capture route through `MainActivity`→`AppGraph.pendingDeepLink`→`MainScaffold`. New files under `app/.../surface/`: NotificationChannels, NotificationRenderer, NotificationActionReceiver, FocusCommands, PausedCheckinScheduler, ReminderScheduler, ReminderReceiver (boot).
+
+**Backend (deployed to Unstuck `uaxfteluwctrlgwmmfzi`):** `register-push-token`, `send-session-recap`, `send-paused-checkin`, `send-morning-brief` deployed (data-only FCM payloads + design-voice copy); `_shared/fcm.ts` gained `dataOnly`. **Morning-brief cron live** (`morning-brief-dispatch` + `wake-window-calibration`, every 15 min). `CRON_SECRET` rotated + inlined into `dispatch_morning_briefs` (the manual SQL keeps placeholders — never commit the secret). The local `supabase` CLI is already authed to this project — `functions deploy --project-ref uaxfteluwctrlgwmmfzi` + `db query --linked` (no DB password).
+
+**Review pass (2026-05-31):** a multi-agent adversarial review (bugs + security) raised 18, confirmed 10, all fixed — notably: notification deep-links/Capture now actually route (were dead); morning-brief cron double-dispatch (HH:MM vs HH:MM:SS) → minutes-since-midnight half-open window; `try_consume_push_budget` locked to `service_role` only (was public/anon/authenticated); resumed-chronometer base; heavy/light from full open-count; high-priority data push.
+
+**Known refinements (not blocking):** deep-links land on Today but don't yet scroll to the recap/brief detail; the "Capture" action opens the live focus screen (not a standalone capture sheet); per-task reminder lead is device-local (not synced); server `notification_preferences` toggles aren't surfaced in the Android settings UI yet.
+
 ## UI redesign → Android Mockups (in progress)
 
 The app is being reconciled to the official **Android Mockups** (Claude-Design

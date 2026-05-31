@@ -28,7 +28,10 @@ class NotificationActionReceiver : BroadcastReceiver() {
                 PausedCheckinScheduler.cancel(context)
                 NotificationManagerCompat.from(context).cancel(NotifIds.PAUSED)
             }
-            ACTION_SNOOZE -> PausedCheckinScheduler.snooze(context, taskName)
+            ACTION_SNOOZE -> {
+                NotificationManagerCompat.from(context).cancel(NotifIds.PAUSED)
+                PausedCheckinScheduler.snooze(context, taskName)
+            }
             ACTION_END -> {
                 FocusCommands.end(app)
                 PausedCheckinScheduler.cancel(context)

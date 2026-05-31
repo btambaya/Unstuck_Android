@@ -4,6 +4,7 @@ import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.MutableStateFlow
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.UnstuckDatabase
 import tech.csalliance.unstuck.sync.SupabaseClientProvider
@@ -18,6 +19,11 @@ class AppGraph(context: Context) {
     val configured: Boolean = BuildConfig.SUPABASE_ANON_KEY.isNotEmpty()
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+
+    /** A pending notification deep-link (set by MainActivity from the launch intent,
+     *  consumed by MainScaffold to navigate). e.g. "unstuck://task/{id}",
+     *  "unstuck://today/recap", "unstuck://today/brief", or "capture". */
+    val pendingDeepLink = MutableStateFlow<String?>(null)
     val db: UnstuckDatabase = UnstuckDatabase.build(context.applicationContext)
     val store = LocalStore(db)
 

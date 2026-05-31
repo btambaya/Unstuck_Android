@@ -74,6 +74,16 @@ class MainActivity : ComponentActivity() {
                 return
             }
         }
+        // Notification "Capture" action → open quick capture.
+        if (intent?.getBooleanExtra(tech.csalliance.unstuck.surface.NotificationActionReceiver.EXTRA_OPEN_CAPTURE, false) == true) {
+            graph.pendingDeepLink.value = "capture"
+            return
+        }
+        // Notification taps → route to the task / today / recap / brief (consumed by MainScaffold).
+        if (data?.scheme == "unstuck" && (data.host == "task" || data.host == "today")) {
+            graph.pendingDeepLink.value = data.toString()
+            return
+        }
         intent?.let { graph.provider?.client?.handleDeeplinks(it) }
     }
 }

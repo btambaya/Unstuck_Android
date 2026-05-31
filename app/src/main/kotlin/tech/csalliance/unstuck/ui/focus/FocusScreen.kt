@@ -74,7 +74,7 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
     // and glanceable; it's torn down only by the terminal Done / End actions.
     LaunchedEffect(live?.paused, sessionStart) {
         if (sessionStart != null) {
-            FocusTimerService.update(context, paused = live?.paused == true)
+            FocusTimerService.update(context, paused = live?.paused == true, startMs = sessionStart)
             if (live?.paused == true) PausedCheckinScheduler.arm(context, task.name)
             else PausedCheckinScheduler.cancel(context)
         }

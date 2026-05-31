@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.4.1 — In-app nudges (no push, no nagging): Today now surfaces a quiet card when something is slipping (a task waiting 3+ weeks or rescheduled repeatedly) or when a follow-up note is worth turning into a task — one card at a time, dismissible. Builds on v0.4.0 reminders + live focus notification."Remind me before tasks\") or per-task on the New Task sheet (\"Remind me\"). Live focus notification overhauled: \"FOCUSING · LIVE\" with Pause/Capture; pausing flips it to an amber \"Did you step away?\" check-in with Resume/Snooze/End — all from the shade. Paused-too-long check-in (~14 min). Session-end recap card on Today (\"You did the thing.\"). Notifications now use per-purpose channels (reminders/recap/paused/daily) with lock-screen privacy. NOTE: morning brief + in-app nudges are the next drop."
+    releaseNotes = "v0.4.1 — In-app nudges (no push): Today surfaces a quiet card when something is slipping (a task waiting 3+ weeks or rescheduled repeatedly) or when a follow-up note is worth turning into a task — one at a time, dismissible. Builds on v0.4.0 (pre-task reminders + the live focus notification with Pause/Capture and an amber paused check-in)."
 }
 
 dependencies {

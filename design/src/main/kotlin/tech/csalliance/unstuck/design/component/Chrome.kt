@@ -19,6 +19,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.outlined.Menu
+import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -48,6 +49,8 @@ fun AppBar(
     dark: Boolean = false,
     onLeading: () -> Unit = {},
     onSearch: () -> Unit = {},
+    onNotifications: (() -> Unit)? = null,
+    notifUnread: Int = 0,
     avatarInitials: String? = null,
     onAvatar: (() -> Unit)? = null,
 ) {
@@ -64,6 +67,12 @@ fun AppBar(
             color = if (dark) Color.White else c.ink,
         )
         if (trailingSearch) BarIcon(Icons.Outlined.Search, iconTint, onSearch)
+        if (onNotifications != null) {
+            Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onNotifications), contentAlignment = Alignment.Center) {
+                Icon(Icons.Outlined.Notifications, contentDescription = "Notifications", tint = iconTint, modifier = Modifier.size(20.dp))
+                if (notifUnread > 0) Box(Modifier.align(Alignment.TopEnd).padding(top = 9.dp, end = 9.dp).size(7.dp).clip(CircleShape).background(c.coral))
+            }
+        }
         if (onAvatar != null) {
             Box(
                 Modifier.size(40.dp).padding(4.dp).clip(CircleShape).background(c.greenSoft).clickable(onClick = onAvatar),

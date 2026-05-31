@@ -25,7 +25,9 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.TimePicker
 import androidx.compose.material3.rememberDatePickerState
+import androidx.compose.material3.rememberTimePickerState
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -96,6 +98,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     var firstMove by remember { mutableStateOf("") }
     var recurrence by remember { mutableStateOf<tech.csalliance.unstuck.core.model.Recurrence?>(null) }
     var showDatePicker by remember { mutableStateOf(false) }
+    var showTimePicker by remember { mutableStateOf(false) }
     var showEstimate by remember { mutableStateOf(false) }
     var reminderLead by remember { mutableStateOf<Int?>(null) }   // null = use the global default
     val tags = remember { mutableStateListOf<String>() }
@@ -140,17 +143,18 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                 }
             }
 
-            // Free-slot time chips + conflict warning (hidden for Later).
+            // Free-slot chips + a custom time picker + conflict warning (hidden for Later).
             if (whenSel != "Later") {
                 SectionLabel("Time")
-                if (slots.isEmpty()) {
-                    Text("No free slots that day — it'll be added without a set time.", style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink3)
-                } else {
-                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        val pt = pickedTime
-                        if (pt != null && slots.none { it.startTime == pt }) SelectableChip(formatTime(pt), selected = true) {}
-                        slots.forEach { s -> SelectableChip(formatTime(s.startTime), selected = pickedTime == s.startTime) { pickedTime = s.startTime; autoTime = false } }
-                    }
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    val pt = pickedTime
+                    // The chosen time (a prefilled/custom one not in the suggestions) — tap to change.
+                    if (pt != null && slots.none { it.startTime == pt }) SelectableChip(formatTime(pt), selected = true) { showTimePicker = true }
+                    slots.forEach { s -> SelectableChip(formatTime(s.startTime), selected = pickedTime == s.startTime) { pickedTime = s.startTime; autoTime = false } }
+                    SelectableChip("Custom…", selected = false) { showTimePicker = true }
+                }
+                if (slots.isEmpty() && pickedTime == null) {
+                    Text("No free slots that day — pick a custom time, or it'll be added without one.", style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink3)
                 }
                 if (conflicts.isNotEmpty()) {
                     Box(Modifier.clip(RoundedCornerShape(8.dp)).background(c.amberSoft).padding(horizontal = 10.dp, vertical = 6.dp)) {
@@ -247,6 +251,25 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
             },
             dismissButton = { TextButton(onClick = { showDatePicker = false }) { Text("Cancel") } },
         ) { DatePicker(state = dpState) }
+    }
+
+    if (showTimePicker) {
+        val tpState = rememberTimePickerState(
+            initialHour = pickedTime?.substringBefore(":")?.toIntOrNull() ?: 9,
+            initialMinute = pickedTime?.substringAfter(":")?.toIntOrNull() ?: 0,
+            is24Hour = false,
+        )
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showTimePicker = false },
+            confirmButton = {
+                TextButton(onClick = {
+                    pickedTime = "%02d:%02d".format(tpState.hour, tpState.minute); autoTime = false; showTimePicker = false
+                }) { Text("OK") }
+            },
+            dismissButton = { TextButton(onClick = { showTimePicker = false }) { Text("Cancel") } },
+            text = { Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { TimePicker(state = tpState) } },
+            containerColor = c.surface,
+        )
     }
 
     if (showEstimate) {

@@ -221,6 +221,15 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
             else computeNudges(ts, cs, nowMs()).filterNot { it.id in dismissed }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    // --- in-app notification center: the log of shown notifications + an unread badge ---
+    val notifications: StateFlow<List<tech.csalliance.unstuck.surface.NotificationLog.Entry>>
+        get() = tech.csalliance.unstuck.surface.NotificationLog.items
+    val notifUnread: StateFlow<Int> =
+        combine(tech.csalliance.unstuck.surface.NotificationLog.items, tech.csalliance.unstuck.surface.NotificationLog.lastSeen) { items, seen ->
+            items.count { it.at > seen }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
+    fun markNotificationsSeen() = tech.csalliance.unstuck.surface.NotificationLog.markAllSeen()
+
     private fun computeNudges(tasks: List<TaskItem>, captures: List<Capture>, now: Long): List<Nudge> {
         val out = mutableListOf<Nudge>()
         // D1 — slipping: open tasks older than 3 weeks or rescheduled 3+ times.

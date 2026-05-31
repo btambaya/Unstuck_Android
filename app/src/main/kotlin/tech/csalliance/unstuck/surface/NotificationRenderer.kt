@@ -59,6 +59,7 @@ object NotificationRenderer {
             .setContentIntent(openApp(context, deepLink))
             .build()
         NotificationManagerCompat.from(context).notify(id, n)
+        NotificationLog.add(context, kind, title, body, deepLink)
     }
 
     /** Post the paused-too-long check-in locally, with Resume / Snooze / End. */
@@ -79,6 +80,7 @@ object NotificationRenderer {
             .addAction(0, "End", action(NotificationActionReceiver.ACTION_END))
             .build()
         NotificationManagerCompat.from(context).notify(NotifIds.PAUSED, n)
+        NotificationLog.add(context, "paused_checkin", "Did you step away?", taskName, "unstuck://today")
     }
 
     /** A scheduled task's start time (A2), or the didn't-start follow-up (A4).
@@ -115,6 +117,7 @@ object NotificationRenderer {
             .addAction(0, "Reschedule", reschedPI)
             .build()
         NotificationManagerCompat.from(context).notify(id, n)
+        NotificationLog.add(context, if (drifted) "drifted" else "atstart", title, body, "unstuck://task/$taskId")
     }
 
     /** Brief confirmation after a one-tap Reschedule (replaces the start-now notif). */

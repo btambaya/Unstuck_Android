@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 17
-        versionName = "0.4.4"
+        versionCode = 18
+        versionName = "0.4.5"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.4.4 — Start-now notifications + 3 notification levels. When a scheduled task is due you now get a 'starts now' notification (not just the heads-up before) with two buttons that work even when the app is closed: Start jumps straight into Focus, and Reschedule moves it to your next free slot in one tap. New Settings -> Focus -> Notifications control with three levels: Calm (essentials only), Balanced (the default), and Coach (adds a nudge if you haven't started on time). Builds on the v0.4.3 push-delivery fix."
+    releaseNotes = "v0.4.5 — UI polish + a notification center. Today and Tasks now keep the header and filters PINNED while only the list scrolls. Tapping your initials opens the account menu right next to them (a dropdown, not a bottom sheet). A new bell next to your initials opens a notification center with upcoming reminders and recent notifications (unread dot included). You can now set a CUSTOM time when scheduling a task (a 'Custom...' chip opens a time picker). The add field in a collection now sits at the bottom so the whole add flow is bottom-anchored. Builds on v0.4.4."
 }
 
 dependencies {

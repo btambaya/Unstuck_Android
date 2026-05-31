@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -77,6 +78,8 @@ fun TodayScreen(
     onAvatar: () -> Unit,
     onSearch: () -> Unit,
     onInsights: () -> Unit,
+    onNotifications: () -> Unit,
+    notifUnread: Int,
 ) {
     val c = UTheme.colors
     val tasks by vm.tasks.collectAsStateWithLifecycle()
@@ -114,108 +117,113 @@ fun TodayScreen(
     val empty = todayAll.isEmpty() && live == null && backlogRows.isEmpty()
     val weekMin = sessions.filter { (now - (it.completedAtMs() ?: 0)) in 0..(7L * 86_400_000) }.sumOf { it.actualSec } / 60
 
-    LazyColumn(Modifier.fillMaxWidth()) {
-        item {
-            Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 14.dp, bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Orbit(size = 24)
+    Column(Modifier.fillMaxWidth()) {
+        // ── Pinned header: avatar + bell, greeting, and (when there's content) the
+        //    Today/Backlog filters. Only the list below scrolls. ──────────────────
+        Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 12.dp, top = 14.dp, bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Orbit(size = 24)
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onNotifications), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.Notifications, contentDescription = "Notifications", tint = c.ink2, modifier = Modifier.size(20.dp))
+                    if (notifUnread > 0) Box(Modifier.align(Alignment.TopEnd).padding(top = 9.dp, end = 9.dp).size(7.dp).clip(CircleShape).background(c.coral))
+                }
                 Box(Modifier.size(32.dp).clip(CircleShape).background(c.greenSoft).clickable(onClick = onAvatar), contentAlignment = Alignment.Center) {
                     Text(initials, style = UFont.sans(12, FontWeight.SemiBold), color = c.greenInk)
                 }
             }
         }
-        item {
-            Column(Modifier.padding(horizontal = 18.dp)) {
-                SectionLabel(dateEyebrow(now), color = c.primaryDeep)
-                Text("${greeting(now)}\nUnstuck.", style = UFont.serifItalic(28), color = c.ink, modifier = Modifier.padding(top = 6.dp, bottom = 6.dp))
-                Row(
-                    Modifier.padding(top = 2.dp).clip(RoundedCornerShape(999.dp)).background(c.bg2).clickable(onClick = onInsights).padding(horizontal = 12.dp, vertical = 7.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
-                ) {
-                    Box(Modifier.size(6.dp).clip(CircleShape).background(c.coral))
-                    Text("This week · ", style = UFont.sans(12), color = c.ink2)
-                    Text(if (weekMin >= 60) "${weekMin / 60}h focused" else "${weekMin}m focused", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
-                    Text("→", style = UFont.sans(12), color = c.ink3)
-                }
+        Column(Modifier.padding(horizontal = 18.dp)) {
+            SectionLabel(dateEyebrow(now), color = c.primaryDeep)
+            Text("${greeting(now)}\nUnstuck.", style = UFont.serifItalic(28), color = c.ink, modifier = Modifier.padding(top = 6.dp, bottom = 6.dp))
+            Row(
+                Modifier.padding(top = 2.dp, bottom = 4.dp).clip(RoundedCornerShape(999.dp)).background(c.bg2).clickable(onClick = onInsights).padding(horizontal = 12.dp, vertical = 7.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Box(Modifier.size(6.dp).clip(CircleShape).background(c.coral))
+                Text("This week · ", style = UFont.sans(12), color = c.ink2)
+                Text(if (weekMin >= 60) "${weekMin / 60}h focused" else "${weekMin}m focused", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
+                Text("→", style = UFont.sans(12), color = c.ink3)
             }
         }
-
-        recap?.let { r ->
-            item {
-                Column(
-                    Modifier.padding(horizontal = 18.dp, vertical = 8.dp).clip(RoundedCornerShape(18.dp))
-                        .background(c.coralSoft).padding(16.dp),
+        if (!empty) {
+            Text(if (backlogActive) "Backlog" else "Today", style = UFont.sans(15, FontWeight.SemiBold), color = c.ink, modifier = Modifier.padding(start = 18.dp, top = 14.dp, bottom = 8.dp))
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 18.dp, end = 18.dp, bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                // Backlog toggle — amber accent (web parity); entering it clears the area filter.
+                Box(
+                    Modifier.clip(RoundedCornerShape(999.dp)).background(if (backlogActive) c.amberSoft else c.bg2).clickable { backlogActive = !backlogActive; if (backlogActive) areaFilter = null }.padding(horizontal = 12.dp, vertical = 6.dp),
                 ) {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
-                        SectionLabel("Just now", color = c.coralDeep)
-                        Text("✕", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable { vm.dismissRecap() })
-                    }
-                    Text("You did the thing.", style = UFont.serifItalic(22), color = c.ink, modifier = Modifier.padding(top = 4.dp))
-                    Text(
-                        "${(r.focusedSec / 60).coerceAtLeast(1)} MIN FOCUSED · ${r.taskName}",
-                        style = UFont.mono(11), color = c.ink2, maxLines = 1, modifier = Modifier.padding(top = 6.dp),
-                    )
-                }
-            }
-        }
-
-        nudges.firstOrNull()?.let { n ->
-            item {
-                Row(
-                    Modifier.padding(horizontal = 18.dp, vertical = 6.dp).fillMaxWidth().clip(RoundedCornerShape(16.dp))
-                        .background(c.bg2).border(1.dp, c.line, RoundedCornerShape(16.dp)).padding(14.dp),
-                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
-                ) {
-                    Text(n.title, style = UFont.sans(13), color = c.ink2, maxLines = 2, modifier = Modifier.weight(1f))
-                    Text(
-                        n.action, style = UFont.sans(12, FontWeight.SemiBold), color = c.primaryDeep,
-                        modifier = Modifier.clickable {
-                            when (n.kind) {
-                                tech.csalliance.unstuck.ui.NudgeKind.SLIPPING -> tasks.firstOrNull { it.id == n.taskId }?.let(onOpen)
-                                tech.csalliance.unstuck.ui.NudgeKind.CAPTURE -> vm.captures.value.firstOrNull { it.id == n.captureId }?.let { vm.promoteCapture(it) }
-                            }
-                            vm.dismissNudge(n.id)
-                        },
-                    )
-                    Text("✕", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clickable { vm.dismissNudge(n.id) })
-                }
-            }
-        }
-
-        if (empty) {
-            item { EmptyHero(onAdd = onSearch) }
-        } else {
-            if (startNext != null) item { StartNextHero(startNext) { onStartFocus(startNext) } }
-            item {
-                Column {
-                    Text(if (backlogActive) "Backlog" else "Today", style = UFont.sans(15, FontWeight.SemiBold), color = c.ink, modifier = Modifier.padding(start = 18.dp, top = 22.dp, bottom = 8.dp))
-                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 18.dp, end = 18.dp, bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                        // Backlog toggle — amber accent (web parity); entering it clears the area filter.
-                        Box(
-                            Modifier.clip(RoundedCornerShape(999.dp)).background(if (backlogActive) c.amberSoft else c.bg2).clickable { backlogActive = !backlogActive; if (backlogActive) areaFilter = null }.padding(horizontal = 12.dp, vertical = 6.dp),
-                        ) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                                if (!backlogActive) Box(Modifier.size(6.dp).clip(CircleShape).background(c.amber))
-                                Text("Backlog", style = UFont.sans(12, FontWeight.Medium), color = if (backlogActive) c.amberInk else c.ink2)
-                            }
-                        }
-                        FilterPill("All", !backlogActive && areaFilter == null) { backlogActive = false; areaFilter = null }
-                        areas.forEach { a -> FilterPill(a.name, !backlogActive && areaFilter == a.name, dotColor = c.areaColor(a.color)) { backlogActive = false; areaFilter = if (areaFilter == a.name) null else a.name } }
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                        if (!backlogActive) Box(Modifier.size(6.dp).clip(CircleShape).background(c.amber))
+                        Text("Backlog", style = UFont.sans(12, FontWeight.Medium), color = if (backlogActive) c.amberInk else c.ink2)
                     }
                 }
+                FilterPill("All", !backlogActive && areaFilter == null) { backlogActive = false; areaFilter = null }
+                areas.forEach { a -> FilterPill(a.name, !backlogActive && areaFilter == a.name, dotColor = c.areaColor(a.color)) { backlogActive = false; areaFilter = if (areaFilter == a.name) null else a.name } }
             }
-            if (liveTask != null && live != null) {
+        }
+
+        // ── Scrolling content ─────────────────────────────────────────────────────
+        LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+            recap?.let { r ->
                 item {
-                    LiveSessionCard(
-                        liveTask, live!!, nowTick,
-                        onReturn = { onStartFocus(liveTask) },
-                        onPause = { vm.pauseFocus() },
-                        onResume = { vm.resumeFocus() },
-                    )
+                    Column(
+                        Modifier.padding(horizontal = 18.dp, vertical = 8.dp).clip(RoundedCornerShape(18.dp))
+                            .background(c.coralSoft).padding(16.dp),
+                    ) {
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
+                            SectionLabel("Just now", color = c.coralDeep)
+                            Text("✕", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable { vm.dismissRecap() })
+                        }
+                        Text("You did the thing.", style = UFont.serifItalic(22), color = c.ink, modifier = Modifier.padding(top = 4.dp))
+                        Text(
+                            "${(r.focusedSec / 60).coerceAtLeast(1)} MIN FOCUSED · ${r.taskName}",
+                            style = UFont.mono(11), color = c.ink2, maxLines = 1, modifier = Modifier.padding(top = 6.dp),
+                        )
+                    }
                 }
             }
-            items(displayRows, key = { it.id }) { t -> TaskRow(t, areaColorFor(t.lifeArea, areas, c), ageDays = if (backlogActive) tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, now) else null) { onOpen(t) } }
+
+            nudges.firstOrNull()?.let { n ->
+                item {
+                    Row(
+                        Modifier.padding(horizontal = 18.dp, vertical = 6.dp).fillMaxWidth().clip(RoundedCornerShape(16.dp))
+                            .background(c.bg2).border(1.dp, c.line, RoundedCornerShape(16.dp)).padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Text(n.title, style = UFont.sans(13), color = c.ink2, maxLines = 2, modifier = Modifier.weight(1f))
+                        Text(
+                            n.action, style = UFont.sans(12, FontWeight.SemiBold), color = c.primaryDeep,
+                            modifier = Modifier.clickable {
+                                when (n.kind) {
+                                    tech.csalliance.unstuck.ui.NudgeKind.SLIPPING -> tasks.firstOrNull { it.id == n.taskId }?.let(onOpen)
+                                    tech.csalliance.unstuck.ui.NudgeKind.CAPTURE -> vm.captures.value.firstOrNull { it.id == n.captureId }?.let { vm.promoteCapture(it) }
+                                }
+                                vm.dismissNudge(n.id)
+                            },
+                        )
+                        Text("✕", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clickable { vm.dismissNudge(n.id) })
+                    }
+                }
+            }
+
+            if (empty) {
+                item { EmptyHero(onAdd = onSearch) }
+            } else {
+                if (startNext != null) item { StartNextHero(startNext) { onStartFocus(startNext) } }
+                if (liveTask != null && live != null) {
+                    item {
+                        LiveSessionCard(
+                            liveTask, live!!, nowTick,
+                            onReturn = { onStartFocus(liveTask) },
+                            onPause = { vm.pauseFocus() },
+                            onResume = { vm.resumeFocus() },
+                        )
+                    }
+                }
+                items(displayRows, key = { it.id }) { t -> TaskRow(t, areaColorFor(t.lifeArea, areas, c), ageDays = if (backlogActive) tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, now) else null) { onOpen(t) } }
+            }
+            item { Spacer(Modifier.height(24.dp)) }
         }
-        item { Spacer(Modifier.height(24.dp)) }
     }
 }
 

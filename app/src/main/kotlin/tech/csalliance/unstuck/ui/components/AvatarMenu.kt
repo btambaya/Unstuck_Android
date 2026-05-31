@@ -10,36 +10,50 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
-import tech.csalliance.unstuck.design.component.SheetHandle
-import tech.csalliance.unstuck.design.component.SheetScrim
+import androidx.compose.ui.window.Popup
+import androidx.compose.ui.window.PopupProperties
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
 
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * Account menu, anchored to the top-right next to the avatar initials (a popup
+ * card, not a bottom sheet — tapping the avatar should drop the menu down from
+ * it). Dismisses on outside tap / back.
+ */
 @Composable
 fun AvatarMenu(vm: AppViewModel, onInsights: () -> Unit, onSettings: () -> Unit, onDismiss: () -> Unit) {
     val c = UTheme.colors
-    val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val name = vm.currentName ?: "Your account"
     val email = vm.currentEmail ?: "Signed in"
     val initials = name.split(' ', '.', '@').mapNotNull { it.firstOrNull()?.uppercaseChar() }.take(2).joinToString("").ifEmpty { "U" }
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = SheetScrim, dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } }) {
-        Column(Modifier.fillMaxWidth().padding(bottom = 20.dp)) {
-            Row(Modifier.fillMaxWidth().padding(start = 20.dp, end = 20.dp, top = 6.dp, bottom = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
-                Box(Modifier.size(36.dp).clip(CircleShape).background(c.greenSoft), contentAlignment = Alignment.Center) {
-                    Text(initials, style = UFont.sans(13, FontWeight.SemiBold), color = c.greenInk)
+    // Sit just below the avatar in the top bar (status bar + bar height ≈ 64dp),
+    // inset a touch from the right edge. Window-level, so it ignores statusBarsPadding.
+    val offset = with(LocalDensity.current) { IntOffset(x = (-6).dp.roundToPx(), y = 64.dp.roundToPx()) }
+    Popup(alignment = Alignment.TopEnd, offset = offset, onDismissRequest = onDismiss, properties = PopupProperties(focusable = true)) {
+        Column(
+            Modifier.padding(end = 2.dp).width(248.dp)
+                .shadow(12.dp, RoundedCornerShape(16.dp))
+                .clip(RoundedCornerShape(16.dp)).background(c.surface)
+                .padding(vertical = 6.dp),
+        ) {
+            Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
+                Box(Modifier.size(34.dp).clip(CircleShape).background(c.greenSoft), contentAlignment = Alignment.Center) {
+                    Text(initials, style = UFont.sans(12, FontWeight.SemiBold), color = c.greenInk)
                 }
                 Column(Modifier.weight(1f)) {
                     Text(name, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink, maxLines = 1)
@@ -47,15 +61,15 @@ fun AvatarMenu(vm: AppViewModel, onInsights: () -> Unit, onSettings: () -> Unit,
                 }
             }
             Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
-            MenuRow("Insights", c.ink, onInsights)
-            MenuRow("Settings", c.ink, onSettings)
-            Box(Modifier.fillMaxWidth().height(1.dp).background(c.line).padding(horizontal = 20.dp))
+            MenuRow("Insights", c.ink) { onInsights(); onDismiss() }
+            MenuRow("Settings", c.ink) { onSettings(); onDismiss() }
+            Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
             MenuRow("Sign out", c.ink3) { vm.signOut(); onDismiss() }
         }
     }
 }
 
 @Composable
-private fun MenuRow(label: String, color: androidx.compose.ui.graphics.Color, onClick: () -> Unit) {
-    Text(label, style = UFont.sans(14), color = color, modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 12.dp))
+private fun MenuRow(label: String, color: Color, onClick: () -> Unit) {
+    Text(label, style = UFont.sans(14), color = color, modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 12.dp))
 }

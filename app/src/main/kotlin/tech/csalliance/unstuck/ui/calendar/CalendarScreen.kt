@@ -62,11 +62,11 @@ private fun hhmmToMin(s: String): Int {
 }
 
 @Composable
-fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, avatarInitials: String, onCreateAt: (String, String) -> Unit) {
+fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, onNotifications: () -> Unit, notifUnread: Int, avatarInitials: String, onCreateAt: (String, String) -> Unit) {
     val c = UTheme.colors
     var view by remember { mutableStateOf("Day") }
     Column(Modifier.fillMaxSize()) {
-        AppBar(title = "Calendar", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch, onAvatar = onAvatar, avatarInitials = avatarInitials)
+        AppBar(title = "Calendar", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch, onNotifications = onNotifications, notifUnread = notifUnread, onAvatar = onAvatar, avatarInitials = avatarInitials)
         Box(Modifier.padding(horizontal = 18.dp, vertical = 4.dp)) {
             MdSegment(listOf("Day", "Week", "Month"), view) { view = it }
         }

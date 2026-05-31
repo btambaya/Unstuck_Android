@@ -60,6 +60,8 @@ fun TasksScreen(
     onSearch: () -> Unit,
     onMenu: () -> Unit,
     onAvatar: () -> Unit,
+    onNotifications: () -> Unit,
+    notifUnread: Int,
     avatarInitials: String,
 ) {
     val c = UTheme.colors
@@ -73,51 +75,48 @@ fun TasksScreen(
     val list = visibleTasks(view, tasks, blocks, vm.nowMs(), activeArea = if (view == TaskListView.TODAY) null else activeArea, activeTag = activeTag, slipMode = false)
 
     Column(Modifier.fillMaxSize()) {
-        AppBar(title = "Tasks", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch, onAvatar = onAvatar, avatarInitials = avatarInitials)
-        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
-            item { Text("Your tasks", style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp)) }
-            item {
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    TAB_ORDER.forEach { v ->
-                        val active = v == view
-                        // Per-tab accent (web parity: Backlog=amber, Completed=green, …).
-                        val pair: Pair<Color, Color>? = when (v) {
-                            TaskListView.BACKLOG -> c.amberSoft to c.amberInk
-                            TaskListView.TODAY -> c.coralSoft to c.coralDeep
-                            TaskListView.UPCOMING -> c.blueSoft to c.blueInk
-                            TaskListView.LATER -> c.primarySoft to c.primaryDeep
-                            TaskListView.COMPLETED -> c.greenSoft to c.greenInk
-                            else -> null
-                        }
-                        Box(Modifier.clip(RoundedCornerShape(999.dp)).background(if (active) (pair?.first ?: c.ink) else c.bg2).clickable { view = v }.padding(horizontal = 14.dp, vertical = 7.dp)) {
-                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                                if (pair != null && !active) Box(Modifier.size(6.dp).clip(CircleShape).background(pair.second))
-                                Text(v.label, style = UFont.sans(12, FontWeight.Medium), color = if (active) (pair?.second ?: c.bg) else c.ink2)
-                            }
+        AppBar(title = "Tasks", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch, onNotifications = onNotifications, notifUnread = notifUnread, onAvatar = onAvatar, avatarInitials = avatarInitials)
+        // ── Pinned: title + tab pills + area/tag filters. Only the list below scrolls. ──
+        Column(Modifier.padding(horizontal = 18.dp)) {
+            Text("Your tasks", style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 10.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                TAB_ORDER.forEach { v ->
+                    val active = v == view
+                    // Per-tab accent (web parity: Backlog=amber, Completed=green, …).
+                    val pair: Pair<Color, Color>? = when (v) {
+                        TaskListView.BACKLOG -> c.amberSoft to c.amberInk
+                        TaskListView.TODAY -> c.coralSoft to c.coralDeep
+                        TaskListView.UPCOMING -> c.blueSoft to c.blueInk
+                        TaskListView.LATER -> c.primarySoft to c.primaryDeep
+                        TaskListView.COMPLETED -> c.greenSoft to c.greenInk
+                        else -> null
+                    }
+                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(if (active) (pair?.first ?: c.ink) else c.bg2).clickable { view = v }.padding(horizontal = 14.dp, vertical = 7.dp)) {
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                            if (pair != null && !active) Box(Modifier.size(6.dp).clip(CircleShape).background(pair.second))
+                            Text(v.label, style = UFont.sans(12, FontWeight.Medium), color = if (active) (pair?.second ?: c.bg) else c.ink2)
                         }
                     }
                 }
             }
             // Area filter pills (web parity: filter the list by life area). Today
             // is area-agnostic, so the pills only bite on the other tabs.
-            item {
-                Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    FilterPill("All", activeArea == null) { onAreaPick(null) }
-                    areas.forEach { a -> FilterPill(a.name, activeArea == a.name, dotColor = c.areaColor(a.color)) { onAreaPick(if (activeArea == a.name) null else a.name) } }
-                }
+            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                FilterPill("All", activeArea == null) { onAreaPick(null) }
+                areas.forEach { a -> FilterPill(a.name, activeArea == a.name, dotColor = c.areaColor(a.color)) { onAreaPick(if (activeArea == a.name) null else a.name) } }
             }
             if (activeTag != null) {
-                item {
-                    Row(
-                        Modifier.padding(bottom = 12.dp).clip(RoundedCornerShape(999.dp)).background(c.primarySoft).clickable { activeTag = null }.padding(horizontal = 11.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        Text("Filtering by tag ", style = UFont.sans(12), color = c.primaryDeep)
-                        Text("#${activeTag}", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
-                        Text("✕", style = UFont.sans(12), color = c.primaryDeep)
-                    }
+                Row(
+                    Modifier.padding(bottom = 12.dp).clip(RoundedCornerShape(999.dp)).background(c.primarySoft).clickable { activeTag = null }.padding(horizontal = 11.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Text("Filtering by tag ", style = UFont.sans(12), color = c.primaryDeep)
+                    Text("#${activeTag}", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
+                    Text("✕", style = UFont.sans(12), color = c.primaryDeep)
                 }
             }
+        }
+        LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
             if (list.isEmpty()) {
                 item { Text("No ${view.label.lowercase()} tasks.", style = UFont.sans(14), color = c.ink3, modifier = Modifier.padding(vertical = 32.dp)) }
             } else {

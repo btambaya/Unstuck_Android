@@ -55,6 +55,7 @@ private sealed interface Route {
     data object Settings : Route
     data class SettingsSub(val section: SettingsSection) : Route
     data object Palette : Route
+    data object Notifications : Route
 }
 
 private sealed interface Sheet {
@@ -83,8 +84,10 @@ fun MainScaffold(vm: AppViewModel) {
     }
 
     val tasks by vm.tasks.collectAsStateWithLifecycle()
+    val notifUnread by vm.notifUnread.collectAsStateWithLifecycle()
     fun push(r: Route) = stack.add(r)
     fun pop() { if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex) }
+    val openNotifs: () -> Unit = { vm.markNotificationsSeen(); push(Route.Notifications) }
 
     // Consume notification deep links set by MainActivity: route to the task / today /
     // recap / brief, or open quick-capture (the live focus screen, else a new task).
@@ -133,10 +136,12 @@ fun MainScaffold(vm: AppViewModel) {
                         onAvatar = { sheet = Sheet.Avatar },
                         onSearch = { push(Route.Palette) },
                         onInsights = { push(Route.Insights(false)) },
+                        onNotifications = openNotifs,
+                        notifUnread = notifUnread,
                     )
-                    "tasks" -> TasksScreen(vm, activeArea = activeArea, onClearArea = { activeArea = null }, onAreaPick = { activeArea = it }, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, avatarInitials = initials)
-                    "calendar" -> CalendarScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, avatarInitials = initials, onCreateAt = { d, t -> newTaskPrefill = d to t; showNewTask = true })
-                    "lists" -> CollectionsScreen(vm, onOpen = { push(Route.Collection(it)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, avatarInitials = initials)
+                    "tasks" -> TasksScreen(vm, activeArea = activeArea, onClearArea = { activeArea = null }, onAreaPick = { activeArea = it }, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
+                    "calendar" -> CalendarScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials, onCreateAt = { d, t -> newTaskPrefill = d to t; showNewTask = true })
+                    "lists" -> CollectionsScreen(vm, onOpen = { push(Route.Collection(it)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
                 }
             }
             BottomNavBar(NAV, tab, onSelect = { tab = it; stack.clear() }, onFab = { showNewTask = true }, modifier = Modifier.navigationBarsPadding())
@@ -161,6 +166,9 @@ fun MainScaffold(vm: AppViewModel) {
                         onOpenTask = { pop(); push(Route.Detail(it.id)) },
                         onTab = { tab = it; stack.clear() },
                         onSettings = { stack.clear(); push(Route.Settings) },
+                    )
+                    Route.Notifications -> tech.csalliance.unstuck.ui.notifications.NotificationCenterScreen(
+                        vm, onBack = ::pop, onOpenTask = { id -> pop(); push(Route.Detail(id)) },
                     )
                 }
             }

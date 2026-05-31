@@ -105,26 +105,11 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                 }
             }
 
-            // Add-item pill field (autofocused).
-            Row(
-                Modifier.fillMaxWidth().padding(top = 16.dp).clip(RoundedCornerShape(28.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(28.dp)).padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = null, tint = c.ink3)
-                BasicTextField(
-                    value = draft, onValueChange = { draft = it },
-                    textStyle = UFont.sans(15).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { add() }),
-                    modifier = Modifier.weight(1f).focusRequester(focus),
-                    decorationBox = { inner -> if (draft.isEmpty()) Text("Add to this collection…", style = UFont.sans(15), color = c.ink3); inner() },
-                )
-            }
-
             if (col.items.isEmpty()) {
                 Box(Modifier.fillMaxWidth().padding(top = 24.dp).clip(RoundedCornerShape(18.dp)).background(c.bg2).border(1.dp, c.line2, RoundedCornerShape(18.dp)).padding(vertical = 38.dp, horizontal = 20.dp), contentAlignment = Alignment.Center) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Text("Keep small things here.", style = UFont.serifItalic(19), color = c.ink2)
-                        Text("Type above. Hit return. Done.", style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 8.dp))
+                        Text("Type below. Hit return. Done.", style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 8.dp))
                     }
                 }
             } else {
@@ -136,6 +121,22 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                     SectionLabel("All", Modifier.padding(start = 4.dp, top = 14.dp, bottom = 6.dp))
                     rest.forEach { CollItemRow(col, it, vm) }
                 }
+            }
+
+            // Add-item pill field — at the BOTTOM so new items append right above it
+            // (the whole add flow is bottom-anchored). Autofocused on open.
+            Row(
+                Modifier.fillMaxWidth().padding(top = 18.dp).clip(RoundedCornerShape(28.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(28.dp)).padding(horizontal = 16.dp, vertical = 12.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Icon(Icons.Filled.Add, contentDescription = null, tint = c.ink3)
+                BasicTextField(
+                    value = draft, onValueChange = { draft = it },
+                    textStyle = UFont.sans(15).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink),
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { add() }),
+                    modifier = Modifier.weight(1f).focusRequester(focus),
+                    decorationBox = { inner -> if (draft.isEmpty()) Text("Add to this collection…", style = UFont.sans(15), color = c.ink3); inner() },
+                )
             }
 
             UButton("Delete collection", kind = ButtonKind.DANGER, fill = false, modifier = Modifier.padding(top = 24.dp)) { confirmDelete = true }

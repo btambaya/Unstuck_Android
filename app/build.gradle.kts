@@ -87,13 +87,14 @@ android {
 // Firebase App Distribution — `./gradlew :app:appDistributionUploadRelease`
 // uploads the signed release to testers. Auth uses the gitignored
 // firebase-service-account.json. Override the invite list with
-// -PappDistTesters="a@x.com,b@y.com" (defaults to the owner).
+// -PappDistTesters="a@x.com,b@y.com" — DEFAULT is the full tester list so a
+// plain upload reaches everyone (not just the owner).
 firebaseAppDistribution {
     appId = "1:806563895083:android:1673707a78b9d39039976e"
     artifactType = "APK"
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
-    testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
+    testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech,justtesting6363@gmail.com,zyzkazaure@gmail.com"
     releaseNotes = "v0.4.5 — UI polish + a notification center. Today and Tasks now keep the header and filters PINNED while only the list scrolls. Tapping your initials opens the account menu right next to them (a dropdown, not a bottom sheet). A new bell next to your initials opens a notification center with upcoming reminders and recent notifications (unread dot included). You can now set a CUSTOM time when scheduling a task (a 'Custom...' chip opens a time picker). The add field in a collection now sits at the bottom so the whole add flow is bottom-anchored. Builds on v0.4.4."
 }
 

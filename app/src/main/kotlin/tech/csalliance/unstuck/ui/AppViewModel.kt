@@ -215,7 +215,10 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun dismissNudge(id: String) { _dismissedNudges.value = _dismissedNudges.value + id }
     val nudges: StateFlow<List<Nudge>> =
         combine(tasks, captures, _dismissedNudges) { ts, cs, dismissed ->
-            computeNudges(ts, cs, nowMs()).filterNot { it.id in dismissed }
+            // Quiet in-app nudges are off at the Calm level. (Read fresh so a level
+            // change is reflected the next time Today re-subscribes.)
+            if (!graph.settings.load().notificationLevel.nudges) emptyList()
+            else computeNudges(ts, cs, nowMs()).filterNot { it.id in dismissed }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     private fun computeNudges(tasks: List<TaskItem>, captures: List<Capture>, now: Long): List<Nudge> {
@@ -434,9 +437,24 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
 
     /** Mutate + persist settings in one call: `updateSettings { it.copy(theme = …) }`. */
     fun updateSettings(transform: (tech.csalliance.unstuck.SettingsState) -> tech.csalliance.unstuck.SettingsState) {
-        val next = transform(_settings.value)
+        val prev = _settings.value
+        val next = transform(prev)
         _settings.value = next
         settingsStore.save(next)
+        // Mirror the notification level to the server so the cron-driven morning brief
+        // (and the server-side paused-checkin cap) honour it. Best-effort.
+        if (next.notificationLevel != prev.notificationLevel) {
+            val uid = auth?.currentUserId
+            if (uid != null) viewModelScope.launch {
+                runCatching {
+                    graph.coordinator?.preferences?.setNotificationLevel(
+                        uid,
+                        morningBrief = next.notificationLevel.morningBrief,
+                        pausedCheckin = next.notificationLevel.pausedCheckin,
+                    )
+                }
+            }
+        }
     }
 
     // --- auth ---

@@ -21,6 +21,9 @@ object PausedCheckinScheduler {
     private const val DELAY_MIN = 14L
 
     fun arm(context: Context, taskName: String) {
+        // Respect the notification level — Calm doesn't do paused check-ins.
+        val level = (context.applicationContext as? UnstuckApp)?.graph?.settings?.load()?.notificationLevel
+        if (level != null && !level.pausedCheckin) return
         val req = OneTimeWorkRequestBuilder<PausedCheckinWorker>()
             .setInitialDelay(DELAY_MIN, TimeUnit.MINUTES)
             .setInputData(workDataOf(KEY_TASK to taskName))

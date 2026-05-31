@@ -55,5 +55,15 @@ object NotifIds {
     const val RECAP = 2001
     const val PAUSED = 2002
     const val BRIEF = 2003
-    const val REMINDER_BASE = 3000  // per-block reminders offset by a stable hash
+    // Per-task notifications are offset by a 16-bit hash of the task id. The bases
+    // are spaced 0x10000 apart so the three families never collide (a pre-task
+    // reminder, a "starts now", and a drift ping for the same task can coexist).
+    const val REMINDER_BASE = 0x30000  // A1 pre-task reminder
+    const val ATSTART_BASE = 0x40000   // A2 "starts now" (Start / Reschedule)
+    const val DRIFTED_BASE = 0x50000   // A4 didn't-start follow-up
+
+    private fun forTask(base: Int, taskId: String) = base + (taskId.hashCode() and 0xFFFF)
+    fun reminder(taskId: String) = forTask(REMINDER_BASE, taskId)
+    fun atStart(taskId: String) = forTask(ATSTART_BASE, taskId)
+    fun drifted(taskId: String) = forTask(DRIFTED_BASE, taskId)
 }

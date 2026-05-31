@@ -80,4 +80,61 @@ object NotificationRenderer {
             .build()
         NotificationManagerCompat.from(context).notify(NotifIds.PAUSED, n)
     }
+
+    /** A scheduled task's start time (A2), or the didn't-start follow-up (A4).
+     *  Two shade actions that work with the app closed: **Start** (opens straight
+     *  into Focus for the task and begins the timer) and **Reschedule** (one tap →
+     *  moves the block to the next free slot today). */
+    fun postTaskStarting(context: Context, taskName: String, taskId: String, blockId: String, drifted: Boolean) {
+        val title = if (drifted) "Didn't get to it?" else "Time to start"
+        val body = if (drifted) "“$taskName” was set for a little while ago — want to start now?" else "“$taskName” starts now."
+        // Start → launch the activity into the focus screen for this task.
+        val startPI = PendingIntent.getActivity(
+            context, ("start:$taskId").hashCode(),
+            Intent(context, MainActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)
+                .setData(Uri.parse("unstuck://focus/$taskId")),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        // Reschedule → broadcast handled in the background (no need to open the app).
+        val reschedPI = PendingIntent.getBroadcast(
+            context, ("resched:$blockId").hashCode(),
+            Intent(context, NotificationActionReceiver::class.java).setAction(NotificationActionReceiver.ACTION_RESCHEDULE)
+                .putExtra(NotificationActionReceiver.EXTRA_TASK_ID, taskId)
+                .putExtra(NotificationActionReceiver.EXTRA_BLOCK_ID, blockId)
+                .putExtra(NotificationActionReceiver.EXTRA_TASK_NAME, taskName)
+                .putExtra(NotificationActionReceiver.EXTRA_DRIFTED, drifted),
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+        )
+        val id = if (drifted) NotifIds.drifted(taskId) else NotifIds.atStart(taskId)
+        val n = base(context, NotificationChannels.REMINDERS)
+            .setContentTitle(title)
+            .setContentText(body)
+            .setStyle(NotificationCompat.BigTextStyle().bigText(body))
+            .setContentIntent(openApp(context, "unstuck://task/$taskId"))
+            .addAction(0, "Start", startPI)
+            .addAction(0, "Reschedule", reschedPI)
+            .build()
+        NotificationManagerCompat.from(context).notify(id, n)
+    }
+
+    /** Brief confirmation after a one-tap Reschedule (replaces the start-now notif). */
+    fun postRescheduleConfirmation(context: Context, taskName: String, newTime: String, taskId: String) {
+        val n = base(context, NotificationChannels.REMINDERS)
+            .setContentTitle("Rescheduled")
+            .setContentText("“$taskName” moved to ${formatClock(newTime)}.")
+            .setContentIntent(openApp(context, "unstuck://task/$taskId"))
+            .setTimeoutAfter(8_000)
+            .build()
+        NotificationManagerCompat.from(context).notify(NotifIds.atStart(taskId), n)
+    }
+
+    /** HH:MM (24h) → a friendly 12h clock for copy. */
+    private fun formatClock(hhmm: String): String {
+        val p = hhmm.split(":")
+        val h = p.getOrNull(0)?.toIntOrNull() ?: return hhmm
+        val m = p.getOrNull(1)?.toIntOrNull() ?: 0
+        val period = if (h >= 12) "PM" else "AM"
+        val h12 = ((h + 11) % 12) + 1
+        return "%d:%02d %s".format(h12, m, period)
+    }
 }

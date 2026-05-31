@@ -67,4 +67,18 @@ class PreferencesClient(private val client: SupabaseClient) {
     suspend fun setAdhdStruggles(userId: String, struggles: List<String>) {
         client.from("user_preferences").upsert(StrugglesRow(userId, struggles)) { onConflict = "user_id" }
     }
+
+    @Serializable private data class NotifPrefsRow(
+        val user_id: String,
+        val morning_brief_enabled: Boolean,
+        val paused_checkin_enabled: Boolean,
+    )
+
+    /** Mirror the device notification level to notification_preferences (owner-self
+     *  RLS) so the server-driven morning brief + paused-checkin cap honour it.
+     *  Only the level-derived toggles are sent; other columns keep their values. */
+    suspend fun setNotificationLevel(userId: String, morningBrief: Boolean, pausedCheckin: Boolean) {
+        client.from("notification_preferences")
+            .upsert(NotifPrefsRow(userId, morningBrief, pausedCheckin)) { onConflict = "user_id" }
+    }
 }

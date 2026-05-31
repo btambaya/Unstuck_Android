@@ -43,6 +43,16 @@ class NotificationActionReceiver : BroadcastReceiver() {
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP)
                     .putExtra(EXTRA_OPEN_CAPTURE, true),
             )
+            // "Reschedule" on the starts-now / drift notification — move the block to the
+            // next free slot today, in the background (no need to open the app).
+            ACTION_RESCHEDULE -> {
+                val taskId = intent.getStringExtra(EXTRA_TASK_ID).orEmpty()
+                val blockId = intent.getStringExtra(EXTRA_BLOCK_ID).orEmpty()
+                val drifted = intent.getBooleanExtra(EXTRA_DRIFTED, false)
+                NotificationManagerCompat.from(context)
+                    .cancel(if (drifted) NotifIds.drifted(taskId) else NotifIds.atStart(taskId))
+                ScheduleCommands.rescheduleToNextSlot(app, blockId, taskId, taskName)
+            }
         }
     }
 
@@ -52,7 +62,11 @@ class NotificationActionReceiver : BroadcastReceiver() {
         const val ACTION_SNOOZE = "tech.csalliance.unstuck.action.SNOOZE"
         const val ACTION_END = "tech.csalliance.unstuck.action.END"
         const val ACTION_CAPTURE = "tech.csalliance.unstuck.action.CAPTURE"
+        const val ACTION_RESCHEDULE = "tech.csalliance.unstuck.action.RESCHEDULE"
         const val EXTRA_TASK_NAME = "taskName"
+        const val EXTRA_TASK_ID = "taskId"
+        const val EXTRA_BLOCK_ID = "blockId"
+        const val EXTRA_DRIFTED = "drifted"
         const val EXTRA_OPEN_CAPTURE = "openCapture"
     }
 }

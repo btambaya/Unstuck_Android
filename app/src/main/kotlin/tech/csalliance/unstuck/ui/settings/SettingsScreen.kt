@@ -107,6 +107,7 @@ fun SettingsHub(vm: AppViewModel, onBack: () -> Unit, onSection: (SettingsSectio
 fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> Unit) {
     val c = UTheme.colors
     val s by vm.settings.collectAsStateWithLifecycle()
+    val context = LocalContext.current
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(title = section.name.lowercase().replaceFirstChar { it.uppercase() }, leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp)) {
@@ -125,7 +126,18 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
                     }
                     SegRow("Remind me before tasks", listOf("Off", "5", "10", "15"), if (s.reminderLeadMin == 0) "Off" else s.reminderLeadMin.toString()) { v ->
                         vm.updateSettings { it.copy(reminderLeadMin = v.toIntOrNull() ?: 0) }
+                        runCatching { tech.csalliance.unstuck.surface.ReminderScheduler.reschedule(context.applicationContext as tech.csalliance.unstuck.UnstuckApp) }
                     }
+                    SegRow("Notifications", listOf("Calm", "Balanced", "Coach"), s.notificationLevel.label) { v ->
+                        vm.updateSettings { it.copy(notificationLevel = tech.csalliance.unstuck.NotificationLevel.fromLabel(v)) }
+                        runCatching { tech.csalliance.unstuck.surface.ReminderScheduler.reschedule(context.applicationContext as tech.csalliance.unstuck.UnstuckApp) }
+                    }
+                    Text(
+                        s.notificationLevel.blurb,
+                        style = UFont.sans(12, FontWeight.Normal),
+                        color = c.ink2,
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                    )
                     ToggleRow("Hide right rail while focusing", s.focusCollapseRail) { v -> vm.updateSettings { it.copy(focusCollapseRail = v) } }
                     ToggleRow("Soft exit", s.focusSoftExit) { v -> vm.updateSettings { it.copy(focusSoftExit = v) } }
                     ToggleRow("Pause reasons", s.focusPauseReasons, last = true) { v -> vm.updateSettings { it.copy(focusPauseReasons = v) } }

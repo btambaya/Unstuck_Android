@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 16
-        versionName = "0.4.3"
+        versionCode = 17
+        versionName = "0.4.4"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.4.3 — Server-push delivery fix. Android device registration was being mislabeled as iOS (a kotlinx serialization default silently dropped the platform field), so server-sent pushes (morning brief, away-recap) never routed to this device. Registration now sends platform explicitly. Local notifications (pre-task reminders, live focus, paused check-in, recap card, in-app nudges) were unaffected and already worked. Builds on v0.4.2 review fixes."
+    releaseNotes = "v0.4.4 — Start-now notifications + 3 notification levels. When a scheduled task is due you now get a 'starts now' notification (not just the heads-up before) with two buttons that work even when the app is closed: Start jumps straight into Focus, and Reschedule moves it to your next free slot in one tap. New Settings -> Focus -> Notifications control with three levels: Calm (essentials only), Balanced (the default), and Coach (adds a nudge if you haven't started on time). Builds on the v0.4.3 push-delivery fix."
 }
 
 dependencies {

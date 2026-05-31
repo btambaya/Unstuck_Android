@@ -97,6 +97,13 @@ fun MainScaffold(vm: AppViewModel) {
                 val liveTask = tasks.firstOrNull { it.id == liveSession?.taskId }
                 if (liveTask != null) focusTask = liveTask else showNewTask = true
             }
+            dl.startsWith("unstuck://focus/") -> {
+                // "Start" on the starts-now notification → begin the session + open Focus.
+                val id = dl.removePrefix("unstuck://focus/")
+                val t = tasks.firstOrNull { it.id == id }
+                if (t != null) { vm.startFocus(t); focusTask = t }
+                else { tab = "today"; stack.clear() }
+            }
             dl.startsWith("unstuck://task/") -> {
                 val id = dl.removePrefix("unstuck://task/")
                 tab = "today"; stack.clear()

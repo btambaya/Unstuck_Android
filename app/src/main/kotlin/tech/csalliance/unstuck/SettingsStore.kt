@@ -7,6 +7,34 @@ import tech.csalliance.unstuck.core.model.ThemePref
 import tech.csalliance.unstuck.design.theme.AccentPalette
 
 /**
+ * How proactively the app notifies (Settings → Focus). Calm = only what you
+ * can't miss; Balanced = the default helpful set; Coach = maximum prompting.
+ * The booleans below are the single source of truth for which moments each
+ * level enables — read by ReminderScheduler, PausedCheckinScheduler, the
+ * in-app nudge surface, and (synced to the server) the morning brief.
+ */
+enum class NotificationLevel(val label: String, val blurb: String) {
+    CALM("Calm", "Only the essentials — pre-task reminders and your session recap."),
+    BALANCED("Balanced", "Reminders, a start-now nudge with Start/Reschedule, paused check-ins, the morning brief, and quiet in-app nudges."),
+    COACH("Coach", "Everything in Balanced, plus a nudge if you haven't started on time and more proactive prompts.");
+
+    /** A "starts now" notification (Start / Reschedule) at the block's start time. */
+    val atStart: Boolean get() = this != CALM
+    /** A follow-up ~10 min after start if the task still hasn't been started. */
+    val drifted: Boolean get() = this == COACH
+    /** The paused-too-long check-in. */
+    val pausedCheckin: Boolean get() = this != CALM
+    /** The server-sent morning brief. */
+    val morningBrief: Boolean get() = this != CALM
+    /** Quiet in-app nudge cards on Today (no push). */
+    val nudges: Boolean get() = this != CALM
+
+    companion object {
+        fun fromLabel(l: String): NotificationLevel = entries.firstOrNull { it.label == l } ?: BALANCED
+    }
+}
+
+/**
  * Device-local user preferences (theme / density / accent / focus / sound /
  * accessibility), persisted to SharedPreferences. Mirrors the web
  * `theme-context` + `STORAGE_KEYS` PREF_* scalars. Read once into a
@@ -32,6 +60,7 @@ data class SettingsState(
     val ambient: String = "off",           // off | brown | pink
     val treatment: FocusTreatment = FocusTreatment.AMBIENT,
     val reminderLeadMin: Int = 10,         // default "remind me N min before a scheduled task"; 0 = Off
+    val notificationLevel: NotificationLevel = NotificationLevel.BALANCED,
 ) {
     /** density + larger-type folded into one sp multiplier (web parity). */
     val fontScale: Float
@@ -67,6 +96,7 @@ class SettingsStore(context: Context) {
         ambient = p.getString("ambient", "off") ?: "off",
         treatment = enumOf(p.getString("treatment", null), FocusTreatment.AMBIENT),
         reminderLeadMin = p.getInt("reminderLeadMin", 10),
+        notificationLevel = enumOf(p.getString("notificationLevel", null), NotificationLevel.BALANCED),
     )
 
     fun save(s: SettingsState) {
@@ -89,6 +119,7 @@ class SettingsStore(context: Context) {
             .putString("ambient", s.ambient)
             .putString("treatment", s.treatment.name)
             .putInt("reminderLeadMin", s.reminderLeadMin)
+            .putString("notificationLevel", s.notificationLevel.name)
             .apply()
     }
 

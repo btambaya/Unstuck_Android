@@ -1,10 +1,7 @@
 package tech.csalliance.unstuck.surface
 
-import android.app.NotificationChannel
-import android.app.NotificationManager
 import android.content.Context
 import android.provider.Settings
-import androidx.core.app.NotificationCompat
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
@@ -15,8 +12,6 @@ import tech.csalliance.unstuck.UnstuckApp
 // added + the google-services plugin applied (a manual prerequisite, the
 // Android analog of the iOS APNs key). All Firebase calls are guarded so the
 // app builds + runs without the config.
-
-const val PUSH_CHANNEL = "unstuck_push"
 
 @Suppress("HardwareIds")
 fun deviceId(context: Context): String =
@@ -46,18 +41,12 @@ class UnstuckMessagingService : FirebaseMessagingService() {
     }
 
     override fun onMessageReceived(message: RemoteMessage) {
-        val title = message.notification?.title ?: message.data["title"] ?: "Unstuck"
-        val body = message.notification?.body ?: message.data["body"] ?: return
-        val mgr = getSystemService(NotificationManager::class.java)
-        if (mgr.getNotificationChannel(PUSH_CHANNEL) == null) {
-            mgr.createNotificationChannel(NotificationChannel(PUSH_CHANNEL, "Reminders", NotificationManager.IMPORTANCE_DEFAULT))
-        }
-        val notification = NotificationCompat.Builder(this, PUSH_CHANNEL)
-            .setSmallIcon(android.R.drawable.ic_dialog_info)
-            .setContentTitle(title)
-            .setContentText(body)
-            .setAutoCancel(true)
-            .build()
-        mgr.notify(System.currentTimeMillis().toInt(), notification)
+        // Prefer data fields (so the server can drive channel/copy/deep-link in all
+        // app states); fall back to the notification block for legacy payloads.
+        val data = message.data
+        val title = data["title"] ?: message.notification?.title ?: "Unstuck"
+        val body = data["body"] ?: message.notification?.body ?: return
+        NotificationChannels.ensureAll(this)
+        NotificationRenderer.renderPush(this, kind = data["kind"], title = title, body = body, deepLink = data["deepLink"])
     }
 }

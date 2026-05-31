@@ -97,6 +97,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     var recurrence by remember { mutableStateOf<tech.csalliance.unstuck.core.model.Recurrence?>(null) }
     var showDatePicker by remember { mutableStateOf(false) }
     var showEstimate by remember { mutableStateOf(false) }
+    var reminderLead by remember { mutableStateOf<Int?>(null) }   // null = use the global default
     val tags = remember { mutableStateListOf<String>() }
     val drafts = remember { mutableStateListOf<DraftCapture>() }
 
@@ -166,6 +167,17 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                 SelectableChip("Custom…", selected = false) { showEstimate = true }
             }
 
+            // Pre-task reminder (only meaningful when it has a time). "Default" uses
+            // the global lead from Settings; pick a specific lead to override this task.
+            if (whenSel != "Later") {
+                SectionLabel("Remind me")
+                Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    SelectableChip("Default", selected = reminderLead == null) { reminderLead = null }
+                    SelectableChip("Off", selected = reminderLead == 0) { reminderLead = 0 }
+                    listOf(5, 10, 15).forEach { m -> SelectableChip("${m}m before", selected = reminderLead == m) { reminderLead = m } }
+                }
+            }
+
             if (areas.isNotEmpty()) {
                 SectionLabel("Area")
                 Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -213,6 +225,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                     firstPhysicalAction = firstMove.trim().ifEmpty { null }, recurrence = recurrence,
                     later = whenSel == "Later",
                 )
+                reminderLead?.let { vm.setReminderOverride(t.id, it) }
                 if (whenSel != "Later" && effectiveDate != null && pickedTime != null) {
                     vm.scheduleTask(t, effectiveDate, pickedTime!!)
                 }

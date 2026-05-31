@@ -31,6 +31,7 @@ data class SettingsState(
     val soundCompletion: Boolean = false,
     val ambient: String = "off",           // off | brown | pink
     val treatment: FocusTreatment = FocusTreatment.AMBIENT,
+    val reminderLeadMin: Int = 10,         // default "remind me N min before a scheduled task"; 0 = Off
 ) {
     /** density + larger-type folded into one sp multiplier (web parity). */
     val fontScale: Float
@@ -65,6 +66,7 @@ class SettingsStore(context: Context) {
         soundCompletion = p.getBoolean("soundCompletion", false),
         ambient = p.getString("ambient", "off") ?: "off",
         treatment = enumOf(p.getString("treatment", null), FocusTreatment.AMBIENT),
+        reminderLeadMin = p.getInt("reminderLeadMin", 10),
     )
 
     fun save(s: SettingsState) {
@@ -86,7 +88,17 @@ class SettingsStore(context: Context) {
             .putBoolean("soundCompletion", s.soundCompletion)
             .putString("ambient", s.ambient)
             .putString("treatment", s.treatment.name)
+            .putInt("reminderLeadMin", s.reminderLeadMin)
             .apply()
+    }
+
+    /** Per-task reminder lead override (minutes), or null to use the global default.
+     *  Stored device-locally — reminders fire from on-device alarms. */
+    fun reminderOverride(taskId: String): Int? =
+        if (p.contains("reminder.override.$taskId")) p.getInt("reminder.override.$taskId", -1).takeIf { it >= 0 } else null
+
+    fun setReminderOverride(taskId: String, leadMin: Int?) {
+        p.edit().apply { if (leadMin == null) remove("reminder.override.$taskId") else putInt("reminder.override.$taskId", leadMin) }.apply()
     }
 
     private inline fun <reified T : Enum<T>> enumOf(name: String?, fallback: T): T =

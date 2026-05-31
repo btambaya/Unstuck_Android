@@ -5,6 +5,10 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- Punctual pre-task reminders ("5 min before") + reschedule after reboot. -->
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:name=".UnstuckApp"
@@ -44,6 +48,20 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="focus_timer" />
         </service>
+
+        <!-- Live-notification / check-in action buttons (Pause/Resume/Snooze/End/Capture). -->
+        <receiver
+            android:name=".surface.NotificationActionReceiver"
+            android:exported="false" />
+
+        <!-- Pre-task reminder alarms + reschedule on boot. -->
+        <receiver
+            android:name=".surface.ReminderReceiver"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
 
         <!-- FCM receiver (dormant until google-services.json is added). -->
         <service

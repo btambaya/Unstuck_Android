@@ -51,6 +51,7 @@ import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.surface.FocusTimerService
+import tech.csalliance.unstuck.surface.PausedCheckinScheduler
 import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.tasks.SelectableChip
 
@@ -67,7 +68,17 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
 
     val sessionStart = live?.sessionStart
     LaunchedEffect(sessionStart) { if (sessionStart != null) FocusTimerService.start(context, task.name, sessionStart) }
-    DisposableEffect(Unit) { onDispose { FocusTimerService.stop(context) } }
+    // The ongoing notification + paused-too-long check-in track the live session,
+    // so they persist (and stay correct) even after you leave the focus screen.
+    // We do NOT stop the service on dispose — leaving focus keeps the session live
+    // and glanceable; it's torn down only by the terminal Done / End actions.
+    LaunchedEffect(live?.paused, sessionStart) {
+        if (sessionStart != null) {
+            FocusTimerService.update(context, paused = live?.paused == true)
+            if (live?.paused == true) PausedCheckinScheduler.arm(context, task.name)
+            else PausedCheckinScheduler.cancel(context)
+        }
+    }
 
     var showCapture by remember { mutableStateOf(false) }
     var showReflect by remember { mutableStateOf(false) }
@@ -145,7 +156,7 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
                     else { vm.pauseFocus(); if (settings.focusPauseReasons) showPauseReasons = true }
                 }
                 // "Done" marks the task complete (records the session + flips done).
-                FocusBtn("Done", soft = false) { reflectElapsed = FocusTimer.elapsedSec(l ?: return@FocusBtn, nowMs); vm.finishFocus(task, markDone = true); showReflect = true }
+                FocusBtn("Done", soft = false) { reflectElapsed = FocusTimer.elapsedSec(l ?: return@FocusBtn, nowMs); vm.finishFocus(task, markDone = true); FocusTimerService.stop(context); PausedCheckinScheduler.cancel(context); showReflect = true }
             }
             // Secondary actions: "Save for later" pauses + exits (resumable from Today,
             // prompting an interruption reason when enabled); "End for now" records the
@@ -160,7 +171,7 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
                 )
                 Text(
                     "End for now", style = UFont.sans(13, FontWeight.Medium), color = Color.White.copy(alpha = 0.72f),
-                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { reflectElapsed = FocusTimer.elapsedSec(l ?: return@clickable, nowMs); vm.finishFocus(task, markDone = false); showReflect = true }.padding(horizontal = 14.dp, vertical = 8.dp),
+                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { reflectElapsed = FocusTimer.elapsedSec(l ?: return@clickable, nowMs); vm.finishFocus(task, markDone = false); FocusTimerService.stop(context); PausedCheckinScheduler.cancel(context); showReflect = true }.padding(horizontal = 14.dp, vertical = 8.dp),
                 )
             }
         }

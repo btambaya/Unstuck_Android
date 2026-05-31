@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 12
-        versionName = "0.3.8"
+        versionCode = 13
+        versionName = "0.4.0"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -94,7 +94,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech"
-    releaseNotes = "v0.3.8 — Pull fix: Google events now show up in the Unstuck calendar. The pull was sending Google a date-only range (2026-05-31), which Google rejects (it needs full RFC3339 timestamps), so it silently returned zero events. Now sends proper timestamps like the web. Two-way sync is complete: your tasks push to Google AND your Google events appear in the grid."
+    releaseNotes = "v0.4.0 — Notifications (part 1). Pre-task reminders: get pinged N minutes before a scheduled task — set the default in Settings → Focus (\"Remind me before tasks\") or per-task on the New Task sheet (\"Remind me\"). Live focus notification overhauled: \"FOCUSING · LIVE\" with Pause/Capture; pausing flips it to an amber \"Did you step away?\" check-in with Resume/Snooze/End — all from the shade. Paused-too-long check-in (~14 min). Session-end recap card on Today (\"You did the thing.\"). Notifications now use per-purpose channels (reminders/recap/paused/daily) with lock-screen privacy. NOTE: morning brief + in-app nudges are the next drop."
 }
 
 dependencies {

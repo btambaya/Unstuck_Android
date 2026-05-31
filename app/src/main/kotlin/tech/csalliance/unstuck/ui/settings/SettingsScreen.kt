@@ -123,6 +123,9 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
                     SegRow("Soft overrun", listOf("Off", "5", "10"), if (s.focusOverrunMin == 0) "Off" else s.focusOverrunMin.toString()) { v ->
                         vm.updateSettings { it.copy(focusOverrunMin = v.toIntOrNull() ?: 0) }
                     }
+                    SegRow("Remind me before tasks", listOf("Off", "5", "10", "15"), if (s.reminderLeadMin == 0) "Off" else s.reminderLeadMin.toString()) { v ->
+                        vm.updateSettings { it.copy(reminderLeadMin = v.toIntOrNull() ?: 0) }
+                    }
                     ToggleRow("Hide right rail while focusing", s.focusCollapseRail) { v -> vm.updateSettings { it.copy(focusCollapseRail = v) } }
                     ToggleRow("Soft exit", s.focusSoftExit) { v -> vm.updateSettings { it.copy(focusSoftExit = v) } }
                     ToggleRow("Pause reasons", s.focusPauseReasons, last = true) { v -> vm.updateSettings { it.copy(focusPauseReasons = v) } }

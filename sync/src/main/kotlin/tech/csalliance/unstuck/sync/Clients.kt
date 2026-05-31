@@ -5,7 +5,9 @@ import io.github.jan.supabase.functions.functions
 import io.github.jan.supabase.postgrest.from
 import io.ktor.client.call.body
 import io.ktor.client.request.setBody
+import io.ktor.http.ContentType
 import io.ktor.http.HttpMethod
+import io.ktor.http.contentType
 import kotlinx.serialization.Serializable
 import java.util.TimeZone
 
@@ -27,6 +29,7 @@ class PushClient(private val client: SupabaseClient) {
     suspend fun register(deviceId: String, fcmToken: String?, timezone: String = TimeZone.getDefault().id) {
         client.functions.invoke("register-push-token") {
             method = HttpMethod.Post
+            contentType(ContentType.Application.Json)
             setBody(RegisterBody(deviceId = deviceId, fcmToken = fcmToken, timezone = timezone))
         }
     }
@@ -39,14 +42,14 @@ class NotificationsClient(private val client: SupabaseClient) {
 
     suspend fun sessionRecap(taskName: String, away: Boolean) {
         client.functions.invoke("send-session-recap") {
-            method = HttpMethod.Post; setBody(RecapBody(taskName, away))
+            method = HttpMethod.Post; contentType(ContentType.Application.Json); setBody(RecapBody(taskName, away))
         }
     }
 
     /** Whether a paused-checkin notification is allowed (cap + preference).
      *  Defaults to false if the server can't be reached. */
     suspend fun pausedCheckin(): Boolean = runCatching {
-        client.functions.invoke("send-paused-checkin") { method = HttpMethod.Post; setBody(Empty()) }
+        client.functions.invoke("send-paused-checkin") { method = HttpMethod.Post; contentType(ContentType.Application.Json); setBody(Empty()) }
             .body<AllowedResponse>().allowed ?: false
     }.getOrDefault(false)
 }

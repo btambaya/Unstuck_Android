@@ -200,6 +200,11 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     suspend fun syncCalendar() { graph.coordinator?.pullCalendar() }
     fun disconnectCalendar(id: String) = launchWrite { graph.coordinator?.disconnectCalendar(id) }
 
+    // --- reminders (pre-task "remind me N min before"; device-local) ---
+    /** Per-task reminder lead override in minutes, or null to use the global default. */
+    fun reminderOverride(taskId: String): Int? = graph.settings.reminderOverride(taskId)
+    fun setReminderOverride(taskId: String, leadMin: Int?) = graph.settings.setReminderOverride(taskId, leadMin)
+
     fun blockTime(date: String, startTime: String, durationMinutes: Int, label: String) = launchWrite {
         write?.upsertCalBlock(
             CalBlock(id = newUuid(), taskId = "placeholder", taskName = label, startTime = startTime, durationMinutes = durationMinutes, date = date, kind = CalBlockKind.PLACEHOLDER),
@@ -244,7 +249,17 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
             if (markDone) applyCompletion(focused.copy(done = true), prior = task, nowISO = isoNow()) else focused,
         )
         store.setLiveSession(null)
+        // Session-end recap (design moment B3): records an in-app card always; the
+        // server only pushes when away — finishing in-app means away = false.
+        runCatching { graph.coordinator?.notifications?.sessionRecap(task.name, away = false) }
+        _lastRecap.value = RecapState(taskName = task.name, focusedSec = elapsed)
     }
+
+    // The most recent session-end recap, surfaced as a dismissible card on Today
+    // (kept alongside ReflectSheet). Cleared when dismissed.
+    private val _lastRecap = MutableStateFlow<RecapState?>(null)
+    val lastRecap: StateFlow<RecapState?> = _lastRecap
+    fun dismissRecap() { _lastRecap.value = null }
 
     fun cancelFocus() = launchWrite { store.setLiveSession(null) }
 
@@ -451,3 +466,6 @@ data class ExportBundle(
     val tags: List<TagRow>,
     val lifeAreas: List<LifeArea>,
 )
+
+/** A just-finished focus session, surfaced as the Today recap card (B3). */
+data class RecapState(val taskName: String, val focusedSec: Int)

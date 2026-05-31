@@ -84,6 +84,7 @@ fun TodayScreen(
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val live by vm.liveSession.collectAsStateWithLifecycle()
+    val recap by vm.lastRecap.collectAsStateWithLifecycle()
     val now = vm.nowMs()
     val liveId = live?.taskId
     var areaFilter by remember { mutableStateOf<String?>(null) }
@@ -133,6 +134,25 @@ fun TodayScreen(
                     Text("This week · ", style = UFont.sans(12), color = c.ink2)
                     Text(if (weekMin >= 60) "${weekMin / 60}h focused" else "${weekMin}m focused", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
                     Text("→", style = UFont.sans(12), color = c.ink3)
+                }
+            }
+        }
+
+        recap?.let { r ->
+            item {
+                Column(
+                    Modifier.padding(horizontal = 18.dp, vertical = 8.dp).clip(RoundedCornerShape(18.dp))
+                        .background(c.coralSoft).padding(16.dp),
+                ) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
+                        SectionLabel("Just now", color = c.coralDeep)
+                        Text("✕", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable { vm.dismissRecap() })
+                    }
+                    Text("You did the thing.", style = UFont.serifItalic(22), color = c.ink, modifier = Modifier.padding(top = 4.dp))
+                    Text(
+                        "${(r.focusedSec / 60).coerceAtLeast(1)} MIN FOCUSED · ${r.taskName}",
+                        style = UFont.mono(11), color = c.ink2, maxLines = 1, modifier = Modifier.padding(top = 6.dp),
+                    )
                 }
             }
         }

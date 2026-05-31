@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Single-colour Orbit silhouette for the themed-icon (Material You) monochrome
-     layer — the launcher tints this. Same geometry as ic_launcher_foreground. -->
+<!-- Single-colour Orbit silhouette (mark.svg geometry) for the themed-icon
+     monochrome layer — the launcher tints this. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
@@ -9,14 +9,14 @@
     android:tint="#FFFFFFFF">
     <path
         android:strokeColor="#FFFFFFFF"
-        android:strokeWidth="6"
+        android:strokeWidth="5.06"
         android:strokeLineCap="round"
         android:fillColor="#00000000"
-        android:pathData="M 70.7,33.3 A 24,24 0 1 0 70.7,74.7" />
+        android:pathData="M 78.15,54 A 24.15,24.15 0 1 0 69.18,72.63" />
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M54,54 m-8,0 a8,8 0 1,0 16,0 a8,8 0 1,0 -16,0" />
+        android:pathData="M54,54 m-7.82,0 a7.82,7.82 0 1,0 15.64,0 a7.82,7.82 0 1,0 -15.64,0" />
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M78,54 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+        android:pathData="M78.15,54 m-4.83,0 a4.83,4.83 0 1,0 9.66,0 a4.83,4.83 0 1,0 -9.66,0" />
 </vector>

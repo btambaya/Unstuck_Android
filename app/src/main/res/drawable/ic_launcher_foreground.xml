@@ -1,24 +1,25 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The Orbit logo, exactly as in the app (Mark.kt): ink anchor + ~270° ink ring
-     with a gap at 3 o'clock + a coral satellite dot in the gap. On the light tile. -->
+<!-- The Unstuck Orbit logo (mark.svg), scaled into the adaptive-icon viewport:
+     ink anchor + ~290° ink ring with the gap at 3 o'clock + a coral satellite
+     dot in the gap. On the light tile. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    <!-- 270° ink ring (gap centred at 3 o'clock). -->
+    <!-- ink ring (arc, gap + satellite at 3 o'clock) -->
     <path
         android:strokeColor="#1A1C26"
-        android:strokeWidth="6"
+        android:strokeWidth="5.06"
         android:strokeLineCap="round"
         android:fillColor="#00000000"
-        android:pathData="M 70.7,33.3 A 24,24 0 1 0 70.7,74.7" />
+        android:pathData="M 78.15,54 A 24.15,24.15 0 1 0 69.18,72.63" />
     <!-- ink anchor -->
     <path
         android:fillColor="#1A1C26"
-        android:pathData="M54,54 m-8,0 a8,8 0 1,0 16,0 a8,8 0 1,0 -16,0" />
-    <!-- coral satellite dot sitting in the gap -->
+        android:pathData="M54,54 m-7.82,0 a7.82,7.82 0 1,0 15.64,0 a7.82,7.82 0 1,0 -15.64,0" />
+    <!-- coral satellite dot -->
     <path
         android:fillColor="#E89077"
-        android:pathData="M78,54 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
+        android:pathData="M78.15,54 m-4.83,0 a4.83,4.83 0 1,0 9.66,0 a4.83,4.83 0 1,0 -9.66,0" />
 </vector>

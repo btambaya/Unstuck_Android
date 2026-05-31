@@ -95,6 +95,12 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech,justtesting6363@gmail.com,zyzkazaure@gmail.com"
+    // Also distribute to the "beta" tester GROUP (alias `beta`) so anyone who
+    // self-enrolls via its invite link gets every build — no manual email entry.
+    // ⚠ The group must already exist: Firebase Console → App Distribution →
+    // Testers & Groups → create a group with alias `beta` + enable its invite link.
+    // Override with -PappDistGroups="alias1,alias2".
+    groups = (findProperty("appDistGroups") as String?) ?: "beta"
     releaseNotes = "v0.4.9 — App icon now uses the exact Unstuck Orbit logo (mark.svg): ink ring + anchor, coral satellite, on the light tile."
 }
 

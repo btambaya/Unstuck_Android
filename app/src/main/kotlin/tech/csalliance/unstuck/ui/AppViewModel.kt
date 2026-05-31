@@ -6,6 +6,7 @@ import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.status.SessionStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
@@ -204,6 +205,30 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     /** Per-task reminder lead override in minutes, or null to use the global default. */
     fun reminderOverride(taskId: String): Int? = graph.settings.reminderOverride(taskId)
     fun setReminderOverride(taskId: String, leadMin: Int?) = graph.settings.setReminderOverride(taskId, leadMin)
+
+    // --- in-app nudges (things slipping / follow-ups) — surfaced quietly on Today, no push ---
+    private val _dismissedNudges = MutableStateFlow<Set<String>>(emptySet())
+    fun dismissNudge(id: String) { _dismissedNudges.value = _dismissedNudges.value + id }
+    val nudges: StateFlow<List<Nudge>> =
+        combine(tasks, captures, _dismissedNudges) { ts, cs, dismissed ->
+            computeNudges(ts, cs, nowMs()).filterNot { it.id in dismissed }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    private fun computeNudges(tasks: List<TaskItem>, captures: List<Capture>, now: Long): List<Nudge> {
+        val out = mutableListOf<Nudge>()
+        // D1 — slipping: open tasks older than 3 weeks or rescheduled 3+ times.
+        tasks.asSequence().filter { !it.done }.forEach { t ->
+            val ageDays = tech.csalliance.unstuck.core.time.Time.parseMillis(t.createdAt)?.let { (now - it) / 86_400_000.0 } ?: 0.0
+            if (ageDays >= 21 || (t.moveCount ?: 0) >= 3) {
+                out.add(Nudge("slip:${t.id}", NudgeKind.SLIPPING, "“${t.name}” has been waiting a while.", "Open", taskId = t.id))
+            }
+        }
+        // E1 — a follow-up capture worth turning into a task.
+        captures.asSequence().filter { it.tag == CaptureTag.FOLLOW_UP }.sortedByDescending { it.at }.take(1).forEach { cap ->
+            out.add(Nudge("cap:${cap.id}", NudgeKind.CAPTURE, "You noted “${cap.body}”.", "Make a task", captureId = cap.id))
+        }
+        return out.take(3)
+    }
 
     fun blockTime(date: String, startTime: String, durationMinutes: Int, label: String) = launchWrite {
         write?.upsertCalBlock(
@@ -469,3 +494,14 @@ data class ExportBundle(
 
 /** A just-finished focus session, surfaced as the Today recap card (B3). */
 data class RecapState(val taskName: String, val focusedSec: Int)
+
+/** A quiet, in-app nudge surfaced on Today (no push) — see the notifications catalog. */
+enum class NudgeKind { SLIPPING, CAPTURE }
+data class Nudge(
+    val id: String,
+    val kind: NudgeKind,
+    val title: String,
+    val action: String,
+    val taskId: String? = null,
+    val captureId: String? = null,
+)

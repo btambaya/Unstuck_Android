@@ -85,6 +85,7 @@ fun TodayScreen(
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val live by vm.liveSession.collectAsStateWithLifecycle()
     val recap by vm.lastRecap.collectAsStateWithLifecycle()
+    val nudges by vm.nudges.collectAsStateWithLifecycle()
     val now = vm.nowMs()
     val liveId = live?.taskId
     var areaFilter by remember { mutableStateOf<String?>(null) }
@@ -153,6 +154,29 @@ fun TodayScreen(
                         "${(r.focusedSec / 60).coerceAtLeast(1)} MIN FOCUSED · ${r.taskName}",
                         style = UFont.mono(11), color = c.ink2, maxLines = 1, modifier = Modifier.padding(top = 6.dp),
                     )
+                }
+            }
+        }
+
+        nudges.firstOrNull()?.let { n ->
+            item {
+                Row(
+                    Modifier.padding(horizontal = 18.dp, vertical = 6.dp).fillMaxWidth().clip(RoundedCornerShape(16.dp))
+                        .background(c.bg2).border(1.dp, c.line, RoundedCornerShape(16.dp)).padding(14.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(n.title, style = UFont.sans(13), color = c.ink2, maxLines = 2, modifier = Modifier.weight(1f))
+                    Text(
+                        n.action, style = UFont.sans(12, FontWeight.SemiBold), color = c.primaryDeep,
+                        modifier = Modifier.clickable {
+                            when (n.kind) {
+                                tech.csalliance.unstuck.ui.NudgeKind.SLIPPING -> tasks.firstOrNull { it.id == n.taskId }?.let(onOpen)
+                                tech.csalliance.unstuck.ui.NudgeKind.CAPTURE -> vm.captures.value.firstOrNull { it.id == n.captureId }?.let { vm.promoteCapture(it) }
+                            }
+                            vm.dismissNudge(n.id)
+                        },
+                    )
+                    Text("✕", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clickable { vm.dismissNudge(n.id) })
                 }
             }
         }

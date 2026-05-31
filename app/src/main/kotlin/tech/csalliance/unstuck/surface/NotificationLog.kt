@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.SharedPreferences
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.updateAndGet
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
@@ -57,8 +58,8 @@ object NotificationLog {
     fun add(context: Context, kind: String?, title: String, body: String, deepLink: String?, at: Long = System.currentTimeMillis()) {
         val p = prefs(context)
         val entry = Entry(id = newUuid(), kind = kind ?: "note", title = title, body = body, deepLink = deepLink, at = at)
-        val next = (listOf(entry) + _items.value).take(CAP)
-        _items.value = next
+        // Atomic read-modify-write so a concurrent FCM + alarm post can't drop an entry.
+        val next = _items.updateAndGet { (listOf(entry) + it).take(CAP) }
         runCatching { p.edit().putString(KEY, json.encodeToString(next)).apply() }
     }
 
@@ -68,5 +69,13 @@ object NotificationLog {
         val now = System.currentTimeMillis()
         _lastSeen.value = now
         p.edit().putLong(SEEN, now).apply()
+    }
+
+    /** Wipe the log + unread marker. Called on sign-out so a different account on
+     *  this device never sees the previous user's notification history. */
+    fun clear(context: Context) {
+        _items.value = emptyList()
+        _lastSeen.value = 0L
+        runCatching { prefs(context).edit().clear().apply() }
     }
 }

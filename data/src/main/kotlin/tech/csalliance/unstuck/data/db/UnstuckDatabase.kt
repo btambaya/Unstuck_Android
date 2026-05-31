@@ -18,7 +18,11 @@ abstract class UnstuckDatabase : RoomDatabase() {
     companion object {
         fun build(context: Context): UnstuckDatabase =
             Room.databaseBuilder(context, UnstuckDatabase::class.java, "unstuck.db")
-                .fallbackToDestructiveMigration()
+                // Never silently destroy local data on an UPGRADE — that would wipe the
+                // `outbox` (the only copy of unsynced offline writes). A future version
+                // bump without a registered Migration now fails loudly in dev/test
+                // instead of nuking production data. Downgrade (older APK) still resets.
+                .fallbackToDestructiveMigrationOnDowngrade()
                 .build()
     }
 }

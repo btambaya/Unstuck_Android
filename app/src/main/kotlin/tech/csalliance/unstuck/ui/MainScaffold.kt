@@ -93,7 +93,12 @@ fun MainScaffold(vm: AppViewModel) {
     // recap / brief, or open quick-capture (the live focus screen, else a new task).
     val deepLink by vm.pendingDeepLink.collectAsStateWithLifecycle()
     val liveSession by vm.liveSession.collectAsStateWithLifecycle()
-    LaunchedEffect(deepLink) {
+    // Keyed on `tasks` too: on a COLD launch from a notification, Room hasn't emitted
+    // yet (tasks is still empty), so a task/focus deep link can't resolve. Instead of
+    // dumping the user on Today, we DON'T consume — the effect re-runs when tasks
+    // populates and routes correctly. A bounded delay falls back to Today if the list
+    // genuinely stays empty (e.g. a stale link / zero tasks).
+    LaunchedEffect(deepLink, tasks) {
         val dl = deepLink ?: return@LaunchedEffect
         when {
             dl == "capture" -> {
@@ -104,13 +109,21 @@ fun MainScaffold(vm: AppViewModel) {
                 // "Start" on the starts-now notification → begin the session + open Focus.
                 val id = dl.removePrefix("unstuck://focus/")
                 val t = tasks.firstOrNull { it.id == id }
-                if (t != null) { vm.startFocus(t); focusTask = t }
-                else { tab = "today"; stack.clear() }
+                when {
+                    t != null -> { vm.startFocus(t); focusTask = t }
+                    // No Room data yet: wait. If tasks emits, this effect cancels + re-runs
+                    // (re-keyed on tasks) and resolves; otherwise fall back to Today.
+                    tasks.isEmpty() -> { kotlinx.coroutines.delay(2500); tab = "today"; stack.clear() }
+                    else -> { tab = "today"; stack.clear() }   // loaded but absent
+                }
             }
             dl.startsWith("unstuck://task/") -> {
                 val id = dl.removePrefix("unstuck://task/")
-                tab = "today"; stack.clear()
-                if (tasks.any { it.id == id }) push(Route.Detail(id))
+                when {
+                    tasks.any { it.id == id } -> { tab = "today"; stack.clear(); push(Route.Detail(id)) }
+                    tasks.isEmpty() -> { kotlinx.coroutines.delay(2500); tab = "today"; stack.clear() }
+                    else -> { tab = "today"; stack.clear() }
+                }
             }
             else -> { tab = "today"; stack.clear() }   // unstuck://today, /recap, /brief
         }

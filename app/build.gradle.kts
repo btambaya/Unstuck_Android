@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 22
-        versionName = "0.4.9"
+        versionCode = 23
+        versionName = "0.4.10"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -101,7 +101,7 @@ firebaseAppDistribution {
     // Testers & Groups → create a group with alias `beta` + enable its invite link.
     // Override with -PappDistGroups="alias1,alias2".
     groups = (findProperty("appDistGroups") as String?) ?: "beta"
-    releaseNotes = "v0.4.9 — App icon now uses the exact Unstuck Orbit logo (mark.svg): ink ring + anchor, coral satellite, on the light tile."
+    releaseNotes = "v0.4.10 — pre-launch hardening from the code review: reminders now reschedule after a reboot/update (the boot receiver was never firing); tapping a task/reminder notification on a cold start opens the right task instead of Today; the notification history + reminder settings are cleared on sign-out (no leak to a different account on the same device); auth tokens are no longer included in cloud backup; and a future app update can no longer wipe local data. Removed a Play-restricted alarm permission."
 }
 
 dependencies {

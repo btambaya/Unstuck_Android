@@ -76,13 +76,18 @@ class RealtimeMirror(
             table = tableName
             filter("user_id", FilterOperator.EQ, userId)
         }
+        // Guard each event: one un-decodable row (a new column/enum, a null in a
+        // required field) must NOT throw out of onEach and permanently kill this
+        // table's live mirror — skip it and keep the stream alive (iOS does the same).
         val job = flow.onEach { action ->
-            when (action) {
-                is PostgresAction.Insert -> onUpsert(action.record)
-                is PostgresAction.Update -> onUpsert(action.record)
-                is PostgresAction.Delete -> action.oldRecord["id"]?.let { onDelete(it.jsonPrimitive.content) }
-                else -> {}
-            }
+            runCatching {
+                when (action) {
+                    is PostgresAction.Insert -> onUpsert(action.record)
+                    is PostgresAction.Update -> onUpsert(action.record)
+                    is PostgresAction.Delete -> action.oldRecord["id"]?.let { onDelete(it.jsonPrimitive.content) }
+                    else -> {}
+                }
+            }.onFailure { println("[realtime] $tableName event skipped: $it") }
         }.launchIn(scope)
         runCatching { channel.subscribe() }
             .onFailure { println("[realtime] subscribe $tableName failed: $it") }

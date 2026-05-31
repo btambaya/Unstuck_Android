@@ -43,7 +43,16 @@ class MainActivity : ComponentActivity() {
         graph.provider?.client?.let { client ->
             lifecycleScope.launch {
                 client.auth.sessionStatus.collect { status ->
-                    if (status is SessionStatus.Authenticated) registerFcmToken(application as UnstuckApp)
+                    when (status) {
+                        is SessionStatus.Authenticated -> registerFcmToken(application as UnstuckApp)
+                        is SessionStatus.NotAuthenticated -> if (status.isSignOut) {
+                            // Don't leak the previous user's notification history / reminder
+                            // settings to a different account on this device.
+                            tech.csalliance.unstuck.surface.NotificationLog.clear(this@MainActivity)
+                            graph.settings.clearUserContent()
+                        }
+                        else -> {}
+                    }
                 }
             }
         }

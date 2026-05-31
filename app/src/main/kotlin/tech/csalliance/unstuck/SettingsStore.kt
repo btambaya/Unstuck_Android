@@ -142,6 +142,15 @@ class SettingsStore(context: Context) {
         p.edit().putStringSet("dismissedNudges", ids).apply()
     }
 
+    /** Remove per-user device-local content (reminder overrides + dismissed nudges)
+     *  on sign-out so a different account on this device starts clean. */
+    fun clearUserContent() {
+        p.edit().apply {
+            p.all.keys.filter { it.startsWith("reminder.override.") }.forEach { remove(it) }
+            remove("dismissedNudges")
+        }.apply()
+    }
+
     private inline fun <reified T : Enum<T>> enumOf(name: String?, fallback: T): T =
         name?.let { runCatching { enumValueOf<T>(it) }.getOrNull() } ?: fallback
 }

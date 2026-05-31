@@ -5,14 +5,16 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
-    <!-- Punctual pre-task reminders ("5 min before") + reschedule after reboot. -->
+    <!-- Punctual pre-task reminders ("5 min before") + reschedule after reboot.
+         SCHEDULE_EXACT_ALARM is user-grantable and we fall back to inexact alarms if
+         denied (ReminderScheduler.setAlarm). We deliberately do NOT request the
+         restricted USE_EXACT_ALARM — Play limits it to alarm-clock/calendar apps. -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-    <uses-permission android:name="android.permission.USE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <application
         android:name=".UnstuckApp"
-        android:allowBackup="true"
+        android:allowBackup="false"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
@@ -54,12 +56,15 @@
             android:name=".surface.NotificationActionReceiver"
             android:exported="false" />
 
-        <!-- Pre-task reminder alarms + reschedule on boot. -->
+        <!-- Pre-task reminder alarms + reschedule on boot. Must be exported=true to
+             receive the system BOOT_COMPLETED / MY_PACKAGE_REPLACED broadcasts (sent
+             from another UID); the alarm PendingIntents target it explicitly anyway. -->
         <receiver
             android:name=".surface.ReminderReceiver"
-            android:exported="false">
+            android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
             </intent-filter>
         </receiver>
 

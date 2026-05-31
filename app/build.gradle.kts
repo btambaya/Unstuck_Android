@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 20
-        versionName = "0.4.7"
+        versionCode = 21
+        versionName = "0.4.8"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -95,7 +95,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech,justtesting6363@gmail.com,zyzkazaure@gmail.com"
-    releaseNotes = "v0.4.7 — App icon now uses the actual in-app Orbit logo (ink ring + coral satellite on the light tile), matching the auth screen. Everything else is unchanged from v0.4.6 (nudge-dismissal persistence, calendar title fix, no Tasks hamburger)."
+    releaseNotes = "v0.4.8 — Today layout: the Start-Next banner now sits above the filter pills, and the pills stick to the top of the list as you scroll. Plus the v0.4.7 logo icon."
 }
 
 dependencies {

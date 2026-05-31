@@ -1,6 +1,7 @@
 package tech.csalliance.unstuck.ui.today
 
 import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -70,6 +71,7 @@ import tech.csalliance.unstuck.ui.components.areaColorFor
 import tech.csalliance.unstuck.ui.components.dateEyebrow
 import tech.csalliance.unstuck.ui.components.greeting
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TodayScreen(
     vm: AppViewModel,
@@ -145,24 +147,8 @@ fun TodayScreen(
                 Text("→", style = UFont.sans(12), color = c.ink3)
             }
         }
-        if (!empty) {
-            Text(if (backlogActive) "Backlog" else "Today", style = UFont.sans(15, FontWeight.SemiBold), color = c.ink, modifier = Modifier.padding(start = 18.dp, top = 14.dp, bottom = 8.dp))
-            Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 18.dp, end = 18.dp, bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                // Backlog toggle — amber accent (web parity); entering it clears the area filter.
-                Box(
-                    Modifier.clip(RoundedCornerShape(999.dp)).background(if (backlogActive) c.amberSoft else c.bg2).clickable { backlogActive = !backlogActive; if (backlogActive) areaFilter = null }.padding(horizontal = 12.dp, vertical = 6.dp),
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                        if (!backlogActive) Box(Modifier.size(6.dp).clip(CircleShape).background(c.amber))
-                        Text("Backlog", style = UFont.sans(12, FontWeight.Medium), color = if (backlogActive) c.amberInk else c.ink2)
-                    }
-                }
-                FilterPill("All", !backlogActive && areaFilter == null) { backlogActive = false; areaFilter = null }
-                areas.forEach { a -> FilterPill(a.name, !backlogActive && areaFilter == a.name, dotColor = c.areaColor(a.color)) { backlogActive = false; areaFilter = if (areaFilter == a.name) null else a.name } }
-            }
-        }
-
-        // ── Scrolling content ─────────────────────────────────────────────────────
+        // ── Scrolling content: the Start-Next banner first, then the filter pills
+        //    (which stick to the top as you scroll), then the list. ──────────────────
         LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
             recap?.let { r ->
                 item {
@@ -210,6 +196,25 @@ fun TodayScreen(
                 item { EmptyHero(onAdd = onSearch) }
             } else {
                 if (startNext != null) item { StartNextHero(startNext) { onStartFocus(startNext) } }
+                // Filter pills BELOW the banner; they stick to the top of the list on scroll.
+                stickyHeader {
+                    Column(Modifier.fillMaxWidth().background(c.bg)) {
+                        Text(if (backlogActive) "Backlog" else "Today", style = UFont.sans(15, FontWeight.SemiBold), color = c.ink, modifier = Modifier.padding(start = 18.dp, top = 14.dp, bottom = 8.dp))
+                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 18.dp, end = 18.dp, bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            // Backlog toggle — amber accent (web parity); entering it clears the area filter.
+                            Box(
+                                Modifier.clip(RoundedCornerShape(999.dp)).background(if (backlogActive) c.amberSoft else c.bg2).clickable { backlogActive = !backlogActive; if (backlogActive) areaFilter = null }.padding(horizontal = 12.dp, vertical = 6.dp),
+                            ) {
+                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                    if (!backlogActive) Box(Modifier.size(6.dp).clip(CircleShape).background(c.amber))
+                                    Text("Backlog", style = UFont.sans(12, FontWeight.Medium), color = if (backlogActive) c.amberInk else c.ink2)
+                                }
+                            }
+                            FilterPill("All", !backlogActive && areaFilter == null) { backlogActive = false; areaFilter = null }
+                            areas.forEach { a -> FilterPill(a.name, !backlogActive && areaFilter == a.name, dotColor = c.areaColor(a.color)) { backlogActive = false; areaFilter = if (areaFilter == a.name) null else a.name } }
+                        }
+                    }
+                }
                 if (liveTask != null && live != null) {
                     item {
                         LiveSessionCard(

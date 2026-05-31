@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 19
-        versionName = "0.4.6"
+        versionCode = 20
+        versionName = "0.4.7"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -95,7 +95,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech,justtesting6363@gmail.com,zyzkazaure@gmail.com"
-    releaseNotes = "v0.4.6 — Fixes + branded icon. Dismissing an in-app nudge (e.g. 'You noted ...') now sticks across app restarts (was reappearing). Calendar day-grid task titles no longer get clipped on short blocks (centered + more room). Removed the redundant hamburger menu on Tasks now that the area filters are always shown. New branded app icon: the coral Orbit mark on dark ink (was an off-brand placeholder). Builds on v0.4.5."
+    releaseNotes = "v0.4.7 — App icon now uses the actual in-app Orbit logo (ink ring + coral satellite on the light tile), matching the auth screen. Everything else is unchanged from v0.4.6 (nudge-dismissal persistence, calendar title fix, no Tasks hamburger)."
 }
 
 dependencies {

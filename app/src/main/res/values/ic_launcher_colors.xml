@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Brand ink — the Orbit mark sits on dark ink (matches the app's branding). -->
-    <color name="ic_launcher_background">#1A1C26</color>
+    <!-- App's light surface — the Orbit logo sits on it exactly as on the auth screen. -->
+    <color name="ic_launcher_background">#FAFAF7</color>
 </resources>

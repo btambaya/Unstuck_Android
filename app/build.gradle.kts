@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 18
-        versionName = "0.4.5"
+        versionCode = 19
+        versionName = "0.4.6"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -95,7 +95,7 @@ firebaseAppDistribution {
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
     testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech,justtesting6363@gmail.com,zyzkazaure@gmail.com"
-    releaseNotes = "v0.4.5 — UI polish + a notification center. Today and Tasks now keep the header and filters PINNED while only the list scrolls. Tapping your initials opens the account menu right next to them (a dropdown, not a bottom sheet). A new bell next to your initials opens a notification center with upcoming reminders and recent notifications (unread dot included). You can now set a CUSTOM time when scheduling a task (a 'Custom...' chip opens a time picker). The add field in a collection now sits at the bottom so the whole add flow is bottom-anchored. Builds on v0.4.4."
+    releaseNotes = "v0.4.6 — Fixes + branded icon. Dismissing an in-app nudge (e.g. 'You noted ...') now sticks across app restarts (was reappearing). Calendar day-grid task titles no longer get clipped on short blocks (centered + more room). Removed the redundant hamburger menu on Tasks now that the area filters are always shown. New branded app icon: the coral Orbit mark on dark ink (was an off-brand placeholder). Builds on v0.4.5."
 }
 
 dependencies {

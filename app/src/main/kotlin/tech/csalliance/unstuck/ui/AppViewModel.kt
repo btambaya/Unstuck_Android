@@ -211,8 +211,13 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun consumeDeepLink() { graph.pendingDeepLink.value = null }
 
     // --- in-app nudges (things slipping / follow-ups) — surfaced quietly on Today, no push ---
-    private val _dismissedNudges = MutableStateFlow<Set<String>>(emptySet())
-    fun dismissNudge(id: String) { _dismissedNudges.value = _dismissedNudges.value + id }
+    // Persisted (device-local) so a dismissed nudge stays dismissed across relaunch.
+    private val _dismissedNudges = MutableStateFlow(graph.settings.loadDismissedNudges())
+    fun dismissNudge(id: String) {
+        val next = _dismissedNudges.value + id
+        _dismissedNudges.value = next
+        graph.settings.saveDismissedNudges(next)
+    }
     val nudges: StateFlow<List<Nudge>> =
         combine(tasks, captures, _dismissedNudges) { ts, cs, dismissed ->
             // Quiet in-app nudges are off at the Calm level. (Read fresh so a level

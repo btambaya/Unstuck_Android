@@ -75,7 +75,8 @@ fun TasksScreen(
     val list = visibleTasks(view, tasks, blocks, vm.nowMs(), activeArea = if (view == TaskListView.TODAY) null else activeArea, activeTag = activeTag, slipMode = false)
 
     Column(Modifier.fillMaxSize()) {
-        AppBar(title = "Tasks", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch, onNotifications = onNotifications, notifUnread = notifUnread, onAvatar = onAvatar, avatarInitials = avatarInitials)
+        // No leading hamburger — the area-filter pills below cover what it did.
+        AppBar(title = "Tasks", leading = Leading.NONE, onSearch = onSearch, onNotifications = onNotifications, notifUnread = notifUnread, onAvatar = onAvatar, avatarInitials = avatarInitials)
         // ── Pinned: title + tab pills + area/tag filters. Only the list below scrolls. ──
         Column(Modifier.padding(horizontal = 18.dp)) {
             Text("Your tasks", style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))

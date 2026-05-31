@@ -132,6 +132,16 @@ class SettingsStore(context: Context) {
         p.edit().apply { if (leadMin == null) remove("reminder.override.$taskId") else putInt("reminder.override.$taskId", leadMin) }.apply()
     }
 
+    /** Dismissed in-app nudge ids (e.g. "cap:<id>"/"slip:<id>") — persisted so a
+     *  dismissed nudge stays dismissed across relaunch (was in-memory, so it
+     *  reappeared on next launch). Copied out of the SharedPreferences set since
+     *  the returned instance must not be mutated. */
+    fun loadDismissedNudges(): Set<String> = (p.getStringSet("dismissedNudges", emptySet()) ?: emptySet()).toSet()
+
+    fun saveDismissedNudges(ids: Set<String>) {
+        p.edit().putStringSet("dismissedNudges", ids).apply()
+    }
+
     private inline fun <reified T : Enum<T>> enumOf(name: String?, fallback: T): T =
         name?.let { runCatching { enumValueOf<T>(it) }.getOrNull() } ?: fallback
 }

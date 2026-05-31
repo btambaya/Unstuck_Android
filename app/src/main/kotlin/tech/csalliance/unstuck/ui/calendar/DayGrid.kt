@@ -178,8 +178,9 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                         }
                         var blockOrigin by remember(b.id) { mutableStateOf(Offset.Zero) }
                         Box(
-                            Modifier.padding(start = 70.dp, end = 12.dp).offset(y = topDp).fillMaxWidth()
-                                .height(hDp.coerceAtLeast(22.dp))
+                            contentAlignment = Alignment.CenterStart,
+                            modifier = Modifier.padding(start = 70.dp, end = 12.dp).offset(y = topDp).fillMaxWidth()
+                                .height(hDp.coerceAtLeast(24.dp))
                                 .onGloballyPositioned { blockOrigin = it.localToWindow(Offset.Zero) }
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(fill)
@@ -197,7 +198,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                                         )
                                     } else Modifier,
                                 )
-                                .padding(6.dp),
+                                .padding(horizontal = 6.dp, vertical = 2.dp),
                         ) {
                             Text(
                                 b.taskName, style = UFont.sans(12, FontWeight.Medium),

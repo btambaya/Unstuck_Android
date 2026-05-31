@@ -1,24 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- The Orbit brand mark: coral ~270° ring with a gap at 3 o'clock + a coral
-     anchor + a light orbit dot in the gap. On the dark-ink adaptive background. -->
+<!-- Single-colour Orbit silhouette for the themed-icon (Material You) monochrome
+     layer — the launcher tints this. Same geometry as ic_launcher_foreground. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
-    android:viewportHeight="108">
-    <!-- 270° coral ring (gap centred at 3 o'clock). -->
+    android:viewportHeight="108"
+    android:tint="#FFFFFFFF">
     <path
-        android:strokeColor="#E89077"
+        android:strokeColor="#FFFFFFFF"
         android:strokeWidth="6"
         android:strokeLineCap="round"
         android:fillColor="#00000000"
         android:pathData="M 70.7,33.3 A 24,24 0 1 0 70.7,74.7" />
-    <!-- coral anchor -->
     <path
-        android:fillColor="#E89077"
+        android:fillColor="#FFFFFFFF"
         android:pathData="M54,54 m-8,0 a8,8 0 1,0 16,0 a8,8 0 1,0 -16,0" />
-    <!-- light orbit dot sitting in the gap -->
     <path
-        android:fillColor="#FAFAF7"
+        android:fillColor="#FFFFFFFF"
         android:pathData="M78,54 m-5,0 a5,5 0 1,0 10,0 a5,5 0 1,0 -10,0" />
 </vector>

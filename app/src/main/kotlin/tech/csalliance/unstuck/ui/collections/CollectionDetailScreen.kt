@@ -71,7 +71,10 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     val focus = remember { FocusRequester() }
     LaunchedEffect(collectionId) { runCatching { focus.requestFocus() } }
 
-    if (col == null) { onBack(); return }
+    // Navigate out of composition (not as a side effect inside it) when the
+    // collection is gone — e.g. deleted locally or via realtime while open.
+    LaunchedEffect(col == null) { if (col == null) onBack() }
+    if (col == null) return
     val color = c.areaColor(col.color)
     val pinned = col.items.filter { it.pinned == true }
     val rest = col.items.filter { it.pinned != true }

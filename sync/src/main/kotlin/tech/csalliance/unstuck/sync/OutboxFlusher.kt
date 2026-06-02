@@ -14,8 +14,13 @@ import tech.csalliance.unstuck.data.db.OutboxEntity
 
 class OutboxFlusher(private val gateway: SyncGateway, private val store: LocalStore) {
 
-    suspend fun flush(userId: String) {
+    suspend fun flush(userId: String, currentUserId: () -> String? = { userId }) {
         while (true) {
+            // Bail if the signed-in user changed mid-drain (sign-out + sign-in to
+            // a different account). RLS already blocks a cross-account write, but
+            // this avoids confusing FK/RLS errors + a stuck op. Mirrors the web
+            // bridge's intendedUserId guard.
+            if (currentUserId() != userId) return
             val all = store.pending()
             if (all.isEmpty()) break
             val pendingIds = all.map { it.recordId }.toSet()

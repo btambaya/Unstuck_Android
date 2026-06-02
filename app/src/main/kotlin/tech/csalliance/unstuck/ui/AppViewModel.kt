@@ -7,6 +7,8 @@ import io.github.jan.supabase.auth.status.SessionStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import androidx.glance.appwidget.updateAll
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
@@ -245,6 +247,22 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         combine(captures, _archivedCaptureIds) { cs, archived ->
             cs.filter { it.id !in archived }.sortedByDescending { it.at }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    init {
+        // Keep the Glance "Start Next" home-screen widget current. Its DataStore
+        // was never written, so the widget shipped frozen on "All clear". Recompute
+        // the recommendation on task/block/live-session change and push it.
+        viewModelScope.launch {
+            combine(tasks, blocks, liveSession) { ts, bs, live ->
+                tech.csalliance.unstuck.core.logic.pickStartNext(ts, bs, live?.taskId, null)
+            }.distinctUntilChanged().collect { rec ->
+                runCatching {
+                    tech.csalliance.unstuck.surface.writeStartNext(graph.appContext, rec?.name, rec?.estimateMin)
+                    tech.csalliance.unstuck.surface.StartNextWidget().updateAll(graph.appContext)
+                }
+            }
+        }
+    }
 
     // --- in-app notification center: the log of shown notifications + an unread badge ---
     val notifications: StateFlow<List<tech.csalliance.unstuck.surface.NotificationLog.Entry>>
@@ -512,7 +530,9 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     suspend fun deleteAccount(): AuthOutcome =
         auth?.deleteAccount() ?: AuthOutcome.Error("Not configured")
     val hasPassword: Boolean get() = auth?.hasPassword ?: true
-    fun signOut() = launchWrite { auth?.signOut() }
+    // Unregister this device's push token (while the JWT is still valid) then
+    // sign out — prevents the previous user's pushes reaching the next user.
+    fun signOut() = launchWrite { graph.coordinator?.signOutAndUnregister() ?: auth?.signOut() }
 
     /** Serialise every user-owned collection into one JSON bundle (matches web exportAll). */
     fun exportJson(): String = EXPORT_JSON.encodeToString(

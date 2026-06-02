@@ -38,6 +38,16 @@ class PushClient(private val client: SupabaseClient) {
             setBody(RegisterBody(deviceId = deviceId, fcmToken = fcmToken, platform = "android", timezone = timezone))
         }
     }
+
+    /** Delete this device's token row on sign-out so the previous user's
+     *  morning brief / pushes are never delivered to whoever signs in next on
+     *  the same device. MUST run while the signing-out user's JWT is still
+     *  valid (RLS: user_id = auth.uid()). */
+    suspend fun unregister(deviceId: String) {
+        client.from("device_tokens").delete {
+            filter { eq("device_id", deviceId) }
+        }
+    }
 }
 
 class NotificationsClient(private val client: SupabaseClient) {

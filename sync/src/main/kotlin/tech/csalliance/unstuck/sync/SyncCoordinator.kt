@@ -47,8 +47,21 @@ class SyncCoordinator(
     private val flusher = OutboxFlusher(gateway, store)
     private val realtime = RealtimeMirror(client, store, scope)
 
+    private val appContext = context.applicationContext
     private val prefs = context.getSharedPreferences("unstuck.sync", Context.MODE_PRIVATE)
     private var observeJob: Job? = null
+
+    /** Sign out, first deleting this device's push-token row WHILE the JWT is
+     *  still valid (RLS: user_id = auth.uid()). Stops the previous user's
+     *  morning brief / pushes from reaching whoever signs in next on this
+     *  device. The server single-owner pre-delete is the other half. */
+    suspend fun signOutAndUnregister() {
+        runCatching { push.unregister(thisDeviceId()) }
+        auth.signOut()
+    }
+
+    private fun thisDeviceId(): String =
+        android.provider.Settings.Secure.getString(appContext.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "android-device"
 
     init {
         // Two-way Google sync: WriteThrough fires these when a task block is
@@ -73,7 +86,7 @@ class SyncCoordinator(
      *  WorkManager job. No-op when signed out. */
     suspend fun syncNow() {
         val uid = auth.currentUserId ?: return
-        flusher.flush(uid)
+        flusher.flush(uid) { auth.currentUserId }
         hydrator.hydrate()
         runCatching { pullCalendar() }
     }

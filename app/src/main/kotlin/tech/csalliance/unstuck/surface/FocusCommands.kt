@@ -18,16 +18,19 @@ import java.time.Instant
 object FocusCommands {
     private fun nowIso(): String = Instant.now().toString()
 
-    fun pause(app: UnstuckApp) = run(app) { store ->
+    // onComplete runs after the (async) write commits — the shade receiver
+    // passes a goAsync() PendingResult.finish() so the process stays alive
+    // until the Room write lands (was fire-and-forget → truncatable).
+    fun pause(app: UnstuckApp, onComplete: () -> Unit = {}) = run(app, onComplete) { store ->
         store.getLiveSession()?.let { store.setLiveSession(FocusTimer.pause(it, System.currentTimeMillis())) }
     }
 
-    fun resume(app: UnstuckApp) = run(app) { store ->
+    fun resume(app: UnstuckApp, onComplete: () -> Unit = {}) = run(app, onComplete) { store ->
         store.getLiveSession()?.let { store.setLiveSession(FocusTimer.resume(it, System.currentTimeMillis())) }
     }
 
     /** End the session (no mark-done) — records the Session + accumulates focus time. */
-    fun end(app: UnstuckApp) = run(app) { store ->
+    fun end(app: UnstuckApp, onComplete: () -> Unit = {}) = run(app, onComplete) { store ->
         val live = store.getLiveSession()
         if (live != null) {
             val elapsed = FocusTimer.elapsedSec(live, System.currentTimeMillis())
@@ -43,7 +46,9 @@ object FocusCommands {
         }
     }
 
-    private inline fun run(app: UnstuckApp, crossinline block: suspend (LocalStore) -> Unit) {
-        app.graph.scope.launch { runCatching { block(app.graph.store) } }
+    private inline fun run(app: UnstuckApp, crossinline onComplete: () -> Unit = {}, crossinline block: suspend (LocalStore) -> Unit) {
+        app.graph.scope.launch {
+            try { runCatching { block(app.graph.store) } } finally { onComplete() }
+        }
     }
 }

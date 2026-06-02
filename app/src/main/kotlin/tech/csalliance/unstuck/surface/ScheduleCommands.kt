@@ -15,26 +15,28 @@ import java.time.Instant
  * time, and confirms in the shade. Runs without opening the app.
  */
 object ScheduleCommands {
-    fun rescheduleToNextSlot(app: UnstuckApp, blockId: String, taskId: String, taskName: String) {
-        val write = app.graph.coordinator?.write ?: return
+    fun rescheduleToNextSlot(app: UnstuckApp, blockId: String, taskId: String, taskName: String, onComplete: () -> Unit = {}) {
+        val write = app.graph.coordinator?.write ?: run { onComplete(); return }
         app.graph.scope.launch {
-            runCatching {
-                val store = app.graph.store
-                val blocks = store.blocks().first()
-                val block = blocks.firstOrNull { it.id == blockId } ?: return@launch
-                val task = store.tasks().first().firstOrNull { it.id == taskId }
-                val estimate = task?.estimateMin ?: block.durationMinutes
-                val today = Clock.todayIso()
-                val now = System.currentTimeMillis()
-                val slot = findFreeSlotsForDate(blocks, estimate, today, now, limit = 1).firstOrNull()
-                val newDate = slot?.date ?: today
-                val newTime = slot?.startTime ?: plusHour(block.startTime)
+            try {
+                runCatching {
+                    val store = app.graph.store
+                    val blocks = store.blocks().first()
+                    val block = blocks.firstOrNull { it.id == blockId } ?: return@runCatching
+                    val task = store.tasks().first().firstOrNull { it.id == taskId }
+                    val estimate = task?.estimateMin ?: block.durationMinutes
+                    val today = Clock.todayIso()
+                    val now = System.currentTimeMillis()
+                    val slot = findFreeSlotsForDate(blocks, estimate, today, now, limit = 1).firstOrNull()
+                    val newDate = slot?.date ?: today
+                    val newTime = slot?.startTime ?: plusHour(block.startTime)
 
-                write.upsertCalBlock(block.copy(date = newDate, startTime = newTime))
-                task?.let { write.upsertTask(bumpMoveCount(it, Instant.now().toString())) }
-                ReminderScheduler.reschedule(app)
-                NotificationRenderer.postRescheduleConfirmation(app.applicationContext, taskName, newTime, taskId)
-            }
+                    write.upsertCalBlock(block.copy(date = newDate, startTime = newTime))
+                    task?.let { write.upsertTask(bumpMoveCount(it, Instant.now().toString())) }
+                    ReminderScheduler.reschedule(app)
+                    NotificationRenderer.postRescheduleConfirmation(app.applicationContext, taskName, newTime, taskId)
+                }
+            } finally { onComplete() }
         }
     }
 

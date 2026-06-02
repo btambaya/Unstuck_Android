@@ -17,13 +17,19 @@ class NotificationActionReceiver : BroadcastReceiver() {
         val app = context.applicationContext as? UnstuckApp ?: return
         val taskName = intent.getStringExtra(EXTRA_TASK_NAME) ?: "your task"
         when (intent.action) {
+            // The write-performing actions keep the receiver alive via goAsync()
+            // until the async Room write commits — otherwise tapping from the
+            // shade on a cold/low-priority process can truncate the coroutine
+            // and leave the live session in an inconsistent state.
             ACTION_PAUSE -> {
-                FocusCommands.pause(app)
+                val pending = goAsync()
+                FocusCommands.pause(app) { pending.finish() }
                 FocusTimerService.update(context, paused = true)
                 PausedCheckinScheduler.arm(context, taskName)
             }
             ACTION_RESUME -> {
-                FocusCommands.resume(app)
+                val pending = goAsync()
+                FocusCommands.resume(app) { pending.finish() }
                 FocusTimerService.update(context, paused = false)
                 PausedCheckinScheduler.cancel(context)
                 NotificationManagerCompat.from(context).cancel(NotifIds.PAUSED)
@@ -33,7 +39,8 @@ class NotificationActionReceiver : BroadcastReceiver() {
                 PausedCheckinScheduler.snooze(context, taskName)
             }
             ACTION_END -> {
-                FocusCommands.end(app)
+                val pending = goAsync()
+                FocusCommands.end(app) { pending.finish() }
                 PausedCheckinScheduler.cancel(context)
                 NotificationManagerCompat.from(context).cancel(NotifIds.PAUSED)
                 FocusTimerService.stop(context)
@@ -51,7 +58,8 @@ class NotificationActionReceiver : BroadcastReceiver() {
                 val drifted = intent.getBooleanExtra(EXTRA_DRIFTED, false)
                 NotificationManagerCompat.from(context)
                     .cancel(if (drifted) NotifIds.drifted(taskId) else NotifIds.atStart(taskId))
-                ScheduleCommands.rescheduleToNextSlot(app, blockId, taskId, taskName)
+                val pending = goAsync()
+                ScheduleCommands.rescheduleToNextSlot(app, blockId, taskId, taskName) { pending.finish() }
             }
         }
     }

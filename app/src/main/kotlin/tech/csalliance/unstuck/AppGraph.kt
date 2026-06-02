@@ -17,6 +17,7 @@ import tech.csalliance.unstuck.sync.SyncCoordinator
 // BuildConfig); the UI shows a setup screen until then, exactly like iOS.
 class AppGraph(context: Context) {
     val configured: Boolean = BuildConfig.SUPABASE_ANON_KEY.isNotEmpty()
+    val appContext: Context = context.applicationContext
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 

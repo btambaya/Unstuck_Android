@@ -57,8 +57,12 @@ fun CommandPalette(vm: AppViewModel, onDismiss: () -> Unit, onOpenTask: (TaskIte
     ).filter { q.isEmpty() || it.title.lowercase().contains(q) }
     val taskResults = tasks.filter { !it.done && (q.isEmpty() || it.name.lowercase().contains(q)) }
         .take(8).map { t -> Result(t.name, t.lifeArea ?: "—", "TASK") { onOpenTask(t) } }
-    val noteResults = captures.filter { q.isNotEmpty() && it.body.lowercase().contains(q) }
-        .take(4).map { cap -> Result(cap.body, cap.tag.name.lowercase(), "NOTE") { onDismiss() } }
+    // Note rows route to their owning task (was a dead end that just closed
+    // the palette). Drop notes with no resolvable owning task.
+    val noteResults = captures
+        .filter { q.isNotEmpty() && it.body.lowercase().contains(q) && it.taskId != null }
+        .mapNotNull { cap -> tasks.find { it.id == cap.taskId }?.let { t -> Result(cap.body, cap.tag.name.lowercase(), "NOTE") { onOpenTask(t) } } }
+        .take(4)
     val results = taskResults + noteResults + actions
 
     Column(Modifier.fillMaxSize().background(c.bg).imePadding()) {

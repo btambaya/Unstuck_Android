@@ -88,6 +88,18 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
             scroll.scrollTo((((lt.hour - 1).coerceAtLeast(0)) * hourPx).toInt())
         }
     }
+    // Drive the NOW line from a coarse ticker so it advances while the screen
+    // is open (was inline LocalTime.now() with no clock-driven recomposition,
+    // so it froze at first composition). Only ticks on today.
+    var nowLt by remember { mutableStateOf(java.time.LocalTime.now()) }
+    LaunchedEffect(date) {
+        if (date == Clock.todayIso()) {
+            while (true) {
+                nowLt = java.time.LocalTime.now()
+                kotlinx.coroutines.delay(30_000)
+            }
+        }
+    }
 
     var gridBounds by remember { mutableStateOf(Rect.Zero) }
     var rootOrigin by remember { mutableStateOf(Offset.Zero) } // window coords of this screen's top-left
@@ -210,7 +222,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                 }
                 // "NOW" line on today's grid.
                 if (date == Clock.todayIso()) {
-                    val lt = java.time.LocalTime.now()
+                    val lt = nowLt
                     val nowMin = lt.hour * 60 + lt.minute - START_HOUR * 60
                     if (nowMin in 0..((END_HOUR - START_HOUR) * 60)) {
                         val topDp = HOUR_HEIGHT * (nowMin / 60f)
@@ -255,10 +267,14 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
         // Drag ghost — follows the finger. dragPos is in window coords, so subtract
         // this Box's window origin to draw it in local space (1:1 with the finger).
         val ghostLabel = dragTask?.name ?: dragBlock?.taskName
+        // Density-aware centering offsets (raw px constants were only correct
+        // at one screen density → ghost drifted from the finger on hdpi/xxhdpi).
+        val ghostDx = with(density) { 70.dp.toPx() }.roundToInt()
+        val ghostDy = with(density) { 18.dp.toPx() }.roundToInt()
         ghostLabel?.let { label ->
             Box(
                 Modifier
-                    .offset { IntOffset((dragPos.x - rootOrigin.x).roundToInt() - 70, (dragPos.y - rootOrigin.y).roundToInt() - 18) }
+                    .offset { IntOffset((dragPos.x - rootOrigin.x).roundToInt() - ghostDx, (dragPos.y - rootOrigin.y).roundToInt() - ghostDy) }
                     .clip(RoundedCornerShape(10.dp))
                     .background(c.coralDeep)
                     .padding(horizontal = 12.dp, vertical = 8.dp),

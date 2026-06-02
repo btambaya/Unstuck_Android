@@ -96,6 +96,24 @@ fun MainScaffold(vm: AppViewModel) {
     // recap / brief, or open quick-capture (the live focus screen, else a new task).
     val deepLink by vm.pendingDeepLink.collectAsStateWithLifecycle()
     val liveSession by vm.liveSession.collectAsStateWithLifecycle()
+
+    // Restore the live-focus foreground service from the persisted session after
+    // process death — independent of whether the user is on the Focus screen.
+    // The service is START_NOT_STICKY and was only armed from FocusScreen, so a
+    // kill left an "active" session with no ongoing notification / paused
+    // check-in. This runs while the Activity is foreground (allowed FGS start);
+    // re-arming the single FOCUS notif id is idempotent.
+    val fgsContext = androidx.compose.ui.platform.LocalContext.current
+    LaunchedEffect(liveSession?.sessionStart, liveSession?.taskId, liveSession?.paused) {
+        val live = liveSession
+        val start = live?.sessionStart
+        if (live != null && start != null) {
+            val name = tasks.firstOrNull { it.id == live.taskId }?.name ?: "Focus session"
+            tech.csalliance.unstuck.surface.FocusTimerService.start(fgsContext, name, start, paused = live.paused)
+            tech.csalliance.unstuck.surface.FocusTimerService.update(fgsContext, paused = live.paused, startMs = start)
+            if (live.paused) tech.csalliance.unstuck.surface.PausedCheckinScheduler.arm(fgsContext, name)
+        }
+    }
     // Keyed on `tasks` too: on a COLD launch from a notification, Room hasn't emitted
     // yet (tasks is still empty), so a task/focus deep link can't resolve. Instead of
     // dumping the user on Today, we DON'T consume — the effect re-runs when tasks

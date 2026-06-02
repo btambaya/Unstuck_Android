@@ -142,12 +142,22 @@ class SettingsStore(context: Context) {
         p.edit().putStringSet("dismissedNudges", ids).apply()
     }
 
-    /** Remove per-user device-local content (reminder overrides + dismissed nudges)
-     *  on sign-out so a different account on this device starts clean. */
+    /** Capture ids the user has archived from the Inbox (triaged without
+     *  deleting). Mirrors dismissedNudges; cleared on sign-out. */
+    fun loadArchivedCaptureIds(): Set<String> = (p.getStringSet("archivedCaptureIds", emptySet()) ?: emptySet()).toSet()
+
+    fun saveArchivedCaptureIds(ids: Set<String>) {
+        p.edit().putStringSet("archivedCaptureIds", ids).apply()
+    }
+
+    /** Remove per-user device-local content (reminder overrides + dismissed
+     *  nudges + archived captures) on sign-out so a different account on this
+     *  device starts clean. */
     fun clearUserContent() {
         p.edit().apply {
             p.all.keys.filter { it.startsWith("reminder.override.") }.forEach { remove(it) }
             remove("dismissedNudges")
+            remove("archivedCaptureIds")
         }.apply()
     }
 

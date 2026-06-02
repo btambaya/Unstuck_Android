@@ -56,6 +56,7 @@ private sealed interface Route {
     data class SettingsSub(val section: SettingsSection) : Route
     data object Palette : Route
     data object Notifications : Route
+    data object Inbox : Route
 }
 
 private sealed interface Sheet {
@@ -85,9 +86,11 @@ fun MainScaffold(vm: AppViewModel) {
 
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val notifUnread by vm.notifUnread.collectAsStateWithLifecycle()
+    val inboxCaptures by vm.inboxCaptures.collectAsStateWithLifecycle()
     fun push(r: Route) = stack.add(r)
     fun pop() { if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex) }
     val openNotifs: () -> Unit = { vm.markNotificationsSeen(); push(Route.Notifications) }
+    val openInbox: () -> Unit = { push(Route.Inbox) }
 
     // Consume notification deep links set by MainActivity: route to the task / today /
     // recap / brief, or open quick-capture (the live focus screen, else a new task).
@@ -151,6 +154,8 @@ fun MainScaffold(vm: AppViewModel) {
                         onInsights = { push(Route.Insights(false)) },
                         onNotifications = openNotifs,
                         notifUnread = notifUnread,
+                        onInbox = openInbox,
+                        inboxCount = inboxCaptures.size,
                     )
                     "tasks" -> TasksScreen(vm, activeArea = activeArea, onClearArea = { activeArea = null }, onAreaPick = { activeArea = it }, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
                     "calendar" -> CalendarScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials, onCreateAt = { d, t -> newTaskPrefill = d to t; showNewTask = true })
@@ -181,6 +186,9 @@ fun MainScaffold(vm: AppViewModel) {
                         onSettings = { stack.clear(); push(Route.Settings) },
                     )
                     Route.Notifications -> tech.csalliance.unstuck.ui.notifications.NotificationCenterScreen(
+                        vm, onBack = ::pop, onOpenTask = { id -> pop(); push(Route.Detail(id)) },
+                    )
+                    Route.Inbox -> tech.csalliance.unstuck.ui.inbox.InboxScreen(
                         vm, onBack = ::pop, onOpenTask = { id -> pop(); push(Route.Detail(id)) },
                     )
                 }

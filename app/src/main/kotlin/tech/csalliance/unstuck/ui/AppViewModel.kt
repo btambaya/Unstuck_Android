@@ -226,6 +226,26 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
             else computeNudges(ts, cs, nowMs()).filterNot { it.id in dismissed }
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    // --- capture Inbox: triage captures (promote / open / archive / discard) ---
+    // "Archived" ids are device-local + cleared on sign-out (like nudges).
+    private val _archivedCaptureIds = MutableStateFlow(graph.settings.loadArchivedCaptureIds())
+    val archivedCaptureIds: StateFlow<Set<String>> = _archivedCaptureIds
+    fun archiveCapture(id: String) {
+        val next = _archivedCaptureIds.value + id
+        _archivedCaptureIds.value = next
+        graph.settings.saveArchivedCaptureIds(next)
+    }
+    fun unarchiveCapture(id: String) {
+        val next = _archivedCaptureIds.value - id
+        _archivedCaptureIds.value = next
+        graph.settings.saveArchivedCaptureIds(next)
+    }
+    /** Captures still needing triage (not archived), newest first. */
+    val inboxCaptures: StateFlow<List<Capture>> =
+        combine(captures, _archivedCaptureIds) { cs, archived ->
+            cs.filter { it.id !in archived }.sortedByDescending { it.at }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
     // --- in-app notification center: the log of shown notifications + an unread badge ---
     val notifications: StateFlow<List<tech.csalliance.unstuck.surface.NotificationLog.Entry>>
         get() = tech.csalliance.unstuck.surface.NotificationLog.items
@@ -244,10 +264,8 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
                 out.add(Nudge("slip:${t.id}", NudgeKind.SLIPPING, "“${t.name}” has been waiting a while.", "Open", taskId = t.id))
             }
         }
-        // E1 — a follow-up capture worth turning into a task.
-        captures.asSequence().filter { it.tag == CaptureTag.FOLLOW_UP }.sortedByDescending { it.at }.take(1).forEach { cap ->
-            out.add(Nudge("cap:${cap.id}", NudgeKind.CAPTURE, "You noted “${cap.body}”.", "Make a task", captureId = cap.id))
-        }
+        // (No capture nudge: the Inbox surfaces captures for triage, and a
+        // nudge for a thought you just wrote was redundant + naggy.)
         return out.take(3)
     }
 

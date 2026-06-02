@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.MoveToInbox
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -82,6 +83,8 @@ fun TodayScreen(
     onInsights: () -> Unit,
     onNotifications: () -> Unit,
     notifUnread: Int,
+    onInbox: () -> Unit,
+    inboxCount: Int,
 ) {
     val c = UTheme.colors
     val tasks by vm.tasks.collectAsStateWithLifecycle()
@@ -125,6 +128,10 @@ fun TodayScreen(
         Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 12.dp, top = 14.dp, bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Orbit(size = 24)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onInbox), contentAlignment = Alignment.Center) {
+                    Icon(Icons.Outlined.MoveToInbox, contentDescription = "Inbox", tint = c.ink2, modifier = Modifier.size(20.dp))
+                    if (inboxCount > 0) Box(Modifier.align(Alignment.TopEnd).padding(top = 9.dp, end = 9.dp).size(7.dp).clip(CircleShape).background(c.coral))
+                }
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onNotifications), contentAlignment = Alignment.Center) {
                     Icon(Icons.Outlined.Notifications, contentDescription = "Notifications", tint = c.ink2, modifier = Modifier.size(20.dp))
                     if (notifUnread > 0) Box(Modifier.align(Alignment.TopEnd).padding(top = 9.dp, end = 9.dp).size(7.dp).clip(CircleShape).background(c.coral))

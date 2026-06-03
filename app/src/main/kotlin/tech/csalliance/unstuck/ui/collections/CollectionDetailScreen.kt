@@ -259,7 +259,15 @@ private fun CollItemRow(
     var editing by remember(item.id) { mutableStateOf(false) }
     var draft by remember(item.id) { mutableStateOf(item.body) }
     Row(
-        Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(12.dp)).padding(horizontal = 12.dp, vertical = 10.dp),
+        Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(12.dp))
+            // Hold ANYWHERE on the row to reveal the actions; tap = edit. (Gated
+            // off while editing so the text field gets the taps; the checkbox +
+            // revealed icons keep their own taps.)
+            .then(if (readOnly || editing) Modifier else Modifier.combinedClickable(
+                onClick = { draft = item.body; editing = true },
+                onLongClick = onReveal,
+            ))
+            .padding(horizontal = 12.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
         // Done checkbox (always visible).
@@ -269,7 +277,7 @@ private fun CollItemRow(
             contentAlignment = Alignment.Center,
         ) { if (done) Icon(Icons.Filled.Check, contentDescription = null, tint = androidx.compose.ui.graphics.Color.White, modifier = Modifier.size(12.dp)) }
 
-        // Text + status. Tap = edit inline; long-press = reveal the action bar.
+        // Text + status. (Row handles tap = edit / hold = reveal.)
         Column(Modifier.weight(1f)) {
             if (editing && !readOnly) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -280,10 +288,6 @@ private fun CollItemRow(
                 Text(
                     item.body, style = UFont.sans(14), color = if (struck) c.ink3 else c.ink,
                     textDecoration = if (struck) TextDecoration.LineThrough else null,
-                    modifier = if (readOnly) Modifier else Modifier.combinedClickable(
-                        onClick = { draft = item.body; editing = true },
-                        onLongClick = onReveal,
-                    ),
                 )
             }
             if (promoted) {

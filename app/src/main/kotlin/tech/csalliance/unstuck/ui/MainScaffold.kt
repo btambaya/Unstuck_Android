@@ -148,6 +148,7 @@ fun MainScaffold(vm: AppViewModel) {
                     else -> { tab = "today"; stack.clear() }
                 }
             }
+            dl == "unstuck://collections" -> { tab = "lists"; stack.clear() }   // a shared collection
             else -> { tab = "today"; stack.clear() }   // unstuck://today, /recap, /brief
         }
         vm.consumeDeepLink()

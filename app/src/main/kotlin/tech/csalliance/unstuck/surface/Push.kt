@@ -47,6 +47,13 @@ class UnstuckMessagingService : FirebaseMessagingService() {
         val title = data["title"] ?: message.notification?.title ?: "Unstuck"
         val body = data["body"] ?: message.notification?.body ?: return
         NotificationChannels.ensureAll(this)
-        NotificationRenderer.renderPush(this, kind = data["kind"], title = title, body = body, deepLink = data["deepLink"])
+        // Derive a stable-but-distinct id from the content so two different pushes
+        // (e.g. a reminder for task A and one for task B, or "Sarah finished milk" vs
+        // "milk isn't started") COEXIST instead of overwriting each other, while an
+        // FCM retry of the identical payload still collapses to one. 0x60000 base keeps
+        // it clear of the local reminder/atstart/drift families.
+        val key = data["kind"].orEmpty() + "|" + data["deepLink"].orEmpty() + "|" + title + "|" + body
+        val notifId = 0x60000 + (key.hashCode() and 0xFFFF)
+        NotificationRenderer.renderPush(this, kind = data["kind"], title = title, body = body, deepLink = data["deepLink"], notifId = notifId)
     }
 }

@@ -130,7 +130,9 @@ class SyncCoordinator(
         }
         calendar.connectGoogle(code, CAL_REDIRECT, state)
         pendingCalState = null
-        auth.currentUserId?.let { hydrator.hydrate(it) }   // pull the new calendar_connections row so the UI flips to "Synced" now, not on next launch
+        // Flush first: hydrate replaces cal_blocks with (remote + localExternal), so an
+        // unflushed local TASK block (in neither set) would vanish until the next sync.
+        auth.currentUserId?.let { flusher.flush(it) { auth.currentUserId }; hydrator.hydrate(it) }   // pull the new calendar_connections row so the UI flips to "Synced" now, not on next launch
         pullCalendar()
         true
     }.getOrElse { Log.w(TAG, "calendar connect failed", it); false }
@@ -244,7 +246,9 @@ class SyncCoordinator(
                 if (SyncDecision.shouldWipeCache(event, prev, uid)) store.clearAll()
                 prefs.edit().putString(KEY_PREV_USER, uid).apply()
                 // Push offline edits first, then pull server-canonical, then mirror live.
-                flusher.flush(uid)
+                // Guard the drain on the LIVE user id so a sign-out + switch mid-flush
+                // doesn't keep stamping queued ops with the prior user.
+                flusher.flush(uid) { auth.currentUserId }
                 hydrator.hydrate(uid)
                 realtime.subscribeAll(uid) { hydrator.hydrateCollections(uid) }
                 runCatching { pullCalendar() }   // ingest Google events if connected

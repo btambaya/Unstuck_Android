@@ -45,7 +45,7 @@ private data class Upcoming(val taskId: String, val name: String, val at: Long)
  * first). Tapping a task-linked row opens that task.
  */
 @Composable
-fun NotificationCenterScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (String) -> Unit) {
+fun NotificationCenterScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (String) -> Unit, onDeepLink: (String) -> Unit = {}) {
     val c = UTheme.colors
     val notifs by vm.notifications.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
@@ -79,12 +79,19 @@ fun NotificationCenterScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (
                 item { Text("Nothing yet. Reminders and recaps will show up here.", style = UFont.sans(13), color = c.ink3, modifier = Modifier.padding(vertical = 24.dp)) }
             } else {
                 items(notifs, key = { it.id }) { n ->
-                    val taskId = n.deepLink?.takeIf { it.startsWith("unstuck://task/") }?.removePrefix("unstuck://task/")
+                    val dl = n.deepLink
+                    val taskId = dl?.takeIf { it.startsWith("unstuck://task/") }?.removePrefix("unstuck://task/")
                     Card(
                         dotColor = accentFor(n.kind, c),
                         title = n.title,
                         meta = "${n.body}  ·  ${relPast(now - n.at)}",
-                        onClick = if (taskId != null) ({ onOpenTask(taskId) }) else null,
+                        // Task links open the task; any other deep link (collection share,
+                        // recap, brief) routes through MainScaffold instead of being dead.
+                        onClick = when {
+                            taskId != null -> ({ onOpenTask(taskId) })
+                            !dl.isNullOrBlank() -> ({ onDeepLink(dl) })
+                            else -> null
+                        },
                     )
                 }
             }

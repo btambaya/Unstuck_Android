@@ -35,6 +35,21 @@ class RecurrenceTest {
         assertEquals(listOf("2026-05-21", "2026-06-21", "2026-07-21", "2026-08-21"), occ.map { it.date })
     }
 
+    // A day-31 monthly start clamps to each month's last day (Feb 28 in a non-leap
+    // year), then RECOVERS to 31 in long months — it doesn't drift down to the 28th.
+    @Test fun monthlyDay31ClampsToShortMonthEnd() {
+        val jan31 = Time.civil(2026, 1, 31)
+        val occ = materializeOccurrences(Recurrence.Monthly(), jan31, "09:00", 95)
+        assertEquals(listOf("2026-01-31", "2026-02-28", "2026-03-31", "2026-04-30"), occ.map { it.date })
+    }
+
+    // Same start in a leap year clamps Feb to the 29th.
+    @Test fun monthlyDay31ClampsToLeapFeb() {
+        val jan31 = Time.civil(2024, 1, 31)
+        val occ = materializeOccurrences(Recurrence.Monthly(), jan31, "09:00", 95)
+        assertEquals(listOf("2024-01-31", "2024-02-29", "2024-03-31", "2024-04-30"), occ.map { it.date })
+    }
+
     @Test fun defaultHorizonIs8Weeks() {
         assertEquals(RECURRENCE_HORIZON_DAYS, materializeOccurrences(Recurrence.Daily(), start, "09:00").size)
     }

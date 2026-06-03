@@ -68,6 +68,32 @@ private fun shiftDate(iso: String, days: Int): String {
     return Clock.dateIso(Time.addDaysMillis(Time.civil(p[0], p[1], p[2]), days))
 }
 
+/** One block's column placement so time-overlapping blocks render side-by-side. */
+internal data class Laid(val block: CalBlock, val startMin: Int, val endMin: Int, var lane: Int = 0, var lanes: Int = 1)
+
+/** Assign each block a (lane, lanes) within its cluster of transitively-overlapping
+ *  blocks (greedy interval colouring), so overlaps split the width instead of
+ *  stacking. Mirrors the web calendar's layoutLanes. */
+internal fun layoutLanes(blocks: List<CalBlock>): List<Laid> {
+    val laid = blocks.map { Laid(it, parseHhmm(it.startTime), parseHhmm(it.startTime) + it.durationMinutes.coerceAtLeast(1)) }
+        .sortedWith(compareBy({ it.startMin }, { it.endMin }))
+    var i = 0
+    while (i < laid.size) {
+        var clusterEnd = laid[i].endMin
+        var j = i + 1
+        while (j < laid.size && laid[j].startMin < clusterEnd) { clusterEnd = maxOf(clusterEnd, laid[j].endMin); j++ }
+        val cluster = laid.subList(i, j)
+        val laneEnd = mutableListOf<Int>()   // end-min of the last block placed in each lane
+        for (b in cluster) {
+            val lane = laneEnd.indexOfFirst { it <= b.startMin }
+            if (lane >= 0) { b.lane = lane; laneEnd[lane] = b.endMin } else { b.lane = laneEnd.size; laneEnd.add(b.endMin) }
+        }
+        for (b in cluster) b.lanes = laneEnd.size
+        i = j
+    }
+    return laid
+}
+
 /** Day grid with drag-to-schedule: long-press an unscheduled task in the tray
  *  and drop it onto an hour slot to create a cal_block at that time. */
 @Composable
@@ -97,6 +123,19 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
             while (true) {
                 nowLt = java.time.LocalTime.now()
                 kotlinx.coroutines.delay(30_000)
+            }
+        }
+    }
+    // Roll the viewed day forward across midnight if the user is still on "today",
+    // so the NOW line + "Today" label don't get stuck on yesterday.
+    LaunchedEffect(Unit) {
+        var shownToday = Clock.todayIso()
+        while (true) {
+            kotlinx.coroutines.delay(30_000)
+            val t = Clock.todayIso()
+            if (t != shownToday) {
+                if (date == shownToday) date = t
+                shownToday = t
             }
         }
     }
@@ -153,9 +192,11 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                     .onGloballyPositioned { gridBounds = it.boundsInWindow() },
             ) {
                 // Tap an empty area → create a task prefilled at that snapped time.
+                val gutterPx = with(density) { 64.dp.toPx() }
                 Column(
                     Modifier.pointerInput(date) {
                         detectTapGestures { off ->
+                            if (off.x < gutterPx) return@detectTapGestures   // ignore taps in the hour-label gutter
                             val totalMin = START_HOUR * 60 + ((off.y / hourPx) * 60).roundToInt()
                             val snapped = ((totalMin / 15) * 15).coerceIn(START_HOUR * 60, END_HOUR * 60 - 15)
                             onCreateAt(date, "%02d:%02d".format(snapped / 60, snapped % 60))
@@ -173,8 +214,11 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                         }
                     }
                 }
-                // Blocks for the day, absolutely positioned by start time.
-                dayBlocks.forEach { b ->
+                // Blocks for the day, absolutely positioned by start time. Overlapping
+                // blocks split the width into side-by-side lanes (see layoutLanes).
+                val gridWidthDp = with(density) { gridBounds.width.toDp() }
+                layoutLanes(dayBlocks).forEach { laid ->
+                    val b = laid.block
                     val topMin = parseHhmm(b.startTime) - START_HOUR * 60
                     if (topMin >= 0) {
                         val topDp = HOUR_HEIGHT * (topMin / 60f)
@@ -189,19 +233,25 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                             else -> c.bg2
                         }
                         var blockOrigin by remember(b.id) { mutableStateOf(Offset.Zero) }
+                        // Split the block area (grid width − 70 − 12) across the cluster's lanes.
+                        val laneWidthDp = if (laid.lanes > 1 && gridWidthDp > 0.dp) (gridWidthDp - 82.dp) / laid.lanes else 0.dp
+                        val placement = if (laneWidthDp > 0.dp)
+                            Modifier.padding(start = 70.dp).offset(x = laneWidthDp * laid.lane, y = topDp).width((laneWidthDp - 3.dp).coerceAtLeast(20.dp))
+                        else
+                            Modifier.padding(start = 70.dp, end = 12.dp).offset(y = topDp).fillMaxWidth()
                         Box(
                             contentAlignment = Alignment.CenterStart,
-                            modifier = Modifier.padding(start = 70.dp, end = 12.dp).offset(y = topDp).fillMaxWidth()
+                            modifier = placement
                                 .height(hDp.coerceAtLeast(24.dp))
                                 .onGloballyPositioned { blockOrigin = it.localToWindow(Offset.Zero) }
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(fill)
                                 .border(1.dp, c.line, RoundedCornerShape(8.dp))
-                                .clickable { editingBlock = b }
-                                // Task blocks: long-press to drag to a new slot (external/Google
-                                // blocks stay tap-only — they mirror the remote calendar).
+                                // Task blocks: tap to edit + long-press to drag. External/Google
+                                // blocks are display-only — they mirror the remote calendar, and
+                                // editing them only changes local state that reverts on next sync.
                                 .then(
-                                    if (isTaskBlock(b)) Modifier.pointerInput(b.id) {
+                                    if (isTaskBlock(b)) Modifier.clickable { editingBlock = b }.pointerInput(b.id) {
                                         detectDragGesturesAfterLongPress(
                                             onDragStart = { local -> dragBlock = b; dragPos = blockOrigin + local },
                                             onDrag = { change, delta -> change.consume(); dragPos += delta },

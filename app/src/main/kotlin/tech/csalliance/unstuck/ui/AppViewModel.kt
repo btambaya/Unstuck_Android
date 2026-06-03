@@ -183,7 +183,11 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
             val plan = tech.csalliance.unstuck.core.logic.regenerateForTask(task, recurrence, blocks.value, tech.csalliance.unstuck.core.time.Clock.todayIso(), startTime, startDate)
             plan.toDelete.forEach { write?.deleteCalBlock(it) }
             plan.toUpsert.forEach { write?.upsertCalBlock(it) }
-            if (existing.isNotEmpty()) write?.upsertTask(bumpMoveCount(task, isoNow()))
+            // Only count a "move" if the anchor (earliest existing block) actually
+            // changed — re-tapping Schedule at the same date/time shouldn't inflate
+            // moveCount + falsely trip the slip detector (parity with the else branch).
+            val anchor = existing.minWithOrNull(compareBy({ it.date }, { it.startTime }))
+            if (anchor != null && (anchor.date != date || anchor.startTime != startTime)) write?.upsertTask(bumpMoveCount(task, isoNow()))
         } else {
             val cur = existing.minWithOrNull(compareBy({ it.date }, { it.startTime }))
             if (cur != null) {
@@ -222,6 +226,9 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     // --- notification deep links (set by MainActivity from the launch intent) ---
     val pendingDeepLink: StateFlow<String?> get() = graph.pendingDeepLink
     fun consumeDeepLink() { graph.pendingDeepLink.value = null }
+    /** Route an in-app tap (e.g. a non-task notification-center row) through the same
+     *  pendingDeepLink handler MainScaffold uses for push taps. */
+    fun openDeepLink(link: String) { graph.pendingDeepLink.value = link }
 
     // --- in-app nudges (things slipping / follow-ups) — surfaced quietly on Today, no push ---
     // Persisted (device-local) so a dismissed nudge stays dismissed across relaunch.
@@ -313,7 +320,9 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         // auto-resumed just by opening the focus screen.
         if (cur?.taskId == task.id) return@launchWrite
         val base = cur ?: FocusTimer.empty
-        val live = FocusTimer.start(base, task.id, estimateMin = task.estimateMin, now = nowMs())
+        // Seed prior focus so reopening after "End for now" continues from the
+        // accumulated total instead of restarting the displayed timer at 0.
+        val live = FocusTimer.start(base, task.id, estimateMin = task.estimateMin, priorAccumulatedSec = task.totalFocused, now = nowMs())
         store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
     }
 
@@ -334,14 +343,21 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun finishFocus(task: TaskItem, markDone: Boolean = false) = launchWrite {
         val live = store.getLiveSession() ?: return@launchWrite
         val elapsed = FocusTimer.elapsedSec(live, nowMs())
+        // Reuse the live-session id so captures taken during the session join back
+        // to this Session row (the interruption histogram depends on it).
         write?.upsertSession(
-            Session(id = newUuid(), taskId = task.id, taskName = task.name, estimateMin = task.estimateMin, actualSec = elapsed, completedAt = isoNow()),
+            Session(id = live.id ?: newUuid(), taskId = task.id, taskName = task.name, estimateMin = task.estimateMin, actualSec = elapsed, completedAt = isoNow()),
         )
         val focused = task.copy(totalFocused = task.totalFocused + elapsed, updatedAt = isoNow())
         write?.upsertTask(
             if (markDone) applyCompletion(focused.copy(done = true), prior = task, nowISO = isoNow()) else focused,
         )
         store.setLiveSession(null)
+        // Completing a promoted shared-collection task from Focus must also flip the
+        // shared item + notify members (same as toggleDone).
+        if (markDone && task.sourceCollectionId != null && task.sourceItemId != null) {
+            share?.taskDone(task.sourceCollectionId!!, task.sourceItemId!!, task.name, currentName ?: "Someone")
+        }
         // Session-end recap (design moment B3): records an in-app card always; the
         // server only pushes when away — finishing in-app means away = false.
         runCatching { graph.coordinator?.notifications?.sessionRecap(task.name, away = false) }
@@ -372,7 +388,10 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         write?.upsertReasonLog(ReasonLog(id = newUuid(), taskId = taskId, reason = reason, action = action, at = isoNow(), durationSec = durationSec))
     }
 
-    fun deleteCapture(id: String) = launchWrite { write?.deleteCapture(id) }
+    fun deleteCapture(id: String) = launchWrite {
+        write?.deleteCapture(id)
+        unarchiveCapture(id)   // drop any device-local archived flag so the set doesn't leak ids
+    }
 
     /**
      * Promote a capture into a standalone task. Mirrors the web capture-actions:
@@ -408,7 +427,16 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     private fun mutateCollection(id: String, transform: (ItemCollection) -> ItemCollection) = launchWrite {
         collectionMutex.withLock {
             val latest = store.collections().first().firstOrNull { it.id == id } ?: return@withLock
-            write?.upsertCollection(transform(latest))
+            val next = transform(latest)
+            if (isShared(latest) && share != null) {
+                // Shared list: rename/recolor/archive update ONLY the metadata columns
+                // (a partial UPDATE) so we don't ship the items JSONB and clobber a
+                // member's concurrent item edit. Optimistic local write first.
+                store.upsert(tech.csalliance.unstuck.data.db.Tables.COLLECTIONS, next, ItemCollection.serializer(), next.id)
+                share?.updateCollectionFields(id, next.name, next.color, next.subtitle ?: "", next.archived ?: false)
+            } else {
+                write?.upsertCollection(next)
+            }
         }
     }
     private fun mutateCollectionItem(
@@ -510,7 +538,10 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     suspend fun cancelCollectionInvite(collectionId: String, email: String) {
         share?.cancelInvite(collectionId, email)
     }
-    suspend fun leaveCollection(collectionId: String) {
+    // Fire-and-forget on viewModelScope (not the screen's): the caller pops the
+    // screen immediately, which would cancel a screen-scoped coroutine before the
+    // leave RPC + local drop committed.
+    fun leaveCollection(collectionId: String) = launchWrite {
         share?.leave(collectionId)
         store.delete(tech.csalliance.unstuck.data.db.Tables.COLLECTIONS, collectionId)   // lose access → drop locally
     }

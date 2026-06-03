@@ -76,6 +76,7 @@ fun MainScaffold(vm: AppViewModel) {
     var showNewTask by remember { mutableStateOf(false) }
     var newTaskPrefill by remember { mutableStateOf<Pair<String, String>?>(null) }
     var focusTask by remember { mutableStateOf<TaskItem?>(null) }
+    var focusAutoCapture by remember { mutableStateOf(false) }
     var activeArea by remember { mutableStateOf<String?>(null) }
     var onboarding by remember { mutableStateOf(!vm.onboarded) }
     // Return to Today whenever the app is backgrounded, so reopening lands on the
@@ -134,7 +135,9 @@ fun MainScaffold(vm: AppViewModel) {
         when {
             dl == "capture" -> {
                 val liveTask = tasks.firstOrNull { it.id == liveSession?.taskId }
-                if (liveTask != null) focusTask = liveTask else showNewTask = true
+                // During a session → open Focus with the capture sheet already up; otherwise
+                // quick-capture as a new task. Either way an input is shown, not a dead screen.
+                if (liveTask != null) { focusTask = liveTask; focusAutoCapture = true } else showNewTask = true
             }
             dl.startsWith("unstuck://focus/") -> {
                 // "Start" on the starts-now notification → begin the session + open Focus.
@@ -226,6 +229,7 @@ fun MainScaffold(vm: AppViewModel) {
                     )
                     Route.Notifications -> tech.csalliance.unstuck.ui.notifications.NotificationCenterScreen(
                         vm, onBack = ::pop, onOpenTask = { id -> pop(); push(Route.Detail(id)) },
+                        onDeepLink = { link -> pop(); vm.openDeepLink(link) },
                     )
                     Route.Inbox -> tech.csalliance.unstuck.ui.inbox.InboxScreen(
                         vm, onBack = ::pop, onOpenTask = { id -> pop(); push(Route.Detail(id)) },
@@ -252,7 +256,7 @@ fun MainScaffold(vm: AppViewModel) {
         }
         focusTask?.let { t ->
             val fresh = tasks.firstOrNull { it.id == t.id } ?: t
-            FocusScreen(vm, fresh, onClose = { focusTask = null })
+            FocusScreen(vm, fresh, onClose = { focusTask = null; focusAutoCapture = false }, autoCapture = focusAutoCapture)
         }
     }
 }

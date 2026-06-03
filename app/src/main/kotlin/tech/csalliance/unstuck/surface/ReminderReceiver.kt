@@ -18,7 +18,10 @@ import tech.csalliance.unstuck.UnstuckApp
  */
 class ReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED) {
+        // Re-arm pending alarms on boot AND on app update — without handling
+        // MY_PACKAGE_REPLACED the update both DROPPED all pending reminders and
+        // fell through to fire a bogus "Coming up · your task is starting".
+        if (intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
             (context.applicationContext as? UnstuckApp)?.let { ReminderScheduler.reschedule(it) }
             return
         }

@@ -26,7 +26,10 @@ private fun matchesRecurrence(r: Recurrence, startDate: Long, candidate: Long): 
     return when (r) {
         is Recurrence.Daily -> true
         is Recurrence.Weekly -> Time.dayOfWeekJs(candidate) in r.daysOfWeek
-        is Recurrence.Monthly -> Time.dayOfMonth(candidate) == Time.dayOfMonth(startDate)
+        // Clamp the start day to the candidate month's length so a task set to the
+        // 29th/30th/31st still fires on the last day of shorter months (Feb etc.)
+        // instead of being silently skipped (web does this clamp).
+        is Recurrence.Monthly -> Time.dayOfMonth(candidate) == minOf(Time.dayOfMonth(startDate), Time.daysInMonth(candidate))
     }
 }
 

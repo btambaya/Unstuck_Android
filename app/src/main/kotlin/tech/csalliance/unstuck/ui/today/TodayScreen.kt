@@ -94,7 +94,12 @@ fun TodayScreen(
     val live by vm.liveSession.collectAsStateWithLifecycle()
     val recap by vm.lastRecap.collectAsStateWithLifecycle()
     val nudges by vm.nudges.collectAsStateWithLifecycle()
-    val now = vm.nowMs()
+    // Refresh ~once a minute so the date eyebrow, "today" task filtering and
+    // "completed today" roll over at midnight on a screen left open (was captured
+    // once at composition → stuck on yesterday until something else recomposed).
+    var nowState by remember { mutableLongStateOf(vm.nowMs()) }
+    LaunchedEffect(Unit) { while (true) { nowState = vm.nowMs(); kotlinx.coroutines.delay(60_000) } }
+    val now = nowState
     val liveId = live?.taskId
     var areaFilter by remember { mutableStateOf<String?>(null) }
     var backlogActive by remember { mutableStateOf(false) }
@@ -239,6 +244,18 @@ fun TodayScreen(
                     }
                 }
                 items(displayRows, key = { it.id }) { t -> TaskRow(t, areaColorFor(t.lifeArea, areas, c), ageDays = if (backlogActive) tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, now) else null) { onOpen(t) } }
+                // Per-view empty note: switching to Backlog or an area filter with no
+                // matches showed a blank list under the header (looked broken). The live
+                // card counts as content, so only show this when nothing else is there.
+                if (displayRows.isEmpty() && liveTask == null && (backlogActive || areaFilter != null)) {
+                    item {
+                        Text(
+                            if (backlogActive) "Backlog's clear — nothing waiting." else "Nothing in $areaFilter right now.",
+                            style = UFont.sans(13), color = c.ink3,
+                            modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 28.dp),
+                        )
+                    }
+                }
             }
             item { Spacer(Modifier.height(24.dp)) }
         }
@@ -268,7 +285,7 @@ private fun StartNextHero(task: TaskItem, onStart: () -> Unit) {
                     Text("${task.lifeArea ?: "Focus"} · ${task.name}", style = UFont.sans(11, FontWeight.SemiBold), color = c.primaryDeep, maxLines = 1)
                 }
                 Text(task.name, style = UFont.sans(21, FontWeight.Bold), color = c.ink, modifier = Modifier.padding(top = 6.dp))
-                Text("${task.estimateMin} min · Low friction", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 6.dp))
+                Text("${task.estimateMin} min", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 6.dp))
                 Box(Modifier.padding(top = 14.dp)) { UButton("Focus", kind = ButtonKind.CORAL, leadingIcon = Icons.Filled.PlayArrow, onClick = onStart) }
             }
         }
@@ -291,8 +308,11 @@ private fun LiveSessionCard(
 ) {
     val c = UTheme.colors
     val paused = live.paused
-    val elapsed = FocusTimer.elapsedSec(live, now)
-    val estimateSec = (task.estimateMin * 60).coerceAtLeast(1)
+    // displayedElapsedSec (= this session + priorAccumulatedSec) so a resumed
+    // save-for-later session shows the SAME running total as the Focus screen,
+    // not just the post-resume slice. Ring uses the session estimate to match.
+    val elapsed = FocusTimer.displayedElapsedSec(live, now)
+    val estimateSec = ((live.sessionEstimateMin.takeIf { it > 0 } ?: task.estimateMin).coerceAtLeast(1)) * 60
     val progress = (elapsed.toFloat() / estimateSec).coerceIn(0f, 1f)
     val accent = if (paused) c.amber else c.coral
     Row(

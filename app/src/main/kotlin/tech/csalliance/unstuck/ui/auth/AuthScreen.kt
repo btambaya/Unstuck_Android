@@ -55,13 +55,17 @@ fun AuthScreen(vm: AppViewModel) {
     var name by remember { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
+    var messageOk by remember { mutableStateOf(false) }
 
-    fun run(block: suspend () -> AuthOutcome) {
+    // `success` is shown (in a calm tone) for flows that finish WITHOUT a session —
+    // sign-up confirmation, magic link, password reset all just send an email, so an
+    // empty Ok branch previously left the screen looking like nothing happened.
+    fun run(success: String? = null, block: suspend () -> AuthOutcome) {
         busy = true; message = null
         scope.launch {
             when (val r = block()) {
-                is AuthOutcome.Ok -> {}
-                is AuthOutcome.Error -> message = r.message
+                is AuthOutcome.Ok -> if (success != null) { messageOk = true; message = success }
+                is AuthOutcome.Error -> { messageOk = false; message = r.message }
             }
             busy = false
         }
@@ -91,11 +95,12 @@ fun AuthScreen(vm: AppViewModel) {
         Spacer(Modifier.height(14.dp))
         MdField(password, { password = it }, "Password", password = true)
 
-        message?.let { Spacer(Modifier.height(12.dp)); Text(it, style = UFont.sans(13), color = c.coralDeep, textAlign = TextAlign.Center) }
+        message?.let { Spacer(Modifier.height(12.dp)); Text(it, style = UFont.sans(13), color = if (messageOk) c.primaryDeep else c.coralDeep, textAlign = TextAlign.Center) }
 
         Spacer(Modifier.height(20.dp))
         UButton(if (busy) "…" else if (signUp) "Create account" else "Sign in", kind = ButtonKind.DARK, enabled = !busy) {
-            if (signUp) run { vm.signUp(email.trim(), password, name) } else run { vm.signIn(email.trim(), password) }
+            if (signUp) run("Check your email to confirm your account, then sign in.") { vm.signUp(email.trim(), password, name) }
+            else run { vm.signIn(email.trim(), password) }
         }
         Spacer(Modifier.height(10.dp))
         // Outlined Google button with the official multicolor "G" logo.
@@ -115,10 +120,10 @@ fun AuthScreen(vm: AppViewModel) {
             style = UFont.sans(13, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clickable { signUp = !signUp },
         )
         Spacer(Modifier.height(8.dp))
-        Text("Email me a magic link instead", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable { run { vm.magicLink(email.trim()) } })
+        Text("Email me a magic link instead", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable { run("Check your email for a one-tap sign-in link.") { vm.magicLink(email.trim()) } })
         if (!signUp) {
             Spacer(Modifier.height(8.dp))
-            Text("Forgot your password?", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable { run { vm.resetPassword(email.trim()) } })
+            Text("Forgot your password?", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable { run("Check your email for a password reset link.") { vm.resetPassword(email.trim()) } })
         }
         Spacer(Modifier.weight(1f))
         Text(

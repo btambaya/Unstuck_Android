@@ -107,12 +107,13 @@ fun BottomNavBar(
             horizontalArrangement = Arrangement.SpaceAround,
             verticalAlignment = Alignment.Bottom,
         ) {
-            // top hairline divider
-            NavCell(items[0], activeKey, onSelect)
-            NavCell(items[1], activeKey, onSelect)
+            // Split the items around the centered FAB gap. Computed (not hardcoded
+            // items[0..3]) so a list with fewer/more than 4 entries can't IOOBE; for
+            // the standard 4 it's still [0,1] | gap | [2,3].
+            val mid = (items.size + 1) / 2
+            items.take(mid).forEach { NavCell(it, activeKey, onSelect) }
             Box(Modifier.width(56.dp)) {} // FAB gap
-            NavCell(items[2], activeKey, onSelect)
-            NavCell(items[3], activeKey, onSelect)
+            items.drop(mid).forEach { NavCell(it, activeKey, onSelect) }
         }
         // 0.5px top divider
         Box(Modifier.fillMaxWidth().height(1.dp).background(c.line).align(Alignment.TopCenter))

@@ -11,9 +11,11 @@ import tech.csalliance.unstuck.core.model.CalBlockKind
 // hydrate merge that preserves local external (g_) blocks.
 class SyncDecisionTest {
 
-    @Test fun signedInAlwaysWipes() {
-        assertTrue(SyncDecision.shouldWipeCache(SyncAuthEvent.SIGNED_IN, "u1", "u1"))
+    @Test fun signedInWipesOnlyIfUserChanged() {
+        // same-user re-auth must NOT wipe (would drop pending offline edits + live session)
+        assertFalse(SyncDecision.shouldWipeCache(SyncAuthEvent.SIGNED_IN, "u1", "u1"))
         assertTrue(SyncDecision.shouldWipeCache(SyncAuthEvent.SIGNED_IN, null, "u1"))
+        assertTrue(SyncDecision.shouldWipeCache(SyncAuthEvent.SIGNED_IN, "u1", "u2"))
     }
 
     @Test fun initialSessionWipesOnlyIfUserChanged() {

@@ -41,7 +41,6 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,7 +55,6 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.core.model.CollectionItem
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.design.component.AppBar
@@ -76,11 +74,12 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     val col = collections.firstOrNull { it.id == collectionId }
     var draft by remember { mutableStateOf("") }
     var editingTitle by remember { mutableStateOf(false) }
-    var titleDraft by remember(col?.name) { mutableStateOf(col?.name ?: "") }
+    // Keyed on id, NOT name: a realtime rename (another member, or the server echo)
+    // would otherwise re-seed this mid-edit and wipe what's being typed.
+    var titleDraft by remember(col?.id) { mutableStateOf(col?.name ?: "") }
     var confirmDelete by remember { mutableStateOf(false) }
     var revealedId by remember { mutableStateOf<String?>(null) }       // item whose actions are shown
     var promoteTarget by remember { mutableStateOf<CollectionItem?>(null) } // item awaiting the share chooser
-    val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val focus = remember { FocusRequester() }
     LaunchedEffect(collectionId) { runCatching { focus.requestFocus() } }
@@ -109,7 +108,11 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     fun pickByTimeThen(item: CollectionItem) {
         val now = java.time.LocalTime.now()
         android.app.TimePickerDialog(context, { _, h, m ->
-            val iso = java.time.LocalDate.now().atTime(h, m).atZone(java.time.ZoneId.systemDefault()).toInstant().toString()
+            // A "by" time earlier than now means tomorrow — otherwise the task is
+            // born already-overdue and fires a late nudge on the next cron tick.
+            val today = java.time.LocalDate.now().atTime(h, m)
+            val dt = if (today.isBefore(java.time.LocalDateTime.now())) today.plusDays(1) else today
+            val iso = dt.atZone(java.time.ZoneId.systemDefault()).toInstant().toString()
             vm.moveItemToTask(col, item, AppViewModel.PromoteMode.LOOP, iso)
         }, now.hour, now.minute, false).show()
     }
@@ -149,7 +152,7 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                             Icon(Icons.Filled.Share, contentDescription = "Share", tint = c.ink2, modifier = Modifier.size(22.dp).clip(CircleShape).clickable { showShare = true })
                         }
                     } else {
-                        Text("Leave", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { scope.launch { vm.leaveCollection(col.id) }; onBack() }.padding(horizontal = 6.dp, vertical = 4.dp))
+                        Text("Leave", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { vm.leaveCollection(col.id); onBack() }.padding(horizontal = 6.dp, vertical = 4.dp))
                     }
                 }
             }
@@ -272,7 +275,9 @@ private fun CollItemRow(
             // off while editing so the text field gets the taps; the checkbox +
             // revealed icons keep their own taps.)
             .then(if (readOnly || editing) Modifier else Modifier.combinedClickable(
-                onClick = { draft = item.body; editing = true },
+                // If the action bar is showing, a tap dismisses it (was falling through
+                // to open the inline editor); otherwise tap = edit, hold = reveal.
+                onClick = { if (revealed) onReveal() else { draft = item.body; editing = true } },
                 onLongClick = onReveal,
             ))
             .padding(horizontal = 12.dp, vertical = 10.dp),
@@ -302,7 +307,9 @@ private fun CollItemRow(
                 val label = when {
                     promotedDone -> "done by ${item.assignee ?: "someone"} ✓"
                     overdue -> "⚠ overdue · due ${fmtTime(item.dueAt)}"
-                    item.assignee != null && item.dueAt != null -> "${item.assignee}'s on it · by ${fmtTime(item.dueAt)}"
+                    // Guard on the PARSED time (dueMs), not the raw string — an unparseable
+                    // dueAt would otherwise render a dangling "…'s on it · by ".
+                    item.assignee != null && dueMs != null -> "${item.assignee}'s on it · by ${fmtTime(item.dueAt)}"
                     item.assignee != null -> "${item.assignee}'s on it"
                     else -> "Promoted"
                 }

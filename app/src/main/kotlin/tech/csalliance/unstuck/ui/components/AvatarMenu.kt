@@ -6,10 +6,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBars
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -41,9 +43,13 @@ fun AvatarMenu(vm: AppViewModel, onInsights: () -> Unit, onSettings: () -> Unit,
     val name = vm.currentName ?: "Your account"
     val email = vm.currentEmail ?: "Signed in"
     val initials = name.split(' ', '.', '@').mapNotNull { it.firstOrNull()?.uppercaseChar() }.take(2).joinToString("").ifEmpty { "U" }
-    // Sit just below the avatar in the top bar (status bar + bar height ≈ 64dp),
-    // inset a touch from the right edge. Window-level, so it ignores statusBarsPadding.
-    val offset = with(LocalDensity.current) { IntOffset(x = (-6).dp.roundToPx(), y = 64.dp.roundToPx()) }
+    // Sit just below the avatar in the top bar. The bar carries statusBarsPadding, so
+    // measure the ACTUAL status-bar inset (a hardcoded 64dp overlapped the avatar on
+    // cutout / large-status-bar devices) and add the ~52dp bar height. Window-level,
+    // so it ignores statusBarsPadding and we must offset by the inset ourselves.
+    val density = LocalDensity.current
+    val statusBarPx = WindowInsets.statusBars.getTop(density)
+    val offset = with(density) { IntOffset(x = (-6).dp.roundToPx(), y = statusBarPx + 52.dp.roundToPx()) }
     Popup(alignment = Alignment.TopEnd, offset = offset, onDismissRequest = onDismiss, properties = PopupProperties(focusable = true)) {
         Column(
             Modifier.padding(end = 2.dp).width(248.dp)

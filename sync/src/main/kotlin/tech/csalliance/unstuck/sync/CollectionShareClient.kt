@@ -2,6 +2,7 @@ package tech.csalliance.unstuck.sync
 
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.functions.functions
+import io.github.jan.supabase.postgrest.from
 import io.github.jan.supabase.postgrest.postgrest
 import io.github.jan.supabase.postgrest.rpc
 import io.ktor.client.call.body
@@ -182,6 +183,18 @@ class CollectionShareClient(private val client: SupabaseClient) {
     /** Mark a SHARED item as promoted (assignee + optional pending/done + by-time). */
     suspend fun setItemPromotion(collectionId: String, itemId: String, assignee: String, done: Boolean?, dueAt: String?) {
         runCatching { client.postgrest.rpc("collection_set_item_promotion", PromotionParams(collectionId, itemId, assignee, done, dueAt)) }
+    }
+
+    @Serializable
+    private data class CollectionMetaUpdate(val name: String, val color: String, val subtitle: String, val archived: Boolean)
+
+    /** Update ONLY a shared collection's metadata columns (a PostgREST UPDATE, not
+     *  a whole-row upsert) so the `items` JSONB isn't shipped + can't clobber a
+     *  member's concurrent item edit. RLS gates it to owner/editor. */
+    suspend fun updateCollectionFields(id: String, name: String, color: String, subtitle: String, archived: Boolean) {
+        runCatching {
+            client.from("collections").update(CollectionMetaUpdate(name, color, subtitle, archived)) { filter { eq("id", id) } }
+        }
     }
 
     @Serializable

@@ -14,6 +14,12 @@ import tech.csalliance.unstuck.data.db.OutboxEntity
 
 class OutboxFlusher(private val gateway: SyncGateway, private val store: LocalStore) {
 
+    // Per-op consecutive-failure tally (keyed by outbox seq). After FAIL_CAP
+    // failures an op is treated as a poison pill and dropped so it can't wedge
+    // its dependents (e.g. a cal_block whose parent task upsert keeps failing)
+    // forever. Resets on app restart, so a transient failure still gets retries.
+    private val failCounts = mutableMapOf<Long, Int>()
+
     suspend fun flush(userId: String, currentUserId: () -> String? = { userId }) {
         while (true) {
             // Bail if the signed-in user changed mid-drain (sign-out + sign-in to
@@ -21,22 +27,40 @@ class OutboxFlusher(private val gateway: SyncGateway, private val store: LocalSt
             // this avoids confusing FK/RLS errors + a stuck op. Mirrors the web
             // bridge's intendedUserId guard.
             if (currentUserId() != userId) return
-            val all = store.pending()
+            val all = store.pending()   // FIFO by seq
             if (all.isEmpty()) break
             val pendingIds = all.map { it.recordId }.toSet()
             // An op is held back while its dependsOn rowId still has a pending op.
             val flushable = all.filter { it.dependsOn == null || it.dependsOn !in pendingIds }
             if (flushable.isEmpty()) break
             var progressed = false
+            // Once an op for a given row fails this pass, skip that row's LATER ops
+            // so a newer edit isn't applied (then clobbered when the older one
+            // retries) — preserve per-row order / last-writer-wins.
+            val blockedRows = mutableSetOf<String>()
             for (op in flushable) {
+                val rowKey = "${op.recordTable}:${op.recordId}"
+                if (rowKey in blockedRows) continue
                 val ok = runCatching { apply(op, userId) }
-                    .onFailure { println("[outbox] ${op.recordTable}#${op.recordId} failed: $it") }
+                    .onFailure { println("[outbox] $rowKey failed: $it") }
                     .isSuccess
-                if (ok) { store.dequeue(op.seq); progressed = true }
+                if (ok) {
+                    store.dequeue(op.seq); failCounts.remove(op.seq); progressed = true
+                } else {
+                    blockedRows.add(rowKey)
+                    val n = (failCounts[op.seq] ?: 0) + 1
+                    failCounts[op.seq] = n
+                    if (n >= FAIL_CAP) {
+                        println("[outbox] dropping poison op $rowKey after $n failures")
+                        store.dequeue(op.seq); failCounts.remove(op.seq); progressed = true
+                    }
+                }
             }
             if (!progressed) break // all remaining ops errored — stop, retry later
         }
     }
+
+    private companion object { const val FAIL_CAP = 5 }
 
     private suspend fun apply(op: OutboxEntity, userId: String) {
         if (op.op == "delete") {

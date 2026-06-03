@@ -26,7 +26,13 @@ object FocusCommands {
     }
 
     fun resume(app: UnstuckApp, onComplete: () -> Unit = {}) = run(app, onComplete) { store ->
-        store.getLiveSession()?.let { store.setLiveSession(FocusTimer.resume(it, System.currentTimeMillis())) }
+        store.getLiveSession()?.let {
+            val r = FocusTimer.resume(it, System.currentTimeMillis())
+            store.setLiveSession(r)
+            // Re-arm the ongoing notification's chronometer at the POST-resume start so
+            // it doesn't count the pause gap (was left at the stale pre-pause start).
+            FocusTimerService.update(app, paused = false, startMs = r.sessionStart)
+        }
     }
 
     /** End the session (no mark-done) — records the Session + accumulates focus time. */

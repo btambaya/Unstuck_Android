@@ -56,7 +56,7 @@ import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.tasks.SelectableChip
 
 @Composable
-fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
+fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCapture: Boolean = false) {
     val c = UTheme.colors
     val live by vm.liveSession.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
@@ -80,7 +80,10 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
         }
     }
 
-    var showCapture by remember { mutableStateOf(false) }
+    var showCapture by remember { mutableStateOf(autoCapture) }
+    // Arriving via the notification "Capture" action opens the capture sheet straight
+    // away (was landing on Focus with no input shown).
+    LaunchedEffect(autoCapture) { if (autoCapture) showCapture = true }
     var showReflect by remember { mutableStateOf(false) }
     var showPauseReasons by remember { mutableStateOf(false) }
     var exitAfterReason by remember { mutableStateOf(false) }
@@ -90,10 +93,14 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
     val treatment = l?.treatment ?: FocusTreatment.AMBIENT
     val paused = l?.paused == true
     val elapsed = if (l != null) FocusTimer.displayedElapsedSec(l, nowMs) else 0
-    val estimateSec = task.estimateMin * 60
+    // Use the session's FROZEN estimate so the ring + the overrun coloring agree
+    // (deriveState reads sessionEstimateMin too), even after a mid-session edit.
+    val estimateSec = (l?.sessionEstimateMin ?: task.estimateMin) * 60
     val remaining = (estimateSec - elapsed).coerceAtLeast(0)
     val progress = if (estimateSec > 0) (elapsed.toFloat() / estimateSec).coerceIn(0f, 1f) else 0f
-    val state = if (l != null) FocusTimer.deriveState(l, nowMs, 1.0) else FocusState.IDLE
+    // Honor the Soft-overrun setting (minutes; 0 = Never) instead of a hardcoded 1s grace.
+    val graceSec = if (settings.focusOverrunMin <= 0) Double.POSITIVE_INFINITY else settings.focusOverrunMin * 60.0
+    val state = if (l != null) FocusTimer.deriveState(l, nowMs, graceSec) else FocusState.IDLE
 
     // Dark indigo radial background.
     val bg = Brush.radialGradient(listOf(oklch(0.30, 0.10, 280.0), oklch(0.16, 0.02, 280.0)), center = Offset(0.5f, 0f), radius = 1400f)
@@ -112,12 +119,12 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit) {
             Spacer(Modifier.height(8.dp))
             SectionLabel(if (paused) "PAUSED" else "FOCUSING", color = Color.White.copy(alpha = 0.55f))
 
-            if (treatment != FocusTreatment.MONK) {
-                Spacer(Modifier.height(8.dp))
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    FocusTreatment.entries.forEach { t ->
-                        SelectableChip(t.name.lowercase(), selected = treatment == t, accent = Color.White.copy(alpha = 0.18f)) { vm.setTreatment(t) }
-                    }
+            // Always show the treatment switcher — including in Monk — so picking
+            // Monk doesn't trap the user with no way back out.
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                FocusTreatment.entries.forEach { t ->
+                    SelectableChip(t.name.lowercase(), selected = treatment == t, accent = Color.White.copy(alpha = 0.18f)) { vm.setTreatment(t) }
                 }
             }
 

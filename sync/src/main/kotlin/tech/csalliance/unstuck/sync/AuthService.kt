@@ -11,6 +11,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import tech.csalliance.unstuck.core.logic.AuthErrorInfo
+import tech.csalliance.unstuck.core.logic.detectSignupAlreadyExists
 import tech.csalliance.unstuck.core.logic.humanizeAuthError
 
 // AuthService — thin wrapper over supabase-kt Auth. Email/password, magic
@@ -40,7 +41,22 @@ class AuthService(private val client: SupabaseClient) {
                 val name = displayName?.trim()
                 if (!name.isNullOrEmpty()) data = buildJsonObject { put("full_name", name); put("display_name", name) }
             }
-        }.fold({ AuthOutcome.Ok }, { AuthOutcome.Error(friendly(it)) })
+        }.fold(
+            { user ->
+                // Supabase's anti-enumeration returns a "successful" obfuscated user for an
+                // already-registered email (no session, empty identities). Surface it instead
+                // of the misleading "check your email" — otherwise a returning user is stuck.
+                val exists = detectSignupAlreadyExists(
+                    identitiesCount = user?.identities?.size,
+                    emailConfirmedAt = user?.emailConfirmedAt?.toString(),
+                    lastSignInAt = user?.lastSignInAt?.toString(),
+                    hasSession = client.auth.currentSessionOrNull() != null,
+                )
+                if (exists) AuthOutcome.Error(humanizeAuthError(AuthErrorInfo(code = "user_already_exists")))
+                else AuthOutcome.Ok
+            },
+            { AuthOutcome.Error(friendly(it)) },
+        )
 
     suspend fun sendMagicLink(email: String): AuthOutcome =
         runCatching { client.auth.signInWith(OTP) { this.email = email } }

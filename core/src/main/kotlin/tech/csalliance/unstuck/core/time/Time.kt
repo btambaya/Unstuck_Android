@@ -42,6 +42,10 @@ object Time {
     fun dayOfMonth(epochMs: Long): Int =
         Instant.ofEpochMilli(epochMs).atZone(ZoneId.systemDefault()).dayOfMonth
 
+    /** Number of days in the calendar month containing [epochMs] (28–31). */
+    fun daysInMonth(epochMs: Long): Int =
+        Instant.ofEpochMilli(epochMs).atZone(ZoneId.systemDefault()).toLocalDate().lengthOfMonth()
+
     fun hourOf(epochMs: Long): Int =
         Instant.ofEpochMilli(epochMs).atZone(ZoneId.systemDefault()).hour
 

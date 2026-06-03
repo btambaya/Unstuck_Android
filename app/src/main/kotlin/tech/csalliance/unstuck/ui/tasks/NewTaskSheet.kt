@@ -115,7 +115,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     }
     // Auto-pick the first free slot when the date/estimate changes — unless the
     // user (or a calendar-slot prefill) chose a specific time.
-    LaunchedEffect(effectiveDate, estimate, whenSel) {
+    LaunchedEffect(effectiveDate, estimate, whenSel, slots) {
         if (whenSel == "Later") pickedTime = null
         else if (autoTime) pickedTime = slots.firstOrNull()?.startTime
     }
@@ -229,7 +229,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                     firstPhysicalAction = firstMove.trim().ifEmpty { null }, recurrence = recurrence,
                     later = whenSel == "Later",
                 )
-                reminderLead?.let { vm.setReminderOverride(t.id, it) }
+                if (whenSel != "Later") reminderLead?.let { vm.setReminderOverride(t.id, it) }   // no block to fire on for a Later task
                 if (whenSel != "Later" && effectiveDate != null && pickedTime != null) {
                     vm.scheduleTask(t, effectiveDate, pickedTime!!)
                 }
@@ -240,12 +240,16 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     }
 
     if (showDatePicker) {
-        val dpState = rememberDatePickerState(initialSelectedDateMillis = now)
+        // Material3's selectedDateMillis is UTC-midnight — read/seed it in UTC, NOT
+        // the local zone, or west-of-UTC users land one calendar day early.
+        val dpState = rememberDatePickerState(
+            initialSelectedDateMillis = java.time.LocalDate.now().atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli(),
+        )
         DatePickerDialog(
             onDismissRequest = { showDatePicker = false },
             confirmButton = {
                 TextButton(onClick = {
-                    dpState.selectedDateMillis?.let { pickedDate = Clock.dateIso(it) }
+                    dpState.selectedDateMillis?.let { pickedDate = java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneOffset.UTC).toLocalDate().toString() }
                     showDatePicker = false
                 }) { Text("OK") }
             },

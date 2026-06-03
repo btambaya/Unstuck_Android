@@ -30,6 +30,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -129,8 +130,11 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
     val dows = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
     val plannedByDay = days.map { d -> blocks.filter { it.date == d.toString() && isTaskBlock(it) }.sumOf { it.durationMinutes } }
     val totalPlanned = plannedByDay.sum()
-    val busiest = days.getOrNull(plannedByDay.indexOf(plannedByDay.maxOrNull() ?: 0))
-    val lightest = days.getOrNull(plannedByDay.indexOf(plannedByDay.minOrNull() ?: 0))
+    val maxPlanned = plannedByDay.maxOrNull() ?: 0
+    val minPlanned = plannedByDay.minOrNull() ?: 0
+    // Only meaningful when the week isn't flat (empty or uniform → "—" both).
+    val busiest = if (maxPlanned == minPlanned) null else days.getOrNull(plannedByDay.indexOf(maxPlanned))
+    val lightest = if (maxPlanned == minPlanned) null else days.getOrNull(plannedByDay.indexOf(minPlanned))
 
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
         SectionLabel("This week", color = c.primaryDeep, modifier = Modifier.padding(top = 8.dp))
@@ -158,23 +162,34 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
                     Box(Modifier.height(WHOUR)) { Text("%02d".format(h), style = UFont.mono(8), color = c.ink4) }
                 }
             }
+            val weekDensity = androidx.compose.ui.platform.LocalDensity.current
             days.forEach { d ->
                 val db = blocks.filter { it.date == d.toString() }
-                Box(Modifier.weight(1f).fillMaxHeight()) {
+                var colW by remember(d.toString()) { mutableStateOf(0.dp) }
+                Box(
+                    Modifier.weight(1f).fillMaxHeight()
+                        .onGloballyPositioned { colW = with(weekDensity) { it.size.width.toDp() } },
+                ) {
                     Column(Modifier.fillMaxSize()) {
                         repeat(WEND - WSTART) { Box(Modifier.fillMaxWidth().height(WHOUR).border(0.5.dp, c.line.copy(alpha = 0.6f))) }
                     }
-                    db.forEach { b ->
+                    // Overlapping blocks split the column into side-by-side lanes.
+                    layoutLanes(db).forEach { laid ->
+                        val b = laid.block
                         val top = hhmmToMin(b.startTime) - WSTART * 60
                         if (top in 0..((WEND - WSTART) * 60)) {
                             val bt = if (isTaskBlock(b)) tasks.firstOrNull { it.id == b.taskId } else null
                             val done = bt?.done == true
                             val fill = if (isTaskBlock(b)) c.areaSwatch(tech.csalliance.unstuck.ui.components.areaColorFor(bt?.lifeArea, areas, c)) else c.blueSoft
-                            Box(
+                            val laneW = if (laid.lanes > 1 && colW > 0.dp) colW / laid.lanes else 0.dp
+                            val place = if (laneW > 0.dp)
+                                Modifier.width((laneW - 1.dp).coerceAtLeast(5.dp)).offset(x = laneW * laid.lane, y = WHOUR * (top / 60f))
+                            else
                                 Modifier.fillMaxWidth().padding(horizontal = 1.dp).offset(y = WHOUR * (top / 60f))
-                                    .height((WHOUR * (b.durationMinutes / 60f)).coerceAtLeast(13.dp))
+                            Box(
+                                place.height((WHOUR * (b.durationMinutes / 60f)).coerceAtLeast(13.dp))
                                     .clip(RoundedCornerShape(3.dp)).background(fill)
-                                    .clickable { tasks.firstOrNull { it.id == b.taskId }?.let(onOpen) },
+                                    .then(if (isTaskBlock(b)) Modifier.clickable { tasks.firstOrNull { it.id == b.taskId }?.let(onOpen) } else Modifier),
                             ) { Text(b.taskName, style = UFont.sans(8, FontWeight.Medium), color = if (done) c.ink3 else c.ink, maxLines = 1, textDecoration = if (done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null) }
                         }
                     }

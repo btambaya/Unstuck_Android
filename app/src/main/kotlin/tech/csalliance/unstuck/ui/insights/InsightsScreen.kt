@@ -97,7 +97,10 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                 item {
                     Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                         StatCard("Estimates", if (enough) "$hit%" else "—", "${sessions.size} sessions", c.greenSoft, c.greenInk, "landed within 5 min")
-                        StatCard("Re-entries", if (enough) "${sessions.size}" else "—", "${captures.size} captures", c.blueSoft, c.blueInk, "focus sessions this window")
+                        // Headline is the session COUNT — titling it "Re-entries" overstated it
+                        // (the first session isn't a re-entry; the real <5m re-entry rate lives in
+                        // the Deep dive). Label it for what the number actually is.
+                        StatCard("Focus sessions", if (enough) "${sessions.size}" else "—", "${captures.size} captures", c.blueSoft, c.blueInk, "completed this window")
                         StatCard("Gentle friction", "${slips.size} tasks", if (slips.isEmpty()) "All clear." else "Watch these", if (slips.isEmpty()) c.greenSoft else c.amberSoft, if (slips.isEmpty()) c.greenInk else c.amberInk, "slipping")
                     }
                 }
@@ -149,7 +152,9 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                 item { Histogram("How fast you come back", reEntryDistribution(sessions), c.primary) }
                 item {
                     val breakdown = captureBreakdown(captures)
-                    if (breakdown.isNotEmpty()) {
+                    // Guard on the captures themselves — breakdown always has the 5 fixed
+                    // tag keys (all 0 when empty), so it would otherwise draw 5 zero bars.
+                    if (captures.isNotEmpty()) {
                         SectionLabel("Captures by kind", Modifier.padding(top = 18.dp, bottom = 6.dp))
                         Card(Modifier.fillMaxWidth(), radius = 14) {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {

@@ -29,8 +29,9 @@ class NotificationActionReceiver : BroadcastReceiver() {
             }
             ACTION_RESUME -> {
                 val pending = goAsync()
+                // FocusCommands.resume re-arms the service chronometer with the correct
+                // post-resume start (passing it here would use the stale pre-pause one).
                 FocusCommands.resume(app) { pending.finish() }
-                FocusTimerService.update(context, paused = false)
                 PausedCheckinScheduler.cancel(context)
                 NotificationManagerCompat.from(context).cancel(NotifIds.PAUSED)
             }

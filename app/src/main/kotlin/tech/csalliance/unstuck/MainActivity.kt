@@ -111,8 +111,8 @@ class MainActivity : ComponentActivity() {
             graph.pendingDeepLink.value = "capture"
             return
         }
-        // Notification taps → route to the task / today / recap / brief / focus (consumed by MainScaffold).
-        if (data?.scheme == "unstuck" && (data.host == "task" || data.host == "today" || data.host == "focus")) {
+        // Notification taps → route to the task / today / recap / brief / focus / collections (consumed by MainScaffold).
+        if (data?.scheme == "unstuck" && (data.host == "task" || data.host == "today" || data.host == "focus" || data.host == "collections")) {
             graph.pendingDeepLink.value = data.toString()
             return
         }

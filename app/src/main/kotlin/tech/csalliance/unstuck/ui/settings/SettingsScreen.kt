@@ -165,14 +165,30 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
                         vm.updateSettings { it.copy(density = Density.valueOf(v.uppercase())) }
                     }
                 }
-                SettingsSection.BACKUP -> SettingsCard {
-                    ToggleRow("Auto-export every Sunday", true) {}
-                    SettingRow("Export now", "One-shot JSON.", last = true) {}
-                }
+                SettingsSection.BACKUP -> BackupContent(vm)
             }
             Box(Modifier.padding(24.dp)) {}
         }
     }
+}
+
+@Composable
+private fun BackupContent(vm: AppViewModel) {
+    val c = UTheme.colors
+    val context = LocalContext.current
+    var msg by remember { mutableStateOf<String?>(null) }
+    // Real export — the previous Backup card was inert ("Auto-export every Sunday"
+    // toggle + "Export now" both no-ops). There's no scheduled-backup backend, so we
+    // surface the one thing that actually works: an on-demand full JSON snapshot.
+    val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        if (uri != null) runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(vm.exportJson().toByteArray()) } }
+            .fold({ msg = "Exported." }, { msg = "Export failed." })
+    }
+    SettingsCard {
+        SettingRow("Export everything", "A full JSON snapshot of your data.", last = true) { exporter.launch("unstuck-export.json") }
+    }
+    Text("Your data is yours — export a complete copy any time.", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 10.dp))
+    msg?.let { Text(it, style = UFont.sans(12), color = c.green, modifier = Modifier.padding(top = 8.dp)) }
 }
 
 @Composable
@@ -208,7 +224,11 @@ private fun AccountContent(vm: AppViewModel) {
             showPassword = false
             scope.launch {
                 if (vm.hasPassword) {
-                    val reauth = vm.signIn(vm.currentEmail ?: "", current)
+                    val email = vm.currentEmail
+                    // Without an email we can't re-auth — say so plainly instead of
+                    // signing in with "" and reporting a bogus "password incorrect".
+                    if (email.isNullOrBlank()) { msg = "Can't verify your current password — no email is set on this account."; return@launch }
+                    val reauth = vm.signIn(email, current)
                     if (reauth is AuthOutcome.Error) { msg = "Current password incorrect."; return@launch }
                 }
                 val r = vm.changePassword(newPw)
@@ -344,7 +364,15 @@ private fun AreasContent(vm: AppViewModel) {
                 BasicTextField(value = draft, onValueChange = { draft = it }, textStyle = UFont.sans(14).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), decorationBox = { inner -> if (draft.isEmpty()) Text("New area", style = UFont.sans(14), color = c.ink3); inner() })
             }
             UButton("Add", kind = ButtonKind.DARK, fill = false) {
-                if (draft.isNotBlank()) { vm.upsertLifeArea(LifeArea(newUuid(), draft.trim(), palette[areas.size % palette.size], areas.size)); draft = "" }
+                val name = draft.trim()
+                // Skip a duplicate name (areas key tasks by name string → two same-named
+                // areas make filtering ambiguous). sortOrder = max+1 and color = first
+                // unused both avoid collisions after a delete shrinks `areas.size`.
+                if (name.isNotBlank() && areas.none { it.name.equals(name, ignoreCase = true) }) {
+                    val color = palette.firstOrNull { col -> areas.none { it.color == col } } ?: palette[areas.size % palette.size]
+                    val order = (areas.maxOfOrNull { it.sortOrder } ?: -1) + 1
+                    vm.upsertLifeArea(LifeArea(newUuid(), name, color, order)); draft = ""
+                }
             }
         }
     }
@@ -397,7 +425,11 @@ private fun TagsContent(vm: AppViewModel) {
             UButton("Add", kind = ButtonKind.DARK, fill = false) {
                 val nm = draft.trim()
                 if (nm.isNotBlank() && tags.none { it.name.equals(nm, ignoreCase = true) }) {
-                    vm.upsertTag(TagRow(newUuid(), nm, palette[tags.size % palette.size], tags.size))
+                    // max+1 / first-unused — same anti-collision as areas (tags.size reused
+                    // an existing sortOrder/color after a delete).
+                    val color = palette.firstOrNull { col -> tags.none { it.color == col } } ?: palette[tags.size % palette.size]
+                    val order = (tags.maxOfOrNull { it.sortOrder } ?: -1) + 1
+                    vm.upsertTag(TagRow(newUuid(), nm, color, order))
                 }
                 draft = ""
             }

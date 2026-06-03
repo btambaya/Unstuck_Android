@@ -98,10 +98,12 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
 
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
+        // Pinned header — the title + share/leave + shared-with line stay put while
+        // the items below scroll. Opaque bg so scrolled rows don't bleed through.
+        Column(Modifier.fillMaxWidth().background(c.bg).padding(horizontal = 18.dp, vertical = 6.dp)) {
             // Title — colored chip + inline rename, with a Share icon (owner) or
             // Leave (member) on the SAME line, right-aligned.
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp), modifier = Modifier.padding(top = 6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
                 ColorChip(color, box = 30, dot = 9)
                 if (editingTitle && owner) {
                     BasicTextField(value = titleDraft, onValueChange = { titleDraft = it }, textStyle = UFont.serifItalic(26).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
@@ -118,7 +120,6 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                     }
                 }
             }
-
             // Small shared-with line — only when actually shared.
             if (shared) {
                 Text(
@@ -127,7 +128,8 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                     modifier = Modifier.padding(top = 8.dp, start = 2.dp),
                 )
             }
-
+        }
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
             // Recolor swatches — owner only.
             if (owner) {
                 Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

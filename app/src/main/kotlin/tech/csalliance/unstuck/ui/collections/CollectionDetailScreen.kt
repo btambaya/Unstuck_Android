@@ -25,6 +25,7 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
+import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -52,11 +53,9 @@ import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.core.model.CollectionItem
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.design.component.AppBar
-import tech.csalliance.unstuck.design.component.ButtonKind
 import tech.csalliance.unstuck.design.component.ColorChip
 import tech.csalliance.unstuck.design.component.Leading
 import tech.csalliance.unstuck.design.component.SectionLabel
-import tech.csalliance.unstuck.design.component.UButton
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
@@ -114,7 +113,10 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                         modifier = Modifier.weight(1f).then(if (owner) Modifier.clickable { titleDraft = col.name; editingTitle = true } else Modifier),
                     )
                     if (owner) {
-                        Icon(Icons.Filled.Share, contentDescription = "Share", tint = c.ink2, modifier = Modifier.size(22.dp).clip(CircleShape).clickable { showShare = true })
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Icon(Icons.Outlined.Delete, contentDescription = "Delete collection", tint = c.ink3, modifier = Modifier.size(21.dp).clip(CircleShape).clickable { confirmDelete = true }.padding(1.dp))
+                            Icon(Icons.Filled.Share, contentDescription = "Share", tint = c.ink2, modifier = Modifier.size(22.dp).clip(CircleShape).clickable { showShare = true })
+                        }
                     } else {
                         Text("Leave", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { scope.launch { vm.leaveCollection(col.id) }; onBack() }.padding(horizontal = 6.dp, vertical = 4.dp))
                     }
@@ -177,10 +179,6 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                 }
             }
 
-            // Delete — owner only.
-            if (owner) {
-                UButton("Delete collection", kind = ButtonKind.DANGER, fill = false, modifier = Modifier.padding(top = 24.dp)) { confirmDelete = true }
-            }
         }
     }
 

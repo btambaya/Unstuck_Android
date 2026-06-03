@@ -23,6 +23,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -44,6 +45,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
@@ -97,35 +99,33 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
-            // Title — colored chip + rename.
+            // Title — colored chip + inline rename, with a Share icon (owner) or
+            // Leave (member) on the SAME line, right-aligned.
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp), modifier = Modifier.padding(top = 6.dp)) {
                 ColorChip(color, box = 30, dot = 9)
                 if (editingTitle && owner) {
                     BasicTextField(value = titleDraft, onValueChange = { titleDraft = it }, textStyle = UFont.serifItalic(26).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
                     Text("✓", style = UFont.sans(18), color = c.green, modifier = Modifier.clickable { vm.renameCollection(col, titleDraft); editingTitle = false }.padding(4.dp))
                 } else {
-                    Text(col.name, style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.weight(1f).then(if (owner) Modifier.clickable { titleDraft = col.name; editingTitle = true } else Modifier))
+                    Text(
+                        col.name, style = UFont.serifItalic(26), color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f).then(if (owner) Modifier.clickable { titleDraft = col.name; editingTitle = true } else Modifier),
+                    )
+                    if (owner) {
+                        Icon(Icons.Filled.Share, contentDescription = "Share", tint = c.ink2, modifier = Modifier.size(22.dp).clip(CircleShape).clickable { showShare = true })
+                    } else {
+                        Text("Leave", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { scope.launch { vm.leaveCollection(col.id) }; onBack() }.padding(horizontal = 6.dp, vertical = 4.dp))
+                    }
                 }
             }
 
-            // Shared indicator + share (owner) / leave (member).
-            if (shared || owner) {
-                Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    if (shared) {
-                        Text(
-                            if (owner) "Shared with $memberCount" else if (canEdit) "Shared with you · you can edit" else "Shared with you · view only",
-                            style = UFont.sans(12, FontWeight.SemiBold), color = c.primaryDeep,
-                        )
-                    }
-                    Box(Modifier.weight(1f))
-                    if (owner) {
-                        UButton("Share", kind = ButtonKind.OUTLINED, fill = false) { showShare = true }
-                    } else {
-                        UButton("Leave", kind = ButtonKind.GHOST, fill = false) {
-                            scope.launch { vm.leaveCollection(col.id) }; onBack()
-                        }
-                    }
-                }
+            // Small shared-with line — only when actually shared.
+            if (shared) {
+                Text(
+                    if (owner) "Shared with $memberCount" else if (canEdit) "Shared with you · you can edit" else "Shared with you · view only",
+                    style = UFont.sans(12, FontWeight.SemiBold), color = c.primaryDeep,
+                    modifier = Modifier.padding(top = 8.dp, start = 2.dp),
+                )
             }
 
             // Recolor swatches — owner only.

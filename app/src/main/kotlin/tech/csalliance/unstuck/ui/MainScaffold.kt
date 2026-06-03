@@ -2,6 +2,8 @@ package tech.csalliance.unstuck.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -184,8 +186,18 @@ fun MainScaffold(vm: AppViewModel) {
         }
 
         // Full-screen overlays (top of the stack) — inset from both system bars.
+        // The opaque background HIDES the tab content beneath, but a plain Box
+        // doesn't CONSUME pointer events, so taps on the overlay's empty areas
+        // (e.g. the top-right, over the tab header's inbox/bell/avatar) would
+        // fall through to those still-live icons. A no-op, no-ripple clickable
+        // on the layer swallows those stray taps without affecting the overlay's
+        // own interactive children (they consume their touches first).
         stack.lastOrNull()?.let { route ->
-            Box(Modifier.fillMaxSize().background(c.bg).systemBarsPadding()) {
+            Box(
+                Modifier.fillMaxSize().background(c.bg)
+                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
+                    .systemBarsPadding(),
+            ) {
                 when (route) {
                     is Route.Detail -> {
                         val t = tasks.firstOrNull { it.id == route.taskId }

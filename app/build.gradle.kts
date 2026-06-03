@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 25
-        versionName = "0.4.12"
+        versionCode = 26
+        versionName = "0.4.13"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -101,7 +101,7 @@ firebaseAppDistribution {
     // Testers & Groups → create a group with alias `beta` + enable its invite link.
     // Override with -PappDistGroups="alias1,alias2".
     groups = (findProperty("appDistGroups") as String?) ?: "beta"
-    releaseNotes = "v0.4.12 — Shared collections! Open any collection → Share → invite a partner by email (even if they don't have Unstuck yet — they get the list the moment they sign up). You both add, check and edit items with live sync. Share as 'Can edit' or 'Can view' (read-only). Edits are conflict-free, so two people adding to the same list at once both land. Shared lists show a SHARED tag; non-owners get a Leave button. Also: the app now records where it's used (platform + rough city, from your sign-in) so we can see how people use it."
+    releaseNotes = "v0.4.13 — Shared collections! Open any collection → tap the Share icon (now next to the title) → invite a partner by email (even if they don't have Unstuck yet — they get the list the moment they sign up). You both add, check and edit items with live sync. Share as 'Can edit' or 'Can view' (read-only). Edits are conflict-free, so two people adding at once both land. Shared lists show a SHARED tag; non-owners get a Leave button. Fix: on detail/overlay screens the hidden header icons (inbox/bell/profile) no longer catch stray taps. Also: the app now records where it's used (platform + rough city, from sign-in)."
 }
 
 dependencies {

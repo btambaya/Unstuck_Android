@@ -115,11 +115,15 @@ fun TodayScreen(
     val todayAll = todayOpen + todayDone
     val rows = todayAll.filter { (areaFilter == null || it.lifeArea == areaFilter) && it.id != startNext?.id && it.id != liveId }
     // Backlog view (web parity): the unplanned + overdue stack, area-agnostic.
-    val backlogRows = visibleTasks(TaskListView.BACKLOG, tasks, blocks, now, activeArea = null, slipMode = false)
-        .filter { it.id != startNext?.id && it.id != liveId }
+    val backlogAll = visibleTasks(TaskListView.BACKLOG, tasks, blocks, now, activeArea = null, slipMode = false)
+    val backlogRows = backlogAll.filter { it.id != startNext?.id && it.id != liveId }
     val displayRows = if (backlogActive) backlogRows else rows
     val liveTask = liveId?.let { id -> tasks.firstOrNull { it.id == id } }
-    val empty = todayAll.isEmpty() && live == null && backlogRows.isEmpty()
+    // Judge "empty" from the UNFILTERED backlog (+ startNext), not backlogRows:
+    // backlogRows has start-next/live subtracted, so a lone overdue task (which
+    // becomes the start-next) would otherwise read as empty and hide the Backlog
+    // toggle. A genuinely empty account still has no todayAll/backlogAll/startNext.
+    val empty = todayAll.isEmpty() && live == null && backlogAll.isEmpty() && startNext == null
     val weekMin = sessions.filter { (now - (it.completedAtMs() ?: 0)) in 0..(7L * 86_400_000) }.sumOf { it.actualSec } / 60
 
     Column(Modifier.fillMaxWidth()) {

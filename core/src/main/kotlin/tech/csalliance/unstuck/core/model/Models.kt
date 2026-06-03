@@ -180,6 +180,16 @@ data class ItemCollection(
     val subtitle: String? = null,
     val items: List<CollectionItem>,
     val sortOrder: Int,
+    // Shared-collection fields (migration 020/022). Client-only — populated by
+    // the Hydrator from collections.user_id + collection_members; NEVER written
+    // back to the DB (the CollectionRow codec drops them). Defaults keep local
+    // cache + own unshared lists untouched.
+    /** Owner's user id (the collection's user_id). Null for local/demo rows. */
+    val ownerId: String? = null,
+    /** Shared-with user ids (excludes the owner). Empty = not shared. */
+    val members: List<String> = emptyList(),
+    /** Current user's role: "owner" | "editor" | "viewer". Null = local/own. */
+    val myRole: String? = null,
 )
 
 @Serializable

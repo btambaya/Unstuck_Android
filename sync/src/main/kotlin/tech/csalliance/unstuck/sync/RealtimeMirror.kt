@@ -8,6 +8,7 @@ import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.postgresChangeFlow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.serialization.json.JsonObject
@@ -37,7 +38,7 @@ class RealtimeMirror(
     private val channels = mutableListOf<RealtimeChannel>()
     private val jobs = mutableListOf<Job>()
 
-    suspend fun subscribeAll(userId: String) {
+    suspend fun subscribeAll(userId: String, onMembersChanged: suspend () -> Unit = {}) {
         unsubscribeAll()
         subscribe(Tables.TASKS, userId,
             { o -> val m = DbRowCodec.decodeTask(o); store.upsert(Tables.TASKS, m, TaskItem.serializer(), m.id, m.updatedAt) },
@@ -54,15 +55,31 @@ class RealtimeMirror(
         subscribe(Tables.REASON_LOGS, userId,
             { o -> val m = DbRowCodec.decodeReasonLog(o); store.upsert(Tables.REASON_LOGS, m, ReasonLog.serializer(), m.id, m.at) },
             { id -> store.delete(Tables.REASON_LOGS, id) })
+        // Collections: shared rows are owned by someone else, so subscribe
+        // WITHOUT the user_id filter and rely on RLS for delivery (members get
+        // the owner's edits). Preserve the client-only members/myRole across the
+        // incoming row (it carries neither). Port of realtime.ts mergeKeep.
         subscribe(Tables.COLLECTIONS, userId,
-            { o -> val m = DbRowCodec.decodeCollection(o); store.upsert(Tables.COLLECTIONS, m, ItemCollection.serializer(), m.id) },
-            { id -> store.delete(Tables.COLLECTIONS, id) })
+            onUpsert = { o ->
+                val m = DbRowCodec.decodeCollection(o)
+                val existing = store.collections().first().firstOrNull { it.id == m.id }
+                val merged = m.copy(
+                    members = existing?.members ?: emptyList(),
+                    myRole = existing?.myRole ?: (if (m.ownerId == userId) "owner" else null),
+                )
+                store.upsert(Tables.COLLECTIONS, merged, ItemCollection.serializer(), m.id)
+            },
+            onDelete = { id -> store.delete(Tables.COLLECTIONS, id) },
+            noUserFilter = true)
         subscribe(Tables.TAGS, userId,
             { o -> val m = DbRowCodec.decodeTag(o); store.upsert(Tables.TAGS, m, TagRow.serializer(), m.id) },
             { id -> store.delete(Tables.TAGS, id) })
         subscribe(Tables.LIFE_AREAS, userId,
             { o -> val m = DbRowCodec.decodeLifeArea(o); store.upsert(Tables.LIFE_AREAS, m, LifeArea.serializer(), m.id) },
             { id -> store.delete(Tables.LIFE_AREAS, id) })
+        // Membership changes for ME — a new share or a revocation. Re-hydrate
+        // collections so the freshly-shared list appears / the revoked one drops.
+        subscribeMembers(userId, onMembersChanged)
     }
 
     private suspend fun subscribe(
@@ -70,11 +87,12 @@ class RealtimeMirror(
         userId: String,
         onUpsert: suspend (JsonObject) -> Unit,
         onDelete: suspend (String) -> Unit,
+        noUserFilter: Boolean = false,
     ) {
         val channel = client.channel("unstuck_${tableName}_$userId")
         val flow = channel.postgresChangeFlow<PostgresAction>(schema = "public") {
             table = tableName
-            filter("user_id", FilterOperator.EQ, userId)
+            if (!noUserFilter) filter("user_id", FilterOperator.EQ, userId)
         }
         // Guard each event: one un-decodable row (a new column/enum, a null in a
         // required field) must NOT throw out of onEach and permanently kill this
@@ -91,6 +109,25 @@ class RealtimeMirror(
         }.launchIn(scope)
         runCatching { channel.subscribe() }
             .onFailure { println("[realtime] subscribe $tableName failed: $it") }
+        channels += channel
+        jobs += job
+    }
+
+    /** collection_members for ME (filtered user_id=eq). Any insert/update/delete
+     *  → re-hydrate collections via [onChanged] (RLS decides which rows return).
+     *  Doesn't mirror rows itself — the membership lives in the collection's
+     *  members[]/myRole, refreshed by the hydrate. */
+    private suspend fun subscribeMembers(userId: String, onChanged: suspend () -> Unit) {
+        val channel = client.channel("unstuck_collection_members_$userId")
+        val flow = channel.postgresChangeFlow<PostgresAction>(schema = "public") {
+            table = "collection_members"
+            filter("user_id", FilterOperator.EQ, userId)
+        }
+        val job = flow.onEach {
+            runCatching { onChanged() }.onFailure { println("[realtime] collection_members refresh failed: $it") }
+        }.launchIn(scope)
+        runCatching { channel.subscribe() }
+            .onFailure { println("[realtime] subscribe collection_members failed: $it") }
         channels += channel
         jobs += job
     }

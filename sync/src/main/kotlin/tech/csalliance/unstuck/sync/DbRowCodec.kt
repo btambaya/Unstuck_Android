@@ -5,6 +5,8 @@ import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import tech.csalliance.unstuck.core.logic.uuidOrNull
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
@@ -221,7 +223,13 @@ internal object DbRowCodec {
     fun decodeCalBlock(o: JsonObject) = rowJson.decodeFromJsonElement(CalBlockRow.serializer(), o).toModel()
     fun decodeCapture(o: JsonObject) = rowJson.decodeFromJsonElement(CaptureRow.serializer(), o).toModel()
     fun decodeReasonLog(o: JsonObject) = rowJson.decodeFromJsonElement(ReasonLogRow.serializer(), o).toModel()
-    fun decodeCollection(o: JsonObject) = rowJson.decodeFromJsonElement(CollectionRow.serializer(), o).toModel()
+    fun decodeCollection(o: JsonObject): ItemCollection {
+        val base = rowJson.decodeFromJsonElement(CollectionRow.serializer(), o).toModel()
+        // ownerId rides on the raw row's user_id (not a CollectionRow field, so
+        // it never round-trips back into an upsert payload).
+        val ownerId = (o["user_id"] as? JsonPrimitive)?.contentOrNull
+        return base.copy(ownerId = ownerId)
+    }
     fun decodeTag(o: JsonObject) = rowJson.decodeFromJsonElement(TagDbRow.serializer(), o).toModel()
     fun decodeLifeArea(o: JsonObject) = rowJson.decodeFromJsonElement(LifeAreaDbRow.serializer(), o).toModel()
     fun decodeConnection(o: JsonObject) = rowJson.decodeFromJsonElement(CalendarConnectionRow.serializer(), o).toModel()

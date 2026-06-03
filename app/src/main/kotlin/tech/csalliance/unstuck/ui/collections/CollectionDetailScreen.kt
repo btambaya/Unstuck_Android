@@ -33,6 +33,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,6 +46,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.core.model.CollectionItem
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.design.component.AppBar
@@ -68,6 +70,7 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     var editingTitle by remember { mutableStateOf(false) }
     var titleDraft by remember(col?.name) { mutableStateOf(col?.name ?: "") }
     var confirmDelete by remember { mutableStateOf(false) }
+    val scope = rememberCoroutineScope()
     val focus = remember { FocusRequester() }
     LaunchedEffect(collectionId) { runCatching { focus.requestFocus() } }
 
@@ -78,6 +81,11 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     val color = c.areaColor(col.color)
     val pinned = col.items.filter { it.pinned == true }
     val rest = col.items.filter { it.pinned != true }
+    val owner = vm.isOwner(col)
+    val canEdit = vm.canEdit(col)
+    val memberCount = col.members.size
+    val shared = memberCount > 0 || !owner
+    var showShare by remember { mutableStateOf(false) }
 
     fun add() {
         val body = draft.trim(); if (body.isEmpty()) return
@@ -92,19 +100,41 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
             // Title — colored chip + rename.
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp), modifier = Modifier.padding(top = 6.dp)) {
                 ColorChip(color, box = 30, dot = 9)
-                if (editingTitle) {
+                if (editingTitle && owner) {
                     BasicTextField(value = titleDraft, onValueChange = { titleDraft = it }, textStyle = UFont.serifItalic(26).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
                     Text("✓", style = UFont.sans(18), color = c.green, modifier = Modifier.clickable { vm.renameCollection(col, titleDraft); editingTitle = false }.padding(4.dp))
                 } else {
-                    Text(col.name, style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.weight(1f).clickable { titleDraft = col.name; editingTitle = true })
+                    Text(col.name, style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.weight(1f).then(if (owner) Modifier.clickable { titleDraft = col.name; editingTitle = true } else Modifier))
                 }
             }
 
-            // Recolor swatches.
-            Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                PALETTE.forEach { col2 ->
-                    val on = col.color == col2
-                    Box(Modifier.size(26.dp).clip(CircleShape).background(c.areaColor(col2)).border(if (on) 2.dp else 0.dp, c.ink, CircleShape).clickable { vm.recolorCollection(col, col2) })
+            // Shared indicator + share (owner) / leave (member).
+            if (shared || owner) {
+                Row(Modifier.fillMaxWidth().padding(top = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    if (shared) {
+                        Text(
+                            if (owner) "Shared with $memberCount" else if (canEdit) "Shared with you · you can edit" else "Shared with you · view only",
+                            style = UFont.sans(12, FontWeight.SemiBold), color = c.primaryDeep,
+                        )
+                    }
+                    Box(Modifier.weight(1f))
+                    if (owner) {
+                        UButton("Share", kind = ButtonKind.OUTLINED, fill = false) { showShare = true }
+                    } else {
+                        UButton("Leave", kind = ButtonKind.GHOST, fill = false) {
+                            scope.launch { vm.leaveCollection(col.id) }; onBack()
+                        }
+                    }
+                }
+            }
+
+            // Recolor swatches — owner only.
+            if (owner) {
+                Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    PALETTE.forEach { col2 ->
+                        val on = col.color == col2
+                        Box(Modifier.size(26.dp).clip(CircleShape).background(c.areaColor(col2)).border(if (on) 2.dp else 0.dp, c.ink, CircleShape).clickable { vm.recolorCollection(col, col2) })
+                    }
                 }
             }
 
@@ -118,33 +148,41 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
             } else {
                 if (pinned.isNotEmpty()) {
                     SectionLabel("Pinned", Modifier.padding(start = 4.dp, top = 20.dp, bottom = 6.dp))
-                    pinned.forEach { CollItemRow(col, it, vm) }
+                    pinned.forEach { CollItemRow(col, it, vm, readOnly = !canEdit) }
                 }
                 if (rest.isNotEmpty()) {
                     SectionLabel("All", Modifier.padding(start = 4.dp, top = 14.dp, bottom = 6.dp))
-                    rest.forEach { CollItemRow(col, it, vm) }
+                    rest.forEach { CollItemRow(col, it, vm, readOnly = !canEdit) }
                 }
             }
 
             // Add-item pill field — at the BOTTOM so new items append right above it
-            // (the whole add flow is bottom-anchored). Autofocused on open.
-            Row(
-                Modifier.fillMaxWidth().padding(top = 18.dp).clip(RoundedCornerShape(28.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(28.dp)).padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
-            ) {
-                Icon(Icons.Filled.Add, contentDescription = null, tint = c.ink3)
-                BasicTextField(
-                    value = draft, onValueChange = { draft = it },
-                    textStyle = UFont.sans(15).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink),
-                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { add() }),
-                    modifier = Modifier.weight(1f).focusRequester(focus),
-                    decorationBox = { inner -> if (draft.isEmpty()) Text("Add to this collection…", style = UFont.sans(15), color = c.ink3); inner() },
-                )
+            // (the whole add flow is bottom-anchored). Autofocused on open. Hidden
+            // for view-only members.
+            if (canEdit) {
+                Row(
+                    Modifier.fillMaxWidth().padding(top = 18.dp).clip(RoundedCornerShape(28.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(28.dp)).padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = null, tint = c.ink3)
+                    BasicTextField(
+                        value = draft, onValueChange = { draft = it },
+                        textStyle = UFont.sans(15).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink),
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { add() }),
+                        modifier = Modifier.weight(1f).focusRequester(focus),
+                        decorationBox = { inner -> if (draft.isEmpty()) Text("Add to this collection…", style = UFont.sans(15), color = c.ink3); inner() },
+                    )
+                }
             }
 
-            UButton("Delete collection", kind = ButtonKind.DANGER, fill = false, modifier = Modifier.padding(top = 24.dp)) { confirmDelete = true }
+            // Delete — owner only.
+            if (owner) {
+                UButton("Delete collection", kind = ButtonKind.DANGER, fill = false, modifier = Modifier.padding(top = 24.dp)) { confirmDelete = true }
+            }
         }
     }
+
+    if (showShare) ShareCollectionSheet(vm, col.id, col.name, onDismiss = { showShare = false })
 
     if (confirmDelete) AlertDialog(
         onDismissRequest = { confirmDelete = false },
@@ -157,7 +195,7 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
 }
 
 @Composable
-private fun CollItemRow(col: ItemCollection, item: CollectionItem, vm: AppViewModel) {
+private fun CollItemRow(col: ItemCollection, item: CollectionItem, vm: AppViewModel, readOnly: Boolean = false) {
     val c = UTheme.colors
     val done = item.done == true
     val isPinned = item.pinned == true
@@ -169,21 +207,24 @@ private fun CollItemRow(col: ItemCollection, item: CollectionItem, vm: AppViewMo
     ) {
         // Done checkbox.
         Box(
-            Modifier.size(18.dp).clip(CircleShape).background(if (done) c.coral else c.surface).border(if (done) 0.dp else 1.5.dp, c.line2, CircleShape).clickable { vm.toggleCollectionItemDone(col, item.id) },
+            Modifier.size(18.dp).clip(CircleShape).background(if (done) c.coral else c.surface).border(if (done) 0.dp else 1.5.dp, c.line2, CircleShape)
+                .then(if (readOnly) Modifier else Modifier.clickable { vm.toggleCollectionItemDone(col, item.id) }),
             contentAlignment = Alignment.Center,
         ) { if (done) Icon(Icons.Filled.Check, contentDescription = null, tint = androidx.compose.ui.graphics.Color.White, modifier = Modifier.size(12.dp)) }
 
-        if (editing) {
+        if (editing && !readOnly) {
             BasicTextField(value = draft, onValueChange = { draft = it }, textStyle = UFont.sans(14).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
             Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable { vm.updateCollectionItemBody(col, item.id, draft); editing = false }.padding(2.dp))
         } else {
             Text(
                 item.body, style = UFont.sans(14), color = if (done) c.ink3 else c.ink,
                 textDecoration = if (done) TextDecoration.LineThrough else null,
-                modifier = Modifier.weight(1f).clickable { draft = item.body; editing = true },
+                modifier = Modifier.weight(1f).then(if (readOnly) Modifier else Modifier.clickable { draft = item.body; editing = true }),
             )
         }
-        Icon(Icons.Filled.Star, contentDescription = "Pin", tint = if (isPinned) c.coral else c.ink4, modifier = Modifier.size(18.dp).clickable { vm.toggleCollectionItemPin(col, item.id) })
-        Icon(Icons.Filled.Close, contentDescription = "Remove", tint = c.ink4, modifier = Modifier.size(18.dp).clickable { vm.removeCollectionItem(col, item.id) })
+        if (!readOnly) {
+            Icon(Icons.Filled.Star, contentDescription = "Pin", tint = if (isPinned) c.coral else c.ink4, modifier = Modifier.size(18.dp).clickable { vm.toggleCollectionItemPin(col, item.id) })
+            Icon(Icons.Filled.Close, contentDescription = "Remove", tint = c.ink4, modifier = Modifier.size(18.dp).clickable { vm.removeCollectionItem(col, item.id) })
+        }
     }
 }

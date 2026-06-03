@@ -42,6 +42,8 @@ class SyncCoordinator(
     val push = PushClient(client)
     val notifications = NotificationsClient(client)
     val preferences = PreferencesClient(client)
+    val collectionShare = CollectionShareClient(client)
+    private val loginTracker = LoginTrackerClient(client)
 
     private val hydrator = Hydrator(gateway, store)
     private val flusher = OutboxFlusher(gateway, store)
@@ -63,6 +65,17 @@ class SyncCoordinator(
     private fun thisDeviceId(): String =
         android.provider.Settings.Secure.getString(appContext.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "android-device"
 
+    /** Best-effort sign-in analytics — at most once per 12h per user (the server
+     *  derives country/city from IP). Never blocks or fails sign-in. */
+    private suspend fun maybeTrackLogin(uid: String) {
+        val now = System.currentTimeMillis()
+        val key = "loginPing.$uid"
+        if (now - prefs.getLong(key, 0L) < 12 * 60 * 60 * 1000L) return
+        prefs.edit().putLong(key, now).apply()
+        val device = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · Android ${android.os.Build.VERSION.RELEASE}"
+        loginTracker.track(device)
+    }
+
     init {
         // Two-way Google sync: WriteThrough fires these when a task block is
         // written/removed so the change mirrors to Google (best-effort).
@@ -82,12 +95,18 @@ class SyncCoordinator(
         observeJob = null
     }
 
+    /** Re-pull collections + membership (after the owner shares/unshares — their
+     *  own collection_members realtime channel doesn't fire for a member's row). */
+    suspend fun refreshCollections() {
+        auth.currentUserId?.let { hydrator.hydrateCollections(it) }
+    }
+
     /** Manual best-effort sync (flush outbox → hydrate) for the periodic
      *  WorkManager job. No-op when signed out. */
     suspend fun syncNow() {
         val uid = auth.currentUserId ?: return
         flusher.flush(uid) { auth.currentUserId }
-        hydrator.hydrate()
+        hydrator.hydrate(uid)
         runCatching { pullCalendar() }
     }
 
@@ -111,7 +130,7 @@ class SyncCoordinator(
         }
         calendar.connectGoogle(code, CAL_REDIRECT, state)
         pendingCalState = null
-        hydrator.hydrate()   // pull the new calendar_connections row so the UI flips to "Synced" now, not on next launch
+        auth.currentUserId?.let { hydrator.hydrate(it) }   // pull the new calendar_connections row so the UI flips to "Synced" now, not on next launch
         pullCalendar()
         true
     }.getOrElse { Log.w(TAG, "calendar connect failed", it); false }
@@ -226,9 +245,10 @@ class SyncCoordinator(
                 prefs.edit().putString(KEY_PREV_USER, uid).apply()
                 // Push offline edits first, then pull server-canonical, then mirror live.
                 flusher.flush(uid)
-                hydrator.hydrate()
-                realtime.subscribeAll(uid)
+                hydrator.hydrate(uid)
+                realtime.subscribeAll(uid) { hydrator.hydrateCollections(uid) }
                 runCatching { pullCalendar() }   // ingest Google events if connected
+                maybeTrackLogin(uid)             // best-effort usage analytics (throttled)
             }
             is SessionStatus.NotAuthenticated -> if (status.isSignOut) {
                 realtime.unsubscribeAll()

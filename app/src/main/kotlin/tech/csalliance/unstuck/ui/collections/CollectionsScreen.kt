@@ -88,9 +88,13 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
                     Modifier.fillMaxWidth().heightIn(min = 130.dp).clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp)).clickable { onOpen(col.id) }.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
+                    val shared = col.members.isNotEmpty() || (col.myRole != null && col.myRole != "owner")
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
                         ColorChip(color, box = 26, dot = 8)
-                        Text("${col.items.size}", style = UFont.sans(11), color = c.ink3)
+                        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            if (shared) Text("SHARED", style = UFont.sans(8, FontWeight.Bold), color = c.primaryDeep)
+                            Text("${col.items.size}", style = UFont.sans(11), color = c.ink3)
+                        }
                     }
                     Text(col.name, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink)
                     Column(Modifier.weight(1f, fill = false).padding(top = 2.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {

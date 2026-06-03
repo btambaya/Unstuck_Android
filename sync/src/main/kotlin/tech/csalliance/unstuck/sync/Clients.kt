@@ -69,6 +69,26 @@ class NotificationsClient(private val client: SupabaseClient) {
     }.getOrDefault(false)
 }
 
+class LoginTrackerClient(private val client: SupabaseClient) {
+    // platform has NO default on purpose — kotlinx omits default-valued fields
+    // (encodeDefaults off), which would drop `platform` and the server would
+    // mislabel the row. Always set it explicitly (same trap as PushClient).
+    @Serializable private data class TrackBody(val platform: String, val device: String)
+
+    /** Best-effort: record this sign-in (platform + device; the server derives
+     *  country/city from the request IP). Never throws — usage analytics must
+     *  not affect sign-in. Throttling is the caller's job. */
+    suspend fun track(device: String) {
+        runCatching {
+            client.functions.invoke("track-login") {
+                method = HttpMethod.Post
+                contentType(ContentType.Application.Json)
+                setBody(TrackBody(platform = "android", device = device))
+            }
+        }
+    }
+}
+
 class PreferencesClient(private val client: SupabaseClient) {
     @Serializable private data class StrugglesRow(val user_id: String, val adhd_struggles: List<String>)
 

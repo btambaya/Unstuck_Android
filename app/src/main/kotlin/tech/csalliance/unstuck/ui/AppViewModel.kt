@@ -55,6 +55,7 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     private val store = graph.store
     private val write get() = graph.coordinator?.write
     val auth get() = graph.coordinator?.auth
+    private val share get() = graph.coordinator?.collectionShare
 
     private fun <T> sf(flow: kotlinx.coroutines.flow.Flow<List<T>>): StateFlow<List<T>> =
         flow.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -378,10 +379,21 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun upsertCollection(c: ItemCollection) = launchWrite { write?.upsertCollection(c) }
     fun deleteCollection(id: String) = launchWrite { write?.deleteCollection(id) }
 
-    // Collection item ops — whole-row upserts (the JSONB row carries its items).
-    // Each mutation is serialized + re-resolves the LATEST collection from Room
-    // first, so rapid fast-add / pin bursts can't persist a stale snapshot and
-    // drop items typed in between (matches the web's functional-update guard).
+    // --- shared-collection helpers (migration 020/022) ---
+    private fun currentUid(): String? = auth?.currentUserId
+    /** A collection is shared if it has members, or it's owned by someone else. */
+    fun isShared(c: ItemCollection): Boolean =
+        c.members.isNotEmpty() || (c.ownerId != null && c.ownerId != currentUid())
+    /** Owner (or a local/demo row with no ownerId). Gates rename/recolor/delete/share. */
+    fun isOwner(c: ItemCollection): Boolean { val uid = currentUid(); return c.ownerId == null || c.ownerId == uid }
+    /** A view-only member can't edit items; owner + editor + local can. */
+    fun canEdit(c: ItemCollection): Boolean = c.myRole != "viewer"
+
+    // Collection item ops. For OWN/unshared lists, whole-row upsert via the
+    // outbox (handles brand-new rows + offline). For SHARED lists, an optimistic
+    // local write + an atomic item RPC so two people editing concurrently don't
+    // clobber each other's items array. Each mutation is serialized + re-resolves
+    // the LATEST collection from Room first (web's functional-update guard).
     private val collectionMutex = Mutex()
     private fun mutateCollection(id: String, transform: (ItemCollection) -> ItemCollection) = launchWrite {
         collectionMutex.withLock {
@@ -389,22 +401,76 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
             write?.upsertCollection(transform(latest))
         }
     }
+    private fun mutateCollectionItem(
+        id: String,
+        transform: (ItemCollection) -> ItemCollection,
+        rpc: suspend (tech.csalliance.unstuck.sync.CollectionShareClient) -> Unit,
+    ) = launchWrite {
+        collectionMutex.withLock {
+            val latest = store.collections().first().firstOrNull { it.id == id } ?: return@withLock
+            val next = transform(latest)
+            if (isShared(latest)) {
+                // Optimistic local write (no outbox — the RPC is the server write).
+                store.upsert(tech.csalliance.unstuck.data.db.Tables.COLLECTIONS, next, ItemCollection.serializer(), next.id)
+                share?.let { rpc(it) }
+            } else {
+                write?.upsertCollection(next)
+            }
+        }
+    }
     fun addCollectionItem(col: ItemCollection, body: String) {
         val text = body.trim(); if (text.isEmpty()) return
-        mutateCollection(col.id) { it.copy(items = it.items + tech.csalliance.unstuck.core.model.CollectionItem(newUuid(), text, at = isoNow())) }
+        val item = tech.csalliance.unstuck.core.model.CollectionItem(newUuid(), text, at = isoNow())
+        mutateCollectionItem(col.id,
+            { it.copy(items = it.items + item) },
+            { it.addItem(col.id, item.id, item.body, item.at) })
     }
-    fun updateCollectionItemBody(col: ItemCollection, itemId: String, body: String) =
-        mutateCollection(col.id) { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(body = body.trim()) else it }) }
-    fun toggleCollectionItemPin(col: ItemCollection, itemId: String) =
-        mutateCollection(col.id) { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(pinned = !(it.pinned ?: false)) else it }) }
-    fun toggleCollectionItemDone(col: ItemCollection, itemId: String) =
-        mutateCollection(col.id) { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(done = !(it.done ?: false)) else it }) }
-    fun removeCollectionItem(col: ItemCollection, itemId: String) =
-        mutateCollection(col.id) { c -> c.copy(items = c.items.filterNot { it.id == itemId }) }
+    fun updateCollectionItemBody(col: ItemCollection, itemId: String, body: String) {
+        val text = body.trim()
+        mutateCollectionItem(col.id,
+            { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(body = text) else it }) },
+            { it.updateItem(col.id, itemId, text) })
+    }
+    fun toggleCollectionItemPin(col: ItemCollection, itemId: String) {
+        var nextVal = false
+        mutateCollectionItem(col.id,
+            { c -> c.copy(items = c.items.map { if (it.id == itemId) { nextVal = !(it.pinned ?: false); it.copy(pinned = nextVal) } else it }) },
+            { it.setItemFlag(col.id, itemId, "pinned", nextVal) })
+    }
+    fun toggleCollectionItemDone(col: ItemCollection, itemId: String) {
+        var nextVal = false
+        mutateCollectionItem(col.id,
+            { c -> c.copy(items = c.items.map { if (it.id == itemId) { nextVal = !(it.done ?: false); it.copy(done = nextVal) } else it }) },
+            { it.setItemFlag(col.id, itemId, "done", nextVal) })
+    }
+    fun removeCollectionItem(col: ItemCollection, itemId: String) {
+        mutateCollectionItem(col.id,
+            { c -> c.copy(items = c.items.filterNot { it.id == itemId }) },
+            { it.removeItem(col.id, itemId) })
+    }
     fun renameCollection(col: ItemCollection, name: String) {
         val nm = name.trim(); if (nm.isNotEmpty()) mutateCollection(col.id) { it.copy(name = nm) }
     }
     fun recolorCollection(col: ItemCollection, color: String) = mutateCollection(col.id) { it.copy(color = color) }
+
+    // --- collection sharing (edge function-backed) ---
+    suspend fun shareCollection(collectionId: String, email: String, role: String): tech.csalliance.unstuck.sync.ShareOutcome {
+        val outcome = share?.share(collectionId, email, role) ?: tech.csalliance.unstuck.sync.ShareOutcome.ERROR
+        if (outcome == tech.csalliance.unstuck.sync.ShareOutcome.OK) graph.coordinator?.refreshCollections()
+        return outcome
+    }
+    suspend fun unshareCollection(collectionId: String, userId: String) {
+        share?.unshare(collectionId, userId); graph.coordinator?.refreshCollections()
+    }
+    suspend fun cancelCollectionInvite(collectionId: String, email: String) {
+        share?.cancelInvite(collectionId, email)
+    }
+    suspend fun leaveCollection(collectionId: String) {
+        share?.leave(collectionId)
+        store.delete(tech.csalliance.unstuck.data.db.Tables.COLLECTIONS, collectionId)   // lose access → drop locally
+    }
+    suspend fun listCollectionMembers(collectionId: String): List<tech.csalliance.unstuck.sync.CollectionMemberInfo> =
+        share?.listMembers(collectionId) ?: emptyList()
 
     // --- tags & areas ---
 

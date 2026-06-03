@@ -28,7 +28,9 @@ import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.outlined.AddTask
+import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Delete
+import androidx.compose.material.icons.outlined.Unarchive
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
@@ -94,6 +96,7 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     val canEdit = vm.canEdit(col)
     val memberCount = col.members.size
     val shared = memberCount > 0 || !owner
+    val archived = col.archived == true
     var showShare by remember { mutableStateOf(false) }
 
     // Move-to-task: solo list → straight to "for me"; shared list → ask via the chooser.
@@ -137,6 +140,11 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                     )
                     if (owner) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Icon(
+                                if (archived) Icons.Outlined.Unarchive else Icons.Outlined.Archive,
+                                contentDescription = if (archived) "Unarchive" else "Archive",
+                                tint = c.ink3, modifier = Modifier.size(21.dp).clip(CircleShape).clickable { vm.archiveCollection(col.id, !archived); onBack() }.padding(1.dp),
+                            )
                             Icon(Icons.Outlined.Delete, contentDescription = "Delete collection", tint = c.ink3, modifier = Modifier.size(21.dp).clip(CircleShape).clickable { confirmDelete = true }.padding(1.dp))
                             Icon(Icons.Filled.Share, contentDescription = "Share", tint = c.ink2, modifier = Modifier.size(22.dp).clip(CircleShape).clickable { showShare = true })
                         }

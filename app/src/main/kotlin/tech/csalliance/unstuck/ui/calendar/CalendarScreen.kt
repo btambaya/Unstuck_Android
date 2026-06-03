@@ -66,7 +66,7 @@ fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () ->
     val c = UTheme.colors
     var view by remember { mutableStateOf("Day") }
     Column(Modifier.fillMaxSize()) {
-        AppBar(title = "Calendar", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch, onNotifications = onNotifications, notifUnread = notifUnread, onAvatar = onAvatar, avatarInitials = avatarInitials)
+        AppBar(title = "Calendar", leading = Leading.NONE, onSearch = onSearch, onNotifications = onNotifications, notifUnread = notifUnread, onAvatar = onAvatar, avatarInitials = avatarInitials)
         Box(Modifier.padding(horizontal = 18.dp, vertical = 4.dp)) {
             MdSegment(listOf("Day", "Week", "Month"), view) { view = it }
         }

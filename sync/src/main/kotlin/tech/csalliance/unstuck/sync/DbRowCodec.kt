@@ -161,9 +161,10 @@ internal data class CollectionRow(
     val subtitle: String?,
     val items: List<CollectionItem>? = emptyList(),
     @SerialName("sort_order") val sortOrder: Int,
+    val archived: Boolean = false,
 ) {
-    constructor(c: ItemCollection) : this(c.id, c.name, c.color, c.subtitle ?: "", c.items, c.sortOrder)
-    fun toModel() = ItemCollection(id, name, color, subtitle?.ifEmpty { null }, items ?: emptyList(), sortOrder)
+    constructor(c: ItemCollection) : this(c.id, c.name, c.color, c.subtitle ?: "", c.items, c.sortOrder, c.archived ?: false)
+    fun toModel() = ItemCollection(id, name, color, subtitle?.ifEmpty { null }, items ?: emptyList(), sortOrder, archived = archived)
 }
 
 @Serializable

@@ -47,12 +47,15 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
     val collections by vm.collections.collectAsStateWithLifecycle()
     var query by remember { mutableStateOf("") }
     var showNew by remember { mutableStateOf(false) }
+    var showArchived by remember { mutableStateOf(false) }
+    val archivedCount = collections.count { it.archived == true }
     val shown = collections.sortedBy { it.sortOrder }.filter {
-        query.isBlank() || it.name.contains(query, true) || it.items.any { i -> i.body.contains(query, true) }
+        (it.archived == true) == showArchived &&
+            (query.isBlank() || it.name.contains(query, true) || it.items.any { i -> i.body.contains(query, true) })
     }
 
     Column(Modifier.fillMaxSize()) {
-        AppBar(title = "Collections", leading = Leading.MENU, onLeading = onMenu, onSearch = onSearch, onNotifications = onNotifications, notifUnread = notifUnread, onAvatar = onAvatar, avatarInitials = avatarInitials)
+        AppBar(title = "Collections", leading = Leading.NONE, onSearch = onSearch, onNotifications = onNotifications, notifUnread = notifUnread, onAvatar = onAvatar, avatarInitials = avatarInitials)
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
             modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp),
@@ -76,8 +79,22 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
                                 decorationBox = { inner -> if (query.isEmpty()) Text("Search collections", style = UFont.sans(13), color = c.ink3); inner() },
                             )
                         }
-                        Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.coral).clickable { showNew = true }.padding(horizontal = 14.dp, vertical = 9.dp)) {
+                        if (!showArchived) Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.coral).clickable { showNew = true }.padding(horizontal = 14.dp, vertical = 9.dp)) {
                             Text("+ New", style = UFont.sans(13, FontWeight.SemiBold), color = androidx.compose.ui.graphics.Color.White)
+                        }
+                    }
+                    // Archived filter toggle — only when there are archived lists (or while viewing them).
+                    if (archivedCount > 0 || showArchived) {
+                        Box(
+                            Modifier.padding(top = 10.dp).clip(RoundedCornerShape(999.dp))
+                                .background(if (showArchived) c.amberSoft else c.bg2)
+                                .clickable { showArchived = !showArchived }
+                                .padding(horizontal = 12.dp, vertical = 6.dp),
+                        ) {
+                            Text(
+                                if (showArchived) "← Back to active" else "Archived ($archivedCount)",
+                                style = UFont.sans(12, FontWeight.Medium), color = if (showArchived) c.amberInk else c.ink2,
+                            )
                         }
                     }
                 }

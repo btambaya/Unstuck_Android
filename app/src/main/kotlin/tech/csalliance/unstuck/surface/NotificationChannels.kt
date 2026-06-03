@@ -22,6 +22,7 @@ object NotificationChannels {
     const val DAILY = "unstuck_daily"           // C1/C2 — morning/evening brief (LOW)
     const val NUDGES = "unstuck_nudges"         // overflow / gentle (MIN, silent)
     const val FOCUS_ONGOING = "focus_timer"     // B1 — live focus session (LOW, ongoing; existing id)
+    const val COLLAB = "unstuck_collab"         // shared-list collaboration: shared/done/late (HIGH heads-up)
 
     /** Brand accents for notification tint (running = coral, paused = amber). */
     const val CORAL = 0xFFE89077.toInt()
@@ -46,6 +47,7 @@ object NotificationChannels {
         ch(DAILY, "Daily brief", NotificationManager.IMPORTANCE_LOW, silent = true)
         ch(NUDGES, "Gentle nudges", NotificationManager.IMPORTANCE_MIN, silent = true)
         ch(FOCUS_ONGOING, "Focus session", NotificationManager.IMPORTANCE_LOW, desc = "Shows the running focus timer")
+        ch(COLLAB, "Shared lists", NotificationManager.IMPORTANCE_HIGH, desc = "When a shared list is shared with you, finished, or running late")
     }
 }
 
@@ -55,6 +57,7 @@ object NotifIds {
     const val RECAP = 2001
     const val PAUSED = 2002
     const val BRIEF = 2003
+    const val COLLAB = 2004
     // Per-task notifications are offset by a 16-bit hash of the task id. The bases
     // are spaced 0x10000 apart so the three families never collide (a pre-task
     // reminder, a "starts now", and a drift ping for the same task can coexist).

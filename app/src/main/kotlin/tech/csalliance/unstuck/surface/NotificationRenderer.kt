@@ -23,6 +23,7 @@ object NotificationRenderer {
         "paused_checkin" -> NotificationChannels.PAUSED to NotifIds.PAUSED
         "morning_brief", "evening_preview", "daily_nudge" -> NotificationChannels.DAILY to NotifIds.BRIEF
         "reminder", "event_soon" -> NotificationChannels.REMINDERS to NotifIds.REMINDER_BASE
+        "collection_share" -> NotificationChannels.COLLAB to NotifIds.COLLAB
         else -> NotificationChannels.RECAP to NotifIds.RECAP
     }
 

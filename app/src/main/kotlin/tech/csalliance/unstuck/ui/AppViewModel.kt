@@ -462,6 +462,7 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         val nm = name.trim(); if (nm.isNotEmpty()) mutateCollection(col.id) { it.copy(name = nm) }
     }
     fun recolorCollection(col: ItemCollection, color: String) = mutateCollection(col.id) { it.copy(color = color) }
+    fun archiveCollection(id: String, archived: Boolean) = mutateCollection(id) { it.copy(archived = archived) }
 
     // --- Move to task (promote a collection item to a task) ---
     enum class PromoteMode { SELF, LOOP }   // LOOP = keep everyone in the loop (shared accountability)

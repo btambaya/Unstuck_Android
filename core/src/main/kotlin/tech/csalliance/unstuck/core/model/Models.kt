@@ -208,6 +208,8 @@ data class ItemCollection(
     val members: List<String> = emptyList(),
     /** Current user's role: "owner" | "editor" | "viewer". Null = local/own. */
     val myRole: String? = null,
+    /** Archived (migration 026) — hidden from the main overview; restorable. */
+    val archived: Boolean? = null,
 )
 
 @Serializable

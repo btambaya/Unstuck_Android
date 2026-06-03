@@ -168,4 +168,34 @@ class CollectionShareClient(private val client: SupabaseClient) {
     suspend fun setItemFlag(collectionId: String, itemId: String, flag: String, value: Boolean) {
         runCatching { client.postgrest.rpc("collection_set_item_flag", FlagParams(collectionId, itemId, flag, value)) }
     }
+
+    // ── Move-to-task accountability ────────────────────────────────────────
+    @Serializable
+    private data class PromotionParams(
+        @SerialName("p_collection_id") val collectionId: String,
+        @SerialName("p_item_id") val itemId: String,
+        @SerialName("p_assignee") val assignee: String,
+        @SerialName("p_done") val done: Boolean? = null,
+        @SerialName("p_due_at") val dueAt: String? = null,
+    )
+
+    /** Mark a SHARED item as promoted (assignee + optional pending/done + by-time). */
+    suspend fun setItemPromotion(collectionId: String, itemId: String, assignee: String, done: Boolean?, dueAt: String?) {
+        runCatching { client.postgrest.rpc("collection_set_item_promotion", PromotionParams(collectionId, itemId, assignee, done, dueAt)) }
+    }
+
+    @Serializable
+    private data class TaskDoneBody(val collectionId: String, val itemId: String, val taskName: String, val by: String)
+
+    /** The assignee completed a promoted task → flip the shared item to done +
+     *  notify the other members (server-side; best-effort). */
+    suspend fun taskDone(collectionId: String, itemId: String, taskName: String, by: String) {
+        runCatching {
+            client.functions.invoke("collection-task-done") {
+                method = HttpMethod.Post
+                contentType(ContentType.Application.Json)
+                setBody(TaskDoneBody(collectionId, itemId, taskName, by))
+            }
+        }
+    }
 }

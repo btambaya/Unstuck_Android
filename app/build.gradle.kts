@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 30
-        versionName = "0.4.17"
+        versionCode = 31
+        versionName = "0.4.18"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
     }
@@ -101,7 +101,7 @@ firebaseAppDistribution {
     // Testers & Groups → create a group with alias `beta` + enable its invite link.
     // Override with -PappDistGroups="alias1,alias2".
     groups = (findProperty("appDistGroups") as String?) ?: "beta"
-    releaseNotes = "v0.4.17 — Tidier collection header: delete is now a small icon next to Share (the big 'Delete collection' button is gone). The title also stays pinned at the top while you scroll its items. Plus everything from v0.4.15: shared collections now actually reach the person you share with (fixed a database-permission bug that silently blocked it), plus you get notified — an in-app card and a push — when someone shares a list with you (honors your notifications-off setting). Tapping the share notification opens Collections. Also fixed: a single overdue task no longer makes Today show an empty 'no tasks' screen (and hide the Backlog toggle). Earlier in v0.4.x — Shared collections! Open any collection → tap the Share icon (now next to the title) → invite a partner by email (even if they don't have Unstuck yet — they get the list the moment they sign up). You both add, check and edit items with live sync. Share as 'Can edit' or 'Can view' (read-only). Edits are conflict-free, so two people adding at once both land. Shared lists show a SHARED tag; non-owners get a Leave button. Fix: on detail/overlay screens the hidden header icons (inbox/bell/profile) no longer catch stray taps; the Today header now lines up with the other tabs. Also: the app now records where it's used (platform + rough city, from sign-in)."
+    releaseNotes = "v0.4.18 — Collection items are tidier and more powerful. Long-press an item to reveal its actions (pin — now a proper pushpin icon, remove, and the new Move to task). Move to task turns an item into a real task; the item stays, struck-through and tagged 'Promoted'. On a SHARED list you can 'keep everyone in the loop' with a 'by' time: the task goes to your list, everyone sees '<you>'s on it · by 6:00', and when you check it off they all see 'done by <you> ✓' and get a heads-up. (If it's not started by 5 min past the time, the others get nudged — pending one server setup.) Earlier: tidier collection header with delete as a small icon next to Share (the big 'Delete collection' button is gone). The title also stays pinned at the top while you scroll its items. Plus everything from v0.4.15: shared collections now actually reach the person you share with (fixed a database-permission bug that silently blocked it), plus you get notified — an in-app card and a push — when someone shares a list with you (honors your notifications-off setting). Tapping the share notification opens Collections. Also fixed: a single overdue task no longer makes Today show an empty 'no tasks' screen (and hide the Backlog toggle). Earlier in v0.4.x — Shared collections! Open any collection → tap the Share icon (now next to the title) → invite a partner by email (even if they don't have Unstuck yet — they get the list the moment they sign up). You both add, check and edit items with live sync. Share as 'Can edit' or 'Can view' (read-only). Edits are conflict-free, so two people adding at once both land. Shared lists show a SHARED tag; non-owners get a Leave button. Fix: on detail/overlay screens the hidden header icons (inbox/bell/profile) no longer catch stray taps; the Today header now lines up with the other tabs. Also: the app now records where it's used (platform + rough city, from sign-in)."
 }
 
 dependencies {

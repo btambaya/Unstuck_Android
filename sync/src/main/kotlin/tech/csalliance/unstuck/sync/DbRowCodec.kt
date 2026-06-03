@@ -70,6 +70,9 @@ internal data class TaskRow(
     @SerialName("completed_at") val completedAt: String?,
     val later: Boolean,
     val recurrence: Recurrence?,
+    @SerialName("source_collection_id") val sourceCollectionId: String? = null,
+    @SerialName("source_item_id") val sourceItemId: String? = null,
+    @SerialName("due_at") val dueAt: String? = null,
     @SerialName("created_at") val createdAt: String,
     @SerialName("updated_at") val updatedAt: String,
 ) {
@@ -77,14 +80,17 @@ internal data class TaskRow(
         t.id, t.name, t.estimateMin, t.totalFocused, t.done, t.priority,
         t.tags ?: emptyList(), t.objectives ?: emptyList(), t.comments ?: emptyList(),
         t.intentWhen, t.intentThen, t.lifeArea, t.firstPhysicalAction,
-        t.moveCount ?: 0, t.completedAt, t.later ?: false, t.recurrence, t.createdAt, t.updatedAt,
+        t.moveCount ?: 0, t.completedAt, t.later ?: false, t.recurrence,
+        t.sourceCollectionId, t.sourceItemId, t.dueAt, t.createdAt, t.updatedAt,
     )
     fun toModel() = TaskItem(
         id = id, name = name, estimateMin = estimateMin, totalFocused = totalFocused, done = done,
         priority = priority, tags = tags, objectives = objectives, comments = comments,
         intentWhen = intentWhen, intentThen = intentThen, lifeArea = lifeArea,
         firstPhysicalAction = firstPhysicalAction, moveCount = moveCount, completedAt = completedAt,
-        later = later, recurrence = recurrence, createdAt = createdAt, updatedAt = updatedAt,
+        later = later, recurrence = recurrence,
+        sourceCollectionId = sourceCollectionId, sourceItemId = sourceItemId, dueAt = dueAt,
+        createdAt = createdAt, updatedAt = updatedAt,
     )
 }
 

@@ -30,6 +30,7 @@ import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.CaptureTag
 import tech.csalliance.unstuck.core.model.FocusTreatment
+import tech.csalliance.unstuck.core.model.CollectionItem
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.LifeArea
 import tech.csalliance.unstuck.core.model.LiveSession
@@ -104,12 +105,16 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         firstPhysicalAction: String? = null,
         recurrence: Recurrence? = null,
         later: Boolean = false,
+        sourceCollectionId: String? = null,
+        sourceItemId: String? = null,
+        dueAt: String? = null,
     ): TaskItem {
         val now = isoNow()
         val t = TaskItem(
             id = newUuid(), name = name.trim(), estimateMin = estimateMin, priority = priority,
             lifeArea = lifeArea, tags = tags, intentWhen = intentWhen, intentThen = intentThen,
             firstPhysicalAction = firstPhysicalAction, recurrence = recurrence, later = later,
+            sourceCollectionId = sourceCollectionId, sourceItemId = sourceItemId, dueAt = dueAt,
             createdAt = now, updatedAt = now,
         )
         launchWrite { write?.upsertTask(t) }
@@ -121,6 +126,11 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun toggleDone(task: TaskItem) = launchWrite {
         val flipped = task.copy(done = !task.done)
         write?.upsertTask(applyCompletion(flipped, prior = task, nowISO = isoNow()))
+        // Completing a task promoted from a shared collection item → flip the
+        // shared item to "done by <name>" + notify the other members (best-effort).
+        if (flipped.done && !task.done && task.sourceCollectionId != null && task.sourceItemId != null) {
+            share?.taskDone(task.sourceCollectionId!!, task.sourceItemId!!, task.name, currentName ?: "Someone")
+        }
     }
 
     fun setLater(task: TaskItem, later: Boolean) = launchWrite {
@@ -452,6 +462,31 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         val nm = name.trim(); if (nm.isNotEmpty()) mutateCollection(col.id) { it.copy(name = nm) }
     }
     fun recolorCollection(col: ItemCollection, color: String) = mutateCollection(col.id) { it.copy(color = color) }
+
+    // --- Move to task (promote a collection item to a task) ---
+    enum class PromoteMode { SELF, LOOP }   // LOOP = keep everyone in the loop (shared accountability)
+
+    /** Mark an item as promoted (struck + status chip), synced to all members on
+     *  a shared list. done = false → "on it", null → static "Promoted". */
+    private fun markItemPromoted(col: ItemCollection, itemId: String, assignee: String, done: Boolean?, dueAt: String?) {
+        mutateCollectionItem(col.id,
+            { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(promoted = true, assignee = assignee, promotedDone = done, dueAt = dueAt) else it }) },
+            { it.setItemPromotion(col.id, itemId, assignee, done, dueAt) })
+    }
+
+    /** Turn a collection item into a task. LOOP on a shared list links the task to
+     *  the item (so completion/lateness flows back to everyone) + sets a "by" time. */
+    fun moveItemToTask(col: ItemCollection, item: CollectionItem, mode: PromoteMode, dueAtIso: String? = null) {
+        val loop = mode == PromoteMode.LOOP && isShared(col)
+        addTask(
+            name = item.body, estimateMin = 25, tags = listOf("from-collection"),
+            sourceCollectionId = if (loop) col.id else null,
+            sourceItemId = if (loop) item.id else null,
+            dueAt = if (loop) dueAtIso else null,
+        )
+        markItemPromoted(col, item.id, assignee = currentName ?: "Someone",
+            done = if (loop) false else null, dueAt = if (loop) dueAtIso else null)
+    }
 
     // --- collection sharing (edge function-backed) ---
     suspend fun shareCollection(collectionId: String, email: String, role: String): tech.csalliance.unstuck.sync.ShareOutcome {

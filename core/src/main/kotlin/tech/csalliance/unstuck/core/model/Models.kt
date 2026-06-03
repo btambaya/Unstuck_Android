@@ -93,6 +93,13 @@ data class TaskItem(
     val completedAt: String? = null,
     val later: Boolean? = null,
     val recurrence: Recurrence? = null,
+    // Back-link to a collection item this task was promoted from (migration 025),
+    // so completing it can flip the shared item + a cron can escalate if it's late.
+    // (`late_nudged` is server-owned by the cron and never written by the client.)
+    val sourceCollectionId: String? = null,
+    val sourceItemId: String? = null,
+    /** ISO "by" time for an accountability promote; the late cron checks due+5m. */
+    val dueAt: String? = null,
     val createdAt: String,
     val updatedAt: String,
 )
@@ -170,6 +177,17 @@ data class CollectionItem(
     val pinned: Boolean? = null,
     val done: Boolean? = null,
     val at: String,
+    // Move-to-task / accountability (migration 025). Set when an item is promoted
+    // to a task. On a shared list these are visible to all members so the list
+    // doubles as an accountability board. Optional → back-compatible JSONB.
+    /** True once the item has been moved to a task. */
+    val promoted: Boolean? = null,
+    /** Display name of the person who took the task (the promoter). */
+    val assignee: String? = null,
+    /** True once the assignee's linked task is completed (live status). */
+    val promotedDone: Boolean? = null,
+    /** ISO "by" time for keep-in-loop promotes; drives the overdue indicator. */
+    val dueAt: String? = null,
 )
 
 @Serializable

@@ -125,7 +125,9 @@ fun TodayScreen(
     Column(Modifier.fillMaxWidth()) {
         // ── Pinned header: avatar + bell, greeting, and (when there's content) the
         //    Today/Backlog filters. Only the list below scrolls. ──────────────────
-        Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 12.dp, top = 14.dp, bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+        // top = 8.dp to match the shared AppBar's vertical padding (the other
+        // three tabs) so the header icon row sits on the same line across pages.
+        Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 12.dp, top = 8.dp, bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
             Orbit(size = 24)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onInbox), contentAlignment = Alignment.Center) {

@@ -24,6 +24,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.design.component.BottomNavBar
@@ -76,6 +78,12 @@ fun MainScaffold(vm: AppViewModel) {
     var focusTask by remember { mutableStateOf<TaskItem?>(null) }
     var activeArea by remember { mutableStateOf<String?>(null) }
     var onboarding by remember { mutableStateOf(!vm.onboarded) }
+    // Return to Today whenever the app is backgrounded, so reopening lands on the
+    // home tab instead of a stale detail/overlay/sheet. A live focus session is
+    // preserved (its overlay reappears).
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        tab = "today"; stack.clear(); sheet = null; showNewTask = false
+    }
     val c = UTheme.colors
     val initials = remember(vm.currentName) {
         (vm.currentName ?: "U").split(' ', '.', '@').mapNotNull { it.firstOrNull()?.uppercaseChar() }.take(2).joinToString("").ifEmpty { "U" }

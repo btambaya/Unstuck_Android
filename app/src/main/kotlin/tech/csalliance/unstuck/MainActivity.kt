@@ -36,6 +36,11 @@ class MainActivity : ComponentActivity() {
         ) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
+        // Exact alarms — without this, task reminders fall back to INEXACT alarms,
+        // which Android batches/Doze-delays so they fire late or not at all. On
+        // Android 12+ it can be denied (and is denied-by-default for apps targeting
+        // 14+). Prompt once so scheduled-task / promote reminders actually fire.
+        maybePromptExactAlarm()
         // Register the FCM token once a session exists (so it lands on first
         // sign-in, and re-registers on a later sign-in / token refresh). The
         // StateFlow emits its current value immediately, covering relaunches
@@ -62,6 +67,24 @@ class MainActivity : ComponentActivity() {
             // AppRoot owns UnstuckTheme so it reacts to the persisted
             // theme / accent / density settings.
             AppRoot(graph)
+        }
+    }
+
+    /** One-time nudge to the system "Alarms & reminders" toggle so exact alarms
+     *  (and thus reliable reminders) work. Only when reminders are on + not yet
+     *  granted + not asked before. */
+    private fun maybePromptExactAlarm() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        val am = getSystemService(android.app.AlarmManager::class.java) ?: return
+        if (am.canScheduleExactAlarms()) return
+        if (graph.settings.load().reminderLeadMin <= 0) return   // reminders off → don't bother
+        val prefs = getSharedPreferences("unstuck.app", MODE_PRIVATE)
+        if (prefs.getBoolean("exactAlarmPrompted", false)) return
+        prefs.edit().putBoolean("exactAlarmPrompted", true).apply()
+        runCatching {
+            startActivity(
+                Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, android.net.Uri.parse("package:$packageName")),
+            )
         }
     }
 

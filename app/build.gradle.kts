@@ -86,21 +86,20 @@ android {
 
 // Firebase App Distribution — `./gradlew :app:appDistributionUploadRelease`
 // uploads the signed release to testers. Auth uses the gitignored
-// firebase-service-account.json. Override the invite list with
-// -PappDistTesters="a@x.com,b@y.com" — DEFAULT is the full tester list so a
-// plain upload reaches everyone (not just the owner).
+// firebase-service-account.json.
+// DEFAULT (for now): distribute ONLY to the two test accounts below — NOT the
+// full `beta` group — so we don't spam every tester with each iteration.
+// To push to the whole beta group (when ready): pass -PappDistGroups=beta.
+// Override testers with -PappDistTesters="a@x.com,b@y.com".
 firebaseAppDistribution {
     appId = "1:806563895083:android:1673707a78b9d39039976e"
     artifactType = "APK"
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path
-    testers = (findProperty("appDistTesters") as String?) ?: "ahmad@csalliance.tech,justtesting6363@gmail.com,zyzkazaure@gmail.com"
-    // Also distribute to the "beta" tester GROUP (alias `beta`) so anyone who
-    // self-enrolls via its invite link gets every build — no manual email entry.
-    // ⚠ The group must already exist: Firebase Console → App Distribution →
-    // Testers & Groups → create a group with alias `beta` + enable its invite link.
-    // Override with -PappDistGroups="alias1,alias2".
-    groups = (findProperty("appDistGroups") as String?) ?: "beta"
+    testers = (findProperty("appDistTesters") as String?) ?: "justtesting6363@gmail.com,zyzkazaure@gmail.com"
+    // No group by default → only the two testers above are notified. Pass
+    // -PappDistGroups=beta to release to the full beta group when told to.
+    groups = (findProperty("appDistGroups") as String?) ?: ""
     releaseNotes = "v0.4.22 — Reopening the app now lands you on Today (not a stale screen). Reminders fix: the app now asks for the 'Alarms & reminders' permission — without it Android silently delayed/dropped your task reminders (so promoted-task reminders never fired). Grant it when prompted, and a reminder fires before a scheduled task's time ('Remind me before tasks' in Settings sets the lead — default 10 min; set it to 5 for a 5-min heads-up). Earlier (v0.4.21): move-to-task fixes: a 'keep everyone in the loop' task now shows on your Calendar at its 'by' time, and you can no longer accidentally promote the same item twice into a duplicate task. Earlier (v0.4.20): archive old/finished lists (archive icon in a list's header; an 'Archived' filter on the overview to view + restore them). Removed the menu (hamburger) from Calendar and Collections. Shared-list notifications (shared / finished / late) now come through loud as a proper heads-up instead of silently. Earlier: hold anywhere on a collection item (not just the text) to reveal its actions — more reliable, with a little buzz when it catches. Everything from v0.4.18: long-press an item to reveal its actions (pin — now a proper pushpin icon, remove, and the new Move to task). Move to task turns an item into a real task; the item stays, struck-through and tagged 'Promoted'. On a SHARED list you can 'keep everyone in the loop' with a 'by' time: the task goes to your list, everyone sees '<you>'s on it · by 6:00', and when you check it off they all see 'done by <you> ✓' and get a heads-up. (If it's not started by 5 min past the time, the others get nudged — pending one server setup.) Earlier: tidier collection header with delete as a small icon next to Share (the big 'Delete collection' button is gone). The title also stays pinned at the top while you scroll its items. Plus everything from v0.4.15: shared collections now actually reach the person you share with (fixed a database-permission bug that silently blocked it), plus you get notified — an in-app card and a push — when someone shares a list with you (honors your notifications-off setting). Tapping the share notification opens Collections. Also fixed: a single overdue task no longer makes Today show an empty 'no tasks' screen (and hide the Backlog toggle). Earlier in v0.4.x — Shared collections! Open any collection → tap the Share icon (now next to the title) → invite a partner by email (even if they don't have Unstuck yet — they get the list the moment they sign up). You both add, check and edit items with live sync. Share as 'Can edit' or 'Can view' (read-only). Edits are conflict-free, so two people adding at once both land. Shared lists show a SHARED tag; non-owners get a Leave button. Fix: on detail/overlay screens the hidden header icons (inbox/bell/profile) no longer catch stray taps; the Today header now lines up with the other tabs. Also: the app now records where it's used (platform + rough city, from sign-in)."
 }
 

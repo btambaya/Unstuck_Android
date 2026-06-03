@@ -101,7 +101,7 @@ firebaseAppDistribution {
     // Testers & Groups → create a group with alias `beta` + enable its invite link.
     // Override with -PappDistGroups="alias1,alias2".
     groups = (findProperty("appDistGroups") as String?) ?: "beta"
-    releaseNotes = "v0.4.11 — New: a capture Inbox (tray icon in the Today header, next to the bell) to triage your captured thoughts — promote to a task, open, archive, or discard. Plus code-review fixes: signing out now unregisters this device so the next person who signs in never gets your notifications; shade actions (Resume/End/Reschedule) are reliable on a cold process; the calendar NOW line advances live; the live-focus notification is restored after the app is killed mid-session; the home-screen 'Start Next' widget now actually updates; drag-to-schedule lines up on all screen densities; and command-palette notes open their task. Removed the redundant 'You noted…' nudge (the Inbox covers it)."
+    releaseNotes = "v0.4.12 — Shared collections! Open any collection → Share → invite a partner by email (even if they don't have Unstuck yet — they get the list the moment they sign up). You both add, check and edit items with live sync. Share as 'Can edit' or 'Can view' (read-only). Edits are conflict-free, so two people adding to the same list at once both land. Shared lists show a SHARED tag; non-owners get a Leave button. Also: the app now records where it's used (platform + rough city, from your sign-in) so we can see how people use it."
 }
 
 dependencies {

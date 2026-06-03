@@ -319,7 +319,10 @@ private fun CollItemRow(
             AnimatedVisibility(visible = revealed) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Icon(Icons.Outlined.PushPin, contentDescription = "Pin", tint = if (isPinned) c.coral else c.ink4, modifier = Modifier.size(19.dp).clickable { vm.toggleCollectionItemPin(col, item.id) })
-                    Icon(Icons.Outlined.AddTask, contentDescription = "Move to task", tint = c.ink4, modifier = Modifier.size(19.dp).clickable { onMoveToTask() })
+                    // Hide Move-to-task while a promotion is in flight (avoids a duplicate task).
+                    if (!promoted || promotedDone) {
+                        Icon(Icons.Outlined.AddTask, contentDescription = "Move to task", tint = c.ink4, modifier = Modifier.size(19.dp).clickable { onMoveToTask() })
+                    }
                     Icon(Icons.Filled.Close, contentDescription = "Remove", tint = c.ink4, modifier = Modifier.size(19.dp).clickable { vm.removeCollectionItem(col, item.id) })
                 }
             }

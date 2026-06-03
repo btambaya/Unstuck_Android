@@ -478,13 +478,22 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     /** Turn a collection item into a task. LOOP on a shared list links the task to
      *  the item (so completion/lateness flows back to everyone) + sets a "by" time. */
     fun moveItemToTask(col: ItemCollection, item: CollectionItem, mode: PromoteMode, dueAtIso: String? = null) {
+        // Guard: don't duplicate a task for an item that's already promoted + in
+        // flight (a completed one may be re-promoted for a fresh cycle).
+        if (item.promoted == true && item.promotedDone != true) return
         val loop = mode == PromoteMode.LOOP && isShared(col)
-        addTask(
+        val task = addTask(
             name = item.body, estimateMin = 25, tags = listOf("from-collection"),
             sourceCollectionId = if (loop) col.id else null,
             sourceItemId = if (loop) item.id else null,
             dueAt = if (loop) dueAtIso else null,
         )
+        // Schedule keep-in-loop tasks at the "by" time so they show on the calendar.
+        if (loop && dueAtIso != null) {
+            runCatching { java.time.Instant.parse(dueAtIso).atZone(java.time.ZoneId.systemDefault()) }.getOrNull()?.let { z ->
+                scheduleTask(task, z.toLocalDate().toString(), String.format("%02d:%02d", z.hour, z.minute))
+            }
+        }
         markItemPromoted(col, item.id, assignee = currentName ?: "Someone",
             done = if (loop) false else null, dueAt = if (loop) dueAtIso else null)
     }

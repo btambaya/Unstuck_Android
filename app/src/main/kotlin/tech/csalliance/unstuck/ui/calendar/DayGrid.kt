@@ -148,7 +148,9 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
     var editingBlock by remember { mutableStateOf<CalBlock?>(null) }
 
     val dayBlocks = blocks.filter { it.date == date }
-    val scheduledIds = dayBlocks.filter { isTaskBlock(it) }.mapNotNull { it.taskId }.toSet()
+    // Scheduled-anywhere, not just on the viewed day — otherwise a task scheduled on
+    // another date reappears in the unscheduled tray and dragging it MOVES its block.
+    val scheduledIds = blocks.filter { isTaskBlock(it) }.mapNotNull { it.taskId }.toSet()
     val unscheduled = tasks.filter { !it.done && it.later != true && it.id !in scheduledIds }
 
     // Map the current drag position (window coords) to a snapped HH:MM on the grid.
@@ -258,7 +260,9 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                                             onDragEnd = { dropBlock() },
                                             onDragCancel = { dragBlock = null },
                                         )
-                                    } else Modifier,
+                                        // External/placeholder blocks are display-only — swallow taps so
+                                        // they don't fall through to the grid's create-task handler.
+                                    } else Modifier.pointerInput(b.id) { detectTapGestures { } },
                                 )
                                 .padding(horizontal = 6.dp, vertical = 2.dp),
                         ) {
@@ -277,7 +281,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                     if (nowMin in 0..((END_HOUR - START_HOUR) * 60)) {
                         val topDp = HOUR_HEIGHT * (nowMin / 60f)
                         Box(Modifier.padding(start = 64.dp, end = 12.dp).offset(y = topDp).fillMaxWidth().height(1.5.dp).background(c.coral))
-                        Box(Modifier.offset(y = topDp - 8.dp).padding(start = 8.dp).clip(RoundedCornerShape(999.dp)).background(c.coral).padding(horizontal = 6.dp, vertical = 1.dp)) {
+                        Box(Modifier.offset(y = (topDp - 8.dp).coerceAtLeast(0.dp)).padding(start = 8.dp).clip(RoundedCornerShape(999.dp)).background(c.coral).padding(horizontal = 6.dp, vertical = 1.dp)) {
                             Text("NOW", style = UFont.mono(8, FontWeight.Bold), color = Color.White)
                         }
                     }

@@ -90,6 +90,7 @@ private fun CalendarSyncBar(vm: AppViewModel) {
     val context = LocalContext.current
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
+    var confirmDisconnect by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (conns.isEmpty()) {
@@ -108,13 +109,25 @@ private fun CalendarSyncBar(vm: AppViewModel) {
                     }.padding(horizontal = 12.dp, vertical = 8.dp),
                 ) { Text(if (busy) "Connecting…" else "＋ Connect Google Calendar", style = UFont.sans(12, FontWeight.Medium), color = c.ink2) }
             } else {
-                Text("Synced · ${conns.first().accountEmail}", style = UFont.sans(12), color = c.ink3, modifier = Modifier.weight(1f))
-                Text("Sync now", style = UFont.sans(12, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { scope.launch { vm.syncCalendar() } }.padding(horizontal = 8.dp, vertical = 4.dp))
-                Text("Disconnect", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { conns.forEach { vm.disconnectCalendar(it.id) } }.padding(horizontal = 8.dp, vertical = 4.dp))
+                // All connected accounts (not just the first); busy feedback on Sync now;
+                // Disconnect confirms first (it's destructive — drops all synced events).
+                Text(if (busy) "Syncing…" else conns.joinToString(", ") { "Synced · ${it.accountEmail}" }, style = UFont.sans(12), color = c.ink3, modifier = Modifier.weight(1f))
+                Text("Sync now", style = UFont.sans(12, FontWeight.Medium), color = if (busy) c.ink3 else c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(enabled = !busy) {
+                    scope.launch { busy = true; error = null; runCatching { vm.syncCalendar() }.onFailure { error = "Sync failed. Try again." }; busy = false }
+                }.padding(horizontal = 8.dp, vertical = 4.dp))
+                Text("Disconnect", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { confirmDisconnect = true }.padding(horizontal = 8.dp, vertical = 4.dp))
             }
         }
         error?.let { Text(it, style = UFont.sans(11), color = c.red, modifier = Modifier.padding(horizontal = 18.dp).padding(bottom = 6.dp)) }
     }
+    if (confirmDisconnect) androidx.compose.material3.AlertDialog(
+        onDismissRequest = { confirmDisconnect = false },
+        title = { Text("Disconnect Google Calendar?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+        text = { Text("Synced events are removed from your calendar. Your tasks are unaffected.", style = UFont.sans(13), color = c.ink2) },
+        confirmButton = { androidx.compose.material3.TextButton(onClick = { confirmDisconnect = false; conns.forEach { vm.disconnectCalendar(it.id) } }) { Text("Disconnect", color = c.red) } },
+        dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmDisconnect = false }) { Text("Cancel", color = c.ink2) } },
+        containerColor = c.surface,
+    )
 }
 
 @Composable

@@ -25,6 +25,9 @@ class AppGraph(context: Context) {
      *  consumed by MainScaffold to navigate). e.g. "unstuck://task/{id}",
      *  "unstuck://today/recap", "unstuck://today/brief", or "capture". */
     val pendingDeepLink = MutableStateFlow<String?>(null)
+    /** Set when a password-recovery deep link lands: AppRoot shows the set-new-password
+     *  screen (a recovery session can change the password without the old one). */
+    val pendingPasswordRecovery = MutableStateFlow(false)
     val db: UnstuckDatabase = UnstuckDatabase.build(context.applicationContext)
     val store = LocalStore(db)
 

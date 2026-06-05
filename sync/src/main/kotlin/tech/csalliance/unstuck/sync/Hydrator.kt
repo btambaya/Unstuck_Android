@@ -77,9 +77,18 @@ class Hydrator(private val gateway: SyncGateway, private val store: LocalStore) 
     private suspend fun hydrateCalBlocks() {
         runCatching {
             val remote = gateway.fetchAll(Tables.CAL_BLOCKS).map { DbRowCodec.decodeCalBlock(it) }
-            val localExternal = store.snapshot(Tables.CAL_BLOCKS, CalBlock.serializer()).filter { isExternalBlock(it) }
+            val local = store.snapshot(Tables.CAL_BLOCKS, CalBlock.serializer())
+            val localExternal = local.filter { isExternalBlock(it) }
             val merged = SyncDecision.mergeHydratedCalBlocks(remote, localExternal)
-            store.replace(Tables.CAL_BLOCKS, merged, CalBlock.serializer(), { it.id })
+            // Preserve unsynced optimistic TASK blocks (a pending outbox upsert): they're
+            // in neither `remote` nor `localExternal`, so the replace would wipe them off
+            // the UI until the next flush. Keep any not already present from the server.
+            val pendingIds = store.pending()
+                .filter { it.recordTable == Tables.CAL_BLOCKS && it.op == "upsert" }
+                .map { it.recordId }.toSet()
+            val mergedIds = merged.map { it.id }.toSet()
+            val localPending = local.filter { it.id in pendingIds && it.id !in mergedIds && !isExternalBlock(it) }
+            store.replace(Tables.CAL_BLOCKS, merged + localPending, CalBlock.serializer(), { it.id })
         }.onFailure { println("[hydrate] cal_blocks failed, leaving local intact: $it") }
     }
 }

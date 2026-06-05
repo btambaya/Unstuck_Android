@@ -59,6 +59,13 @@ class SyncCoordinator(
      *  morning brief / pushes from reaching whoever signs in next on this
      *  device. The server single-owner pre-delete is the other half. */
     suspend fun signOutAndUnregister() {
+        // Drain any queued offline writes BEFORE signing out — the NotAuthenticated
+        // branch calls store.clearAll() which also wipes the outbox, so un-flushed
+        // edits would be lost forever. Best-effort + bounded so a flaky network can't
+        // hang sign-out.
+        auth.currentUserId?.let { uid ->
+            runCatching { kotlinx.coroutines.withTimeoutOrNull(5_000) { flusher.flush(uid) { auth.currentUserId } } }
+        }
         runCatching { push.unregister(thisDeviceId()) }
         auth.signOut()
     }
@@ -160,7 +167,12 @@ class SyncCoordinator(
         val ownEventIds = store.blocks().first()
             .filter { it.kind == CalBlockKind.TASK && !it.externalEventId.isNullOrBlank() }
             .mapNotNull { it.externalEventId }.toSet()
-        val blocks = events.filter { it.id !in ownEventIds }.map { externalEventToBlock(it, it.calendarId) }
+        val blocks = events
+            .filter { it.id !in ownEventIds }
+            // Skip all-day events (date-only start, no 'T') — they'd collapse to 15-min
+            // 00:00 slivers stacked on the time grid. (A proper all-day lane is a follow-up.)
+            .filter { it.start.contains('T') }
+            .map { externalEventToBlock(it, it.calendarId) }
         val keep = blocks.map { it.id }.toSet()
         blocks.forEach { write.upsertCalBlock(it) }
         // Reconcile deletions: drop in-window EXTERNAL blocks Google no longer returns.

@@ -41,10 +41,13 @@ fun AppRoot(graph: AppGraph) {
             !vm.configured -> SetupScreen()
             else -> {
                 val authed by vm.authed.collectAsStateWithLifecycle()
+                val recovery by vm.pendingPasswordRecovery.collectAsStateWithLifecycle()
                 when (authed) {
                     null -> LoadingScreen()
                     false -> AuthScreen(vm)
-                    true -> MainScaffold(vm)
+                    // A recovery session lands here authenticated — let them set a new
+                    // password (the only way out of a forgotten password).
+                    true -> if (recovery) tech.csalliance.unstuck.ui.auth.SetNewPasswordScreen(vm) else MainScaffold(vm)
                 }
             }
         }

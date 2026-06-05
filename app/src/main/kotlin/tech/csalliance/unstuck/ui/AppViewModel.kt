@@ -184,6 +184,14 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
             val plan = tech.csalliance.unstuck.core.logic.regenerateForTask(task, recurrence, blocks.value, tech.csalliance.unstuck.core.time.Clock.todayIso(), startTime, startDate)
             plan.toDelete.forEach { write?.deleteCalBlock(it) }
             plan.toUpsert.forEach { write?.upsertCalBlock(it) }
+            // Guarantee the user's CHOSEN slot is materialized. The horizon regen skips
+            // the chosen date when it's today or off-pattern (e.g. a Tue pick on a
+            // Mon/Wed/Fri weekly), so without this the task vanishes from that date —
+            // despite the "Scheduled" confirmation. Only add when nothing covers it.
+            val coversChosen = existing.any { it.date == date } || plan.toUpsert.any { it.date == date }
+            if (!coversChosen) {
+                write?.upsertCalBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = startTime, durationMinutes = task.estimateMin, date = date, kind = CalBlockKind.TASK))
+            }
             // Only count a "move" if the anchor (earliest existing block) actually
             // changed — re-tapping Schedule at the same date/time shouldn't inflate
             // moveCount + falsely trip the slip detector (parity with the else branch).
@@ -230,6 +238,13 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     /** Route an in-app tap (e.g. a non-task notification-center row) through the same
      *  pendingDeepLink handler MainScaffold uses for push taps. */
     fun openDeepLink(link: String) { graph.pendingDeepLink.value = link }
+
+    // --- password recovery (from a "forgot password" email deep link) ---
+    val pendingPasswordRecovery: StateFlow<Boolean> get() = graph.pendingPasswordRecovery
+    fun consumeRecovery() { graph.pendingPasswordRecovery.value = false }
+    /** Set a new password on the recovery session — no current password needed. */
+    suspend fun setNewPassword(newPassword: String): AuthOutcome =
+        auth?.changePassword(newPassword) ?: AuthOutcome.Error("Not configured")
 
     // --- in-app nudges (things slipping / follow-ups) — surfaced quietly on Today, no push ---
     // Persisted (device-local) so a dismissed nudge stays dismissed across relaunch.
@@ -320,6 +335,17 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         // paused session stays paused (the user resumes explicitly), it isn't
         // auto-resumed just by opening the focus screen.
         if (cur?.taskId == task.id) return@launchWrite
+        // Replacing a DIFFERENT task's live session: finalize it first (write its
+        // Session row + accumulate its focus time) so the elapsed time isn't silently
+        // discarded — same finalize as finishFocus(markDone=false).
+        if (cur != null && cur.sessionStart != null && cur.taskId != task.id) {
+            val prev = store.tasks().first().firstOrNull { it.id == cur.taskId }
+            if (prev != null) {
+                val elapsed = FocusTimer.elapsedSec(cur, nowMs())
+                write?.upsertSession(Session(id = cur.id ?: newUuid(), taskId = prev.id, taskName = prev.name, estimateMin = prev.estimateMin, actualSec = elapsed, completedAt = isoNow()))
+                write?.upsertTask(prev.copy(totalFocused = prev.totalFocused + elapsed, updatedAt = isoNow()))
+            }
+        }
         val base = cur ?: FocusTimer.empty
         // Seed prior focus so reopening after "End for now" continues from the
         // accumulated total instead of restarting the displayed timer at 0.
@@ -411,9 +437,13 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
 
     // --- shared-collection helpers (migration 020/022) ---
     private fun currentUid(): String? = auth?.currentUserId
-    /** A collection is shared if it has members, or it's owned by someone else. */
-    fun isShared(c: ItemCollection): Boolean =
-        c.members.isNotEmpty() || (c.ownerId != null && c.ownerId != currentUid())
+    /** A collection is shared if it has members, or it's owned by someone else. Guard on
+     *  a KNOWN current uid — a transiently-null uid must not mis-classify your OWN list as
+     *  shared (that routes edits down the RPC-only path with no outbox → silent loss). */
+    fun isShared(c: ItemCollection): Boolean {
+        val uid = currentUid()
+        return c.members.isNotEmpty() || (c.ownerId != null && uid != null && c.ownerId != uid)
+    }
     /** Owner (or a local/demo row with no ownerId). Gates rename/recolor/delete/share. */
     fun isOwner(c: ItemCollection): Boolean { val uid = currentUid(); return c.ownerId == null || c.ownerId == uid }
     /** A view-only member can't edit items; owner + editor + local can. */
@@ -523,8 +553,13 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
                 scheduleTask(task, z.toLocalDate().toString(), String.format("%02d:%02d", z.hour, z.minute))
             }
         }
-        markItemPromoted(col, item.id, assignee = currentName ?: "Someone",
-            done = if (loop) false else null, dueAt = if (loop) dueAtIso else null)
+        // "Just me" on a SHARED list must NOT announce to the others (it would mark the
+        // shared item "<you>'s on it" for everyone with no way to clear). Only mark when
+        // keeping-in-loop, or on a solo list (where it's a local-only "Promoted" chip).
+        if (loop || !isShared(col)) {
+            markItemPromoted(col, item.id, assignee = currentName ?: "Someone",
+                done = if (loop) false else null, dueAt = if (loop) dueAtIso else null)
+        }
     }
 
     // --- collection sharing (edge function-backed) ---
@@ -575,6 +610,9 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
      *  match + de-dupe so renaming A→B on a task tagged [A,B] yields [B], not [B,B]. */
     fun renameTag(tag: TagRow, newName: String) = launchWrite {
         val nm = newName.trim(); if (nm.isEmpty() || nm == tag.name) return@launchWrite
+        // Bail on a duplicate name (case-insensitive) — two same-named tags make the
+        // name-keyed filter/cascade ambiguous.
+        if (tags.value.any { it.id != tag.id && it.name.equals(nm, ignoreCase = true) }) return@launchWrite
         write?.upsertTag(tag.copy(name = nm))
         tasks.value.filter { t -> t.tags?.any { it.equals(tag.name, ignoreCase = true) } == true }.forEach { t ->
             write?.upsertTask(t.copy(tags = t.tags?.map { if (it.equals(tag.name, ignoreCase = true)) nm else it }?.distinct(), updatedAt = isoNow()))
@@ -596,6 +634,9 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     /** Rename an area + cascade the new name onto its tasks (web parity). */
     fun renameLifeArea(area: LifeArea, newName: String) = launchWrite {
         val nm = newName.trim(); if (nm.isEmpty() || nm == area.name) return@launchWrite
+        // Bail on a duplicate name — areas key tasks by name string, so two same-named
+        // areas make the Today/Tasks filter ambiguous.
+        if (lifeAreas.value.any { it.id != area.id && it.name.equals(nm, ignoreCase = true) }) return@launchWrite
         write?.upsertLifeArea(area.copy(name = nm))
         tasks.value.filter { it.lifeArea == area.name }.forEach { t -> write?.upsertTask(t.copy(lifeArea = nm, updatedAt = isoNow())) }
     }

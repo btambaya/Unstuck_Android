@@ -95,7 +95,7 @@ fun MainScaffold(vm: AppViewModel) {
     // home tab instead of a stale detail/overlay/sheet. A live focus session is
     // preserved (its overlay reappears).
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
-        tab = "today"; stack.clear(); sheet = null; showNewTask = false
+        tab = "today"; stack.clear(); sheet = null; showNewTask = false; newTaskPrefill = null
     }
     val c = UTheme.colors
     val initials = remember(vm.currentName) {
@@ -181,7 +181,7 @@ fun MainScaffold(vm: AppViewModel) {
     // intercepts back itself, so we only handle the focus overlay, the route stack,
     // and the non-Today tab fall-back. (Leaving focus keeps the live session running.)
     val sheetOpen = showNewTask || sheet != null
-    BackHandler(enabled = focusTask != null) { focusTask = null }
+    BackHandler(enabled = focusTask != null) { focusTask = null; focusAutoCapture = false }
     BackHandler(enabled = focusTask == null && !sheetOpen && stack.isNotEmpty()) { pop() }
     BackHandler(enabled = focusTask == null && !sheetOpen && stack.isEmpty() && tab != "today") { tab = "today" }
 
@@ -206,14 +206,14 @@ fun MainScaffold(vm: AppViewModel) {
                     "lists" -> CollectionsScreen(vm, onOpen = { push(Route.Collection(it)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
                 }
             }
-            BottomNavBar(NAV, tab, onSelect = { tab = it; stack.clear() }, onFab = { showNewTask = true }, modifier = Modifier.navigationBarsPadding())
+            BottomNavBar(NAV, tab, onSelect = { tab = it; stack.clear() }, onFab = { newTaskPrefill = null; showNewTask = true }, modifier = Modifier.navigationBarsPadding())
         }
 
         // Floating beta-feedback bubble — sits above tab content (declared after the
         // Column) but hides under any overlay / sheet / focus (the guard), so it never
         // covers a modal. Bottom-end, lifted above the nav bar to clear the center FAB.
         // Gated by BuildConfig.FEEDBACK_ENABLED so it's a one-flag flip for a public build.
-        if (BuildConfig.FEEDBACK_ENABLED && stack.isEmpty() && !sheetOpen && focusTask == null) {
+        if (BuildConfig.FEEDBACK_ENABLED && stack.isEmpty() && !sheetOpen && focusTask == null && tab != "calendar") {
             Box(
                 Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 16.dp, bottom = 74.dp)
                     .size(50.dp).shadow(8.dp, CircleShape).clip(CircleShape).background(c.surface)

@@ -60,7 +60,13 @@ class WriteThrough(private val store: LocalStore) {
 
     suspend fun upsertCapture(c: Capture) {
         store.upsert(Tables.CAPTURES, c, Capture.serializer(), c.id, c.at)
-        enqueue("captures", c.id, "upsert", DbRowCodec.encodeCapture(c).toString())
+        // Wait for the parent session row to flush first — a capture taken DURING a
+        // session references a session_id (FK) whose `sessions` row is only written at
+        // session end. Without this the capture can push ahead, hit the FK, and be
+        // poison-dropped. (If the session is abandoned, the orphan-drop in OutboxFlusher
+        // cleans this up alongside it.)
+        val dependsOn = c.sessionId?.let { if (isUuid(it)) it else null }
+        enqueue("captures", c.id, "upsert", DbRowCodec.encodeCapture(c).toString(), dependsOn)
     }
 
     suspend fun upsertReasonLog(r: ReasonLog) {
@@ -89,7 +95,14 @@ class WriteThrough(private val store: LocalStore) {
         // Skip the read for g_ (external) ids — those are never pushed.
         val block = if (!id.startsWith("g_")) store.blocks().first().firstOrNull { it.id == id } else null
         store.delete(Tables.CAL_BLOCKS, id)
-        if (!id.startsWith("g_")) enqueue(Tables.CAL_BLOCKS, id, "delete", null) // external rows aren't ours
+        if (!id.startsWith("g_")) {
+            // Cancel any still-queued upsert for this block first. A cal_block upsert
+            // carries dependsOn=task.id, so it can be held back while the delete (no
+            // dependsOn) flushes ahead of it — which would re-create the block on the
+            // server AFTER the delete. Drop the stale upsert so the row stays deleted.
+            cancelPendingUpserts(Tables.CAL_BLOCKS, id)
+            enqueue(Tables.CAL_BLOCKS, id, "delete", null) // external rows aren't ours
+        }
         block?.let { pushCalBlockDelete?.invoke(it) }
     }
     suspend fun deleteTag(id: String) = deleteLocalAndEnqueue(Tables.TAGS, id)
@@ -101,7 +114,16 @@ class WriteThrough(private val store: LocalStore) {
 
     private suspend fun deleteLocalAndEnqueue(table: String, id: String) {
         store.delete(table, id)
+        cancelPendingUpserts(table, id)
         enqueue(table, id, "delete", null)
+    }
+
+    /** Drop any queued upsert ops for a row about to be deleted, so a held-back
+     *  upsert can't resurrect it on the server after the delete flushes. */
+    private suspend fun cancelPendingUpserts(table: String, id: String) {
+        store.pending()
+            .filter { it.recordTable == table && it.recordId == id && it.op == "upsert" }
+            .forEach { store.dequeue(it.seq) }
     }
 
     private suspend fun enqueue(table: String, id: String, op: String, payload: String?, dependsOn: String? = null) {

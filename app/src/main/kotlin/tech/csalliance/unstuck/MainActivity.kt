@@ -28,8 +28,11 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         // OAuth / magic-link PKCE callback (unstuck://auth-callback) + Google
-        // Calendar consent return (unstuck://calendar-callback).
-        handleAuthOrCalendar(intent)
+        // Calendar consent return (unstuck://calendar-callback). ONLY on a fresh
+        // create — a config change (rotation / theme / locale) recreates the Activity
+        // with the same launch Intent, which would otherwise re-fire the deep link
+        // (re-open the task, re-run the calendar exchange). onNewIntent covers later ones.
+        if (savedInstanceState == null) handleAuthOrCalendar(intent)
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
@@ -75,9 +78,15 @@ class MainActivity : ComponentActivity() {
      *  granted + not asked before. */
     private fun maybePromptExactAlarm() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
+        // Don't bounce a brand-new user to the system Alarms-&-reminders screen before
+        // they've even seen onboarding — wait until they're in the app.
+        if (!graph.onboarded) return
         val am = getSystemService(android.app.AlarmManager::class.java) ?: return
         if (am.canScheduleExactAlarms()) return
-        if (graph.settings.load().reminderLeadMin <= 0) return   // reminders off → don't bother
+        // Skip only when NO exact-alarm-driven moment is enabled. Lead reminders off is
+        // not enough — Balanced/Coach still schedule start-now & drift alarms.
+        val s = graph.settings.load()
+        if (s.reminderLeadMin <= 0 && s.notificationLevel == tech.csalliance.unstuck.NotificationLevel.CALM) return
         val prefs = getSharedPreferences("unstuck.app", MODE_PRIVATE)
         if (prefs.getBoolean("exactAlarmPrompted", false)) return
         prefs.edit().putBoolean("exactAlarmPrompted", true).apply()
@@ -110,6 +119,11 @@ class MainActivity : ComponentActivity() {
         if (intent?.getBooleanExtra(tech.csalliance.unstuck.surface.NotificationActionReceiver.EXTRA_OPEN_CAPTURE, false) == true) {
             graph.pendingDeepLink.value = "capture"
             return
+        }
+        // Password-recovery link → flag it so AppRoot shows the set-new-password screen
+        // once Supabase establishes the recovery session (handleDeeplinks below).
+        if (data?.toString()?.contains("type=recovery", ignoreCase = true) == true) {
+            graph.pendingPasswordRecovery.value = true
         }
         // Notification taps → route to the task / today / recap / brief / focus / collections (consumed by MainScaffold).
         if (data?.scheme == "unstuck" && (data.host == "task" || data.host == "today" || data.host == "focus" || data.host == "collections")) {

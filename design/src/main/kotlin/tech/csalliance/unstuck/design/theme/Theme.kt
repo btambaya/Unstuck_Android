@@ -1,9 +1,13 @@
 package tech.csalliance.unstuck.design.theme
 
 import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
+import androidx.compose.ui.Modifier
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.Immutable
@@ -142,7 +146,12 @@ fun UnstuckTheme(
         // every sp text size responds (mirrors the web density / larger-type).
         val base = LocalDensity.current
         CompositionLocalProvider(LocalDensity provides Density(base.density, base.fontScale * fontScale)) {
-            MaterialTheme(colorScheme = scheme, typography = UnstuckTypography, content = content)
+            // Paint a theme-correct background under EVERY screen. Without this only
+            // MainScaffold drew its own bg, so the auth / loading / setup screens showed
+            // near-white text on the hardcoded white window in dark mode (P1).
+            MaterialTheme(colorScheme = scheme, typography = UnstuckTypography) {
+                Box(Modifier.fillMaxSize().background(colors.bg)) { content() }
+            }
         }
     }
 }

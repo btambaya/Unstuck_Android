@@ -110,8 +110,8 @@ private fun Card(dotColor: androidx.compose.ui.graphics.Color, title: String, me
     ) {
         Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
         Column(Modifier.weight(1f)) {
-            Text(title, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink, maxLines = 1)
-            Text(meta, style = UFont.sans(12), color = c.ink3, maxLines = 2)
+            Text(title, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+            Text(meta, style = UFont.sans(12), color = c.ink3, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
         }
     }
 }

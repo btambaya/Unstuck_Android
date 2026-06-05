@@ -30,6 +30,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.painterResource
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
@@ -99,14 +102,20 @@ fun AuthScreen(vm: AppViewModel) {
 
         Spacer(Modifier.height(20.dp))
         UButton(if (busy) "…" else if (signUp) "Create account" else "Sign in", kind = ButtonKind.DARK, enabled = !busy) {
-            if (signUp) run("Check your email to confirm your account, then sign in.") { vm.signUp(email.trim(), password, name) }
-            else run { vm.signIn(email.trim(), password) }
+            val e = email.trim()
+            when {
+                e.isBlank() -> { messageOk = false; message = "Enter your email first." }
+                password.isBlank() -> { messageOk = false; message = "Enter your password." }
+                signUp -> run("Check your email to confirm your account, then sign in.") { vm.signUp(e, password, name) }
+                else -> run { vm.signIn(e, password) }
+            }
         }
         Spacer(Modifier.height(10.dp))
         // Outlined Google button with the official multicolor "G" logo.
         Row(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(999.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(999.dp))
-                .clickable(enabled = !busy) { run { vm.googleSignIn() } }.padding(vertical = 14.dp),
+                .clickable(enabled = !busy) { run { vm.googleSignIn() } }
+                .semantics(mergeDescendants = true) { role = Role.Button }.padding(vertical = 14.dp),
             horizontalArrangement = Arrangement.Center, verticalAlignment = Alignment.CenterVertically,
         ) {
             Image(painterResource(tech.csalliance.unstuck.R.drawable.ic_google_g), contentDescription = null, modifier = Modifier.size(18.dp))
@@ -117,18 +126,68 @@ fun AuthScreen(vm: AppViewModel) {
         Spacer(Modifier.height(16.dp))
         Text(
             if (signUp) "Already have an account? Sign in" else "New here? Create an account",
-            style = UFont.sans(13, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clickable { signUp = !signUp },
+            // Clear any stale error/success banner when switching modes; ≥44dp touch target.
+            style = UFont.sans(13, FontWeight.Medium), color = c.primaryDeep,
+            modifier = Modifier.clickable { signUp = !signUp; message = null; messageOk = false }.padding(vertical = 10.dp),
         )
-        Spacer(Modifier.height(8.dp))
-        Text("Email me a magic link instead", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable { run("Check your email for a one-tap sign-in link.") { vm.magicLink(email.trim()) } })
+        Text("Email me a magic link instead", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable(enabled = !busy) {
+            val e = email.trim()
+            if (e.isBlank()) { messageOk = false; message = "Enter your email first." }
+            else run("Check your email for a one-tap sign-in link.") { vm.magicLink(e) }
+        }.padding(vertical = 10.dp))
         if (!signUp) {
-            Spacer(Modifier.height(8.dp))
-            Text("Forgot your password?", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable { run("Check your email for a password reset link.") { vm.resetPassword(email.trim()) } })
+            Text("Forgot your password?", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable(enabled = !busy) {
+                val e = email.trim()
+                if (e.isBlank()) { messageOk = false; message = "Enter your email first." }
+                else run("Check your email for a password reset link.") { vm.resetPassword(e) }
+            }.padding(vertical = 10.dp))
         }
-        Spacer(Modifier.weight(1f))
+        Spacer(Modifier.height(40.dp))
         Text(
             if (signUp) "Quiet clarity, with momentum." else "The anchor stays steady. You move around it.",
             style = UFont.sans(11), color = c.ink3, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 24.dp),
         )
+    }
+}
+
+/** Shown after a "forgot password" recovery link: the user is authenticated via the
+ *  recovery session and just needs to choose a new password (no current one needed). */
+@Composable
+fun SetNewPasswordScreen(vm: AppViewModel) {
+    val c = UTheme.colors
+    val scope = rememberCoroutineScope()
+    var pw by remember { mutableStateOf("") }
+    var confirm by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf(false) }
+    var message by remember { mutableStateOf<String?>(null) }
+    val valid = pw.length >= 8 && pw == confirm
+    Column(
+        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 22.dp, vertical = 30.dp),
+        horizontalAlignment = Alignment.CenterHorizontally,
+    ) {
+        Orbit(size = 36)
+        Spacer(Modifier.height(16.dp))
+        SectionLabel("SET A NEW PASSWORD", color = c.primaryDeep)
+        Text("Choose a new password.", style = UFont.serifItalic(34), color = c.ink, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 8.dp))
+        Spacer(Modifier.height(22.dp))
+        MdField(pw, { pw = it }, "New password", password = true)
+        Spacer(Modifier.height(14.dp))
+        MdField(confirm, { confirm = it }, "Confirm password", password = true)
+        val hint = when {
+            pw.isNotEmpty() && pw.length < 8 -> "At least 8 characters."
+            confirm.isNotEmpty() && confirm != pw -> "Passwords don't match."
+            else -> message
+        }
+        hint?.let { Spacer(Modifier.height(12.dp)); Text(it, style = UFont.sans(13), color = c.coralDeep, textAlign = TextAlign.Center) }
+        Spacer(Modifier.height(20.dp))
+        UButton(if (busy) "…" else "Save password", kind = ButtonKind.DARK, enabled = valid && !busy) {
+            busy = true; message = null
+            scope.launch {
+                when (val r = vm.setNewPassword(pw)) {
+                    is AuthOutcome.Ok -> vm.consumeRecovery()   // drops into the app
+                    is AuthOutcome.Error -> { message = r.message; busy = false }
+                }
+            }
+        }
     }
 }

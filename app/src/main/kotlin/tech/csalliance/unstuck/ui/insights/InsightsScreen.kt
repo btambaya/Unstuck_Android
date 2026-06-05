@@ -105,7 +105,12 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                     }
                 }
                 if (enough) {
-                    item { StackedBars("When focus happens", weekdayAreaHours(sessions, tasks).map { it.d to it.data }, DEFAULT_AREAS, lifeAreas) }
+                    item {
+                        // Drive the chart from the user's OWN areas — DEFAULT_AREAS dropped
+                        // every custom/renamed area's hours and greyed the legend.
+                        val areaNames = lifeAreas.map { it.name }.ifEmpty { DEFAULT_AREAS }
+                        StackedBars("When focus happens", weekdayAreaHours(sessions, tasks, areaNames).map { it.d to it.data }, areaNames, lifeAreas)
+                    }
                     item { Histogram("When interruptions happen", interruptionBins(captures, sessions), c.coral) }
                     item {
                         val insights = topInsights(sessions, tasks, captures, reasons)

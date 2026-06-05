@@ -2,6 +2,7 @@ package tech.csalliance.unstuck.core.time
 
 import java.time.Instant
 import java.time.LocalDate
+import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.time.ZoneId
 
@@ -16,7 +17,17 @@ object Time {
     fun parseMillis(iso: String): Long? =
         try { Instant.parse(iso).toEpochMilli() }
         catch (_: Exception) {
-            try { OffsetDateTime.parse(iso).toInstant().toEpochMilli() } catch (_: Exception) { null }
+            try { OffsetDateTime.parse(iso).toInstant().toEpochMilli() }
+            catch (_: Exception) {
+                // Offset-less local datetime ("2026-06-06T14:00"), then bare date
+                // ("2026-06-06") — interpret in the system zone instead of returning null
+                // (which would otherwise read as 00:00 / a 15-min sliver for such inputs).
+                val zone = ZoneId.systemDefault()
+                try { LocalDateTime.parse(iso).atZone(zone).toInstant().toEpochMilli() }
+                catch (_: Exception) {
+                    try { LocalDate.parse(iso).atStartOfDay(zone).toInstant().toEpochMilli() } catch (_: Exception) { null }
+                }
+            }
         }
 
     /** Local-midnight epoch ms for the day containing `now`. */

@@ -35,7 +35,9 @@ class ReminderReceiver : BroadcastReceiver() {
         if (kind == "lead") {
             val body = if (lead > 0) "$taskName — in $lead minutes." else "$taskName is starting."
             val deepLink = if (taskId.isNotBlank()) "unstuck://task/$taskId" else "unstuck://today"
-            NotificationRenderer.renderPush(context, kind = "reminder", title = "Coming up", body = body, deepLink = deepLink, notifId = NotifIds.reminder(taskId))
+            // External calendar events have a blank task id — key the notif id off the
+            // block id instead so two events close in time don't share one id (overwrite).
+            NotificationRenderer.renderPush(context, kind = "reminder", title = "Coming up", body = body, deepLink = deepLink, notifId = NotifIds.reminder(taskId.ifBlank { blockId }))
             return
         }
 

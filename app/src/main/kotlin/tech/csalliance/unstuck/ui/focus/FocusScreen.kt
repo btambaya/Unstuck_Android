@@ -124,7 +124,18 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
             Spacer(Modifier.height(8.dp))
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 FocusTreatment.entries.forEach { t ->
-                    SelectableChip(t.name.lowercase(), selected = treatment == t, accent = Color.White.copy(alpha = 0.18f)) { vm.setTreatment(t) }
+                    // Explicit white-on-dark chips (not SelectableChip, whose unselected
+                    // state uses the light theme bg2 — bright on the dark focus bg, which
+                    // made the UNSELECTED chips look selected). Selected = solid white.
+                    val sel = treatment == t
+                    Box(
+                        Modifier.clip(RoundedCornerShape(999.dp))
+                            .background(if (sel) Color.White.copy(alpha = 0.92f) else Color.White.copy(alpha = 0.08f))
+                            .clickable { vm.setTreatment(t) }
+                            .padding(horizontal = 13.dp, vertical = 6.dp),
+                    ) {
+                        Text(t.name.lowercase(), style = UFont.sans(12, FontWeight.Medium), color = if (sel) Color(0xFF14122A) else Color.White.copy(alpha = 0.7f))
+                    }
                 }
             }
 

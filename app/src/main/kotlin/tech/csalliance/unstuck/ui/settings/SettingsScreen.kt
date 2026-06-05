@@ -177,18 +177,19 @@ private fun BackupContent(vm: AppViewModel) {
     val c = UTheme.colors
     val context = LocalContext.current
     var msg by remember { mutableStateOf<String?>(null) }
+    var msgErr by remember { mutableStateOf(false) }
     // Real export — the previous Backup card was inert ("Auto-export every Sunday"
     // toggle + "Export now" both no-ops). There's no scheduled-backup backend, so we
     // surface the one thing that actually works: an on-demand full JSON snapshot.
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(vm.exportJson().toByteArray()) } }
-            .fold({ msg = "Exported." }, { msg = "Export failed." })
+            .fold({ msg = "Exported."; msgErr = false }, { msg = "Export failed."; msgErr = true })
     }
     SettingsCard {
         SettingRow("Export everything", "A full JSON snapshot of your data.", last = true) { exporter.launch("unstuck-export.json") }
     }
     Text("Your data is yours — export a complete copy any time.", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 10.dp))
-    msg?.let { Text(it, style = UFont.sans(12), color = c.green, modifier = Modifier.padding(top = 8.dp)) }
+    msg?.let { Text(it, style = UFont.sans(12), color = if (msgErr) c.red else c.green, modifier = Modifier.padding(top = 8.dp)) }
 }
 
 @Composable
@@ -200,10 +201,11 @@ private fun AccountContent(vm: AppViewModel) {
     var showPassword by remember { mutableStateOf(false) }
     var showDelete by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<String?>(null) }
+    var msgErr by remember { mutableStateOf(false) }   // render failures in red, not success-green
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) {
             runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(vm.exportJson().toByteArray()) } }
-                .fold({ msg = "Exported." }, { msg = "Export failed." })
+                .fold({ msg = "Exported."; msgErr = false }, { msg = "Export failed."; msgErr = true })
         }
     }
 
@@ -215,9 +217,9 @@ private fun AccountContent(vm: AppViewModel) {
         SettingRow("Delete my account", "Permanently removes your data") { showDelete = true }
         SettingRow("Sign out", "End this session", last = true) { vm.signOut() }
     }
-    msg?.let { Text(it, style = UFont.sans(12), color = c.green, modifier = Modifier.padding(top = 10.dp)) }
+    msg?.let { Text(it, style = UFont.sans(12), color = if (msgErr) c.red else c.green, modifier = Modifier.padding(top = 10.dp)) }
 
-    if (showName) FieldDialog("Display name", "Your name", initial = vm.currentName ?: "", onSave = { showName = false; scope.launch { val r = vm.updateDisplayName(it); msg = if (r is AuthOutcome.Error) r.message else "Name updated." } }, onDismiss = { showName = false })
+    if (showName) FieldDialog("Display name", "Your name", initial = vm.currentName ?: "", onSave = { showName = false; scope.launch { val r = vm.updateDisplayName(it); msgErr = r is AuthOutcome.Error; msg = if (r is AuthOutcome.Error) r.message else "Name updated." } }, onDismiss = { showName = false })
     if (showPassword) PasswordDialog(
         hasPassword = vm.hasPassword,
         onSave = { current, newPw ->
@@ -227,12 +229,12 @@ private fun AccountContent(vm: AppViewModel) {
                     val email = vm.currentEmail
                     // Without an email we can't re-auth — say so plainly instead of
                     // signing in with "" and reporting a bogus "password incorrect".
-                    if (email.isNullOrBlank()) { msg = "Can't verify your current password — no email is set on this account."; return@launch }
+                    if (email.isNullOrBlank()) { msgErr = true; msg = "Can't verify your current password — no email is set on this account."; return@launch }
                     val reauth = vm.signIn(email, current)
-                    if (reauth is AuthOutcome.Error) { msg = "Current password incorrect."; return@launch }
+                    if (reauth is AuthOutcome.Error) { msgErr = true; msg = "Current password incorrect."; return@launch }
                 }
                 val r = vm.changePassword(newPw)
-                msg = if (r is AuthOutcome.Error) r.message else "Password updated."
+                msgErr = r is AuthOutcome.Error; msg = if (r is AuthOutcome.Error) r.message else "Password updated."
             }
         },
         onDismiss = { showPassword = false },
@@ -251,7 +253,7 @@ private fun AccountContent(vm: AppViewModel) {
             },
             confirmButton = {
                 TextButton(enabled = email.isNotBlank() && typed.trim().equals(email, ignoreCase = true), onClick = {
-                    showDelete = false; scope.launch { val r = vm.deleteAccount(); if (r is AuthOutcome.Error) msg = r.message }
+                    showDelete = false; scope.launch { val r = vm.deleteAccount(); if (r is AuthOutcome.Error) { msgErr = true; msg = r.message } }
                 }) { Text("Delete forever", color = c.red) }
             },
             dismissButton = { TextButton(onClick = { showDelete = false }) { Text("Cancel", color = c.ink2) } },
@@ -390,6 +392,7 @@ private fun TagsContent(vm: AppViewModel) {
         tags.sortedBy { it.sortOrder }.forEach { tag ->
             val uses = tasks.count { it.tags?.contains(tag.name) == true }
             var menu by remember(tag.id) { mutableStateOf(false) }
+            var confirm by remember(tag.id) { mutableStateOf(false) }
             var editing by remember(tag.id) { mutableStateOf(false) }
             var nameDraft by remember(tag.id) { mutableStateOf(tag.name) }
             var palOpen by remember(tag.id) { mutableStateOf(false) }
@@ -413,10 +416,18 @@ private fun TagsContent(vm: AppViewModel) {
                     Icon(Icons.Filled.MoreVert, contentDescription = "Tag options", tint = c.ink3, modifier = Modifier.size(20.dp).clickable { menu = true })
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(text = { Text("Rename", style = UFont.sans(14), color = c.ink) }, onClick = { menu = false; nameDraft = tag.name; editing = true })
-                        DropdownMenuItem(text = { Text("Delete", style = UFont.sans(14), color = c.red) }, onClick = { menu = false; vm.deleteTag(tag.id) })
+                        DropdownMenuItem(text = { Text("Delete", style = UFont.sans(14), color = c.red) }, onClick = { menu = false; confirm = true })
                     }
                 }
             }
+            if (confirm) AlertDialog(
+                onDismissRequest = { confirm = false },
+                title = { Text("Delete #${tag.name}?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+                text = { Text("It's removed from every task that uses it. This can't be undone.", style = UFont.sans(13), color = c.ink2) },
+                confirmButton = { TextButton(onClick = { confirm = false; vm.deleteTag(tag.id) }) { Text("Delete", color = c.red) } },
+                dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel", color = c.ink2) } },
+                containerColor = c.surface,
+            )
         }
         Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Box(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 10.dp)) {

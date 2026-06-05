@@ -43,7 +43,10 @@ object FocusCommands {
             val task = store.tasks().first().firstOrNull { it.id == live.taskId }
             val write = app.graph.coordinator?.write
             write?.upsertSession(
-                Session(id = newUuid(), taskId = live.taskId, taskName = task?.name ?: "", estimateMin = live.sessionEstimateMin, actualSec = elapsed, completedAt = nowIso()),
+                // Reuse the live-session id so captures taken during the session join back
+                // to this Session row (the interruption histogram keys on it) — matches
+                // AppViewModel.finishFocus. A fresh uuid orphaned them.
+                Session(id = live.id ?: newUuid(), taskId = live.taskId, taskName = task?.name ?: "", estimateMin = live.sessionEstimateMin, actualSec = elapsed, completedAt = nowIso()),
             )
             task?.let { write?.upsertTask(it.copy(totalFocused = it.totalFocused + elapsed, updatedAt = nowIso())) }
             store.setLiveSession(null)

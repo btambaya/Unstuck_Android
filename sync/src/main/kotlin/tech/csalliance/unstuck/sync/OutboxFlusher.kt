@@ -53,6 +53,13 @@ class OutboxFlusher(private val gateway: SyncGateway, private val store: LocalSt
                     if (n >= FAIL_CAP) {
                         println("[outbox] dropping poison op $rowKey after $n failures")
                         store.dequeue(op.seq); failCounts.remove(op.seq); progressed = true
+                        // Also drop ops that depended on this row — their FK parent will
+                        // never exist server-side, so flushing them would push a dangling
+                        // reference (or fail forever in turn). Don't orphan them.
+                        all.filter { it.dependsOn == op.recordId }.forEach { dep ->
+                            println("[outbox] dropping orphaned dependent ${dep.recordTable}:${dep.recordId}")
+                            store.dequeue(dep.seq); failCounts.remove(dep.seq)
+                        }
                     }
                 }
             }

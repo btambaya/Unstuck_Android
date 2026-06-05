@@ -11,6 +11,11 @@ spec. Every `:core` logic port has a JUnit test mirroring the same web + iOS
 cases, so all three clients agree on bucketing, ranking, recurrence, the focus
 timer, analytics, and the Google-Calendar mapping.
 
+**Status:** feature-complete, locked as a **verified beta** at **v0.4.24
+(versionCode 37)**. Distributed via Firebase App Distribution to 2 testers
+(no beta group by default). See [`handover.md`](handover.md) for the current
+state + what remains to fully close out.
+
 ## Stack
 
 | Concern | Choice |
@@ -19,7 +24,7 @@ timer, analytics, and the Google-Calendar mapping.
 | Backend SDK | supabase-kt 3.x (Auth/Postgrest/Realtime/Functions, PKCE) |
 | Local store | Room (offline-first, `Flow` queries) |
 | Serialization | kotlinx-serialization |
-| DI | Hilt |
+| DI | Manual (`AppGraph` — NOT Hilt) |
 | Async | coroutines + Flow |
 | Push | FCM (firebase-messaging) |
 | Widgets | Jetpack Glance + DataStore |

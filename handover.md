@@ -4,6 +4,22 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`docs/handbook/`](docs/handbook/README.md)** (8 deep chapters) + the quick [`docs/APP_GUIDE.md`](docs/APP_GUIDE.md).
 
+## CURRENT STATUS — v0.4.24 (versionCode 37), 2026-06-05
+
+**The app is feature-complete and stable; being locked as a verified beta.** Distributed via Firebase App Distribution to **2 testers only** (justtesting6363@, zyzkazaure@ — NO beta group by default; `-PappDistGroups=beta` to push to the full group). Same Supabase backend (`uaxfteluwctrlgwmmfzi`). 185 unit tests green; release builds signed (dev keystore); backend crons live (`morning-brief-dispatch` /15m, `collection-late-check` /5m).
+
+**Done since the older sections below (which are historical — trust this block on conflicts):**
+- **Shared collections + accountability** — promote item→task, "keep everyone in the loop" with a "by" time, completion push + live tracker, server-side **late nudge cron** (deployed + verified firing).
+- **Two-way Google Calendar** — pull AND **push** (insert/patch/delete) both implemented; OAuth via the registered HTTPS bounce page.
+- **Reminders reliability** — prompts for POST_NOTIFICATIONS (13+) and SCHEDULE_EXACT_ALARM (denied-by-default on SDK 35 targets); a "Notifications are off" banner on Today surfaces the silent-failure case (notify() suppressed when disabled).
+- **v0.4.23 — 49-bug multi-agent sweep** across the whole app (see [`audit/bug-sweep-0.4.23.md`](audit/bug-sweep-0.4.23.md)); the long-standing **poison-pill outbox bug is FIXED** (OutboxFlusher FAIL_CAP=5 drop + per-row LWW via blockedRows).
+- **v0.4.24** — Calendar Week-view week navigation (‹/› + Today); real date+time **schedule picker** in task detail (was estimate-only); the notifications-off banner.
+
+**Remaining to fully close out (verification + launch decision, NOT building):**
+1. **On-device verification** of v0.4.23/v0.4.24 — especially that a scheduled reminder reaches the phone as a heads-up (grant POST_NOTIFICATIONS + Alarms & reminders; schedule a task ~15 min out), plus week-nav + the schedule picker.
+2. **Google OAuth app verification** (only for public/non-test Google accounts) — Calendar is a sensitive scope; testing mode caps at 100 users + shows the "unverified app" screen. Redirect is already registered.
+3. **Google Play launch** (only if going public) — would need an AAB + a Play upload key (we ship APK on the dev keystore today) + Play Console listing. NOT needed for the Firebase beta.
+
 ## Calendar + Notifications (v0.3.x–v0.4.x, 2026-05-31)
 
 **Two-way Google Calendar sync — shipped & working (v0.3.5–v0.3.8).** Connect uses the HTTPS bounce page `https://unstuck-602.pages.dev/calendar-callback` (registered on the Google Cloud **Web** OAuth client — custom schemes are rejected). Tasks push to the user's **primary** Google calendar (selectedCalendarIds can be read-only → 403); pull sends **RFC3339** timestamps (bare dates → 0 events). Root fixes along the way: ktor `contentType(application/json)` on every `functions.invoke{setBody}`; kotlinx omits default values (made `provider` explicit); snake_case `/connections` DTO.
@@ -26,7 +42,7 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 **Known refinements (not blocking):** deep-links land on Today but don't yet scroll to the recap/brief detail; the "Capture" action opens the live focus screen (not a standalone capture sheet); per-task reminder lead is device-local (not synced); server `notification_preferences` toggles aren't surfaced in the Android settings UI yet.
 
-**⚠ Open bug — poison-pill outbox entry (found 2026-05-31, NOT yet fixed).** Logcat shows one outbox op retrying every flush cycle for hours, never draining: `[outbox] cal_blocks#381d6605-… failed: … violates foreign key constraint "cal_blocks_task_id_fkey" (Key is not present in table "tasks")`. An orphaned cal_block references a task absent server-side, so its upsert can never succeed. `OutboxFlusher.flush` uses a `progressed` flag (no strict head-of-line block — newer ops still flush), so sync isn't stalled, but the op retries forever (log spam + redundant network). **Fix needs an owner decision** (not shipped unreviewed — it touches the data-integrity drain path): (a) add an `attempts` column to `OutboxEntity` (Room migration) + dead-letter after N failures — safest, only drops genuinely-stuck ops [**recommended**]; or (b) classify permanent FK/4xx errors in `OutboxFlusher` and quarantine immediately — no migration, but risks dropping a recoverable op (→ silent local-change loss on next hydrate).
+**✅ FIXED in v0.4.23 — poison-pill outbox entry (was found 2026-05-31).** An orphaned cal_block referencing a task absent server-side (`cal_blocks_task_id_fkey`) retried every flush cycle forever (log spam + redundant network; sync wasn't stalled thanks to the `progressed` flag). The fix took option (b) without a Room migration: `OutboxFlusher` keeps an in-memory `failCounts` map and **drops a row after `FAIL_CAP=5` failures** (dead-letter), and a `blockedRows` set skips that row's LATER ops once one fails so per-row LWW is preserved. No silent local-change loss in practice (5 attempts across flush cycles before drop).
 
 ## UI redesign → Android Mockups (in progress)
 

@@ -23,7 +23,18 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
+import androidx.compose.foundation.border
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.unit.dp
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material3.Icon
+import tech.csalliance.unstuck.BuildConfig
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -66,6 +77,7 @@ private sealed interface Route {
 private sealed interface Sheet {
     data object Avatar : Sheet
     data object Areas : Sheet
+    data object Feedback : Sheet
 }
 
 @Composable
@@ -197,6 +209,21 @@ fun MainScaffold(vm: AppViewModel) {
             BottomNavBar(NAV, tab, onSelect = { tab = it; stack.clear() }, onFab = { showNewTask = true }, modifier = Modifier.navigationBarsPadding())
         }
 
+        // Floating beta-feedback bubble — sits above tab content (declared after the
+        // Column) but hides under any overlay / sheet / focus (the guard), so it never
+        // covers a modal. Bottom-end, lifted above the nav bar to clear the center FAB.
+        // Gated by BuildConfig.FEEDBACK_ENABLED so it's a one-flag flip for a public build.
+        if (BuildConfig.FEEDBACK_ENABLED && stack.isEmpty() && !sheetOpen && focusTask == null) {
+            Box(
+                Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 16.dp, bottom = 74.dp)
+                    .size(50.dp).shadow(8.dp, CircleShape).clip(CircleShape).background(c.surface)
+                    .border(1.dp, c.line, CircleShape).clickable { sheet = Sheet.Feedback },
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Outlined.ChatBubbleOutline, contentDescription = "Send feedback", tint = c.coral, modifier = Modifier.size(22.dp))
+            }
+        }
+
         // Full-screen overlays (top of the stack) — inset from both system bars.
         // The opaque background HIDES the tab content beneath, but a plain Box
         // doesn't CONSUME pointer events, so taps on the overlay's empty areas
@@ -251,6 +278,9 @@ fun MainScaffold(vm: AppViewModel) {
                 vm,
                 onPick = { area -> activeArea = area; tab = "tasks"; stack.clear(); sheet = null },
                 onDismiss = { sheet = null },
+            )
+            Sheet.Feedback -> tech.csalliance.unstuck.ui.feedback.FeedbackSheet(
+                vm, currentScreen = tab, onDismiss = { sheet = null },
             )
             null -> {}
         }

@@ -43,6 +43,7 @@ class SyncCoordinator(
     val notifications = NotificationsClient(client)
     val preferences = PreferencesClient(client)
     val collectionShare = CollectionShareClient(client)
+    val feedback = FeedbackClient(client)
     private val loginTracker = LoginTrackerClient(client)
 
     private val hydrator = Hydrator(gateway, store)

@@ -57,6 +57,7 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     private val write get() = graph.coordinator?.write
     val auth get() = graph.coordinator?.auth
     private val share get() = graph.coordinator?.collectionShare
+    private val feedback get() = graph.coordinator?.feedback
 
     private fun <T> sf(flow: kotlinx.coroutines.flow.Flow<List<T>>): StateFlow<List<T>> =
         flow.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -654,6 +655,18 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     /** Signed-in identity for the avatar / account UI (null when signed out). */
     val currentEmail: String? get() = auth?.currentEmail
     val currentName: String? get() = auth?.currentName
+
+    /** Send one-way beta feedback with auto-attached context. Returns false on
+     *  failure (offline / not configured) so the sheet can offer a retry. */
+    suspend fun sendFeedback(body: String, category: String?, screen: String?): Boolean {
+        val fb = feedback ?: return false
+        val device = "${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} · Android ${android.os.Build.VERSION.RELEASE}"
+        return fb.submit(
+            id = newUuid(), body = body.trim(), category = category, email = auth?.currentEmail,
+            appVersion = tech.csalliance.unstuck.BuildConfig.VERSION_NAME, platform = "android",
+            device = device, screen = screen,
+        )
+    }
 
     suspend fun signIn(email: String, password: String): AuthOutcome =
         auth?.signIn(email, password) ?: AuthOutcome.Error("Not configured")

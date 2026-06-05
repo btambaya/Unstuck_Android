@@ -136,9 +136,10 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("Today", "Tomorrow", "Pick date", "Later").forEach { w ->
                     SelectableChip(if (w == "Pick date" && whenSel == "Pick date") pickedDate.takeLast(5) else w, selected = whenSel == w) {
-                        whenSel = w
                         autoTime = true   // re-auto-pick a slot for the new date
-                        if (w == "Pick date") showDatePicker = true
+                        // "Pick date" only commits AFTER the dialog's OK — so cancelling
+                        // leaves the previous selection instead of a stale "Pick date".
+                        if (w == "Pick date") showDatePicker = true else whenSel = w
                     }
                 }
             }
@@ -243,13 +244,16 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
         // Material3's selectedDateMillis is UTC-midnight — read/seed it in UTC, NOT
         // the local zone, or west-of-UTC users land one calendar day early.
         val dpState = rememberDatePickerState(
-            initialSelectedDateMillis = java.time.LocalDate.now().atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli(),
+            // Seed from the already-picked date so re-opening shows it (not always today).
+            initialSelectedDateMillis = (runCatching { java.time.LocalDate.parse(pickedDate) }.getOrNull() ?: java.time.LocalDate.now())
+                .atStartOfDay(java.time.ZoneOffset.UTC).toInstant().toEpochMilli(),
         )
         DatePickerDialog(
             onDismissRequest = { showDatePicker = false },
             confirmButton = {
                 TextButton(onClick = {
                     dpState.selectedDateMillis?.let { pickedDate = java.time.Instant.ofEpochMilli(it).atZone(java.time.ZoneOffset.UTC).toLocalDate().toString() }
+                    whenSel = "Pick date"   // commit only on OK
                     showDatePicker = false
                 }) { Text("OK") }
             },

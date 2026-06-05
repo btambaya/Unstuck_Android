@@ -240,8 +240,10 @@ fun MainScaffold(vm: AppViewModel) {
                 when (route) {
                     is Route.Detail -> {
                         val t = tasks.firstOrNull { it.id == route.taskId }
+                        // Pop in an effect, not inline — mutating the stack during
+                        // composition is a no-no (and can recompose-loop).
                         if (t != null) TaskDetailScreen(vm, t, onBack = ::pop, onStartFocus = { focusTask = t; pop() })
-                        else pop()
+                        else LaunchedEffect(route.taskId) { pop() }
                     }
                     is Route.Collection -> CollectionDetailScreen(vm, route.id, onBack = ::pop)
                     is Route.Insights -> InsightsScreen(vm, deep = route.deep, onBack = ::pop, onToggleDeep = { stack[stack.lastIndex] = Route.Insights(it) })

@@ -127,10 +127,12 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
             } else {
                 if (!enough) item { ThresholdNote(sessions.size) }
                 item {
-                    val mins = sessions.map { it.actualSec / 60 }.sorted()
-                    val median = if (mins.isEmpty()) 0 else mins[mins.size / 2]
+                    // Median over raw SECONDS (round once at display) — truncating each
+                    // session to whole minutes first skewed the median (web parity).
+                    val secs = sessions.map { it.actualSec }.sorted()
+                    val median = if (secs.isEmpty()) 0 else (secs[secs.size / 2] / 60.0).roundToInt()
                     val reentry = reEntryDistribution(sessions)
-                    val reentryPct = reentry.sum().let { if (it == 0) 0 else (reentry[0] * 100 / it) }
+                    val reentryPct = reentry.sum().let { if (it == 0) 0 else (reentry[0] * 100.0 / it).roundToInt() }
                     Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             StatCard("Median", if (enough) "${median}m" else "—", caption = "across ${sessions.size} sessions", modifier = Modifier.weight(1f))
@@ -138,7 +140,7 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             StatCard("Re-entry <5m", if (enough) "$reentryPct%" else "—", caption = "fast comebacks", modifier = Modifier.weight(1f))
-                            StatCard("Captures", "${captures.size}", caption = "kept this window", modifier = Modifier.weight(1f))
+                            StatCard("Captures", if (enough) "${captures.size}" else "—", caption = "kept this window", modifier = Modifier.weight(1f))
                         }
                     }
                 }

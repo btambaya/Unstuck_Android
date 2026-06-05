@@ -1,8 +1,10 @@
 package tech.csalliance.unstuck.surface
 
 import android.content.Context
+import androidx.work.Constraints
 import androidx.work.CoroutineWorker
 import androidx.work.ExistingPeriodicWorkPolicy
+import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkerParameters
 import androidx.work.WorkManager
@@ -22,7 +24,11 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         private const val NAME = "unstuck_periodic_sync"
 
         fun schedule(context: Context) {
-            val request = PeriodicWorkRequestBuilder<SyncWorker>(30, TimeUnit.MINUTES).build()
+            // Only run when there's a network — a sync with no connection just wakes
+            // the device to fail.
+            val request = PeriodicWorkRequestBuilder<SyncWorker>(30, TimeUnit.MINUTES)
+                .setConstraints(Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build())
+                .build()
             WorkManager.getInstance(context)
                 .enqueueUniquePeriodicWork(NAME, ExistingPeriodicWorkPolicy.KEEP, request)
         }

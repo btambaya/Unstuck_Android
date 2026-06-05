@@ -169,7 +169,7 @@ fun TodayScreen(
             ) {
                 Box(Modifier.size(6.dp).clip(CircleShape).background(c.coral))
                 Text("This week · ", style = UFont.sans(12), color = c.ink2)
-                Text(if (weekMin >= 60) "${weekMin / 60}h focused" else "${weekMin}m focused", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
+                Text(if (weekMin >= 60) "${weekMin / 60}h${if (weekMin % 60 != 0) " ${weekMin % 60}m" else ""} focused" else "${weekMin}m focused", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
                 Text("→", style = UFont.sans(12), color = c.ink3)
             }
         }
@@ -212,7 +212,7 @@ fun TodayScreen(
                         Text("You did the thing.", style = UFont.serifItalic(22), color = c.ink, modifier = Modifier.padding(top = 4.dp))
                         Text(
                             "${(r.focusedSec / 60).coerceAtLeast(1)} MIN FOCUSED · ${r.taskName}",
-                            style = UFont.mono(11), color = c.ink2, maxLines = 1, modifier = Modifier.padding(top = 6.dp),
+                            style = UFont.mono(11), color = c.ink2, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp),
                         )
                     }
                 }
@@ -313,7 +313,7 @@ private fun StartNextHero(task: TaskItem, onStart: () -> Unit) {
                 }
                 Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Box(Modifier.size(6.dp).clip(CircleShape).background(c.coral))
-                    Text("${task.lifeArea ?: "Focus"} · ${task.name}", style = UFont.sans(11, FontWeight.SemiBold), color = c.primaryDeep, maxLines = 1)
+                    Text("${task.lifeArea ?: "Focus"} · ${task.name}", style = UFont.sans(11, FontWeight.SemiBold), color = c.primaryDeep, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                 }
                 Text(task.name, style = UFont.sans(21, FontWeight.Bold), color = c.ink, modifier = Modifier.padding(top = 6.dp))
                 Text("${task.estimateMin} min", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 6.dp))
@@ -362,7 +362,7 @@ private fun LiveSessionCard(
             Text(formatMMSS(elapsed), style = UFont.mono(7, FontWeight.Bold), color = c.ink2)
         }
         Column(Modifier.weight(1f)) {
-            Text(if (paused) "Paused · ${task.name}" else "In focus · ${task.name}", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink, maxLines = 1)
+            Text(if (paused) "Paused · ${task.name}" else "In focus · ${task.name}", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
             Text(if (paused) "${task.estimateMin}m · paused" else "running for ${formatMMSS(elapsed)}", style = UFont.sans(11), color = c.ink3)
         }
         Box(
@@ -391,6 +391,7 @@ private fun TaskRow(task: TaskItem, areaColor: Color, ageDays: Int? = null, onOp
                 color = if (task.done) c.ink3 else c.ink,
                 textDecoration = if (task.done) TextDecoration.LineThrough else null,
                 maxLines = 1,
+                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
             )
             Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 AreaDotColor(areaColor, size = 5)

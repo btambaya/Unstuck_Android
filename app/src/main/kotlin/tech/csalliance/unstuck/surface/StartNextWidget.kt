@@ -33,15 +33,18 @@ class StartNextWidget : GlanceAppWidget() {
         val prefs: Preferences = context.startNextDataStore.data.first()
         val name = prefs[StartNextKeys.NAME]
         val estimate = prefs[StartNextKeys.ESTIMATE]
-        provideContent { Content(name, estimate) }
+        // Follow the system theme (was always light → unreadable in dark mode).
+        val dark = (context.resources.configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) == android.content.res.Configuration.UI_MODE_NIGHT_YES
+        provideContent { Content(name, estimate, dark) }
     }
 
     @Composable
-    private fun Content(name: String?, estimate: Int?) {
-        val ink = ColorProvider(Color(0xFF2A2A33))
-        val muted = ColorProvider(Color(0xFF8A8A95))
+    private fun Content(name: String?, estimate: Int?, dark: Boolean) {
+        val ink = ColorProvider(if (dark) Color(0xFFF0EEF5) else Color(0xFF2A2A33))
+        val muted = ColorProvider(if (dark) Color(0xFF9A98A5) else Color(0xFF8A8A95))
+        val bg = if (dark) Color(0xFF1A1822) else Color(0xFFFAFAF7)
         Column(
-            modifier = GlanceModifier.fillMaxSize().background(Color(0xFFFAFAF7)).padding(16.dp)
+            modifier = GlanceModifier.fillMaxSize().background(bg).padding(16.dp)
                 .clickable(actionStartActivity<MainActivity>()),
             verticalAlignment = Alignment.Vertical.CenterVertically,
         ) {

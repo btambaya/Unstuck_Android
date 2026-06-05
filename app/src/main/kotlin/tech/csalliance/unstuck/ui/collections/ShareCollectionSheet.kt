@@ -86,7 +86,10 @@ fun ShareCollectionSheet(vm: AppViewModel, collectionId: String, collectionName:
     fun removeMember(m: CollectionMemberInfo) {
         members = members.filterNot { it === m }   // optimistic
         scope.launch {
-            if (m.pending) vm.cancelCollectionInvite(collectionId, m.email) else vm.unshareCollection(collectionId, m.userId)
+            runCatching {
+                if (m.pending) vm.cancelCollectionInvite(collectionId, m.email) else vm.unshareCollection(collectionId, m.userId)
+            }
+            refresh()   // reconcile against the server — the member reappears if it failed
         }
     }
 
@@ -126,7 +129,14 @@ fun ShareCollectionSheet(vm: AppViewModel, collectionId: String, collectionName:
             }
 
             // Members + pending invites.
-            SectionLabel(if (members.isNotEmpty()) "Shared with ${members.size}" else "Not shared yet")
+            SectionLabel(run {
+                val accepted = members.count { !it.pending }; val invited = members.count { it.pending }
+                when {
+                    accepted > 0 -> "Shared with $accepted" + (if (invited > 0) " · $invited invited" else "")
+                    invited > 0 -> "$invited invited"
+                    else -> "Not shared yet"
+                }
+            })
             if (loading) {
                 Text("Loading…", style = UFont.sans(13), color = c.ink3)
             } else {

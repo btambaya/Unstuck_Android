@@ -182,7 +182,7 @@ private fun BackupContent(vm: AppViewModel) {
     // toggle + "Export now" both no-ops). There's no scheduled-backup backend, so we
     // surface the one thing that actually works: an on-demand full JSON snapshot.
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        if (uri != null) runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(vm.exportJson().toByteArray()) } }
+        if (uri != null) runCatching { (context.contentResolver.openOutputStream(uri) ?: error("no output stream")).use { it.write(vm.exportJson().toByteArray()) } }
             .fold({ msg = "Exported."; msgErr = false }, { msg = "Export failed."; msgErr = true })
     }
     SettingsCard {
@@ -204,14 +204,14 @@ private fun AccountContent(vm: AppViewModel) {
     var msgErr by remember { mutableStateOf(false) }   // render failures in red, not success-green
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         if (uri != null) {
-            runCatching { context.contentResolver.openOutputStream(uri)?.use { it.write(vm.exportJson().toByteArray()) } }
+            runCatching { (context.contentResolver.openOutputStream(uri) ?: error("no output stream")).use { it.write(vm.exportJson().toByteArray()) } }
                 .fold({ msg = "Exported."; msgErr = false }, { msg = "Export failed."; msgErr = true })
         }
     }
 
     SettingsCard {
         SettingRow("Display name", vm.currentName ?: "Set a name") { showName = true }
-        SettingRow("Signed in", vm.currentEmail ?: "—") {}
+        SettingRow("Signed in", vm.currentEmail ?: "—")   // static info — no tap
         SettingRow(if (vm.hasPassword) "Change password" else "Add a password", "Update your sign-in password") { showPassword = true }
         SettingRow("Export everything", "One-shot JSON snapshot") { exporter.launch("unstuck-export.json") }
         SettingRow("Delete my account", "Permanently removes your data") { showDelete = true }
@@ -441,8 +441,8 @@ private fun TagsContent(vm: AppViewModel) {
                     val color = palette.firstOrNull { col -> tags.none { it.color == col } } ?: palette[tags.size % palette.size]
                     val order = (tags.maxOfOrNull { it.sortOrder } ?: -1) + 1
                     vm.upsertTag(TagRow(newUuid(), nm, color, order))
+                    draft = ""   // clear only on a real add — a duplicate keeps the text
                 }
-                draft = ""
             }
         }
     }
@@ -455,9 +455,9 @@ private fun SettingsCard(content: @Composable () -> Unit) {
 }
 
 @Composable
-private fun SettingRow(label: String, sub: String?, last: Boolean = false, onClick: () -> Unit) {
+private fun SettingRow(label: String, sub: String?, last: Boolean = false, onClick: (() -> Unit)? = null) {
     val c = UTheme.colors
-    Row(Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+    Row(Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier).padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
         Column(Modifier.weight(1f)) {
             Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
             if (sub != null) Text(sub, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 4.dp))

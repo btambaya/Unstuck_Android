@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -102,7 +103,7 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
             items(shown, key = { it.id }) { col ->
                 val color = c.areaColor(col.color)
                 Column(
-                    Modifier.fillMaxWidth().heightIn(min = 130.dp).clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp)).clickable { onOpen(col.id) }.padding(14.dp),
+                    Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp)).clickable { onOpen(col.id) }.padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     val shared = col.members.isNotEmpty() || (col.myRole != null && col.myRole != "owner")
@@ -118,6 +119,13 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
                         col.items.take(2).forEach { item ->
                             Text("· ${item.body}", style = UFont.sans(11), color = c.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis)
                         }
+                    }
+                }
+            }
+            if (shown.isEmpty()) {
+                item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(2) }) {
+                    Box(Modifier.fillMaxWidth().padding(top = 48.dp), contentAlignment = Alignment.Center) {
+                        Text(if (showArchived) "No archived lists." else "No lists yet. Tap + to start one.", style = UFont.sans(13), color = c.ink3)
                     }
                 }
             }

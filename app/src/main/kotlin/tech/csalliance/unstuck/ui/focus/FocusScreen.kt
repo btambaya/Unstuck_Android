@@ -67,7 +67,9 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
     LaunchedEffect(Unit) { while (true) { nowMs = System.currentTimeMillis(); delay(1000) } }
 
     val sessionStart = live?.sessionStart
-    LaunchedEffect(sessionStart) { if (sessionStart != null) FocusTimerService.start(context, task.name, sessionStart) }
+    // Pass the paused state on the initial arm so reopening a paused (saved-for-later)
+    // session doesn't flash "FOCUSING" for a frame before the paused update lands.
+    LaunchedEffect(sessionStart) { if (sessionStart != null) FocusTimerService.start(context, task.name, sessionStart, paused = live?.paused == true) }
     // The ongoing notification + paused-too-long check-in track the live session,
     // so they persist (and stay correct) even after you leave the focus screen.
     // We do NOT stop the service on dispose — leaving focus keeps the session live

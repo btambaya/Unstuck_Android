@@ -49,8 +49,10 @@ fun ReflectSheet(elapsedSec: Int, onDismiss: () -> Unit) {
             Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Skip", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable(onClick = onDismiss))
                 Box(Modifier.weight(1f))
+                // "Done", not "Save" — this is a momentary reflection, nothing is stored,
+                // so the label shouldn't imply persistence.
                 Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.ink).clickable(onClick = onDismiss).padding(horizontal = 18.dp, vertical = 9.dp)) {
-                    Text("Save", style = UFont.sans(13, FontWeight.SemiBold), color = c.bg)
+                    Text("Done", style = UFont.sans(13, FontWeight.SemiBold), color = c.bg)
                 }
             }
         }

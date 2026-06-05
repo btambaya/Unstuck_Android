@@ -89,12 +89,13 @@ class MainActivity : ComponentActivity() {
         if (s.reminderLeadMin <= 0 && s.notificationLevel == tech.csalliance.unstuck.NotificationLevel.CALM) return
         val prefs = getSharedPreferences("unstuck.app", MODE_PRIVATE)
         if (prefs.getBoolean("exactAlarmPrompted", false)) return
-        prefs.edit().putBoolean("exactAlarmPrompted", true).apply()
+        // Only mark as prompted if the Settings screen actually launched — a failed
+        // launch can then be retried on a later cold start (was set unconditionally).
         runCatching {
             startActivity(
                 Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, android.net.Uri.parse("package:$packageName")),
             )
-        }
+        }.onSuccess { prefs.edit().putBoolean("exactAlarmPrompted", true).apply() }
     }
 
     override fun onNewIntent(intent: Intent) {

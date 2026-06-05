@@ -87,6 +87,14 @@ fun TodayScreen(
     inboxCount: Int,
 ) {
     val c = UTheme.colors
+    val context = androidx.compose.ui.platform.LocalContext.current
+    // Surface a silent failure: if OS notifications are disabled for the app, reminders
+    // fire + log in-app but never reach the phone. Re-check on resume (the user may toggle
+    // it in system settings and come back).
+    var notifsEnabled by remember { mutableStateOf(true) }
+    androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+        notifsEnabled = androidx.core.app.NotificationManagerCompat.from(context).areNotificationsEnabled()
+    }
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
@@ -168,6 +176,29 @@ fun TodayScreen(
         // ── Scrolling content: the Start-Next banner first, then the filter pills
         //    (which stick to the top as you scroll), then the list. ──────────────────
         LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+            if (!notifsEnabled) {
+                item {
+                    Row(
+                        Modifier.padding(horizontal = 18.dp, vertical = 8.dp).fillMaxWidth().clip(RoundedCornerShape(16.dp))
+                            .background(c.amberSoft).clickable {
+                                runCatching {
+                                    context.startActivity(
+                                        android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                                            .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName),
+                                    )
+                                }
+                            }.padding(14.dp),
+                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        Icon(Icons.Outlined.Notifications, contentDescription = null, tint = c.amberInk, modifier = Modifier.size(18.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text("Notifications are off", style = UFont.sans(13, FontWeight.SemiBold), color = c.amberInk)
+                            Text("Reminders won't reach your phone. Tap to turn them on.", style = UFont.sans(12), color = c.amberInk.copy(alpha = 0.85f))
+                        }
+                        Text("→", style = UFont.sans(14), color = c.amberInk)
+                    }
+                }
+            }
             recap?.let { r ->
                 item {
                     Column(

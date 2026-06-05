@@ -123,9 +123,11 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
     val blocks by vm.blocks.collectAsStateWithLifecycle()
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
-    // Monday-anchored week containing today.
+    // Monday-anchored week, navigable via the ‹ / › arrows (weekOffset = weeks from
+    // the current week; 0 = the week containing today).
+    var weekOffset by remember { mutableStateOf(0) }
     val today = java.time.LocalDate.now()
-    val monday = today.minusDays(((today.dayOfWeek.value + 6) % 7).toLong())
+    val monday = today.minusDays(((today.dayOfWeek.value + 6) % 7).toLong()).plusWeeks(weekOffset.toLong())
     val days = (0..6).map { monday.plusDays(it.toLong()) }
     val dows = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
     val plannedByDay = days.map { d -> blocks.filter { it.date == d.toString() && isTaskBlock(it) }.sumOf { it.durationMinutes } }
@@ -136,9 +138,22 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
     val busiest = if (maxPlanned == minPlanned) null else days.getOrNull(plannedByDay.indexOf(maxPlanned))
     val lightest = if (maxPlanned == minPlanned) null else days.getOrNull(plannedByDay.indexOf(minPlanned))
 
+    val end = days.last()
+    fun mon(d: java.time.LocalDate) = d.month.name.lowercase().replaceFirstChar { it.uppercase() }.take(3)
+    val rangeLabel = if (monday.month == end.month) "${mon(monday)} ${monday.dayOfMonth}–${end.dayOfMonth}"
+        else "${mon(monday)} ${monday.dayOfMonth} – ${mon(end)} ${end.dayOfMonth}"
     Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
-        SectionLabel("This week", color = c.primaryDeep, modifier = Modifier.padding(top = 8.dp))
-        Text("${monday.month.name.lowercase().replaceFirstChar { it.uppercase() }} ${monday.dayOfMonth}–${days.last().dayOfMonth}", style = UFont.serifItalic(24), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 10.dp))
+        Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                SectionLabel(if (weekOffset == 0) "This week" else "Week", color = c.primaryDeep)
+                Text(rangeLabel, style = UFont.serifItalic(24), color = c.ink, modifier = Modifier.padding(top = 4.dp))
+            }
+            // ‹ prev · (Today, when off the current week) · › next
+            Text("‹", style = UFont.serifItalic(28), color = c.ink2, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { weekOffset-- }.padding(horizontal = 12.dp, vertical = 2.dp))
+            if (weekOffset != 0) Text("Today", style = UFont.sans(12, FontWeight.SemiBold), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { weekOffset = 0 }.padding(horizontal = 8.dp, vertical = 4.dp))
+            Text("›", style = UFont.serifItalic(28), color = c.ink2, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { weekOffset++ }.padding(horizontal = 12.dp, vertical = 2.dp))
+        }
+        Spacer(Modifier.height(10.dp))
         Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             RollupStat("Focus planned", if (totalPlanned >= 60) "${totalPlanned / 60}h ${totalPlanned % 60}m" else "${totalPlanned}m", c.primarySoft, c.primaryDeep, Modifier.weight(1f))
             RollupStat("Busiest", busiest?.let { dows[((it.dayOfWeek.value + 6) % 7)] } ?: "—", c.amberSoft, c.amberInk, Modifier.weight(1f))

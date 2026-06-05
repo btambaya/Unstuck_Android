@@ -30,12 +30,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import tech.csalliance.unstuck.core.logic.findFreeSlots
 import tech.csalliance.unstuck.core.logic.formatTime
 import tech.csalliance.unstuck.core.logic.recurrenceLabel
 import tech.csalliance.unstuck.core.model.Capture
@@ -62,11 +62,31 @@ import tech.csalliance.unstuck.ui.components.areaColorFor
 @Composable
 fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onStartFocus: () -> Unit) {
     val c = UTheme.colors
+    val context = LocalContext.current
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val captures by vm.captures.collectAsStateWithLifecycle()
     var scheduled by remember(task.id) { mutableStateOf<String?>(null) }
+
+    // Pick an actual date + time (platform dialogs, local-zone — no Material UTC
+    // off-by-one). scheduleTask both creates and reschedules in place; scheduling a
+    // concrete time also moves the task out of "Later".
+    fun pickSchedule() {
+        val d0 = java.time.LocalDate.now()
+        val t0 = java.time.LocalTime.now()
+        val dlg = android.app.DatePickerDialog(context, { _, y, m, day ->
+            android.app.TimePickerDialog(context, { _, h, min ->
+                val dateIso = java.time.LocalDate.of(y, m + 1, day).toString()
+                val timeIso = "%02d:%02d".format(h, min)
+                vm.scheduleTask(task, dateIso, timeIso)
+                if (task.later == true) vm.setLater(task, false)
+                scheduled = "${dateIso.takeLast(5)} ${formatTime(timeIso)}"
+            }, t0.hour, t0.minute, false).show()
+        }, d0.year, d0.monthValue - 1, d0.dayOfMonth)
+        dlg.datePicker.minDate = System.currentTimeMillis() - 60_000   // no past days
+        dlg.show()
+    }
     var confirmDelete by remember { mutableStateOf(false) }
     var showEstimate by remember { mutableStateOf(false) }
     val taskSessions = sessions.filter { it.taskId == task.id }
@@ -108,10 +128,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
 
             Row(Modifier.fillMaxWidth().padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { UButton("Focus", kind = ButtonKind.CORAL, leadingIcon = Icons.Filled.PlayArrow, onClick = onStartFocus) }
-                UButton("Schedule", kind = ButtonKind.OUTLINED, fill = false) {
-                    val slot = findFreeSlots(blocks, task.estimateMin, vm.nowMs(), limit = 1).firstOrNull()
-                    if (slot != null) { vm.scheduleTask(task, slot.date, slot.startTime); scheduled = slot.label }
-                }
+                UButton("Schedule", kind = ButtonKind.OUTLINED, fill = false) { pickSchedule() }
                 UButton(if (task.done) "✓ Done" else "Mark done", kind = ButtonKind.TEXT, fill = false) { vm.toggleDone(task) }
             }
             scheduled?.let { Text("Scheduled $it", style = UFont.sans(12), color = c.green, modifier = Modifier.padding(top = 8.dp)) }
@@ -140,7 +157,8 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                         }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
-                        MetaCell("Schedule", scheduleLabel, Modifier.weight(1f))
+                        // Tapping the schedule cell opens the same date/time picker.
+                        MetaCell("Schedule", scheduleLabel, Modifier.weight(1f).clip(RoundedCornerShape(8.dp)).clickable { pickSchedule() })
                         MetaCell("Status", if (task.done) "Completed" else "Not started", Modifier.weight(1f))
                     }
                 }

@@ -199,7 +199,8 @@ fun TodayScreen(
                     }
                 }
             }
-            recap?.let { r ->
+            // Expire the "just now" recap after 6h (web parity) using the existing now ticker.
+            recap?.takeIf { now - it.at < 6L * 3600_000 }?.let { r ->
                 item {
                     Column(
                         Modifier.padding(horizontal = 18.dp, vertical = 8.dp).clip(RoundedCornerShape(18.dp))
@@ -359,7 +360,8 @@ private fun LiveSessionCard(
                 drawArc(c.line, 0f, 360f, false, Offset(cen.x - r, cen.y - r), Size(r * 2, r * 2), style = Stroke(width = sw))
                 drawArc(accent, -90f, 360f * progress, false, Offset(cen.x - r, cen.y - r), Size(r * 2, r * 2), style = Stroke(width = sw, cap = StrokeCap.Round))
             }
-            Text(formatMMSS(elapsed), style = UFont.mono(7, FontWeight.Bold), color = c.ink2)
+            // Compact "Hh MM" once past an hour so the label can't overflow the 30dp ring.
+            Text(if (elapsed >= 3600) "${elapsed / 3600}h${"%02d".format((elapsed % 3600) / 60)}" else formatMMSS(elapsed), style = UFont.mono(7, FontWeight.Bold), color = c.ink2)
         }
         Column(Modifier.weight(1f)) {
             Text(if (paused) "Paused · ${task.name}" else "In focus · ${task.name}", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)

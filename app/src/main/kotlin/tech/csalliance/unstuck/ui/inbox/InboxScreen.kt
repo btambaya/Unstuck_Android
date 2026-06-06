@@ -55,7 +55,9 @@ fun InboxScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (String) -> Un
     val allCaptures by vm.captures.collectAsStateWithLifecycle()
     val archivedIds by vm.archivedCaptureIds.collectAsStateWithLifecycle()
     val tasks by vm.tasks.collectAsStateWithLifecycle()
-    val now = remember { vm.nowMs() }
+    // Refresh ~every 30s so the "Xm ago" ages don't freeze at screen-open time.
+    var now by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(vm.nowMs()) }
+    androidx.compose.runtime.LaunchedEffect(Unit) { while (true) { now = vm.nowMs(); kotlinx.coroutines.delay(30_000) } }
 
     var showArchived by remember { mutableStateOf(false) }
     val archived = remember(allCaptures, archivedIds) {

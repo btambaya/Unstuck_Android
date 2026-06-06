@@ -52,9 +52,11 @@ private val AREA_PALETTE = listOf("indigo", "coral", "green", "amber", "violet",
 @Composable
 fun OnboardingScreen(vm: AppViewModel, onDone: () -> Unit) {
     val c = UTheme.colors
-    var step by remember { mutableStateOf(0) }
+    // Saveable so a rotation / theme change doesn't restart onboarding from step 0 or
+    // lose the typed first task.
+    var step by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
     val pickedAreas = remember { mutableStateListOf("Work", "Personal", "Home") }
-    var firstTask by remember { mutableStateOf("") }
+    var firstTask by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
     var treatment by remember { mutableStateOf(FocusTreatment.AMBIENT) }
 
     fun finish() {

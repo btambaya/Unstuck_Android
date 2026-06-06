@@ -8,6 +8,8 @@ import androidx.work.NetworkType
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkerParameters
 import androidx.work.WorkManager
+import androidx.glance.appwidget.updateAll
+import kotlinx.coroutines.flow.first
 import tech.csalliance.unstuck.UnstuckApp
 import java.util.concurrent.TimeUnit
 
@@ -17,6 +19,17 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
     override suspend fun doWork(): Result {
         val app = applicationContext as? UnstuckApp ?: return Result.success()
         runCatching { app.graph.coordinator?.syncNow() }
+        // Refresh the Start-Next widget from the latest local store. The in-app updater
+        // only runs while AppViewModel is alive, so without this the widget goes stale
+        // across process death.
+        runCatching {
+            val store = app.graph.store
+            val rec = tech.csalliance.unstuck.core.logic.pickStartNext(
+                store.tasks().first(), store.blocks().first(), store.getLiveSession()?.taskId, null,
+            )
+            writeStartNext(applicationContext, rec?.name, rec?.estimateMin)
+            StartNextWidget().updateAll(applicationContext)
+        }
         return Result.success()
     }
 

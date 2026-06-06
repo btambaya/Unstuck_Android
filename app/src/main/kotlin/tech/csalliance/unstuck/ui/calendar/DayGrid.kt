@@ -351,7 +351,9 @@ private fun CalBlockEditSheet(vm: AppViewModel, block: CalBlock, onDismiss: () -
     val blocks by vm.blocks.collectAsStateWithLifecycle()
     // Track the live block so sequential edits compose + the selection follows.
     val live = blocks.firstOrNull { it.id == block.id } ?: block
-    val slots = tech.csalliance.unstuck.core.logic.findFreeSlotsForDate(blocks, live.durationMinutes, live.date, vm.nowMs(), limit = 5)
+    // Full-day window (not the default 08:00–18:00) so an early-morning / evening block
+    // can be rescheduled within its own time band.
+    val slots = tech.csalliance.unstuck.core.logic.findFreeSlotsForDate(blocks, live.durationMinutes, live.date, vm.nowMs(), limit = 5, dayStartMin = 0, dayEndMin = 24 * 60)
     val times = (listOf(live.startTime) + slots.map { it.startTime }).distinct()
     androidx.compose.material3.ModalBottomSheet(
         onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = tech.csalliance.unstuck.design.component.SheetScrim,

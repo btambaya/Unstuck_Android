@@ -82,6 +82,15 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
         }
     }
 
+    // Ambient focus audio — play the loop while focusing when the Ambient setting is on
+    // (was a dead toggle). Stops on leave. (Start chime / overrun bell / completion sound
+    // still need their own audio assets before they can be wired.)
+    androidx.compose.runtime.DisposableEffect(settings.ambient) {
+        if (settings.ambient != "off") tech.csalliance.unstuck.surface.AmbientAudio.start(context)
+        else tech.csalliance.unstuck.surface.AmbientAudio.stop()
+        onDispose { tech.csalliance.unstuck.surface.AmbientAudio.stop() }
+    }
+
     var showCapture by remember { mutableStateOf(autoCapture) }
     // Arriving via the notification "Capture" action opens the capture sheet straight
     // away (was landing on Focus with no input shown).

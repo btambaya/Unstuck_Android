@@ -388,7 +388,7 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         // Session-end recap (design moment B3): records an in-app card always; the
         // server only pushes when away — finishing in-app means away = false.
         runCatching { graph.coordinator?.notifications?.sessionRecap(task.name, away = false) }
-        _lastRecap.value = RecapState(taskName = task.name, focusedSec = elapsed)
+        _lastRecap.value = RecapState(taskName = task.name, focusedSec = elapsed, at = nowMs())
     }
 
     // The most recent session-end recap, surfaced as a dismissible card on Today
@@ -763,7 +763,7 @@ data class ExportBundle(
 )
 
 /** A just-finished focus session, surfaced as the Today recap card (B3). */
-data class RecapState(val taskName: String, val focusedSec: Int)
+data class RecapState(val taskName: String, val focusedSec: Int, val at: Long = 0L)
 
 /** A quiet, in-app nudge surfaced on Today (no push) — see the notifications catalog. */
 enum class NudgeKind { SLIPPING, CAPTURE }

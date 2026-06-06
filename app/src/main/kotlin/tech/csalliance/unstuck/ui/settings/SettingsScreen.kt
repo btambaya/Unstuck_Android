@@ -242,17 +242,20 @@ private fun AccountContent(vm: AppViewModel) {
     if (showDelete) {
         var typed by remember { mutableStateOf("") }
         val email = vm.currentEmail ?: ""
+        // Fall back to typing DELETE when there's no email — otherwise the confirm button
+        // is permanently un-clickable for an email-less account, trapping the user.
+        val confirmWord = email.ifBlank { "DELETE" }
         AlertDialog(
             onDismissRequest = { showDelete = false },
             title = { Text("Delete your account?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("This permanently removes everything and cannot be undone. Type your email to confirm.", style = UFont.sans(13), color = c.ink2)
-                    OutlinedTextField(value = typed, onValueChange = { typed = it }, label = { Text("Email") }, singleLine = true)
+                    Text("This permanently removes everything and cannot be undone. Type ${if (email.isBlank()) "DELETE" else "your email"} to confirm.", style = UFont.sans(13), color = c.ink2)
+                    OutlinedTextField(value = typed, onValueChange = { typed = it }, label = { Text(if (email.isBlank()) "Confirm" else "Email") }, singleLine = true)
                 }
             },
             confirmButton = {
-                TextButton(enabled = email.isNotBlank() && typed.trim().equals(email, ignoreCase = true), onClick = {
+                TextButton(enabled = typed.trim().equals(confirmWord, ignoreCase = true), onClick = {
                     showDelete = false; scope.launch { val r = vm.deleteAccount(); if (r is AuthOutcome.Error) { msgErr = true; msg = r.message } }
                 }) { Text("Delete forever", color = c.red) }
             },

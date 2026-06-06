@@ -4,6 +4,8 @@
 
 Method: 16 parallel agents, one per feature category, each diffing the web spec against the live Android Kotlin (workflow `android-web-parity-rescan`).
 
+> **Update — closed in v0.4.29** (~11 gaps after this scan): both _broken_ items (drag-reschedule now bumps moveCount; the `teal` colour token resolves) · area palette now has all 8 web tokens (teal + red) · task-detail Status shows "In progress" · Start-Next hero headlines `firstPhysicalAction` + adds a "Pick another" action · Focus surfaces `firstPhysicalAction`, the **overrun check-in (+10 / in-the-zone / stop)** [the HIGH], and a soft-exit confirm · the recurrence editor now sets an **Until** end date. Counts below are the original scan — subtract those.
+
 ## Rollup
 
 - **64 remaining gaps** across 16 categories (was **189** on 2026-05-29 — 122 missing / 49 partial / 18 broken).

@@ -212,9 +212,14 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun unschedule(blockId: String) = launchWrite { write?.deleteCalBlock(blockId) }
 
-    /** Reschedule / resize an existing block (the block-edit sheet). */
+    /** Reschedule / resize an existing block (drag or the block-edit sheet). */
     fun moveBlock(block: CalBlock, date: String, startTime: String) = launchWrite {
         write?.upsertCalBlock(block.copy(date = date, startTime = startTime))
+        // Bump the owning task's moveCount on a real move (web parity) so the slip
+        // detector / analytics count every drag-reschedule.
+        if ((block.date != date || block.startTime != startTime) && block.taskId != null) {
+            tasks.value.firstOrNull { it.id == block.taskId }?.let { write?.upsertTask(bumpMoveCount(it, isoNow())) }
+        }
     }
     fun resizeBlock(block: CalBlock, durationMinutes: Int) = launchWrite {
         write?.upsertCalBlock(block.copy(durationMinutes = durationMinutes.coerceIn(15, 360)))
@@ -652,7 +657,7 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         // Single source of seeding — onboarding no longer also writes areas itself,
         // so we don't double-seed (picked + defaults).
         if (lifeAreas.value.isEmpty()) {
-            val palette = listOf("indigo", "coral", "violet", "green", "amber", "blue")
+            val palette = listOf("indigo", "coral", "green", "amber", "teal", "blue", "violet", "red")
             val seed = areas.ifEmpty { listOf("Work", "Personal", "Home", "Health") }
             seed.forEachIndexed { i, n -> write?.upsertLifeArea(LifeArea(id = newUuid(), name = n, color = palette[i % palette.size], sortOrder = i)) }
         }

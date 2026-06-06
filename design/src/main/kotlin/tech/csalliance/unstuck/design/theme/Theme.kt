@@ -46,6 +46,7 @@ data class UnstuckColors(
         "blue" -> blue
         "green", "new feature", "bug" -> green
         "amber" -> amber
+        "teal" -> oklch(0.70, 0.10, 200.0)   // web's teal token (seeded on the Health area)
         "red" -> red
         else -> ink4
     }

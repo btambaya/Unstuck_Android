@@ -2,7 +2,7 @@
 
 Single source of truth for "where is the Android build?". Update as phases land.
 
-> **New engineer? Start with the onboarding handbook: [`docs/handbook/`](docs/handbook/README.md)** (8 deep chapters) + the quick [`docs/APP_GUIDE.md`](docs/APP_GUIDE.md).
+> **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
 ## CURRENT STATUS — v0.4.24 (versionCode 37), 2026-06-05
 

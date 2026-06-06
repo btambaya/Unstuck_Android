@@ -11,10 +11,11 @@ spec. Every `:core` logic port has a JUnit test mirroring the same web + iOS
 cases, so all three clients agree on bucketing, ranking, recurrence, the focus
 timer, analytics, and the Google-Calendar mapping.
 
-**Status:** feature-complete, locked as a **verified beta** at **v0.4.24
-(versionCode 37)**. Distributed via Firebase App Distribution to 2 testers
-(no beta group by default). See [`handover.md`](handover.md) for the current
-state + what remains to fully close out.
+**Status:** feature-complete **verified beta** at **v0.4.28 (versionCode 41)**,
+distributed via Firebase App Distribution to 2 testers (no beta group by default).
+All project docs live in [`docs/`](docs/) — see [`docs/handover.md`](docs/handover.md)
+for live state and [`docs/audit-web-parity-gaps.md`](docs/audit-web-parity-gaps.md)
+for the web↔Android parity scan.
 
 ## Stack
 
@@ -64,4 +65,4 @@ JDK 17. Gradle wrapper pinned to **8.9** (AGP 8.7.3).
    Get it with `supabase projects api-keys --project-ref uaxfteluwctrlgwmmfzi`.
 3. `app/google-services.json` — from the Firebase Android app (FCM).
 
-See `handover.md` for the live build state and the phased roadmap.
+See `docs/handover.md` for the live build state and the phased roadmap.

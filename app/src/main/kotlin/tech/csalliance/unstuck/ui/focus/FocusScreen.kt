@@ -91,6 +91,7 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
         onDispose { tech.csalliance.unstuck.surface.AmbientAudio.stop() }
     }
 
+    var confirmExit by remember { mutableStateOf(false) }
     var showCapture by remember { mutableStateOf(autoCapture) }
     // Arriving via the notification "Capture" action opens the capture sheet straight
     // away (was landing on Focus with no input shown).
@@ -121,7 +122,10 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
                 // "← Out" leaves the timer RUNNING (the live session persists so you
                 // can return) — it does NOT discard. Matches the web's leave-focus flow.
-                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.10f)).clickable { onClose() }.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.10f)).clickable {
+                    // Soft-exit confirm (web parity) when leaving a RUNNING session.
+                    if (settings.focusSoftExit && !paused && sessionStart != null) confirmExit = true else onClose()
+                }.padding(horizontal = 12.dp, vertical = 6.dp)) {
                     Text("← Out", style = UFont.sans(12), color = Color.White.copy(alpha = 0.7f))
                 }
                 Box {}
@@ -167,10 +171,25 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
             Spacer(Modifier.height(if (treatment == FocusTreatment.MONK) 40.dp else 20.dp))
             if (treatment != FocusTreatment.MONK) {
                 Text(task.name, style = UFont.serifItalic(24), color = Color.White, textAlign = TextAlign.Center, modifier = Modifier.padding(horizontal = 24.dp))
+                // The smallest concrete step, surfaced during focus (web parity).
+                task.firstPhysicalAction?.takeIf { it.isNotBlank() }?.let {
+                    Text("→ $it", style = UFont.sans(13), color = Color.White.copy(alpha = 0.82f), textAlign = TextAlign.Center, maxLines = 2, modifier = Modifier.padding(top = 6.dp, start = 24.dp, end = 24.dp))
+                }
                 Text("${task.estimateMin}m estimate", style = UFont.sans(13), color = Color.White.copy(alpha = 0.65f), modifier = Modifier.padding(top = 6.dp))
             }
             Text(formatMMSS(elapsed), style = UFont.sans(52, FontWeight.Light), color = if (state == FocusState.OVERRUN) c.coral else Color.White, modifier = Modifier.padding(top = 20.dp))
             Text("${formatMMSS(remaining)} left", style = UFont.sans(12), color = Color.White.copy(alpha = 0.5f))
+
+            // Overrun check-in (web parity): past the estimate, offer to extend or stop —
+            // not just a recolored timer. Add 10 / "in the zone" (+15) / stop here.
+            if (state == FocusState.OVERRUN && !paused) {
+                Text("Past your estimate — still going well?", style = UFont.sans(12), color = c.coral.copy(alpha = 0.9f), modifier = Modifier.padding(top = 10.dp))
+                Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FocusBtn("+10 min", soft = true) { vm.extendFocus(10) }
+                    FocusBtn("In the zone", soft = true) { vm.extendFocus(15) }
+                    FocusBtn("Stop here", soft = false) { vm.finishFocus(task, markDone = false); FocusTimerService.stop(context); PausedCheckinScheduler.cancel(context); onClose() }
+                }
+            }
 
             if (treatment == FocusTreatment.COCKPIT) {
                 CapturesRail(vm, task)
@@ -205,6 +224,14 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
             }
         }
 
+        if (confirmExit) androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmExit = false },
+            title = { Text("Leave focus?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+            text = { Text("Your timer keeps running — you can pick it back up from Today.", style = UFont.sans(13), color = c.ink2) },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { confirmExit = false; onClose() }) { Text("Leave", color = c.primaryDeep) } },
+            dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmExit = false }) { Text("Stay", color = c.ink2) } },
+            containerColor = c.surface,
+        )
         if (showCapture) CaptureSheet(vm, task, live?.id) { showCapture = false }
         if (showReflect) ReflectSheet(reflectElapsed) { showReflect = false; onClose() }
         if (showPauseReasons) {

@@ -319,7 +319,7 @@ private fun AreasContent(vm: AppViewModel) {
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     var draft by remember { mutableStateOf("") }
-    val palette = listOf("indigo", "coral", "violet", "green", "amber", "blue")
+    val palette = listOf("indigo", "coral", "green", "amber", "teal", "blue", "violet", "red")
     Text("Areas filter the same list — flat on purpose.", style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(bottom = 14.dp))
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         areas.sortedBy { it.sortOrder }.forEach { a ->
@@ -389,7 +389,7 @@ private fun TagsContent(vm: AppViewModel) {
     val tags by vm.tags.collectAsStateWithLifecycle()
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     var draft by remember { mutableStateOf("") }
-    val palette = listOf("indigo", "coral", "violet", "green", "amber", "blue")
+    val palette = listOf("indigo", "coral", "green", "amber", "teal", "blue", "violet", "red")
     Text("Tags cut across areas — apply as many as you like.", style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(bottom = 14.dp))
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         tags.sortedBy { it.sortOrder }.forEach { tag ->

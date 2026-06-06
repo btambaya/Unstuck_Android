@@ -159,7 +159,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         // Tapping the schedule cell opens the same date/time picker.
                         MetaCell("Schedule", scheduleLabel, Modifier.weight(1f).clip(RoundedCornerShape(8.dp)).clickable { pickSchedule() })
-                        MetaCell("Status", if (task.done) "Completed" else "Not started", Modifier.weight(1f))
+                        MetaCell("Status", when { task.done -> "Completed"; task.totalFocused > 0 -> "In progress"; else -> "Not started" }, Modifier.weight(1f))
                     }
                 }
             }

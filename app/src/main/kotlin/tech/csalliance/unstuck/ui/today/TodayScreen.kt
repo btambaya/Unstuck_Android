@@ -245,7 +245,7 @@ fun TodayScreen(
             if (empty) {
                 item { EmptyHero(onAdd = onSearch) }
             } else {
-                if (startNext != null) item { StartNextHero(startNext) { onStartFocus(startNext) } }
+                if (startNext != null) item { StartNextHero(startNext, onStart = { onStartFocus(startNext) }, onPickAnother = onSearch) }
                 // Filter pills BELOW the banner; they stick to the top of the list on scroll.
                 stickyHeader {
                     Column(Modifier.fillMaxWidth().background(c.bg)) {
@@ -303,7 +303,7 @@ private fun heroBrush(c: UnstuckColors): Brush =
         Brush.linearGradient(listOf(oklch(0.96, 0.04, 280.0), oklch(0.95, 0.05, 320.0)))
 
 @Composable
-private fun StartNextHero(task: TaskItem, onStart: () -> Unit) {
+private fun StartNextHero(task: TaskItem, onStart: () -> Unit, onPickAnother: () -> Unit) {
     val c = UTheme.colors
     Column(Modifier.padding(horizontal = 18.dp).padding(top = 20.dp)) {
         Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(heroBrush(c)).padding(18.dp)) {
@@ -316,9 +316,14 @@ private fun StartNextHero(task: TaskItem, onStart: () -> Unit) {
                     Box(Modifier.size(6.dp).clip(CircleShape).background(c.coral))
                     Text("${task.lifeArea ?: "Focus"} · ${task.name}", style = UFont.sans(11, FontWeight.SemiBold), color = c.primaryDeep, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
                 }
-                Text(task.name, style = UFont.sans(21, FontWeight.Bold), color = c.ink, modifier = Modifier.padding(top = 6.dp))
+                // Headline = the smallest concrete step (firstPhysicalAction) when set, else
+                // the task name — the calming "do this one small thing" framing (web parity).
+                Text(task.firstPhysicalAction?.takeIf { it.isNotBlank() } ?: task.name, style = UFont.sans(21, FontWeight.Bold), color = c.ink, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp))
                 Text("${task.estimateMin} min", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 6.dp))
-                Box(Modifier.padding(top = 14.dp)) { UButton("Focus", kind = ButtonKind.CORAL, leadingIcon = Icons.Filled.PlayArrow, onClick = onStart) }
+                Row(Modifier.padding(top = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    UButton("Focus", kind = ButtonKind.CORAL, fill = false, leadingIcon = Icons.Filled.PlayArrow, onClick = onStart)
+                    Text("Pick another", style = UFont.sans(13, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(onClick = onPickAnother).padding(horizontal = 10.dp, vertical = 8.dp))
+                }
             }
         }
     }

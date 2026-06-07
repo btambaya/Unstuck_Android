@@ -20,7 +20,23 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
 import tech.csalliance.unstuck.AppGraph
+import tech.csalliance.unstuck.core.time.Clock
+import tech.csalliance.unstuck.sync.AssistantResult
+import tech.csalliance.unstuck.sync.ChatMessage
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.applyCompletion
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
@@ -58,6 +74,7 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     val auth get() = graph.coordinator?.auth
     private val share get() = graph.coordinator?.collectionShare
     private val feedback get() = graph.coordinator?.feedback
+    private val assistant get() = graph.coordinator?.assistant
 
     private fun <T> sf(flow: kotlinx.coroutines.flow.Flow<List<T>>): StateFlow<List<T>> =
         flow.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
@@ -712,6 +729,168 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
             appVersion = tech.csalliance.unstuck.BuildConfig.VERSION_NAME, platform = "android",
             device = device, screen = screen,
         )
+    }
+
+    // --- assistant (agentic chat) ---
+    // The edge fn reasons (system prompt + tool schemas + qwen); WE execute the
+    // tool calls through the same write methods the UI uses. One turn: ask →
+    // run tools locally → append results → re-ask, until a plain-text reply
+    // (capped). `history` is mutated so the caller keeps full context.
+
+    sealed interface AssistantTurn {
+        data class Reply(val text: String) : AssistantTurn
+        /** "not_configured" | "network" | "upstream" | … — UI shows a friendly note. */
+        data class Error(val code: String) : AssistantTurn
+    }
+
+    suspend fun assistantTurn(history: MutableList<ChatMessage>): AssistantTurn {
+        val a = assistant ?: return AssistantTurn.Error("not_configured")
+        // Scratch for entities created mid-turn (the live StateFlows lag the
+        // optimistic write), so a later tool call can reference them by id.
+        val newTasks = HashMap<String, TaskItem>()
+        val newLists = HashMap<String, ItemCollection>()
+        var iterations = 0
+        while (iterations < 5) {
+            iterations++
+            when (val r = a.ask(history, buildAssistantContext())) {
+                is AssistantResult.Err -> return AssistantTurn.Error(r.code)
+                is AssistantResult.Ok -> {
+                    val reply = r.reply
+                    history.add(ChatMessage(role = "assistant", content = reply.content, toolCalls = reply.toolCalls))
+                    val calls = reply.toolCalls
+                    if (calls.isNullOrEmpty()) {
+                        return AssistantTurn.Reply(reply.content?.trim().orEmpty().ifEmpty { "Done." })
+                    }
+                    for (call in calls) {
+                        val result = runCatching { runAssistantTool(call.function.name, parseToolArgs(call.function.arguments), newTasks, newLists) }
+                            .getOrElse { "error: ${it.message ?: "failed"}" }
+                        history.add(ChatMessage(role = "tool", content = result, toolCallId = call.id, name = call.function.name))
+                    }
+                }
+            }
+        }
+        return AssistantTurn.Reply("Done.")
+    }
+
+    private fun parseToolArgs(s: String): JsonObject =
+        runCatching { Json.parseToJsonElement(s).jsonObject }.getOrDefault(JsonObject(emptyMap()))
+
+    /** Execute one tool call → a short result string the model reads next turn. */
+    private suspend fun runAssistantTool(
+        name: String, args: JsonObject,
+        newTasks: HashMap<String, TaskItem>, newLists: HashMap<String, ItemCollection>,
+    ): String {
+        fun str(k: String) = args[k]?.jsonPrimitive?.contentOrNull?.takeIf { it.isNotBlank() }
+        fun int(k: String) = args[k]?.jsonPrimitive?.intOrNull
+        fun bool(k: String) = args[k]?.jsonPrimitive?.booleanOrNull
+        fun strList(k: String) = (args[k] as? JsonArray)?.mapNotNull { it.jsonPrimitive.contentOrNull }
+        fun intList(k: String) = (args[k] as? JsonArray)?.mapNotNull { it.jsonPrimitive.intOrNull }
+        fun findTask(id: String?) = id?.let { newTasks[it] ?: tasks.value.firstOrNull { t -> t.id == it } }
+        fun findList(id: String?) = id?.let { newLists[it] ?: collections.value.firstOrNull { c -> c.id == it } }
+
+        return when (name) {
+            "create_task" -> {
+                val nm = str("name") ?: return "error: name required"
+                val t = addTask(
+                    name = nm, estimateMin = int("estimateMin") ?: 25, lifeArea = str("lifeArea"),
+                    tags = strList("tags"), firstPhysicalAction = str("firstPhysicalAction"),
+                    dueAt = str("dueAt"), later = bool("later") ?: false,
+                )
+                newTasks[t.id] = t
+                "ok: created task id=${t.id} name=\"${t.name}\""
+            }
+            "schedule_task" -> {
+                val t = findTask(str("taskId")) ?: return "error: task not found"
+                val d = str("date") ?: return "error: date required"
+                val tm = str("startTime") ?: return "error: startTime required"
+                scheduleTask(t, d, tm); "ok: scheduled \"${t.name}\" $d $tm"
+            }
+            "update_task" -> {
+                val t = findTask(str("taskId")) ?: return "error: task not found"
+                val upd = t.copy(
+                    name = str("name") ?: t.name, estimateMin = int("estimateMin") ?: t.estimateMin,
+                    lifeArea = str("lifeArea") ?: t.lifeArea, tags = strList("tags") ?: t.tags,
+                    firstPhysicalAction = str("firstPhysicalAction") ?: t.firstPhysicalAction,
+                )
+                updateTask(upd); newTasks[upd.id] = upd; "ok: updated \"${upd.name}\""
+            }
+            "set_task_later" -> {
+                val t = findTask(str("taskId")) ?: return "error: task not found"
+                setLater(t, bool("later") ?: true); "ok"
+            }
+            "set_task_recurrence" -> {
+                val t = findTask(str("taskId")) ?: return "error: task not found"
+                val until = str("until")
+                val rec = when (str("kind")) {
+                    "daily" -> Recurrence.Daily(until)
+                    "weekly" -> Recurrence.Weekly(intList("daysOfWeek") ?: emptyList(), until)
+                    "monthly" -> Recurrence.Monthly(until)
+                    else -> null
+                }
+                setRecurrence(t, rec); "ok"
+            }
+            "complete_task" -> {
+                val t = findTask(str("taskId")) ?: return "error: task not found"
+                if (!t.done) toggleDone(t); "ok: completed \"${t.name}\""
+            }
+            "delete_task" -> {
+                val t = findTask(str("taskId")) ?: return "error: task not found"
+                deleteTask(t.id); "ok: deleted \"${t.name}\""
+            }
+            "create_list" -> {
+                val nm = str("name") ?: return "error: name required"
+                val order = (collections.value.maxOfOrNull { it.sortOrder } ?: -1) + 1
+                val c = ItemCollection(newUuid(), nm, str("color") ?: "indigo", null, emptyList(), order)
+                upsertCollection(c); newLists[c.id] = c; "ok: created list id=${c.id} name=\"${c.name}\""
+            }
+            "add_to_list" -> {
+                val c = findList(str("listId")) ?: return "error: list not found"
+                val b = str("body") ?: return "error: body required"
+                addCollectionItem(c, b); "ok: added to \"${c.name}\""
+            }
+            "promote_item_to_task" -> {
+                val c = findList(str("listId")) ?: return "error: list not found"
+                val item = c.items.firstOrNull { it.id == str("itemId") } ?: return "error: item not found"
+                val mode = if (str("mode") == "loop") PromoteMode.LOOP else PromoteMode.SELF
+                moveItemToTask(c, item, mode, str("dueAt")); "ok: promoted \"${item.body}\""
+            }
+            else -> "error: unknown tool $name"
+        }
+    }
+
+    /** Compact snapshot of the user's open tasks / lists / areas for the agent. */
+    private fun buildAssistantContext(): JsonElement {
+        val blocksByTask = blocks.value.groupBy { it.taskId }
+        return buildJsonObject {
+            put("today", Clock.todayIso())
+            put("now", isoNow())
+            put("currentName", currentName ?: "")
+            putJsonArray("areas") { lifeAreas.value.forEach { add(it.name) } }
+            putJsonArray("tags") { tags.value.forEach { add(it.name) } }
+            putJsonArray("tasks") {
+                tasks.value.asSequence().filter { !it.done }.take(60).forEach { t ->
+                    addJsonObject {
+                        put("id", t.id); put("name", t.name); put("estimateMin", t.estimateMin)
+                        t.lifeArea?.let { put("lifeArea", it) }
+                        if (t.later == true) put("later", true)
+                        if (t.recurrence != null) put("repeats", true)
+                        blocksByTask[t.id]?.firstOrNull()?.let { put("scheduledDate", it.date); put("scheduledTime", it.startTime) }
+                    }
+                }
+            }
+            putJsonArray("lists") {
+                collections.value.filter { it.archived != true }.forEach { c ->
+                    addJsonObject {
+                        put("id", c.id); put("name", c.name)
+                        putJsonArray("items") {
+                            c.items.take(40).forEach { i ->
+                                addJsonObject { put("id", i.id); put("body", i.body); if (i.done == true) put("done", true) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
 
     suspend fun signIn(email: String, password: String): AuthOutcome =

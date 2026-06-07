@@ -78,6 +78,7 @@ private sealed interface Sheet {
     data object Avatar : Sheet
     data object Areas : Sheet
     data object Feedback : Sheet
+    data object Assistant : Sheet
 }
 
 @Composable
@@ -209,18 +210,20 @@ fun MainScaffold(vm: AppViewModel) {
             BottomNavBar(NAV, tab, onSelect = { tab = it; stack.clear() }, onFab = { newTaskPrefill = null; showNewTask = true }, modifier = Modifier.navigationBarsPadding())
         }
 
-        // Floating beta-feedback bubble — sits above tab content (declared after the
-        // Column) but hides under any overlay / sheet / focus (the guard), so it never
-        // covers a modal. Bottom-end, lifted above the nav bar to clear the center FAB.
-        // Gated by BuildConfig.FEEDBACK_ENABLED so it's a one-flag flip for a public build.
-        if (BuildConfig.FEEDBACK_ENABLED && stack.isEmpty() && !sheetOpen && focusTask == null && tab != "calendar") {
+        // Floating assistant/feedback bubble — sits above tab content (declared after
+        // the Column) but hides under any overlay / sheet / focus (the guard), so it
+        // never covers a modal. Bottom-end, lifted above the nav bar to clear the FAB.
+        // Opens the dual-purpose surface (Assistant chat + Feedback). Gated by the
+        // build flags so it's a one-flip for a public build.
+        if ((BuildConfig.ASSISTANT_ENABLED || BuildConfig.FEEDBACK_ENABLED) && stack.isEmpty() && !sheetOpen && focusTask == null && tab != "calendar") {
             Box(
                 Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 16.dp, bottom = 74.dp)
                     .size(50.dp).shadow(8.dp, CircleShape).clip(CircleShape).background(c.surface)
-                    .border(1.dp, c.line, CircleShape).clickable { sheet = Sheet.Feedback },
+                    .border(1.dp, c.line, CircleShape)
+                    .clickable { sheet = if (BuildConfig.ASSISTANT_ENABLED) Sheet.Assistant else Sheet.Feedback },
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Outlined.ChatBubbleOutline, contentDescription = "Send feedback", tint = c.coral, modifier = Modifier.size(22.dp))
+                Icon(Icons.Outlined.ChatBubbleOutline, contentDescription = "Assistant", tint = c.coral, modifier = Modifier.size(22.dp))
             }
         }
 
@@ -282,6 +285,9 @@ fun MainScaffold(vm: AppViewModel) {
                 onDismiss = { sheet = null },
             )
             Sheet.Feedback -> tech.csalliance.unstuck.ui.feedback.FeedbackSheet(
+                vm, currentScreen = tab, onDismiss = { sheet = null },
+            )
+            Sheet.Assistant -> tech.csalliance.unstuck.ui.assistant.AssistantSheet(
                 vm, currentScreen = tab, onDismiss = { sheet = null },
             )
             null -> {}

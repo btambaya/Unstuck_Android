@@ -44,6 +44,7 @@ class SyncCoordinator(
     val preferences = PreferencesClient(client)
     val collectionShare = CollectionShareClient(client)
     val feedback = FeedbackClient(client)
+    val assistant = AssistantClient(client)
     private val loginTracker = LoginTrackerClient(client)
 
     private val hydrator = Hydrator(gateway, store)

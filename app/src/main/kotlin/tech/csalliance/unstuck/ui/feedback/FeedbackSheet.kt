@@ -56,6 +56,19 @@ private val CATEGORIES = listOf("bug" to "Bug", "idea" to "Idea", "praise" to "P
 fun FeedbackSheet(vm: AppViewModel, currentScreen: String?, onDismiss: () -> Unit) {
     val c = UTheme.colors
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    ModalBottomSheet(
+        onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = SheetScrim,
+        dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } },
+    ) {
+        FeedbackForm(vm, currentScreen, onDone = onDismiss)
+    }
+}
+
+/** The feedback composer content (no sheet wrapper) — reused inside the
+ *  assistant surface's "Feedback" tab. Calls [onDone] after the thanks lands. */
+@Composable
+fun FeedbackForm(vm: AppViewModel, currentScreen: String?, onDone: () -> Unit) {
+    val c = UTheme.colors
     val scope = rememberCoroutineScope()
     var body by remember { mutableStateOf("") }
     var category by remember { mutableStateOf("bug") }
@@ -66,60 +79,51 @@ fun FeedbackSheet(vm: AppViewModel, currentScreen: String?, onDismiss: () -> Uni
     val ctx = "Attaches v${tech.csalliance.unstuck.BuildConfig.VERSION_NAME}" +
         (currentScreen?.let { " · $it" } ?: "") + " · ${android.os.Build.MODEL}"
 
-    ModalBottomSheet(
-        onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = SheetScrim,
-        dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } },
-    ) {
-        if (sent) {
-            // Auto-dismiss shortly after the thanks lands.
-            LaunchedEffect(Unit) { delay(1100); onDismiss() }
-            Column(
-                Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(top = 8.dp, bottom = 40.dp),
-                horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                Text("Thanks — we got it 🙏", style = UFont.serifItalic(22), color = c.ink)
-                Text("It goes straight to the team.", style = UFont.sans(13), color = c.ink3)
+    if (sent) {
+        LaunchedEffect(Unit) { delay(1100); onDone() }
+        Column(
+            Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(top = 8.dp, bottom = 40.dp),
+            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Thanks — we got it 🙏", style = UFont.serifItalic(22), color = c.ink)
+            Text("It goes straight to the team.", style = UFont.sans(13), color = c.ink3)
+        }
+        return
+    }
+
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 22.dp).padding(bottom = 26.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        Text("Bugs, ideas, anything — straight to the team.", style = UFont.sans(13), color = c.ink2)
+
+        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            CATEGORIES.forEach { (key, label) ->
+                val sel = category == key
+                Box(
+                    Modifier.clip(RoundedCornerShape(999.dp)).background(if (sel) c.ink else c.surface)
+                        .then(if (sel) Modifier else Modifier.border(1.dp, c.line2, RoundedCornerShape(999.dp)))
+                        .clickable { category = key }.padding(horizontal = 13.dp, vertical = 6.dp),
+                ) { Text(label, style = UFont.sans(12, FontWeight.Medium), color = if (sel) c.bg else c.ink3) }
             }
-            return@ModalBottomSheet
         }
 
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 22.dp).padding(bottom = 26.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("SEND FEEDBACK", style = UFont.mono(11, FontWeight.Medium), color = c.ink3)
-            Text("Bugs, ideas, anything — straight to the team.", style = UFont.sans(13), color = c.ink2)
+        Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.bg2).padding(14.dp)) {
+            BasicTextField(
+                value = body, onValueChange = { if (!sending) body = it },
+                textStyle = UFont.sans(15).copy(color = c.ink), cursorBrush = SolidColor(c.ink),
+                modifier = Modifier.fillMaxWidth().heightIn(min = 88.dp),
+                decorationBox = { inner -> if (body.isEmpty()) Text("What's on your mind?", style = UFont.sans(15), color = c.ink3); inner() },
+            )
+        }
 
-            // Category chips.
-            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                CATEGORIES.forEach { (key, label) ->
-                    val sel = category == key
-                    Box(
-                        Modifier.clip(RoundedCornerShape(999.dp)).background(if (sel) c.ink else c.surface)
-                            .then(if (sel) Modifier else Modifier.border(1.dp, c.line2, RoundedCornerShape(999.dp)))
-                            .clickable { category = key }.padding(horizontal = 13.dp, vertical = 6.dp),
-                    ) { Text(label, style = UFont.sans(12, FontWeight.Medium), color = if (sel) c.bg else c.ink3) }
-                }
-            }
+        Text(ctx, style = UFont.mono(10), color = c.ink4)
+        error?.let { Text(it, style = UFont.sans(12), color = c.coralDeep) }
 
-            // Message — the only required field. Multi-line, grows with content.
-            Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.bg2).padding(14.dp)) {
-                BasicTextField(
-                    value = body, onValueChange = { if (!sending) body = it },
-                    textStyle = UFont.sans(15).copy(color = c.ink), cursorBrush = SolidColor(c.ink),
-                    modifier = Modifier.fillMaxWidth().heightIn(min = 88.dp),
-                    decorationBox = { inner -> if (body.isEmpty()) Text("What's on your mind?", style = UFont.sans(15), color = c.ink3); inner() },
-                )
-            }
-
-            Text(ctx, style = UFont.mono(10), color = c.ink4)
-            error?.let { Text(it, style = UFont.sans(12), color = c.coralDeep) }
-
-            Box(Modifier.padding(top = 2.dp)) {
-                UButton(if (sending) "Sending…" else "Send", kind = ButtonKind.CORAL, fill = false, enabled = body.isNotBlank() && !sending) {
-                    scope.launch {
-                        sending = true; error = null
-                        val ok = vm.sendFeedback(body, category, currentScreen)
-                        sending = false
-                        if (ok) sent = true else error = "Couldn't send — check your connection and try again."
-                    }
+        Box(Modifier.padding(top = 2.dp)) {
+            UButton(if (sending) "Sending…" else "Send", kind = ButtonKind.CORAL, fill = false, enabled = body.isNotBlank() && !sending) {
+                scope.launch {
+                    sending = true; error = null
+                    val ok = vm.sendFeedback(body, category, currentScreen)
+                    sending = false
+                    if (ok) sent = true else error = "Couldn't send — check your connection and try again."
                 }
             }
         }

@@ -11,6 +11,19 @@
          restricted USE_EXACT_ALARM — Play limits it to alarm-clock/calendar apps. -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- Assistant voice: on-device speech-to-text dictation (TTS needs no perm). -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Package visibility (Android 11+): see the system speech recognition + TTS
+         services so SpeechRecognizer / TextToSpeech resolve. -->
+    <queries>
+        <intent>
+            <action android:name="android.speech.RecognitionService" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+    </queries>
 
     <application
         android:name=".UnstuckApp"

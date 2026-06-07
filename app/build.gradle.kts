@@ -51,6 +51,7 @@ android {
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
         // for a public release.
         buildConfigField("Boolean", "FEEDBACK_ENABLED", "true")
+        buildConfigField("Boolean", "ASSISTANT_ENABLED", "true")
     }
 
     signingConfigs {

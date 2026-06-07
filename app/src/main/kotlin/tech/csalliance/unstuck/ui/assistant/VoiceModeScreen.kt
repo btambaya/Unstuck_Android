@@ -56,7 +56,7 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
     val c = UTheme.colors
     val context = LocalContext.current
     val main = remember { Handler(Looper.getMainLooper()) }
-    val audio = remember { VoiceAudioEngine() }
+    val audio = remember { VoiceAudioEngine(context) }
 
     var state by remember { mutableStateOf(VoiceState.CONNECTING) }
     var caption by remember { mutableStateOf("") }

@@ -13,6 +13,8 @@
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Assistant voice: on-device speech-to-text dictation (TTS needs no perm). -->
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- Realtime voice: communication mode + routing for hardware echo cancellation. -->
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
 
     <!-- Package visibility (Android 11+): see the system speech recognition + TTS
          services so SpeechRecognizer / TextToSpeech resolve. -->

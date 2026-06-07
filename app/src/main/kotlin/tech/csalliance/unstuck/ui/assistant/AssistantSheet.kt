@@ -111,8 +111,9 @@ private fun AssistantChat(vm: AppViewModel) {
     val context = LocalContext.current
     val voice = rememberVoiceController()
 
-    // Full OpenAI-shape history (mutated by assistantTurn); display derives from it.
-    val messages = remember { mutableStateListOf<ChatMessage>() }
+    // History lives on the ViewModel (survives closing/reopening + app restart);
+    // display derives from it.
+    val messages = vm.assistantHistory
     var input by remember { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
     var listening by remember { mutableStateOf(false) }
@@ -130,10 +131,9 @@ private fun AssistantChat(vm: AppViewModel) {
         if (t.isEmpty() || sending) return
         input = ""
         note = null
-        messages.add(ChatMessage(role = "user", content = t))
         sending = true
         scope.launch {
-            when (val turn = vm.assistantTurn(messages)) {
+            when (val turn = vm.sendAssistant(t)) {
                 is AppViewModel.AssistantTurn.Reply -> if (speakReplies) voice.speak(turn.text)
                 is AppViewModel.AssistantTurn.Error -> note = friendlyError(turn.code)
             }
@@ -163,6 +163,15 @@ private fun AssistantChat(vm: AppViewModel) {
     }
 
     Column(Modifier.fillMaxWidth().fillMaxHeight(0.86f).imePadding()) {
+        // "New chat" — clears the persisted conversation. Only when there's history.
+        if (shown.isNotEmpty()) {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 22.dp), horizontalArrangement = Arrangement.End) {
+                Text(
+                    "New chat", style = UFont.sans(12, FontWeight.Medium), color = c.ink3,
+                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { vm.clearAssistant() }.padding(horizontal = 8.dp, vertical = 4.dp),
+                )
+            }
+        }
         // Messages (or empty hint).
         if (shown.isEmpty() && !sending) {
             Column(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 22.dp), verticalArrangement = Arrangement.Center) {
@@ -270,6 +279,7 @@ private fun RoundIcon(
 private fun friendlyError(code: String): String = when (code) {
     "not_configured" -> "The assistant isn't set up yet."
     "network" -> "Couldn't reach the assistant — check your connection."
+    "timeout" -> "That took too long — try again."
     "upstream" -> "The assistant had a hiccup. Try again."
     "unauthorized" -> "Please sign in to use the assistant."
     else -> "Something went wrong. Try again."

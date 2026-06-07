@@ -17,7 +17,9 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import androidx.compose.runtime.mutableStateListOf
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.decodeFromString
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -739,11 +741,50 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
 
     sealed interface AssistantTurn {
         data class Reply(val text: String) : AssistantTurn
-        /** "not_configured" | "network" | "upstream" | … — UI shows a friendly note. */
+        /** "not_configured" | "network" | "timeout" | "upstream" | … — UI shows a note. */
         data class Error(val code: String) : AssistantTurn
     }
 
-    suspend fun assistantTurn(history: MutableList<ChatMessage>): AssistantTurn {
+    // Conversation lives on the ViewModel (survives closing/reopening the bubble)
+    // and is persisted to disk (survives an accidental app close). Capped so it
+    // can't grow unbounded; the window starts at a user turn so we never re-send
+    // an orphaned tool_call.
+    val assistantHistory = mutableStateListOf<ChatMessage>()
+    private val assistantPrefs by lazy {
+        graph.appContext.getSharedPreferences("unstuck.assistant", android.content.Context.MODE_PRIVATE)
+    }
+
+    init {
+        runCatching {
+            assistantPrefs.getString("history", null)?.let {
+                assistantHistory.addAll(Json.decodeFromString<List<ChatMessage>>(it))
+            }
+        }
+    }
+
+    private fun persistAssistant() {
+        runCatching {
+            val window = assistantHistory.takeLast(40).dropWhile { it.role != "user" }
+            assistantPrefs.edit().putString("history", Json.encodeToString(window)).apply()
+        }
+    }
+
+    /** Clear the assistant conversation (a "new chat"). */
+    fun clearAssistant() {
+        assistantHistory.clear()
+        runCatching { assistantPrefs.edit().remove("history").apply() }
+    }
+
+    /** Send a user message + run the turn against [assistantHistory], persisting. */
+    suspend fun sendAssistant(userText: String): AssistantTurn {
+        assistantHistory.add(ChatMessage(role = "user", content = userText))
+        persistAssistant()
+        val result = assistantTurn(assistantHistory)
+        persistAssistant()
+        return result
+    }
+
+    private suspend fun assistantTurn(history: MutableList<ChatMessage>): AssistantTurn {
         val a = assistant ?: return AssistantTurn.Error("not_configured")
         // Scratch for entities created mid-turn (the live StateFlows lag the
         // optimistic write), so a later tool call can reference them by id.

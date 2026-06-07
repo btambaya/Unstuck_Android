@@ -71,16 +71,26 @@ sealed interface AssistantResult {
 
 class AssistantClient(private val client: SupabaseClient) {
 
-    suspend fun ask(messages: List<ChatMessage>, context: JsonElement): AssistantResult = runCatching {
-        val resp: AssistantResponse = client.functions.invoke("assistant") {
-            method = HttpMethod.Post
-            contentType(ContentType.Application.Json)
-            setBody(AssistantRequest(messages, context))
-        }.body()
-        when {
-            resp.error != null -> AssistantResult.Err(resp.error)
-            resp.assistant != null -> AssistantResult.Ok(resp.assistant)
-            else -> AssistantResult.Err("empty")
+    suspend fun ask(messages: List<ChatMessage>, context: JsonElement): AssistantResult {
+        // One retry on a thrown error (transient network / cold-start timeout).
+        var last: Throwable? = null
+        repeat(2) { attempt ->
+            val r = runCatching {
+                val resp: AssistantResponse = client.functions.invoke("assistant") {
+                    method = HttpMethod.Post
+                    contentType(ContentType.Application.Json)
+                    setBody(AssistantRequest(messages, context))
+                }.body()
+                when {
+                    resp.error != null -> AssistantResult.Err(resp.error)
+                    resp.assistant != null -> AssistantResult.Ok(resp.assistant)
+                    else -> AssistantResult.Err("empty")
+                }
+            }
+            r.getOrNull()?.let { return it }
+            last = r.exceptionOrNull()
+            if (attempt == 0) kotlinx.coroutines.delay(800)
         }
-    }.getOrElse { AssistantResult.Err("network") }
+        return AssistantResult.Err(if (last is kotlinx.coroutines.TimeoutCancellationException) "timeout" else "network")
+    }
 }

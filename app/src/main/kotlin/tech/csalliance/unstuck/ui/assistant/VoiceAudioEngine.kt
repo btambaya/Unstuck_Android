@@ -6,21 +6,40 @@ import android.media.AudioFormat
 import android.media.AudioRecord
 import android.media.AudioTrack
 import android.media.MediaRecorder
+import android.media.audiofx.AcousticEchoCanceler
+import android.media.audiofx.AutomaticGainControl
+import android.media.audiofx.NoiseSuppressor
+import android.os.SystemClock
 import java.util.concurrent.LinkedBlockingQueue
 import kotlin.concurrent.thread
 
 // Raw-PCM audio for realtime voice. Capture: 16 kHz mono PCM16 (what Qwen-Omni
 // expects), delivered in ~100ms frames. Playback: 24 kHz mono PCM16 streamed
-// from a queue (the model's output rate), with a flush for barge-in. No codecs,
-// no files — just the mic in and the model's voice out. Caller must hold
-// RECORD_AUDIO before startCapture().
+// from a queue (the model's output rate). Caller must hold RECORD_AUDIO before
+// startCapture().
+//
+// HALF-DUPLEX: phone loudspeakers leak the model's own voice back into the mic;
+// the realtime server's VAD then hears that as the user "interrupting", cuts the
+// sentence, and starts a new turn — a self-feedback loop. So while the model is
+// actively playing (plus a short tail to cover trailing echo) we DON'T forward
+// mic frames upstream. Reinforced with hardware AEC/NS/AGC when available.
 class VoiceAudioEngine {
-    companion object { const val IN_RATE = 16_000; const val OUT_RATE = 24_000 }
+    companion object {
+        const val IN_RATE = 16_000
+        const val OUT_RATE = 24_000
+        // Keep the mic muted for this long after the last audio was written, so
+        // the tail of the model's speech (still ringing out the speaker) can't
+        // trip the server VAD.
+        const val OUTPUT_TAIL_MS = 400L
+    }
 
     // ── capture ──
     private var record: AudioRecord? = null
     @Volatile private var capturing = false
     private var captureThread: Thread? = null
+    private var aec: AcousticEchoCanceler? = null
+    private var ns: NoiseSuppressor? = null
+    private var agc: AutomaticGainControl? = null
 
     @SuppressLint("MissingPermission")
     fun startCapture(onFrame: (ByteArray) -> Unit) {
@@ -36,20 +55,36 @@ class VoiceAudioEngine {
         }.getOrNull() ?: return
         if (rec.state != AudioRecord.STATE_INITIALIZED) { runCatching { rec.release() }; return }
         record = rec
+        enableEffects(rec.audioSessionId)
         capturing = true
         runCatching { rec.startRecording() }
         captureThread = thread(name = "voice-capture") {
             val buf = ByteArray(frameBytes)
             while (capturing) {
                 val n = rec.read(buf, 0, buf.size)
-                if (n > 0) onFrame(if (n == buf.size) buf.copyOf() else buf.copyOf(n))
+                // Drop frames while the model is speaking (anti-echo half-duplex).
+                if (n > 0 && !outputBusy()) onFrame(if (n == buf.size) buf.copyOf() else buf.copyOf(n))
             }
         }
+    }
+
+    // Best-effort platform DSP: echo cancellation, noise suppression, auto gain.
+    private fun enableEffects(sessionId: Int) {
+        runCatching { if (AcousticEchoCanceler.isAvailable()) aec = AcousticEchoCanceler.create(sessionId)?.apply { enabled = true } }
+        runCatching { if (NoiseSuppressor.isAvailable()) ns = NoiseSuppressor.create(sessionId)?.apply { enabled = true } }
+        runCatching { if (AutomaticGainControl.isAvailable()) agc = AutomaticGainControl.create(sessionId)?.apply { enabled = true } }
+    }
+
+    private fun releaseEffects() {
+        runCatching { aec?.release() }; aec = null
+        runCatching { ns?.release() }; ns = null
+        runCatching { agc?.release() }; agc = null
     }
 
     fun stopCapture() {
         capturing = false
         captureThread?.join(300); captureThread = null
+        releaseEffects()
         record?.let { runCatching { it.stop() }; runCatching { it.release() } }
         record = null
     }
@@ -58,8 +93,16 @@ class VoiceAudioEngine {
     private var track: AudioTrack? = null
     private val queue = LinkedBlockingQueue<ByteArray>()
     @Volatile private var playing = false
+    @Volatile private var lastOutputMs = 0L
     private var playThread: Thread? = null
     private val poison = ByteArray(0)
+
+    /** True while the model's audio is (or just was) playing — used to gate the mic. */
+    fun outputBusy(): Boolean {
+        if (!playing) return false
+        if (queue.isNotEmpty()) return true
+        return SystemClock.uptimeMillis() - lastOutputMs < OUTPUT_TAIL_MS
+    }
 
     fun startPlayback() {
         if (playing) return
@@ -92,16 +135,20 @@ class VoiceAudioEngine {
                     val w = t.write(chunk, off, chunk.size - off)
                     if (w <= 0) break
                     off += w
+                    lastOutputMs = SystemClock.uptimeMillis()
                 }
             }
         }
     }
 
-    fun enqueue(pcm: ByteArray) { if (playing && pcm.isNotEmpty()) queue.offer(pcm) }
+    fun enqueue(pcm: ByteArray) {
+        if (playing && pcm.isNotEmpty()) { lastOutputMs = SystemClock.uptimeMillis(); queue.offer(pcm) }
+    }
 
     /** Barge-in: drop queued audio + cut current playback immediately. */
     fun flushPlayback() {
         queue.clear()
+        lastOutputMs = 0L
         track?.let { runCatching { it.pause() }; runCatching { it.flush() }; runCatching { it.play() } }
     }
 

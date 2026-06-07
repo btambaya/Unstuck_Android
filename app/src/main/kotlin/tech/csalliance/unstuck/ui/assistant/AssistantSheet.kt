@@ -162,10 +162,26 @@ private fun AssistantChat(vm: AppViewModel) {
         if (granted) startMic() else micPermission.launch(Manifest.permission.RECORD_AUDIO)
     }
 
+    var voiceOpen by remember { mutableStateOf(false) }
+    if (voiceOpen) VoiceModeScreen(vm) { voiceOpen = false }
+
     Column(Modifier.fillMaxWidth().fillMaxHeight(0.86f).imePadding()) {
-        // "New chat" — clears the persisted conversation. Only when there's history.
-        if (shown.isNotEmpty()) {
-            Row(Modifier.fillMaxWidth().padding(horizontal = 22.dp), horizontalArrangement = Arrangement.End) {
+        // Header: a "Talk" entry into full voice mode (when configured) + "New chat".
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 2.dp),
+            horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically,
+        ) {
+            if (vm.voiceConfigured()) {
+                Row(
+                    Modifier.clip(RoundedCornerShape(999.dp)).background(c.coral).clickable { voiceOpen = true }
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Icon(Icons.Filled.Mic, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
+                    Text("Talk", style = UFont.sans(12, FontWeight.SemiBold), color = Color.White)
+                }
+            } else { Box(Modifier) }
+            if (shown.isNotEmpty()) {
                 Text(
                     "New chat", style = UFont.sans(12, FontWeight.Medium), color = c.ink3,
                     modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { vm.clearAssistant() }.padding(horizontal = 8.dp, vertical = 4.dp),

@@ -25,10 +25,13 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.putJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
@@ -931,6 +934,85 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
                     }
                 }
             }
+        }
+    }
+
+    // --- voice (realtime, Qwen-Omni via the Cloudflare proxy) ---
+    // The realtime session is configured CLIENT-side (session.update), so the
+    // instructions + tool schemas live here. Tool execution reuses the same
+    // dispatcher as text mode, with a session scratch for mid-call entities.
+
+    val voiceProxyUrl: String get() = tech.csalliance.unstuck.BuildConfig.VOICE_PROXY_URL
+    val voiceModel: String get() = "qwen3.5-omni-flash-realtime"
+    fun voiceConfigured(): Boolean = voiceProxyUrl.isNotBlank()
+    fun voiceAccessToken(): String? = graph.provider?.client?.auth?.currentSessionOrNull()?.accessToken
+
+    private val voiceNewTasks = HashMap<String, TaskItem>()
+    private val voiceNewLists = HashMap<String, ItemCollection>()
+    fun resetVoiceScratch() { voiceNewTasks.clear(); voiceNewLists.clear() }
+    suspend fun runVoiceTool(name: String, args: JsonObject): String =
+        runAssistantTool(name, args, voiceNewTasks, voiceNewLists)
+
+    fun voiceInstructions(): String =
+        "You are Unstuck's voice assistant — a calm, concise scheduling partner for someone with ADHD. " +
+        "Speak naturally and briefly, like a helpful friend. When the user asks you to do something (add a task, " +
+        "schedule, add to a list), call the matching tool, then say what you did in one short sentence. Ask a quick " +
+        "question only when something essential is missing. Confirm out loud before deleting anything. Reference " +
+        "existing tasks/lists by their id from the state below. Dates are YYYY-MM-DD, times 24h HH:MM, computed from " +
+        "the current time.\n\nCurrent app state:\n" + buildAssistantContext().toString()
+
+    /** Tool schemas for the realtime session (OpenAI/DashScope function shape).
+     *  Names + params mirror runAssistantTool — keep in sync. */
+    fun voiceTools(): JsonArray = buildJsonArray {
+        fun JsonObjectBuilder.prop(name: String, type: String, desc: String) =
+            putJsonObject(name) { put("type", type); put("description", desc) }
+        fun tool(name: String, desc: String, required: List<String>, props: JsonObjectBuilder.() -> Unit) {
+            addJsonObject {
+                put("type", "function"); put("name", name); put("description", desc)
+                putJsonObject("parameters") {
+                    put("type", "object")
+                    putJsonObject("properties", props)
+                    putJsonArray("required") { required.forEach { add(it) } }
+                }
+            }
+        }
+        tool("create_task", "Create a task.", listOf("name")) {
+            prop("name", "string", "Task title.")
+            prop("estimateMin", "integer", "Estimated minutes (default 25).")
+            prop("lifeArea", "string", "A life-area name from context, else omit.")
+            prop("dueAt", "string", "Optional ISO 'by' time.")
+            prop("later", "boolean", "true to park in Later.")
+        }
+        tool("schedule_task", "Place a task on the calendar.", listOf("taskId", "date", "startTime")) {
+            prop("taskId", "string", "Existing task id.")
+            prop("date", "string", "YYYY-MM-DD.")
+            prop("startTime", "string", "24h HH:MM.")
+        }
+        tool("update_task", "Edit a task's fields (only pass what changes).", listOf("taskId")) {
+            prop("taskId", "string", "Task id.")
+            prop("name", "string", "New title."); prop("estimateMin", "integer", "Minutes.")
+            prop("lifeArea", "string", "Area name.")
+        }
+        tool("set_task_later", "Park in Later or bring back.", listOf("taskId", "later")) {
+            prop("taskId", "string", "Task id."); prop("later", "boolean", "true=Later.")
+        }
+        tool("set_task_recurrence", "Repeat a task or stop (kind=none).", listOf("taskId", "kind")) {
+            prop("taskId", "string", "Task id.")
+            prop("kind", "string", "daily | weekly | monthly | none.")
+            prop("until", "string", "Optional end date YYYY-MM-DD.")
+            putJsonObject("daysOfWeek") { put("type", "array"); putJsonObject("items") { put("type", "integer") }; put("description", "Weekly: 0=Sun..6=Sat.") }
+        }
+        tool("complete_task", "Mark a task done.", listOf("taskId")) { prop("taskId", "string", "Task id.") }
+        tool("delete_task", "Delete a task — only after the user confirms aloud.", listOf("taskId")) { prop("taskId", "string", "Task id.") }
+        tool("create_list", "Create a new list.", listOf("name")) {
+            prop("name", "string", "List name."); prop("color", "string", "Optional palette token.")
+        }
+        tool("add_to_list", "Add an item to a list.", listOf("listId", "body")) {
+            prop("listId", "string", "List id."); prop("body", "string", "Item text.")
+        }
+        tool("promote_item_to_task", "Turn a list item into a task.", listOf("listId", "itemId", "mode")) {
+            prop("listId", "string", "List id."); prop("itemId", "string", "Item id.")
+            prop("mode", "string", "self | loop."); prop("dueAt", "string", "ISO 'by' time (loop).")
         }
     }
 

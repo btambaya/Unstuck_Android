@@ -49,6 +49,7 @@ class VoiceRealtimeClient(
     private val runTool: suspend (name: String, args: JsonObject) -> String,
     private val onState: (VoiceState) -> Unit,
     private val onCaption: (role: String, text: String, done: Boolean) -> Unit,
+    private val onError: (String) -> Unit = {},
 ) {
     private val scope = CoroutineScope(Dispatchers.IO)
     private var ws: WebSocket? = null
@@ -107,12 +108,24 @@ class VoiceRealtimeClient(
                     ev["transcript"]?.jsonPrimitive?.contentOrNull?.let { onCaption("user", it, true) }
                 "response.audio.done", "response.done" -> onState(VoiceState.LISTENING)
                 "response.function_call_arguments.done" -> handleToolCall(webSocket, ev)
-                "error" -> { onState(VoiceState.ERROR) }
+                "error" -> {
+                    val m = ev["error"]?.jsonObject?.get("message")?.jsonPrimitive?.contentOrNull
+                        ?: ev["error"]?.jsonPrimitive?.contentOrNull
+                    if (!m.isNullOrBlank()) onError(m.take(160)); onState(VoiceState.ERROR)
+                }
             }
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            open = false; audio.shutdown(); onState(VoiceState.ERROR)
+            open = false; audio.shutdown()
+            val code = response?.code
+            val body = runCatching { response?.body?.string() }.getOrNull()
+            val msg = when {
+                !body.isNullOrBlank() -> body.take(160)
+                code != null -> "Voice server error (HTTP $code)"
+                else -> t.message?.take(160) ?: "Couldn't reach the voice server"
+            }
+            onError(msg); onState(VoiceState.ERROR)
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {

@@ -67,12 +67,14 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
         val token = vm.voiceAccessToken()
         if (token.isNullOrBlank()) { note = "Please sign in to use voice."; state = VoiceState.ERROR; return }
         if (!vm.voiceConfigured()) { note = "Voice isn't set up yet."; state = VoiceState.ERROR; return }
+        note = null; state = VoiceState.CONNECTING
         vm.resetVoiceScratch()
         val rc = VoiceRealtimeClient(
             proxyUrl = vm.voiceProxyUrl, token = token, model = vm.voiceModel,
             instructions = vm.voiceInstructions(), tools = vm.voiceTools(), audio = audio,
             runTool = { name, args -> vm.runVoiceTool(name, args) },
             onState = { s -> main.post { state = s } },
+            onError = { msg -> main.post { note = msg } },
             onCaption = { role, text, done ->
                 main.post {
                     when {

@@ -112,8 +112,12 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(24.dp),
             ) {
-                PulsingOrb(active = state == VoiceState.SPEAKING || state == VoiceState.LISTENING,
-                    color = if (state == VoiceState.SPEAKING) c.coral else c.primary)
+                val live = state == VoiceState.SPEAKING || state == VoiceState.LISTENING
+                PulsingOrb(
+                    active = live,
+                    color = if (state == VoiceState.SPEAKING) c.coral else c.primary,
+                    onClick = if (live) ({ client?.interrupt() }) else null,
+                )
                 Text(
                     when (state) {
                         VoiceState.CONNECTING -> "Connecting…"
@@ -126,6 +130,14 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                 )
                 if (caption.isNotBlank()) {
                     Text(caption, style = UFont.serifItalic(22), color = c.ink, textAlign = TextAlign.Center)
+                }
+                // Manual interrupt — cut the model's speech and let the user talk.
+                if (live) {
+                    Box(
+                        Modifier.clip(RoundedCornerShape(999.dp)).background(c.bg2)
+                            .clickable { client?.interrupt() }
+                            .padding(horizontal = 24.dp, vertical = 12.dp),
+                    ) { Text("Interrupt", style = UFont.sans(15, FontWeight.SemiBold), color = c.ink) }
                 }
             }
 
@@ -140,14 +152,15 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
 }
 
 @Composable
-private fun PulsingOrb(active: Boolean, color: Color) {
+private fun PulsingOrb(active: Boolean, color: Color, onClick: (() -> Unit)? = null) {
     val transition = rememberInfiniteTransition(label = "orb")
     val scale by transition.animateFloat(
         initialValue = 1f, targetValue = if (active) 1.15f else 1f,
         animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "scale",
     )
     Box(
-        Modifier.size(120.dp).scale(scale).clip(CircleShape).background(color),
+        Modifier.size(120.dp).scale(scale).clip(CircleShape).background(color)
+            .let { if (onClick != null) it.clickable { onClick() } else it },
         contentAlignment = Alignment.Center,
     ) { Text("●", style = UFont.sans(36), color = Color.White.copy(alpha = 0.9f)) }
 }

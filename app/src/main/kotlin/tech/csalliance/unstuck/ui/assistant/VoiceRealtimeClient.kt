@@ -54,6 +54,9 @@ class VoiceRealtimeClient(
     private val scope = CoroutineScope(Dispatchers.IO)
     private var ws: WebSocket? = null
     @Volatile private var open = false
+    // After a manual interrupt we drop any still-in-flight audio from the
+    // cancelled response until the next turn starts (user speaks / new response).
+    @Volatile private var muted = false
 
     private val http = OkHttpClient.Builder()
         .pingInterval(20, TimeUnit.SECONDS)
@@ -77,6 +80,17 @@ class VoiceRealtimeClient(
         onState(VoiceState.CLOSED)
     }
 
+    /** Manual interrupt: cut playback now, tell the server to stop generating,
+     *  and reopen the mic. Stale audio from the cancelled response is dropped
+     *  until the next turn begins. */
+    fun interrupt() {
+        if (!open) return
+        muted = true
+        audio.flushPlayback()
+        runCatching { ws?.send(buildJsonObject { put("type", "response.cancel") }.toString()) }
+        onState(VoiceState.LISTENING)
+    }
+
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
             open = true
@@ -95,8 +109,10 @@ class VoiceRealtimeClient(
         override fun onMessage(webSocket: WebSocket, text: String) {
             val ev = runCatching { Json.parseToJsonElement(text).jsonObject }.getOrNull() ?: return
             when (ev["type"]?.jsonPrimitive?.contentOrNull) {
-                "input_audio_buffer.speech_started" -> { audio.flushPlayback(); onState(VoiceState.LISTENING) }
+                "input_audio_buffer.speech_started" -> { muted = false; audio.flushPlayback(); onState(VoiceState.LISTENING) }
+                "response.created" -> muted = false // a fresh reply is wanted again
                 "response.audio.delta" -> {
+                    if (muted) return // stale audio from a cancelled/interrupted response
                     ev["delta"]?.jsonPrimitive?.contentOrNull?.let {
                         audio.enqueue(Base64.decode(it, Base64.NO_WRAP)); onState(VoiceState.SPEAKING)
                     }

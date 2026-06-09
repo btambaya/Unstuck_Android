@@ -101,6 +101,8 @@ Google OAuth flow (the only live one): the client calls `/authorize` to get a co
 
 **6. `account-delete` (`verify_jwt = true`)** — `POST` only. Decodes the JWT for `sub`, then `adminClient.auth.admin.deleteUser(sub)` with the service-role key. All user tables cascade via their `user_id` FK. The user id never comes from the body — there's no override path.
 
+**7. `assistant` (`verify_jwt = true`)** — the in-app AI agent's **text** path. A thin, stateless, provider-agnostic proxy to an OpenAI-compatible `/chat/completions` (owns the system prompt + tool schemas; the client runs the tool calls). Android client: `sync/AssistantClient.kt`; the conversation + tool dispatcher live in `AppViewModel`. The **model/provider is configured entirely server-side** (Supabase secrets `LLM_API_KEY`/`LLM_BASE_URL`/`LLM_MODEL`), so swapping the text model needs **no app change**. The **voice** path is separate — `qwen3.5-omni-flash-realtime` via the `unstuck-voice-proxy` Cloudflare Worker (not a Supabase fn); the only app-side model knob is `AppViewModel.voiceModel`. **Onboarding/swapping either model is documented in the web repo: `unstuck/docs/ASSISTANT-MODELS.md`.**
+
 ### The cron (`supabase/manual/notification_cron.sql`)
 
 This file is in `supabase/manual/`, **not** `migrations/`, so `db push` never auto-applies it — you run it **by hand** (psql / SQL editor) after deploying `send-morning-brief`, enabling `pg_cron` + `pg_net`, and wiring `CRON_SECRET`. It defines two `security definer` functions and schedules both **every 15 minutes in UTC**:

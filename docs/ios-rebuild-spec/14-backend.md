@@ -13,7 +13,7 @@ The backend is one Supabase project (project ref `uaxfteluwctrlgwmmfzi`). It com
 1. **Postgres schema** — 27 migrations (`001`–`027`), normalized one-table-per-entity, every user-owned table RLS-locked to `auth.uid()`.
 2. **PostgREST** — the auto-generated REST CRUD API over those tables. This is the client's primary read/write path (`supabase-swift`'s `.from(table)`).
 3. **Realtime** — Postgres logical-replication broadcast on a publication (`supabase_realtime`). Clients subscribe per table for cross-device live sync.
-4. **Edge Functions** (Deno/TypeScript) — 11 functions for operations that can't be plain CRUD: calendar OAuth + Google API proxy, push-notification senders, account deletion, collection sharing, login tracking, feedback is plain CRUD.
+4. **Edge Functions** (Deno/TypeScript) — functions for operations that can't be plain CRUD: calendar OAuth + Google API proxy, push-notification senders, account deletion, collection sharing, login tracking, and the **`assistant`** AI-agent text proxy (feedback is plain CRUD). The AI assistant also has a **voice** path via a separate Cloudflare Worker (`unstuck-voice-proxy` → DashScope realtime), not a Supabase fn.
 5. **pg_cron + pg_net jobs** — three scheduled jobs (manual SQL, not migrations): wake-window calibration, morning-brief dispatch, collection-late escalation.
 6. **Auth** — Supabase GoTrue (email/password, magic link, Google OAuth). A signup trigger (`handle_new_user`) seeds per-user rows.
 
@@ -29,7 +29,9 @@ The iOS client is an **offline-first, optimistic, last-write-wins replica** of t
 - **Realtime mirror** applies live INSERT/UPDATE/DELETE from other devices.
 - **Sync coordinator** observes auth state and drives wipe/flush/hydrate/subscribe.
 
-Port files (Android `sync/` → iOS Swift): `SyncCoordinator`, `SyncDecision`, `WriteThrough`, `OutboxFlusher`, `Hydrator`, `RealtimeMirror`, `SyncGateway`, `DbRowCodec`, plus the typed clients (`CalendarClient`, `PushClient`, `NotificationsClient`, `PreferencesClient`, `CollectionShareClient`, `FeedbackClient`, `LoginTrackerClient`, `AuthService`).
+Port files (Android `sync/` → iOS Swift): `SyncCoordinator`, `SyncDecision`, `WriteThrough`, `OutboxFlusher`, `Hydrator`, `RealtimeMirror`, `SyncGateway`, `DbRowCodec`, plus the typed clients (`CalendarClient`, `PushClient`, `NotificationsClient`, `PreferencesClient`, `CollectionShareClient`, `FeedbackClient`, `LoginTrackerClient`, `AuthService`, and `AssistantClient` for the AI agent — text via the `assistant` edge fn; voice via the realtime WS client).
+
+> **AI assistant (text + voice)** is a shipped Android feature to replicate. The text model/provider is configured **entirely server-side** (no app change to swap it); the voice model is `qwen3.5-omni-flash-realtime` via the voice-proxy Worker. The full model/provider architecture + onboarding runbook is in the web repo: **`unstuck/docs/ASSISTANT-MODELS.md`**.
 
 ---
 

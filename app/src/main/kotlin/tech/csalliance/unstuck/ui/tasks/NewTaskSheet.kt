@@ -35,7 +35,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.foundation.verticalScroll
@@ -48,6 +52,7 @@ import tech.csalliance.unstuck.core.logic.findConflicts
 import tech.csalliance.unstuck.core.logic.findFreeSlotsForDate
 import tech.csalliance.unstuck.core.logic.formatTime
 import tech.csalliance.unstuck.core.model.CaptureTag
+import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.design.component.ButtonKind
@@ -66,6 +71,45 @@ private class DraftCapture {
 private val CAPTURE_TAGS = listOf(
     CaptureTag.FOLLOW_UP to "follow-up", CaptureTag.IDEA to "idea", CaptureTag.EDIT to "edit",
     CaptureTag.QUESTION to "question", CaptureTag.DISTRACTION to "distraction",
+)
+
+// Savers so the draft survives a config change (rotation / dark-mode flip / locale /
+// split-screen): Activity recreation must not silently discard a half-typed task.
+
+/** [kind, until, daysOfWeek("|"-joined)] strings; empty list = does not repeat. */
+private val RecurrenceSaver = listSaver<Recurrence?, String>(
+    save = { r ->
+        when (r) {
+            null -> emptyList()
+            is Recurrence.Daily -> listOf("daily", r.until.orEmpty())
+            is Recurrence.Monthly -> listOf("monthly", r.until.orEmpty())
+            is Recurrence.Weekly -> listOf("weekly", r.until.orEmpty(), r.daysOfWeek.joinToString("|"))
+        }
+    },
+    restore = { saved ->
+        val until = saved.getOrNull(1)?.ifBlank { null }
+        when (saved.firstOrNull()) {
+            "daily" -> Recurrence.Daily(until)
+            "monthly" -> Recurrence.Monthly(until)
+            "weekly" -> Recurrence.Weekly(saved.getOrNull(2)?.split("|")?.mapNotNull { it.toIntOrNull() }.orEmpty(), until)
+            else -> null
+        }
+    },
+)
+
+private val TagsSaver = listSaver<SnapshotStateList<String>, String>(
+    save = { it.toList() },
+    restore = { it.toMutableStateList() },
+)
+
+/** Each capture draft saves as a [body, tag-name] pair. */
+private val DraftsSaver = listSaver<SnapshotStateList<DraftCapture>, List<String>>(
+    save = { drafts -> drafts.map { listOf(it.body, it.tag.name) } },
+    restore = { saved ->
+        saved.map { (body, tag) ->
+            DraftCapture().apply { this.body = body; this.tag = runCatching { CaptureTag.valueOf(tag) }.getOrDefault(CaptureTag.FOLLOW_UP) }
+        }.toMutableStateList()
+    },
 )
 
 private fun tomorrowIso(now: Long): String = Clock.dateIso(Time.addDaysMillis(Time.startOfDayMillis(now), 1))
@@ -88,21 +132,23 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     val todayIso = Clock.dateIso(Time.startOfDayMillis(now))
     val tmrwIso = tomorrowIso(now)
 
-    var name by remember { mutableStateOf("") }
-    var whenSel by remember { mutableStateOf(when (prefillDate) { null, todayIso -> "Today"; tmrwIso -> "Tomorrow"; else -> "Pick date" }) }
-    var pickedDate by remember { mutableStateOf(prefillDate?.takeIf { it != todayIso && it != tmrwIso } ?: tmrwIso) }
-    var pickedTime by remember { mutableStateOf(prefillTime) }
-    var autoTime by remember { mutableStateOf(prefillTime == null) }  // false once the user/prefill sets a time
-    var estimate by remember { mutableStateOf(settings.focusDefaultMin) }
-    var area by remember { mutableStateOf<String?>(null) }
-    var firstMove by remember { mutableStateOf("") }
-    var recurrence by remember { mutableStateOf<tech.csalliance.unstuck.core.model.Recurrence?>(null) }
-    var showDatePicker by remember { mutableStateOf(false) }
-    var showTimePicker by remember { mutableStateOf(false) }
-    var showEstimate by remember { mutableStateOf(false) }
-    var reminderLead by remember { mutableStateOf<Int?>(null) }   // null = use the global default
-    val tags = remember { mutableStateListOf<String>() }
-    val drafts = remember { mutableStateListOf<DraftCapture>() }
+    // rememberSaveable (not remember): a config change recreates the Activity and
+    // must restore — not discard — everything typed in the primary creation flow.
+    var name by rememberSaveable { mutableStateOf("") }
+    var whenSel by rememberSaveable { mutableStateOf(when (prefillDate) { null, todayIso -> "Today"; tmrwIso -> "Tomorrow"; else -> "Pick date" }) }
+    var pickedDate by rememberSaveable { mutableStateOf(prefillDate?.takeIf { it != todayIso && it != tmrwIso } ?: tmrwIso) }
+    var pickedTime by rememberSaveable { mutableStateOf(prefillTime) }
+    var autoTime by rememberSaveable { mutableStateOf(prefillTime == null) }  // false once the user/prefill sets a time
+    var estimate by rememberSaveable { mutableStateOf(settings.focusDefaultMin) }
+    var area by rememberSaveable { mutableStateOf<String?>(null) }
+    var firstMove by rememberSaveable { mutableStateOf("") }
+    var recurrence by rememberSaveable(stateSaver = RecurrenceSaver) { mutableStateOf<Recurrence?>(null) }
+    var showDatePicker by rememberSaveable { mutableStateOf(false) }
+    var showTimePicker by rememberSaveable { mutableStateOf(false) }
+    var showEstimate by rememberSaveable { mutableStateOf(false) }
+    var reminderLead by rememberSaveable { mutableStateOf<Int?>(null) }   // null = use the global default
+    val tags = rememberSaveable(saver = TagsSaver) { mutableStateListOf<String>() }
+    val drafts = rememberSaveable(saver = DraftsSaver) { mutableStateListOf<DraftCapture>() }
 
     val effectiveDate: String? = when (whenSel) {
         "Later" -> null
@@ -281,7 +327,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     }
 
     if (showEstimate) {
-        var v by remember { mutableStateOf(estimate.toString()) }
+        var v by rememberSaveable { mutableStateOf(estimate.toString()) }
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { showEstimate = false },
             title = { Text("Estimate (minutes)") },

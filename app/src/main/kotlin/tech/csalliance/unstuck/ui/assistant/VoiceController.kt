@@ -33,6 +33,9 @@ class VoiceController(private val context: Context) {
     private var recognizer: SpeechRecognizer? = null
     private var tts: TextToSpeech? = null
     private var ttsReady = false
+    // TTS init is async, so the first speak() of a session lands while the engine
+    // is still warming up — buffer it and flush from the init callback.
+    private var pendingSpeak: String? = null
 
     val sttAvailable: Boolean get() = SpeechRecognizer.isRecognitionAvailable(context)
 
@@ -93,11 +96,17 @@ class VoiceController(private val context: Context) {
         if (text.isBlank()) return
         val engine = tts ?: TextToSpeech(context.applicationContext) { status ->
             ttsReady = status == TextToSpeech.SUCCESS
-            if (ttsReady) preferOfflineVoice()
+            if (ttsReady) {
+                preferOfflineVoice()
+                pendingSpeak?.let { tts?.speak(it, TextToSpeech.QUEUE_FLUSH, null, "assistant") }
+            }
+            pendingSpeak = null
         }.also { tts = it }
         if (ttsReady) {
             preferOfflineVoice()
             engine.speak(text, TextToSpeech.QUEUE_FLUSH, null, "assistant")
+        } else {
+            pendingSpeak = text // engine still initializing — latest reply wins (QUEUE_FLUSH semantics)
         }
     }
 
@@ -111,10 +120,11 @@ class VoiceController(private val context: Context) {
         }
     }
 
-    fun stopSpeaking() { runCatching { tts?.stop() } }
+    fun stopSpeaking() { pendingSpeak = null; runCatching { tts?.stop() } }
 
     fun shutdown() {
         stopListening()
+        pendingSpeak = null
         runCatching { tts?.stop(); tts?.shutdown() }
         tts = null
     }

@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
@@ -37,10 +38,8 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -48,11 +47,18 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import kotlinx.coroutines.launch
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.design.component.SheetHandle
 import tech.csalliance.unstuck.design.component.SheetScrim
 import tech.csalliance.unstuck.design.theme.UFont
@@ -99,23 +105,26 @@ private enum class Tab { ASSISTANT, FEEDBACK }
 private fun ToggleChip(label: String, selected: Boolean, onClick: () -> Unit) {
     val c = UTheme.colors
     Box(
+        // selectable (not clickable) so TalkBack announces "selected, tab" state.
         Modifier.clip(RoundedCornerShape(999.dp)).background(if (selected) c.ink else c.bg2)
-            .clickable(onClick = onClick).padding(horizontal = 16.dp, vertical = 8.dp),
+            .selectable(selected = selected, role = Role.Tab, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 8.dp),
     ) { Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = if (selected) c.bg else c.ink2) }
 }
 
 @Composable
 private fun AssistantChat(vm: AppViewModel) {
     val c = UTheme.colors
-    val scope = rememberCoroutineScope()
     val context = LocalContext.current
     val voice = rememberVoiceController()
 
-    // History lives on the ViewModel (survives closing/reopening + app restart);
-    // display derives from it.
+    // History + the in-flight turn live on the ViewModel (the turn runs on
+    // viewModelScope, so dismissing the sheet mid-"Thinking…" no longer cancels
+    // a multi-step turn half-applied); display derives from them.
     val messages = vm.assistantHistory
+    val sending by vm.assistantSending.collectAsStateWithLifecycle()
+    val errorCode by vm.assistantError.collectAsStateWithLifecycle()
     var input by remember { mutableStateOf("") }
-    var sending by remember { mutableStateOf(false) }
     var listening by remember { mutableStateOf(false) }
     var speakReplies by remember { mutableStateOf(false) }
     var note by remember { mutableStateOf<String?>(null) }
@@ -125,20 +134,18 @@ private fun AssistantChat(vm: AppViewModel) {
     LaunchedEffect(shown.size, sending) {
         if (shown.isNotEmpty()) listState.animateScrollToItem(shown.size) // last + the thinking row
     }
+    // Speak replies as turns complete. Replies can land after a dismissal (the
+    // turn outlives the sheet) — only an open sheet collects + speaks.
+    LaunchedEffect(Unit) {
+        vm.assistantReplies.collect { if (speakReplies) voice.speak(it) }
+    }
 
     fun send(text: String) {
         val t = text.trim()
         if (t.isEmpty() || sending) return
         input = ""
         note = null
-        sending = true
-        scope.launch {
-            when (val turn = vm.sendAssistant(t)) {
-                is AppViewModel.AssistantTurn.Reply -> if (speakReplies) voice.speak(turn.text)
-                is AppViewModel.AssistantTurn.Error -> note = friendlyError(turn.code)
-            }
-            sending = false
-        }
+        vm.sendAssistant(t)
     }
 
     fun startMic() {
@@ -212,8 +219,14 @@ private fun AssistantChat(vm: AppViewModel) {
             }
         }
 
-        note?.let {
-            Text(it, style = UFont.sans(12), color = c.coralDeep, modifier = Modifier.padding(horizontal = 22.dp, vertical = 4.dp))
+        // Local notes (mic permission) or the last turn's error off the VM (which
+        // survives close/reopen). Polite live region so TalkBack announces failures.
+        (note ?: errorCode?.let(::friendlyError))?.let {
+            Text(
+                it, style = UFont.sans(12), color = c.coralDeep,
+                modifier = Modifier.padding(horizontal = 22.dp, vertical = 4.dp)
+                    .semantics { liveRegion = LiveRegionMode.Polite },
+            )
         }
 
         // Input bar: text + speaker toggle + mic + send.
@@ -239,17 +252,21 @@ private fun AssistantChat(vm: AppViewModel) {
             RoundIcon(
                 icon = if (speakReplies) Icons.Outlined.VolumeUp else Icons.Outlined.VolumeOff,
                 tint = if (speakReplies) c.coral else c.ink3, bg = c.bg2,
+                label = "Speak replies", stateDesc = if (speakReplies) "On" else "Off",
+                role = Role.Switch,
             ) { speakReplies = !speakReplies; if (!speakReplies) voice.stopSpeaking() }
             RoundIcon(
                 icon = Icons.Filled.Mic,
                 tint = if (listening) Color.White else c.ink2,
                 bg = if (listening) c.coral else c.bg2,
+                label = if (listening) "Stop listening" else "Dictate message",
                 onClick = ::onMic,
             )
             RoundIcon(
                 icon = Icons.AutoMirrored.Filled.Send,
                 tint = if (input.isBlank() || sending) c.ink4 else Color.White,
                 bg = if (input.isBlank() || sending) c.bg2 else c.coral,
+                label = "Send",
             ) { send(input) }
         }
     }
@@ -273,7 +290,8 @@ private fun MessageBubble(text: String, fromUser: Boolean) {
 @Composable
 private fun ThinkingRow() {
     val c = UTheme.colors
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+    // Polite live region so TalkBack announces that a reply is in progress.
+    Row(Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite }, horizontalArrangement = Arrangement.Start) {
         Box(
             Modifier.clip(RoundedCornerShape(16.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(16.dp))
                 .padding(horizontal = 14.dp, vertical = 10.dp),
@@ -284,10 +302,17 @@ private fun ThinkingRow() {
 @Composable
 private fun RoundIcon(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
-    tint: Color, bg: Color, onClick: () -> Unit,
+    tint: Color, bg: Color,
+    label: String, stateDesc: String? = null, role: Role = Role.Button,
+    onClick: () -> Unit,
 ) {
     Box(
-        Modifier.size(40.dp).clip(RoundedCornerShape(999.dp)).background(bg).clickable(onClick = onClick),
+        Modifier.size(40.dp).clip(RoundedCornerShape(999.dp)).background(bg).clickable(onClick = onClick)
+            .semantics {
+                this.role = role
+                contentDescription = label
+                stateDesc?.let { stateDescription = it }
+            },
         contentAlignment = Alignment.Center,
     ) { Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp)) }
 }

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
@@ -42,6 +43,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -472,9 +475,16 @@ private fun SettingRow(label: String, sub: String?, last: Boolean = false, onCli
 @Composable
 private fun ToggleRow(label: String, value: Boolean, last: Boolean = false, onChange: (Boolean) -> Unit) {
     val c = UTheme.colors
-    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+    // The whole row is the switch for TalkBack ("<label>, switch, on") — the inner
+    // pill is decorative so it doesn't surface as a second nameless toggle.
+    Row(
+        Modifier.fillMaxWidth()
+            .toggleable(value = value, role = Role.Switch, onValueChange = onChange)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink, modifier = Modifier.weight(1f))
-        MdToggle(value, onChange)
+        MdToggle(value, onChange, Modifier.clearAndSetSemantics {})
     }
     if (!last) Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
 }

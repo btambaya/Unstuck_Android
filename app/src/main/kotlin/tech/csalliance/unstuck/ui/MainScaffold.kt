@@ -3,7 +3,7 @@ package tech.csalliance.unstuck.ui
 import androidx.activity.compose.BackHandler
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
@@ -21,12 +21,14 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -86,17 +88,28 @@ fun MainScaffold(vm: AppViewModel) {
     var tab by rememberSaveable { mutableStateOf("today") }
     val stack = remember { mutableStateListOf<Route>() }
     var sheet by remember { mutableStateOf<Sheet?>(null) }
-    var showNewTask by remember { mutableStateOf(false) }
-    var newTaskPrefill by remember { mutableStateOf<Pair<String, String>?>(null) }
+    var showNewTask by rememberSaveable { mutableStateOf(false) }
+    var newTaskPrefill by rememberSaveable(stateSaver = listSaver(
+        save = { p -> if (p == null) emptyList() else listOf(p.first, p.second) },
+        restore = { l -> if (l.size == 2) l[0] to l[1] else null },
+    )) { mutableStateOf<Pair<String, String>?>(null) }
     var focusTask by remember { mutableStateOf<TaskItem?>(null) }
     var focusAutoCapture by remember { mutableStateOf(false) }
     var activeArea by remember { mutableStateOf<String?>(null) }
     var onboarding by remember { mutableStateOf(!vm.onboarded) }
     // Return to Today whenever the app is backgrounded, so reopening lands on the
     // home tab instead of a stale detail/overlay/sheet. A live focus session is
-    // preserved (its overlay reappears).
+    // preserved (its overlay reappears). Config changes (rotation, dark-mode flip)
+    // also pass through ON_STOP — those must NOT reset, or the saveable new-task
+    // sheet state would be cleared before it is snapshotted.
+    val hostActivity = androidx.compose.ui.platform.LocalContext.current.let { ctx ->
+        generateSequence(ctx) { (it as? android.content.ContextWrapper)?.baseContext }
+            .filterIsInstance<android.app.Activity>().firstOrNull()
+    }
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
-        tab = "today"; stack.clear(); sheet = null; showNewTask = false; newTaskPrefill = null
+        if (hostActivity?.isChangingConfigurations != true) {
+            tab = "today"; stack.clear(); sheet = null; showNewTask = false; newTaskPrefill = null
+        }
     }
     val c = UTheme.colors
     val initials = remember(vm.currentName) {
@@ -231,13 +244,15 @@ fun MainScaffold(vm: AppViewModel) {
         // The opaque background HIDES the tab content beneath, but a plain Box
         // doesn't CONSUME pointer events, so taps on the overlay's empty areas
         // (e.g. the top-right, over the tab header's inbox/bell/avatar) would
-        // fall through to those still-live icons. A no-op, no-ripple clickable
-        // on the layer swallows those stray taps without affecting the overlay's
-        // own interactive children (they consume their touches first).
+        // fall through to those still-live icons. A no-op pointerInput on the
+        // layer swallows those stray taps without affecting the overlay's own
+        // interactive children (they consume their touches first) — and unlike
+        // clickable it adds NO semantics node, so TalkBack doesn't surface a
+        // giant nameless "double tap to activate" element on every pushed screen.
         stack.lastOrNull()?.let { route ->
             Box(
                 Modifier.fillMaxSize().background(c.bg)
-                    .clickable(interactionSource = remember { MutableInteractionSource() }, indication = null) {}
+                    .pointerInput(Unit) { detectTapGestures {} }
                     .systemBarsPadding(),
             ) {
                 when (route) {

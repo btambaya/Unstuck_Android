@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
@@ -49,20 +50,23 @@ fun UButton(
     onClick: () -> Unit,
 ) {
     val c = UTheme.colors
-    val bg = when (kind) {
+    val bgKind = when (kind) {
         ButtonKind.CORAL, ButtonKind.PRIMARY -> c.coral
         ButtonKind.DARK -> c.ink
         ButtonKind.DANGER -> c.red
         ButtonKind.GHOST -> c.bg2
         ButtonKind.OUTLINED, ButtonKind.TEXT -> Color.Transparent
     }
-    val fg = when (kind) {
+    val fgKind = when (kind) {
         ButtonKind.CORAL, ButtonKind.PRIMARY, ButtonKind.DANGER -> Color.White
         ButtonKind.DARK -> c.bg
         ButtonKind.GHOST -> c.ink
         ButtonKind.OUTLINED -> c.ink
         ButtonKind.TEXT -> c.ink3
     }
+    // Disabled buttons must LOOK disabled (washed out), not just swallow taps.
+    val bg = if (enabled) bgKind else bgKind.copy(alpha = bgKind.alpha * 0.45f)
+    val fg = if (enabled) fgKind else fgKind.copy(alpha = 0.6f)
     val base = Modifier
         .then(if (fill) Modifier.fillMaxWidth() else Modifier)
         .clip(pill)
@@ -98,12 +102,13 @@ fun ColorChip(color: Color, modifier: Modifier = Modifier, box: Int = 30, dot: I
     ) { Box(Modifier.size(dot.dp).clip(CircleShape).background(color)) }
 }
 
-/** Filter / segmented pill — dark-ink active, bg2 inactive, optional area dot. */
+/** Filter / segmented pill — dark-ink active, bg2 inactive, optional area dot.
+ *  selectable (not clickable) so TalkBack announces the selected state. */
 @Composable
 fun FilterPill(label: String, selected: Boolean, modifier: Modifier = Modifier, dotColor: Color? = null, onClick: () -> Unit) {
     val c = UTheme.colors
     Row(
-        modifier.clip(pill).background(if (selected) c.ink else c.bg2).clickable(onClick = onClick)
+        modifier.clip(pill).background(if (selected) c.ink else c.bg2).selectable(selected = selected, onClick = onClick)
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp),

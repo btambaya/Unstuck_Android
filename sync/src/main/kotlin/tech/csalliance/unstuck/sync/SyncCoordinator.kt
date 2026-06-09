@@ -132,13 +132,17 @@ class SyncCoordinator(
 
     /** Finish consent from the `unstuck://calendar-callback?code&state` deep link. */
     suspend fun completeGoogleConnect(code: String, state: String): Boolean = runCatching {
+        // CSRF guard: only honor a callback when WE initiated the consent flow AND
+        // the returned state matches the one minted for it. A null pendingCalState
+        // means no connect is in flight — an unsolicited deep link (the callback is
+        // BROWSABLE, reachable from any web page/app) must be rejected, not processed.
         val expected = pendingCalState
-        if (expected != null && expected != state) {                 // CSRF guard
-            Log.w(TAG, "calendar connect: state mismatch — ignoring callback")
+        if (expected == null || expected != state) {
+            Log.w(TAG, "calendar connect: no pending consent or state mismatch — ignoring callback")
             return false
         }
+        pendingCalState = null   // single-use: a replayed deep link can't be honored twice
         calendar.connectGoogle(code, CAL_REDIRECT, state)
-        pendingCalState = null
         // Flush first: hydrate replaces cal_blocks with (remote + localExternal), so an
         // unflushed local TASK block (in neither set) would vanish until the next sync.
         auth.currentUserId?.let { flusher.flush(it) { auth.currentUserId }; hydrator.hydrate(it) }   // pull the new calendar_connections row so the UI flips to "Synced" now, not on next launch

@@ -62,9 +62,9 @@ class WriteThrough(private val store: LocalStore) {
         store.upsert(Tables.CAPTURES, c, Capture.serializer(), c.id, c.at)
         // Wait for the parent session row to flush first — a capture taken DURING a
         // session references a session_id (FK) whose `sessions` row is only written at
-        // session end. Without this the capture can push ahead, hit the FK, and be
-        // poison-dropped. (If the session is abandoned, the orphan-drop in OutboxFlusher
-        // cleans this up alongside it.)
+        // session end. OutboxFlusher holds a dependsOn op while the parent row has a
+        // pending op OR doesn't exist in local records yet (the live-session case), so
+        // the capture can't push ahead, hit the FK, and be poison-dropped.
         val dependsOn = c.sessionId?.let { if (isUuid(it)) it else null }
         enqueue("captures", c.id, "upsert", DbRowCodec.encodeCapture(c).toString(), dependsOn)
     }

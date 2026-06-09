@@ -9,14 +9,20 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.glance.appwidget.updateAll
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.mutableStateListOf
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.decodeFromString
@@ -210,7 +216,12 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
             // the chosen date when it's today or off-pattern (e.g. a Tue pick on a
             // Mon/Wed/Fri weekly), so without this the task vanishes from that date —
             // despite the "Scheduled" confirmation. Only add when nothing covers it.
-            val coversChosen = existing.any { it.date == date } || plan.toUpsert.any { it.date == date }
+            // Coverage is computed POST-plan: a pre-regen block on the chosen date that
+            // the plan is about to delete (the old off-pattern anchor, or the same date
+            // at the old time) must NOT count — counting it skipped this upsert while
+            // the deletes still ran, leaving the chosen date with no block at all.
+            val deleting = plan.toDelete.toSet()
+            val coversChosen = existing.any { it.date == date && it.id !in deleting } || plan.toUpsert.any { it.date == date }
             if (!coversChosen) {
                 write?.upsertCalBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = startTime, durationMinutes = task.estimateMin, date = date, kind = CalBlockKind.TASK))
             }
@@ -424,7 +435,22 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     val lastRecap: StateFlow<RecapState?> = _lastRecap
     fun dismissRecap() { _lastRecap.value = null }
 
-    fun cancelFocus() = launchWrite { store.setLiveSession(null) }
+    fun cancelFocus() = launchWrite {
+        // Captures taken during the cancelled session reference a sessions row that
+        // would otherwise never be written — the outbox gate would hold them (and the
+        // server FK reject them) forever. Materialize a minimal session row first so
+        // those captures can still sync; a captureless cancel leaves no trace, and the
+        // task's totalFocused is deliberately NOT bumped (cancel discards the time).
+        val live = store.getLiveSession()
+        val sid = live?.id
+        if (live != null && sid != null && store.captures().first().any { it.sessionId == sid }) {
+            val task = store.tasks().first().firstOrNull { it.id == live.taskId }
+            write?.upsertSession(
+                Session(id = sid, taskId = live.taskId, taskName = task?.name.orEmpty(), estimateMin = task?.estimateMin ?: live.sessionEstimateMin, actualSec = FocusTimer.elapsedSec(live, nowMs()), completedAt = isoNow()),
+            )
+        }
+        store.setLiveSession(null)
+    }
 
     private suspend fun mutateLive(transform: (LiveSession) -> LiveSession) {
         val cur = store.getLiveSession() ?: return
@@ -756,11 +782,48 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     private val assistantPrefs by lazy {
         graph.appContext.getSharedPreferences("unstuck.assistant", android.content.Context.MODE_PRIVATE)
     }
+    // Bumped by clearAssistant() so an in-flight async history load can't
+    // resurrect a conversation cleared (e.g. by a sign-out) while it was reading.
+    private var assistantEpoch = 0
+
+    // The in-flight turn runs on viewModelScope — NOT the sheet's composition
+    // scope — so dismissing the sheet (or MainScaffold's ON_STOP sheet reset)
+    // can't cancel a multi-step agentic turn mid-flight and leave tool actions
+    // half-applied with no reply. State lives here so reopening the sheet shows it.
+    private var assistantJob: Job? = null
+    private val _assistantSending = MutableStateFlow(false)
+    val assistantSending: StateFlow<Boolean> = _assistantSending.asStateFlow()
+    /** Error code of the last failed turn (null = none); survives sheet reopen. */
+    private val _assistantError = MutableStateFlow<String?>(null)
+    val assistantError: StateFlow<String?> = _assistantError.asStateFlow()
+    /** Reply texts as turns complete — an OPEN sheet collects to speak them. */
+    private val _assistantReplies = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val assistantReplies: SharedFlow<String> = _assistantReplies.asSharedFlow()
 
     init {
-        runCatching {
-            assistantPrefs.getString("history", null)?.let {
-                assistantHistory.addAll(Json.decodeFromString<List<ChatMessage>>(it))
+        // Load the persisted history OFF the main thread — the synchronous prefs
+        // read + JSON decode of up to 40 (possibly long) messages was cold-start
+        // main-thread disk IO inside the first composition. The sheet is never
+        // visible at t=0, so the deferred load is invisible to the user.
+        viewModelScope.launch {
+            val epoch = assistantEpoch
+            val loaded = withContext(Dispatchers.IO) {
+                runCatching {
+                    assistantPrefs.getString("history", null)
+                        ?.let { Json.decodeFromString<List<ChatMessage>>(it) }
+                }.getOrNull()
+            }
+            if (!loaded.isNullOrEmpty() && epoch == assistantEpoch) assistantHistory.addAll(0, loaded)
+        }
+        // Scrub the conversation on sign-out — same cross-account leak class as
+        // the notification log: the next account on a shared device must not see
+        // the previous user's brain-dump / created tasks. (Account deletion ends
+        // in the same auth signOut, so it's covered too.)
+        graph.provider?.client?.let { client ->
+            viewModelScope.launch {
+                client.auth.sessionStatus.collect { status ->
+                    if (status is SessionStatus.NotAuthenticated && status.isSignOut) clearAssistant()
+                }
             }
         }
     }
@@ -772,19 +835,37 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         }
     }
 
-    /** Clear the assistant conversation (a "new chat"). */
+    /** Clear the assistant conversation (a "new chat" + the sign-out scrub). */
     fun clearAssistant() {
+        assistantEpoch++
+        assistantJob?.cancel()
+        assistantJob = null
+        _assistantSending.value = false
+        _assistantError.value = null
         assistantHistory.clear()
-        runCatching { assistantPrefs.edit().remove("history").apply() }
+        runCatching { assistantPrefs.edit().clear().apply() }
     }
 
-    /** Send a user message + run the turn against [assistantHistory], persisting. */
-    suspend fun sendAssistant(userText: String): AssistantTurn {
+    /** Append a user message + run the agentic turn on viewModelScope, persisting.
+     *  Fire-and-forget for the caller: progress/result surface via
+     *  [assistantSending], [assistantError] and [assistantReplies]. */
+    fun sendAssistant(userText: String) {
+        if (_assistantSending.value) return
+        _assistantSending.value = true
+        _assistantError.value = null
         assistantHistory.add(ChatMessage(role = "user", content = userText))
         persistAssistant()
-        val result = assistantTurn(assistantHistory)
-        persistAssistant()
-        return result
+        assistantJob = viewModelScope.launch {
+            try {
+                when (val result = assistantTurn(assistantHistory)) {
+                    is AssistantTurn.Reply -> _assistantReplies.tryEmit(result.text)
+                    is AssistantTurn.Error -> _assistantError.value = result.code
+                }
+                persistAssistant()
+            } finally {
+                _assistantSending.value = false
+            }
+        }
     }
 
     private suspend fun assistantTurn(history: MutableList<ChatMessage>): AssistantTurn {

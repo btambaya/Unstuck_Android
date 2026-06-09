@@ -36,12 +36,21 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.semantics.LiveRegionMode
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleEventEffect
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
@@ -69,6 +78,13 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
         if (!vm.voiceConfigured()) { note = "Voice isn't set up yet."; state = VoiceState.ERROR; return }
         note = null; state = VoiceState.CONNECTING
         vm.resetVoiceScratch()
+        // Another app (most importantly an incoming phone call) took audio focus →
+        // end the session instead of talking over it. stop() reports CLOSED ("Ended").
+        audio.onFocusLost = { client?.stop() }
+        audio.onCaptureError = {
+            client?.stop()
+            main.post { note = "Couldn't access the microphone — it may be in use by another app."; state = VoiceState.ERROR }
+        }
         val rc = VoiceRealtimeClient(
             proxyUrl = vm.voiceProxyUrl, token = token, model = vm.voiceModel,
             instructions = vm.voiceInstructions(), tools = vm.voiceTools(), audio = audio,
@@ -92,20 +108,40 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
         if (granted) startSession() else { note = "Microphone access is needed for voice."; state = VoiceState.ERROR }
     }
 
+    // stop() tears audio down too (off the main thread); shutdown() directly only
+    // covers the never-started case, where it's a cheap no-op sweep.
+    fun endSession() {
+        val rc = client
+        if (rc != null) rc.stop() else audio.shutdown()
+    }
+
     LaunchedEffect(Unit) {
         val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         if (granted) startSession() else micPermission.launch(Manifest.permission.RECORD_AUDIO)
     }
-    DisposableEffect(Unit) { onDispose { client?.stop(); audio.shutdown() } }
+    DisposableEffect(Unit) { onDispose { endSession() } }
+    // Graceful end on Home/lock — without a microphone foreground service Android
+    // silences capture in the background, so a backgrounded session would be a
+    // one-way zombie call (speaker + socket + comm-mode left alive).
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { endSession() }
 
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        // Keep the screen awake while the call is live so the lock screen doesn't
+        // cut the session mid-conversation. (The dialog has its own window.)
+        val view = LocalView.current
+        val sessionLive = state == VoiceState.CONNECTING || state == VoiceState.LISTENING || state == VoiceState.SPEAKING
+        DisposableEffect(sessionLive) {
+            view.keepScreenOn = sessionLive
+            onDispose { view.keepScreenOn = false }
+        }
         Box(Modifier.fillMaxSize().background(c.bg)) {
             // Close (X)
             Box(
                 Modifier.align(Alignment.TopEnd).padding(18.dp).size(40.dp).clip(CircleShape)
-                    .background(c.bg2).clickable { onClose() },
+                    .background(c.bg2).clickable(role = Role.Button) { onClose() }
+                    .semantics { contentDescription = "Close voice mode" },
                 contentAlignment = Alignment.Center,
-            ) { Text("✕", style = UFont.sans(18), color = c.ink2) }
+            ) { Text("✕", Modifier.clearAndSetSemantics {}, style = UFont.sans(18), color = c.ink2) }
 
             Column(
                 Modifier.align(Alignment.Center).fillMaxWidth().padding(horizontal = 32.dp),
@@ -126,6 +162,8 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                         VoiceState.ERROR -> note ?: "Something went wrong."
                         VoiceState.CLOSED -> "Ended"
                     },
+                    // Announce state changes (Listening/Speaking/errors) to TalkBack.
+                    modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                     style = UFont.sans(15, FontWeight.Medium), color = c.ink2,
                 )
                 if (caption.isNotBlank()) {
@@ -135,7 +173,7 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                 if (live) {
                     Box(
                         Modifier.clip(RoundedCornerShape(999.dp)).background(c.bg2)
-                            .clickable { client?.interrupt() }
+                            .clickable(role = Role.Button) { client?.interrupt() }
                             .padding(horizontal = 24.dp, vertical = 12.dp),
                     ) { Text("Interrupt", style = UFont.sans(15, FontWeight.SemiBold), color = c.ink) }
                 }
@@ -144,7 +182,8 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
             // End button
             Box(
                 Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp)
-                    .clip(RoundedCornerShape(999.dp)).background(c.coral).clickable { onClose() }
+                    .clip(RoundedCornerShape(999.dp)).background(c.coral)
+                    .clickable(role = Role.Button) { onClose() }
                     .padding(horizontal = 28.dp, vertical = 14.dp),
             ) { Text("End", style = UFont.sans(15, FontWeight.SemiBold), color = Color.White) }
         }
@@ -160,7 +199,13 @@ private fun PulsingOrb(active: Boolean, color: Color, onClick: (() -> Unit)? = n
     )
     Box(
         Modifier.size(120.dp).scale(scale).clip(CircleShape).background(color)
-            .let { if (onClick != null) it.clickable { onClick() } else it },
+            .let { m ->
+                if (onClick != null) {
+                    m.clickable(role = Role.Button) { onClick() }
+                        .semantics { contentDescription = "Interrupt assistant" }
+                } else m
+            },
         contentAlignment = Alignment.Center,
-    ) { Text("●", style = UFont.sans(36), color = Color.White.copy(alpha = 0.9f)) }
+        // The glyph is decorative — keep TalkBack on the orb's label, not "●".
+    ) { Text("●", Modifier.clearAndSetSemantics {}, style = UFont.sans(36), color = Color.White.copy(alpha = 0.9f)) }
 }

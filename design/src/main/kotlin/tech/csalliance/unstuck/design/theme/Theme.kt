@@ -58,7 +58,9 @@ data class UnstuckColors(
         val light = UnstuckColors(
             bg = hexColor("#FAFAF7"), bg2 = hexColor("#F4F2EC"), surface = hexColor("#FFFFFF"),
             ink = hexColor("#1A1C26"), ink2 = hexColor("#414252"),
-            ink3 = hexColor("#7B7D8E"), ink4 = hexColor("#B5B6C0"),
+            // ink3 darkened from the mockup's #7B7D8E (~4.07:1 on white — fails WCAG AA
+            // for the 11-13sp meta text it colors app-wide) to #6C6E7E (~4.6:1 on white).
+            ink3 = hexColor("#6C6E7E"), ink4 = hexColor("#B5B6C0"),
             line = hexColor("#EAE7DD"), line2 = hexColor("#D9D5CA"),
             primary = oklch(0.58, 0.13, 280.0), primarySoft = oklch(0.93, 0.04, 280.0),
             primaryDeep = oklch(0.42, 0.13, 280.0),

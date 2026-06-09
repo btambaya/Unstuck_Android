@@ -61,6 +61,12 @@ class VoiceAudioEngine(private val context: Context) {
     private val am = context.getSystemService(Context.AUDIO_SERVICE) as AudioManager
     private val mainHandler = Handler(Looper.getMainLooper())
 
+    // Session-level callbacks, set by the owner of the engine (voice screen).
+    /** Another app (most importantly telephony) took audio focus — end the session. */
+    @Volatile var onFocusLost: (() -> Unit)? = null
+    /** Mic capture couldn't start or died mid-session (mic held elsewhere). */
+    @Volatile var onCaptureError: (() -> Unit)? = null
+
     // ── communication mode + routing ──
     @Volatile private var commActive = false
     private var savedMode = AudioManager.MODE_NORMAL
@@ -70,21 +76,32 @@ class VoiceAudioEngine(private val context: Context) {
     @Volatile var echoProne = true
         private set
 
-    private fun enterCommMode() {
-        if (commActive) return
+    private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
+        if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
+            onFocusLost?.invoke()
+        }
+    }
+
+    /** @return false when audio focus was denied (e.g. an active phone call) — don't start streams. */
+    private fun enterCommMode(): Boolean {
+        if (commActive) return true
         commActive = true
         runCatching { savedMode = am.mode; am.mode = AudioManager.MODE_IN_COMMUNICATION }
-        runCatching {
+        val granted = runCatching {
             val attrs = AudioAttributes.Builder()
                 .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
                 .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build()
             val fr = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN_TRANSIENT_EXCLUSIVE)
-                .setAudioAttributes(attrs).build()
-            am.requestAudioFocus(fr)
+                .setAudioAttributes(attrs)
+                .setOnAudioFocusChangeListener(focusListener, mainHandler)
+                .build()
             focusRequest = fr
-        }
+            am.requestAudioFocus(fr) != AudioManager.AUDIOFOCUS_REQUEST_FAILED
+        }.getOrDefault(false)
+        if (!granted) { exitCommMode(); return false }
         applyRoute()
         registerRouteCallback()
+        return true
     }
 
     // Prefer a connected headset; else hands-free on the built-in speaker.
@@ -141,7 +158,7 @@ class VoiceAudioEngine(private val context: Context) {
     @SuppressLint("MissingPermission")
     fun startCapture(onFrame: (ByteArray) -> Unit) {
         if (capturing) return
-        enterCommMode()
+        if (!enterCommMode()) { onCaptureError?.invoke(); return }
         val frameBytes = IN_RATE / 10 * 2 // 100ms mono pcm16 = 3200 bytes
         val minBuf = AudioRecord.getMinBufferSize(IN_RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
         val rec = runCatching {
@@ -154,12 +171,25 @@ class VoiceAudioEngine(private val context: Context) {
         if (rec.state != AudioRecord.STATE_INITIALIZED) { runCatching { rec.release() }; return }
         record = rec
         enableEffects(rec.audioSessionId)
-        capturing = true
         runCatching { rec.startRecording() }
+        if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
+            // Mic is held by another app (or start failed): bail instead of letting
+            // the read loop spin on error codes at full CPU.
+            releaseEffects()
+            runCatching { rec.release() }
+            record = null
+            onCaptureError?.invoke()
+            return
+        }
+        capturing = true
         captureThread = thread(name = "voice-capture") {
             val buf = ByteArray(frameBytes)
             while (capturing) {
                 val n = rec.read(buf, 0, buf.size)
+                if (n < 0) { // recorder died (e.g. mic stolen) — fatal, don't spin
+                    if (capturing) onCaptureError?.invoke()
+                    break
+                }
                 // Half-duplex ONLY on an echo-prone (loudspeaker) route. On a
                 // headset we always forward → true server-VAD barge-in.
                 if (n > 0 && !(echoProne && outputBusy())) onFrame(if (n == buf.size) buf.copyOf() else buf.copyOf(n))
@@ -205,7 +235,7 @@ class VoiceAudioEngine(private val context: Context) {
 
     fun startPlayback() {
         if (playing) return
-        enterCommMode()
+        if (!enterCommMode()) return // capture's bail surfaces the error
         val minBuf = AudioTrack.getMinBufferSize(OUT_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
         val t = runCatching {
             AudioTrack.Builder()

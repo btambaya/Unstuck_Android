@@ -8,6 +8,20 @@ import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.UnstuckApp
 
 /**
+ * Re-arms pending reminder alarms on boot AND on app update — without handling
+ * MY_PACKAGE_REPLACED the update both DROPPED all pending reminders and fell
+ * through to fire a bogus "Coming up · your task is starting". This is the only
+ * exported reminder receiver (the system sends these broadcasts from another
+ * UID) and it deliberately reads NO intent extras, so other apps can't abuse it.
+ */
+class BootReceiver : BroadcastReceiver() {
+    override fun onReceive(context: Context, intent: Intent) {
+        if (intent.action != Intent.ACTION_BOOT_COMPLETED && intent.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
+        (context.applicationContext as? UnstuckApp)?.let { ReminderScheduler.reschedule(it) }
+    }
+}
+
+/**
  * Fires a time/schedule notification when its exact alarm goes off. The
  * `EXTRA_KIND` set by [ReminderScheduler] selects the moment:
  *  - "lead"    → pre-task "Coming up" (tap opens the task).
@@ -15,16 +29,14 @@ import tech.csalliance.unstuck.UnstuckApp
  *  - "drifted" → "didn't get to it?" follow-up (also Start / Reschedule).
  * For atstart/drifted we re-check at fire time that the task isn't already done
  * or being focused, so the nudge never fires for something already handled.
+ *
+ * NOT exported: the alarm PendingIntents target this class by explicit component
+ * (created by this app), so delivery still works — but no third-party app can
+ * inject spoofed extras to post a phishing notification under Unstuck's identity.
+ * Boot/update rescheduling lives in [BootReceiver].
  */
 class ReminderReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
-        // Re-arm pending alarms on boot AND on app update — without handling
-        // MY_PACKAGE_REPLACED the update both DROPPED all pending reminders and
-        // fell through to fire a bogus "Coming up · your task is starting".
-        if (intent.action == Intent.ACTION_BOOT_COMPLETED || intent.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
-            (context.applicationContext as? UnstuckApp)?.let { ReminderScheduler.reschedule(it) }
-            return
-        }
         val kind = intent.getStringExtra(EXTRA_KIND) ?: "lead"
         val taskName = intent.getStringExtra(EXTRA_TASK_NAME)?.takeIf { it.isNotBlank() } ?: "your task"
         val taskId = intent.getStringExtra(EXTRA_TASK_ID).orEmpty()

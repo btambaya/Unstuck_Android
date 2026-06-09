@@ -13,6 +13,8 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -29,6 +31,9 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -58,7 +63,8 @@ fun AppBar(
     val iconTint = if (dark) Color.White else c.ink2
     Row(Modifier.fillMaxWidth().padding(horizontal = 6.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
         if (leading != Leading.NONE) {
-            BarIcon(if (leading == Leading.MENU) Icons.Outlined.Menu else Icons.AutoMirrored.Outlined.ArrowBack, iconTint, onLeading)
+            if (leading == Leading.MENU) BarIcon(Icons.Outlined.Menu, iconTint, "Menu", onLeading)
+            else BarIcon(Icons.AutoMirrored.Outlined.ArrowBack, iconTint, "Back", onLeading)
         }
         Text(
             title,
@@ -66,7 +72,7 @@ fun AppBar(
             style = UFont.sans(16, FontWeight.Medium).copy(letterSpacing = (-0.1).sp),
             color = if (dark) Color.White else c.ink,
         )
-        if (trailingSearch) BarIcon(Icons.Outlined.Search, iconTint, onSearch)
+        if (trailingSearch) BarIcon(Icons.Outlined.Search, iconTint, "Search", onSearch)
         if (onNotifications != null) {
             Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onNotifications), contentAlignment = Alignment.Center) {
                 Icon(Icons.Outlined.Notifications, contentDescription = "Notifications", tint = iconTint, modifier = Modifier.size(20.dp))
@@ -75,7 +81,9 @@ fun AppBar(
         }
         if (onAvatar != null) {
             Box(
-                Modifier.size(40.dp).padding(4.dp).clip(CircleShape).background(c.greenSoft).clickable(onClick = onAvatar),
+                Modifier.size(40.dp).padding(4.dp).clip(CircleShape).background(c.greenSoft)
+                    .semantics { contentDescription = "Account menu" }
+                    .clickable(onClick = onAvatar, role = Role.Button),
                 contentAlignment = Alignment.Center,
             ) { Text(avatarInitials ?: "U", style = UFont.sans(12, FontWeight.SemiBold), color = c.greenInk) }
         }
@@ -83,9 +91,9 @@ fun AppBar(
 }
 
 @Composable
-private fun BarIcon(icon: ImageVector, tint: Color, onClick: () -> Unit) {
-    Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onClick), contentAlignment = Alignment.Center) {
-        Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp))
+private fun BarIcon(icon: ImageVector, tint: Color, label: String, onClick: () -> Unit) {
+    Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onClick, role = Role.Button), contentAlignment = Alignment.Center) {
+        Icon(icon, contentDescription = label, tint = tint, modifier = Modifier.size(20.dp))
     }
 }
 
@@ -103,7 +111,7 @@ fun BottomNavBar(
     val c = UTheme.colors
     Box(modifier.fillMaxWidth()) {
         Row(
-            Modifier.fillMaxWidth().background(c.bg).padding(top = 8.dp, bottom = 6.dp),
+            Modifier.fillMaxWidth().background(c.bg).selectableGroup().padding(top = 8.dp, bottom = 6.dp),
             horizontalArrangement = Arrangement.SpaceAround,
             verticalAlignment = Alignment.Bottom,
         ) {
@@ -127,7 +135,9 @@ private fun RowScope.NavCell(item: NavSpec, activeKey: String, onSelect: (String
     val c = UTheme.colors
     val active = item.key == activeKey
     Column(
-        Modifier.weight(1f).clip(RoundedCornerShape(12.dp)).clickable { onSelect(item.key) }.padding(top = 2.dp, bottom = 2.dp),
+        Modifier.weight(1f).clip(RoundedCornerShape(12.dp))
+            .selectable(selected = active, role = Role.Tab) { onSelect(item.key) }
+            .padding(top = 2.dp, bottom = 2.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
         verticalArrangement = Arrangement.spacedBy(2.dp),
     ) {
@@ -135,7 +145,9 @@ private fun RowScope.NavCell(item: NavSpec, activeKey: String, onSelect: (String
             Modifier.clip(RoundedCornerShape(999.dp)).background(if (active) c.bg2 else Color.Transparent)
                 .padding(horizontal = 16.dp, vertical = 4.dp),
         ) {
-            Icon(item.icon, contentDescription = item.label, tint = if (active) c.ink else c.ink3, modifier = Modifier.size(20.dp))
+            // contentDescription = null: the Text below already names the tab (a non-null
+            // description here made TalkBack announce the label twice).
+            Icon(item.icon, contentDescription = null, tint = if (active) c.ink else c.ink3, modifier = Modifier.size(20.dp))
         }
         Text(item.label, style = UFont.sans(11, if (active) FontWeight.SemiBold else FontWeight.Medium), color = if (active) c.ink else c.ink3)
     }

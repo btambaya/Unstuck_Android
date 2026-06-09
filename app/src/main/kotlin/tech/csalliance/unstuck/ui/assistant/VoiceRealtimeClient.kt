@@ -3,6 +3,8 @@ package tech.csalliance.unstuck.ui.assistant
 import android.util.Base64
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
@@ -22,6 +24,7 @@ import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 // Realtime voice client for Qwen-Omni (via the Cloudflare proxy). Streams mic
 // PCM16/16k up, plays the model's PCM16/24k speech back, shows live captions,
@@ -51,17 +54,25 @@ class VoiceRealtimeClient(
     private val onCaption: (role: String, text: String, done: Boolean) -> Unit,
     private val onError: (String) -> Unit = {},
 ) {
-    private val scope = CoroutineScope(Dispatchers.IO)
+    companion object {
+        // One client for ALL voice sessions — each OkHttpClient owns a dispatcher
+        // executor, connection pool, and ping scheduler that linger long after
+        // the session ends, so per-session clients pile up idle thread pools.
+        private val http by lazy {
+            OkHttpClient.Builder()
+                .pingInterval(20, TimeUnit.SECONDS)
+                .readTimeout(0, TimeUnit.MILLISECONDS) // long-lived socket
+                .build()
+        }
+    }
+
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private var ws: WebSocket? = null
     @Volatile private var open = false
+    @Volatile private var stopped = false
     // After a manual interrupt we drop any still-in-flight audio from the
     // cancelled response until the next turn starts (user speaks / new response).
     @Volatile private var muted = false
-
-    private val http = OkHttpClient.Builder()
-        .pingInterval(20, TimeUnit.SECONDS)
-        .readTimeout(0, TimeUnit.MILLISECONDS) // long-lived socket
-        .build()
 
     fun start() {
         onState(VoiceState.CONNECTING)
@@ -73,10 +84,18 @@ class VoiceRealtimeClient(
     }
 
     fun stop() {
+        if (stopped) return
+        stopped = true
         open = false
-        audio.shutdown()
-        runCatching { ws?.close(1000, "bye") }
+        scope.cancel() // a dead session must not keep running tools / mutating state
+        val socket = ws
         ws = null
+        // Off the caller's thread: audio.shutdown() joins the capture/playback
+        // threads (up to ~600ms) and stop() runs on main (dispose / ON_STOP).
+        thread(name = "voice-stop") {
+            runCatching { socket?.close(1000, "bye") }
+            audio.shutdown()
+        }
         onState(VoiceState.CLOSED)
     }
 

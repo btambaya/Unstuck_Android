@@ -15,7 +15,7 @@ class TokensTest {
         assertEquals(hexColor("#FFFFFF"), l.surface)
         assertEquals(hexColor("#1A1C26"), l.ink)
         assertEquals(hexColor("#414252"), l.ink2)
-        assertEquals(hexColor("#7B7D8E"), l.ink3)
+        assertEquals(hexColor("#6C6E7E"), l.ink3)   // darkened from mockup #7B7D8E for WCAG AA
         assertEquals(hexColor("#B5B6C0"), l.ink4)
         assertEquals(hexColor("#EAE7DD"), l.line)
         assertEquals(hexColor("#D9D5CA"), l.line2)

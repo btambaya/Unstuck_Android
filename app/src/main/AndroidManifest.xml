@@ -71,11 +71,18 @@
             android:name=".surface.NotificationActionReceiver"
             android:exported="false" />
 
-        <!-- Pre-task reminder alarms + reschedule on boot. Must be exported=true to
-             receive the system BOOT_COMPLETED / MY_PACKAGE_REPLACED broadcasts (sent
-             from another UID); the alarm PendingIntents target it explicitly anyway. -->
+        <!-- Pre-task reminder alarm fires. NOT exported: the alarm PendingIntents
+             target it by explicit component from this app, so delivery still works,
+             while no other app can inject spoofed notification extras. -->
         <receiver
             android:name=".surface.ReminderReceiver"
+            android:exported="false" />
+
+        <!-- Reschedule reminder alarms on boot / app update. Must be exported=true to
+             receive the system BOOT_COMPLETED / MY_PACKAGE_REPLACED broadcasts (sent
+             from another UID); it reads no intent extras (see BootReceiver). -->
+        <receiver
+            android:name=".surface.BootReceiver"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />

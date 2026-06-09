@@ -20,8 +20,10 @@ import tech.csalliance.unstuck.data.db.Tables
 // Hydrator — pulls every synced table and replaces the local store
 // (server-canonical). Per-table error isolation: a table whose fetch fails is
 // left intact (mirrors hydrate.ts's `if (res.ok) replace(...)`). cal_blocks
-// preserves locally-cached Google external blocks across the replace. RLS
-// auto-scopes reads. Port of the iOS Hydrator.swift.
+// preserves locally-cached Google external blocks across the replace, and every
+// table preserves rows whose outbox upsert is still pending (an unflushed
+// optimistic write must not vanish from the UI). RLS auto-scopes reads. Port of
+// the iOS Hydrator.swift.
 
 class Hydrator(private val gateway: SyncGateway, private val store: LocalStore) {
 
@@ -57,7 +59,10 @@ class Hydrator(private val gateway: SyncGateway, private val store: LocalStore) 
                 val myRole = if (c.ownerId == userId) "owner" else ms.firstOrNull { it.first == userId }?.second
                 c.copy(members = ms.map { it.first }, myRole = myRole)
             }
-            store.replace(Tables.COLLECTIONS, enriched, ItemCollection.serializer(), { it.id })
+            // Keep optimistic local collections whose outbox upsert hasn't flushed yet
+            // (same preservation the generic replace() applies).
+            val localPending = pendingLocalRows(Tables.COLLECTIONS, ItemCollection.serializer(), { it.id }, enriched.map { it.id }.toSet())
+            store.replace(Tables.COLLECTIONS, enriched + localPending, ItemCollection.serializer(), { it.id })
         }.onFailure { println("[hydrate] collections failed, leaving local intact: $it") }
     }
 
@@ -70,8 +75,29 @@ class Hydrator(private val gateway: SyncGateway, private val store: LocalStore) 
     ) {
         runCatching {
             val models = gateway.fetchAll(table).map(decode)
-            store.replace(table, models, ser, id, updatedAt)
+            // Preserve optimistic local rows with a still-pending outbox upsert (e.g.
+            // a transient flush failure followed by a successful fetch): they're not
+            // in `models`, so the replace would wipe them off the UI until the next
+            // successful flush. Same rule hydrateCalBlocks applies for cal_blocks.
+            val localPending = pendingLocalRows(table, ser, id, models.map(id).toSet())
+            store.replace(table, models + localPending, ser, id, updatedAt)
         }.onFailure { println("[hydrate] $table failed, leaving local intact: $it") }
+    }
+
+    /** Local rows for [table] that still have a queued outbox upsert and are not
+     *  in the server set — re-added across the replace so an unflushed write
+     *  doesn't vanish from the UI. */
+    private suspend fun <T> pendingLocalRows(
+        table: String,
+        ser: KSerializer<T>,
+        id: (T) -> String,
+        serverIds: Set<String>,
+    ): List<T> {
+        val pendingIds = store.pending()
+            .filter { it.recordTable == table && it.op == "upsert" }
+            .map { it.recordId }.toSet()
+        if (pendingIds.isEmpty()) return emptyList()
+        return store.snapshot(table, ser).filter { id(it) in pendingIds && id(it) !in serverIds }
     }
 
     private suspend fun hydrateCalBlocks() {

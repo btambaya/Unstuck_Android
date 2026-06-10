@@ -106,11 +106,24 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     val configured = graph.configured
 
     /** null until the auth state resolves; true/false once known. */
+    // Tri-state so AppRoot shows the splash (null) — NOT the sign-in screen —
+    // while supabase restores the session from storage. Mapping every
+    // non-Authenticated status to `false` made `Initializing` (the
+    // load-from-storage state that fires before Authenticated on a cold start)
+    // render AuthScreen for a frame before flipping to the dashboard — the
+    // "sign-in flashes for a split second" bug. Keep `Initializing` as null.
     val authed: StateFlow<Boolean?> = run {
         val client = graph.provider?.client
         if (client == null) MutableStateFlow<Boolean?>(false)
         else client.auth.sessionStatus
-            .map { it is SessionStatus.Authenticated }
+            .map { status ->
+                when (status) {
+                    is SessionStatus.Authenticated -> true
+                    is SessionStatus.NotAuthenticated -> false
+                    is SessionStatus.RefreshFailure -> false   // couldn't refresh → needs re-auth
+                    is SessionStatus.Initializing -> null      // still loading from storage → stay on splash
+                }
+            }
             .stateIn(viewModelScope, SharingStarted.Eagerly, null)
     }
 

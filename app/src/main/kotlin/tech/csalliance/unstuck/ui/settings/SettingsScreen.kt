@@ -326,7 +326,7 @@ private fun AreasContent(vm: AppViewModel) {
     Text("Areas filter the same list — flat on purpose.", style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(bottom = 14.dp))
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         areas.sortedBy { it.sortOrder }.forEach { a ->
-            val open = tasks.count { it.lifeArea == a.name && !it.done }
+            val open = tasks.count { it.lifeArea == a.name && !it.done && it.recurrence == null }
             var menu by remember(a.id) { mutableStateOf(false) }
             var confirm by remember(a.id) { mutableStateOf(false) }
             var editing by remember(a.id) { mutableStateOf(false) }

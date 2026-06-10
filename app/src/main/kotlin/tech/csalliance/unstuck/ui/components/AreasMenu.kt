@@ -42,7 +42,8 @@ fun AreasMenu(vm: AppViewModel, onPick: (String?) -> Unit, onDismiss: () -> Unit
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     val tasks by vm.tasks.collectAsStateWithLifecycle()
-    val unassigned = tasks.count { !it.done && it.lifeArea == null }
+    // recurrence == null: hidden recurring templates don't count toward areas.
+    val unassigned = tasks.count { !it.done && it.recurrence == null && it.lifeArea == null }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = SheetScrim,
@@ -50,9 +51,9 @@ fun AreasMenu(vm: AppViewModel, onPick: (String?) -> Unit, onDismiss: () -> Unit
     ) {
         Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
             SectionLabel("Areas", color = c.primaryDeep, modifier = Modifier.padding(start = 20.dp, bottom = 4.dp))
-            AreaRow(c.ink4, "All tasks", tasks.count { !it.done }) { onPick(null) }
+            AreaRow(c.ink4, "All tasks", tasks.count { !it.done && it.recurrence == null }) { onPick(null) }
             areas.sortedBy { it.sortOrder }.forEach { a ->
-                val open = tasks.count { it.lifeArea == a.name && !it.done }
+                val open = tasks.count { it.lifeArea == a.name && !it.done && it.recurrence == null }
                 AreaRow(c.areaColor(a.color), a.name, open) { onPick(a.name) }
             }
             if (unassigned > 0) AreaRow(c.ink4, "Unassigned", unassigned) { onPick("Unassigned") }

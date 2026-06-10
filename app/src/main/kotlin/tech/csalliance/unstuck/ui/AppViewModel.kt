@@ -393,7 +393,8 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     private fun computeNudges(tasks: List<TaskItem>, captures: List<Capture>, now: Long): List<Nudge> {
         val out = mutableListOf<Nudge>()
         // D1 — slipping: open tasks older than 3 weeks or rescheduled 3+ times.
-        tasks.asSequence().filter { !it.done }.forEach { t ->
+        // (recurrence == null: a hidden recurring template never "slips".)
+        tasks.asSequence().filter { !it.done && it.recurrence == null }.forEach { t ->
             val ageDays = tech.csalliance.unstuck.core.time.Time.parseMillis(t.createdAt)?.let { (now - it) / 86_400_000.0 } ?: 0.0
             if (ageDays >= 21 || (t.moveCount ?: 0) >= 3) {
                 out.add(Nudge("slip:${t.id}", NudgeKind.SLIPPING, "“${t.name}” has been waiting a while.", "Open", taskId = t.id))
@@ -467,33 +468,38 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun finishFocus(task: TaskItem, markDone: Boolean = false) = launchWrite {
         val live = store.getLiveSession() ?: return@launchWrite
         val elapsed = FocusTimer.elapsedSec(live, nowMs())
+        // Resolve a recurring OCCURRENCE robustly — via live.occurrenceBlockId OR
+        // (defensively) the passed task's id being a cal_block id. The session +
+        // totalFocused always accrue on the TEMPLATE; completion marks the DAY's
+        // block. This guarantees we never upsert a task whose id is a block id
+        // (which would mint a phantom occurrence-as-task).
+        val occBlock = live.occurrenceBlockId?.let { id -> blocks.value.firstOrNull { it.id == id } }
+            ?: occurrenceBlockFor(task.id, tasks.value, blocks.value)
+        val realTask = occBlock?.let { b -> tasks.value.firstOrNull { it.id == b.taskId } } ?: task
         // Reuse the live-session id so captures taken during the session join back
         // to this Session row (the interruption histogram depends on it).
         write?.upsertSession(
-            Session(id = live.id ?: newUuid(), taskId = task.id, taskName = task.name, estimateMin = task.estimateMin, actualSec = elapsed, completedAt = isoNow()),
+            Session(id = live.id ?: newUuid(), taskId = realTask.id, taskName = realTask.name, estimateMin = realTask.estimateMin, actualSec = elapsed, completedAt = isoNow()),
         )
-        // Focusing a recurring occurrence: accrue focus on the series (task = the
-        // template here) but mark THIS day's cal_block done, not the template.
-        val occBlock = live.occurrenceBlockId?.let { id -> blocks.value.firstOrNull { it.id == id } }
         if (occBlock != null) {
-            write?.upsertTask(task.copy(totalFocused = task.totalFocused + elapsed, updatedAt = isoNow()))
+            write?.upsertTask(realTask.copy(totalFocused = realTask.totalFocused + elapsed, updatedAt = isoNow()))
             if (markDone) write?.upsertCalBlock(occBlock.copy(done = true, skipped = false, completedAt = isoNow()))
         } else {
-            val focused = task.copy(totalFocused = task.totalFocused + elapsed, updatedAt = isoNow())
+            val focused = realTask.copy(totalFocused = realTask.totalFocused + elapsed, updatedAt = isoNow())
             write?.upsertTask(
-                if (markDone) applyCompletion(focused.copy(done = true), prior = task, nowISO = isoNow()) else focused,
+                if (markDone) applyCompletion(focused.copy(done = true), prior = realTask, nowISO = isoNow()) else focused,
             )
         }
         store.setLiveSession(null)
         // Completing a promoted shared-collection task from Focus must also flip the
         // shared item + notify members (same as toggleDone).
-        if (markDone && occBlock == null && task.sourceCollectionId != null && task.sourceItemId != null) {
-            share?.taskDone(task.sourceCollectionId!!, task.sourceItemId!!, task.name, currentName ?: "Someone")
+        if (markDone && occBlock == null && realTask.sourceCollectionId != null && realTask.sourceItemId != null) {
+            share?.taskDone(realTask.sourceCollectionId!!, realTask.sourceItemId!!, realTask.name, currentName ?: "Someone")
         }
         // Session-end recap (design moment B3): records an in-app card always; the
         // server only pushes when away — finishing in-app means away = false.
-        runCatching { graph.coordinator?.notifications?.sessionRecap(task.name, away = false) }
-        _lastRecap.value = RecapState(taskName = task.name, focusedSec = elapsed, at = nowMs())
+        runCatching { graph.coordinator?.notifications?.sessionRecap(realTask.name, away = false) }
+        _lastRecap.value = RecapState(taskName = realTask.name, focusedSec = elapsed, at = nowMs())
     }
 
     // The most recent session-end recap, surfaced as a dismissible card on Today

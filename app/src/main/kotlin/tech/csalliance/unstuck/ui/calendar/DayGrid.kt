@@ -153,7 +153,9 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
     // Scheduled-anywhere, not just on the viewed day — otherwise a task scheduled on
     // another date reappears in the unscheduled tray and dragging it MOVES its block.
     val scheduledIds = blocks.filter { isTaskBlock(it) }.mapNotNull { it.taskId }.toSet()
-    val unscheduled = tasks.filter { !it.done && it.later != true && it.id !in scheduledIds }
+    // recurrence == null: never offer a recurring TEMPLATE in the schedule tray —
+    // it's a hidden definition that generates occurrences, not a schedulable task.
+    val unscheduled = tasks.filter { !it.done && it.later != true && it.recurrence == null && it.id !in scheduledIds }
 
     // Map the current drag position (window coords) to a snapped HH:MM on the grid.
     fun dropTimeOrNull(): String? {

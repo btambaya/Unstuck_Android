@@ -44,8 +44,8 @@ android {
         applicationId = "tech.csalliance.unstuck"
         minSdk = 26
         targetSdk = 35
-        versionCode = 54
-        versionName = "0.4.41"
+        versionCode = 55
+        versionName = "0.4.42"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)

@@ -98,7 +98,30 @@ fun AuthScreen(vm: AppViewModel) {
         Spacer(Modifier.height(14.dp))
         MdField(password, { password = it }, "Password", password = true)
 
-        message?.let { Spacer(Modifier.height(12.dp)); Text(it, style = UFont.sans(13), color = if (messageOk) c.primaryDeep else c.coralDeep, textAlign = TextAlign.Center) }
+        // Success (email sent / confirm) + error both render as a pronounced banner —
+        // a faint one-line caption read as "nothing happened" after Forgot password.
+        message?.let { msg ->
+            Spacer(Modifier.height(16.dp))
+            Row(
+                Modifier.fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(if (messageOk) c.greenSoft else c.coralSoft)
+                    .padding(horizontal = 14.dp, vertical = 13.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    if (messageOk) "✓" else "!",
+                    style = UFont.sans(16, FontWeight.Bold),
+                    color = if (messageOk) c.greenInk else c.coralDeep,
+                )
+                Spacer(Modifier.width(11.dp))
+                Text(
+                    msg,
+                    style = UFont.sans(14, FontWeight.Medium),
+                    color = if (messageOk) c.greenInk else c.coralDeep,
+                )
+            }
+        }
 
         Spacer(Modifier.height(20.dp))
         UButton(if (busy) "…" else if (signUp) "Create account" else "Sign in", kind = ButtonKind.DARK, enabled = !busy) {
@@ -139,7 +162,7 @@ fun AuthScreen(vm: AppViewModel) {
             Text("Forgot your password?", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable(enabled = !busy) {
                 val e = email.trim()
                 if (e.isBlank()) { messageOk = false; message = "Enter your email first." }
-                else run("Check your email for a password reset link.") { vm.resetPassword(e) }
+                else run("Check your email — tap the link to set a new password.") { vm.resetPassword(e) }
             }.padding(vertical = 10.dp))
         }
         Spacer(Modifier.height(40.dp))

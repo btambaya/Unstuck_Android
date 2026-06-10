@@ -122,9 +122,15 @@ class MainActivity : ComponentActivity() {
             return
         }
         // Password-recovery link → flag it so AppRoot shows the set-new-password screen
-        // once Supabase establishes the recovery session (handleDeeplinks below).
+        // once Supabase establishes the recovery session (handleDeeplinks below). The
+        // implicit/token flow carries `type=recovery` in the URL; the PKCE flow does
+        // NOT (it comes back as `unstuck://auth-callback?code=…`), so for auth-callback
+        // links we instead ARM a probe and let the session observer classify the
+        // exchanged session by its token `amr` (recovery vs magic-link / OAuth).
         if (data?.toString()?.contains("type=recovery", ignoreCase = true) == true) {
             graph.pendingPasswordRecovery.value = true
+        } else if (data?.scheme == "unstuck" && data.host == "auth-callback") {
+            graph.pendingRecoveryProbe.value = true
         }
         // Notification taps → route to the task / today / recap / brief / focus / collections (consumed by MainScaffold).
         if (data?.scheme == "unstuck" && (data.host == "task" || data.host == "today" || data.host == "focus" || data.host == "collections")) {

@@ -28,6 +28,12 @@ class AppGraph(context: Context) {
     /** Set when a password-recovery deep link lands: AppRoot shows the set-new-password
      *  screen (a recovery session can change the password without the old one). */
     val pendingPasswordRecovery = MutableStateFlow(false)
+    /** Armed by MainActivity when an `unstuck://auth-callback` deep link arrives. PKCE
+     *  recovery links come back as `…/auth-callback?code=…` with NO `type=recovery`
+     *  marker, so they can't be classified from the URL. Once the code is exchanged,
+     *  the session observer reads the token's `amr`: a "recovery" session routes to
+     *  set-new-password; magic-link / OAuth sign in normally. One-shot. */
+    val pendingRecoveryProbe = MutableStateFlow(false)
     val db: UnstuckDatabase = UnstuckDatabase.build(context.applicationContext)
     val store = LocalStore(db)
 

@@ -40,6 +40,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.putJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -293,6 +294,21 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     // --- password recovery (from a "forgot password" email deep link) ---
     val pendingPasswordRecovery: StateFlow<Boolean> get() = graph.pendingPasswordRecovery
     fun consumeRecovery() { graph.pendingPasswordRecovery.value = false }
+    /** A forgot-password session carries amr method "recovery" (GoTrue stamps it on
+     *  the recovery verification). PKCE recovery deep links have no `type=recovery` in
+     *  the URL, so this token read is how we tell a reset apart from a magic-link /
+     *  OAuth sign-in that lands on the same `auth-callback` host. */
+    private fun isRecoverySession(jwt: String): Boolean = runCatching {
+        val payload = jwt.split(".").getOrNull(1) ?: return@runCatching false
+        val decoded = String(
+            android.util.Base64.decode(
+                payload,
+                android.util.Base64.URL_SAFE or android.util.Base64.NO_WRAP or android.util.Base64.NO_PADDING,
+            ),
+        )
+        val amr = Json.parseToJsonElement(decoded).jsonObject["amr"]?.jsonArray ?: return@runCatching false
+        amr.any { it.jsonObject["method"]?.jsonPrimitive?.contentOrNull == "recovery" }
+    }.getOrDefault(false)
     /** Set a new password on the recovery session — no current password needed. */
     suspend fun setNewPassword(newPassword: String): AuthOutcome =
         auth?.changePassword(newPassword) ?: AuthOutcome.Error("Not configured")
@@ -836,6 +852,16 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
             viewModelScope.launch {
                 client.auth.sessionStatus.collect { status ->
                     if (status is SessionStatus.NotAuthenticated && status.isSignOut) clearAssistant()
+                    // A just-exchanged auth-callback session: classify it. A "recovery"
+                    // session (forgot-password link) routes to set-new-password; magic-
+                    // link / OAuth fall through to the normal app. One-shot probe so a
+                    // later relaunch (Storage source) never re-triggers the screen.
+                    if (status is SessionStatus.Authenticated && graph.pendingRecoveryProbe.value) {
+                        graph.pendingRecoveryProbe.value = false
+                        if (isRecoverySession(status.session.accessToken)) {
+                            graph.pendingPasswordRecovery.value = true
+                        }
+                    }
                 }
             }
         }

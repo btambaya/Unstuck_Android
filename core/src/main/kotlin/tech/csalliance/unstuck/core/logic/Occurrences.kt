@@ -47,3 +47,15 @@ fun occurrenceBlockFor(rowId: String, tasks: List<TaskItem>, blocks: List<CalBlo
     val b = blocks.firstOrNull { it.id == rowId && isTaskBlock(it) } ?: return null
     return if (tasks.any { it.id == b.taskId && it.recurrence != null }) b else null
 }
+
+/** The row to open when a calendar block is tapped: the per-day OCCURRENCE
+ *  (id = block id) when the block belongs to a recurring template, else the
+ *  normal task. Lets the detail sheet treat it as an occurrence. */
+fun taskForBlock(block: CalBlock, tasks: List<TaskItem>): TaskItem? {
+    val t = tasks.firstOrNull { it.id == block.taskId } ?: return null
+    return if (t.recurrence != null) {
+        t.copy(id = block.id, recurrence = null, done = block.done, completedAt = block.completedAt, estimateMin = block.durationMinutes)
+    } else {
+        t
+    }
+}

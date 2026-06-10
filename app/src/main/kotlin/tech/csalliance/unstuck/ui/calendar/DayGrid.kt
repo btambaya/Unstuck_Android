@@ -100,7 +100,9 @@ internal fun layoutLanes(blocks: List<CalBlock>): List<Laid> {
 fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (String, String) -> Unit) {
     val c = UTheme.colors
     val tasks by vm.tasks.collectAsStateWithLifecycle()
-    val blocks by vm.blocks.collectAsStateWithLifecycle()
+    val blocksRaw by vm.blocks.collectAsStateWithLifecycle()
+    // Skipped recurring occurrences are cancelled for that day — drop them.
+    val blocks = blocksRaw.filter { !it.skipped }
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     val density = LocalDensity.current
     val hourPx = with(density) { HOUR_HEIGHT.toPx() }
@@ -228,7 +230,8 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                         // Color by source: external = blue, a task = its life-area swatch,
                         // placeholder = neutral. Mirrors the web bgFor().
                         val bt = if (isTaskBlock(b)) tasks.firstOrNull { it.id == b.taskId } else null
-                        val done = bt?.done == true
+                        // For a recurring occurrence the completion lives on the block.
+                        val done = b.done || bt?.done == true
                         val fill = when {
                             b.kind == CalBlockKind.EXTERNAL -> c.blueSoft
                             isTaskBlock(b) -> c.areaSwatch(areaColorFor(bt?.lifeArea, areas, c))

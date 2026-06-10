@@ -44,6 +44,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import tech.csalliance.unstuck.core.logic.isTaskBlock
+import tech.csalliance.unstuck.core.logic.taskForBlock
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.time.Time
@@ -136,7 +137,9 @@ private fun CalendarSyncBar(vm: AppViewModel) {
 @Composable
 private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (String, String) -> Unit) {
     val c = UTheme.colors
-    val blocks by vm.blocks.collectAsStateWithLifecycle()
+    val blocksRaw by vm.blocks.collectAsStateWithLifecycle()
+    // Skipped recurring occurrences are cancelled for that day — drop them.
+    val blocks = blocksRaw.filter { !it.skipped }
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     // Monday-anchored week, navigable via the ‹ / › arrows (weekOffset = weeks from
@@ -220,7 +223,8 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (
                         val top = hhmmToMin(b.startTime) - WSTART * 60
                         if (top in 0..((WEND - WSTART) * 60)) {
                             val bt = if (isTaskBlock(b)) tasks.firstOrNull { it.id == b.taskId } else null
-                            val done = bt?.done == true
+                            // For a recurring occurrence the completion lives on the block.
+                            val done = b.done || bt?.done == true
                             val fill = if (isTaskBlock(b)) c.areaSwatch(tech.csalliance.unstuck.ui.components.areaColorFor(bt?.lifeArea, areas, c)) else c.blueSoft
                             val laneW = if (laid.lanes > 1 && colW > 0.dp) colW / laid.lanes else 0.dp
                             val place = if (laneW > 0.dp)
@@ -230,7 +234,7 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (
                             Box(
                                 place.height((WHOUR * (b.durationMinutes / 60f)).coerceAtLeast(13.dp))
                                     .clip(RoundedCornerShape(3.dp)).background(fill)
-                                    .then(if (isTaskBlock(b)) Modifier.clickable { tasks.firstOrNull { it.id == b.taskId }?.let(onOpen) } else Modifier),
+                                    .then(if (isTaskBlock(b)) Modifier.clickable { taskForBlock(b, tasks)?.let(onOpen) } else Modifier),
                             ) { Text(b.taskName, style = UFont.sans(8, FontWeight.Medium), color = if (done) c.ink3 else c.ink, maxLines = 1, textDecoration = if (done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null) }
                         }
                     }

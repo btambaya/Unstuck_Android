@@ -126,6 +126,13 @@ data class CalBlock(
     val externalEventId: String? = null,
     val externalConnectionId: String? = null,
     val kind: CalBlockKind? = null,
+    // Per-occurrence state (migration 033). For a recurring template's
+    // occurrence blocks, completion/skip live here (per day), not on the
+    // template task — so one day can be ticked off or cancelled without
+    // ending the series. See core/logic/Occurrences.kt.
+    val done: Boolean = false,
+    val skipped: Boolean = false,
+    val completedAt: String? = null,
 )
 
 @Serializable
@@ -231,4 +238,7 @@ data class LiveSession(
     val overrunPromptFired: Boolean = false,
     val treatment: FocusTreatment,
     val priorAccumulatedSec: Int? = null,
+    // Focusing a recurring OCCURRENCE: taskId above is the template (totalFocused
+    // continuity); completing marks THIS occurrence's cal_block done. Device-local.
+    val occurrenceBlockId: String? = null,
 )

@@ -68,5 +68,5 @@ enum class ThemePref { @SerialName("system") SYSTEM, @SerialName("light") LIGHT,
 enum class Density { @SerialName("compact") COMPACT, @SerialName("regular") REGULAR, @SerialName("comfy") COMFY }
 
 enum class TaskListView(val label: String) {
-    ALL("All"), BACKLOG("Backlog"), TODAY("Today"), UPCOMING("Upcoming"), LATER("Later"), COMPLETED("Completed");
+    ALL("All"), BACKLOG("Backlog"), TODAY("Today"), UPCOMING("Upcoming"), LATER("Later"), RECURRING("Recurring"), COMPLETED("Completed");
 }

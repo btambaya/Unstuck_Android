@@ -37,6 +37,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.formatTime
+import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
 import tech.csalliance.unstuck.core.logic.recurrenceLabel
 import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.CaptureTag
@@ -65,9 +66,18 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     val context = LocalContext.current
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
+    val tasks by vm.tasks.collectAsStateWithLifecycle()
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val captures by vm.captures.collectAsStateWithLifecycle()
     var scheduled by remember(task.id) { mutableStateOf<String?>(null) }
+
+    // A recurring OCCURRENCE's id is its cal_block id. Complete/skip route to
+    // the block (vm.toggleDone / vm.skipOccurrence already detect it); field
+    // edits route to the TEMPLATE (one definition per series).
+    val occBlock = occurrenceBlockFor(task.id, tasks, blocks)
+    val template = occBlock?.let { b -> tasks.firstOrNull { it.id == b.taskId } }
+    val isOcc = occBlock != null && template != null
+    val editTarget = if (isOcc) template!! else task
 
     // Pick an actual date + time (platform dialogs, local-zone — no Material UTC
     // off-by-one). scheduleTask both creates and reschedules in place; scheduling a
@@ -112,7 +122,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                 color = if (task.done) c.ink3 else c.ink,
                 strike = task.done,
                 modifier = Modifier.padding(top = 6.dp),
-            ) { if (it.isNotBlank() && it != task.name) vm.updateTask(task.copy(name = it)) }
+            ) { if (it.isNotBlank() && it != task.name) vm.updateTask(editTarget.copy(name = it)) }
 
             Box(Modifier.fillMaxWidth().padding(top = 14.dp).clip(RoundedCornerShape(14.dp)).background(c.bg2).padding(horizontal = 16.dp, vertical = 14.dp)) {
                 Column {
@@ -122,14 +132,15 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                         style = UFont.sans(14).copy(fontStyle = FontStyle.Italic),
                         color = if (task.firstPhysicalAction == null) c.ink3 else c.ink,
                         modifier = Modifier.padding(top = 6.dp),
-                    ) { val v = it.trim().ifEmpty { null }; if (v != task.firstPhysicalAction) vm.updateTask(task.copy(firstPhysicalAction = v)) }
+                    ) { val v = it.trim().ifEmpty { null }; if (v != task.firstPhysicalAction) vm.updateTask(editTarget.copy(firstPhysicalAction = v)) }
                 }
             }
 
             Row(Modifier.fillMaxWidth().padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { UButton("Focus", kind = ButtonKind.CORAL, leadingIcon = Icons.Filled.PlayArrow, onClick = onStartFocus) }
-                UButton("Schedule", kind = ButtonKind.OUTLINED, fill = false) { pickSchedule() }
+                if (!isOcc) UButton("Schedule", kind = ButtonKind.OUTLINED, fill = false) { pickSchedule() }
                 UButton(if (task.done) "✓ Done" else "Mark done", kind = ButtonKind.TEXT, fill = false) { vm.toggleDone(task) }
+                if (isOcc) UButton("Skip today", kind = ButtonKind.TEXT, fill = false) { vm.skipOccurrence(task.id); onBack() }
             }
             scheduled?.let { Text("Scheduled $it", style = UFont.sans(12), color = c.green, modifier = Modifier.padding(top = 8.dp)) }
             if (task.later == true) {
@@ -143,7 +154,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                         Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             val presets = listOf(15, 25, 45, 60, 90)
                             presets.forEach { m ->
-                                SelectableChip("${m}m", selected = task.estimateMin == m) { vm.updateTask(task.copy(estimateMin = m)) }
+                                SelectableChip("${m}m", selected = task.estimateMin == m) { vm.updateTask(editTarget.copy(estimateMin = m)) }
                             }
                             if (task.estimateMin !in presets) SelectableChip("${task.estimateMin}m", selected = true) { showEstimate = true }
                             SelectableChip("Custom…", selected = false) { showEstimate = true }
@@ -152,24 +163,30 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                     Column {
                         SectionLabel("Area")
                         Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            FilterPill("Unassigned", task.lifeArea == null) { vm.updateTask(task.copy(lifeArea = null)) }
-                            areas.forEach { a -> FilterPill(a.name, task.lifeArea == a.name, dotColor = c.areaColor(a.color)) { vm.updateTask(task.copy(lifeArea = if (task.lifeArea == a.name) null else a.name)) } }
+                            FilterPill("Unassigned", task.lifeArea == null) { vm.updateTask(editTarget.copy(lifeArea = null)) }
+                            areas.forEach { a -> FilterPill(a.name, task.lifeArea == a.name, dotColor = c.areaColor(a.color)) { vm.updateTask(editTarget.copy(lifeArea = if (task.lifeArea == a.name) null else a.name)) } }
                         }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(16.dp)) {
                         // Tapping the schedule cell opens the same date/time picker.
-                        MetaCell("Schedule", scheduleLabel, Modifier.weight(1f).clip(RoundedCornerShape(8.dp)).clickable { pickSchedule() })
+                        MetaCell("Schedule", scheduleLabel, Modifier.weight(1f).clip(RoundedCornerShape(8.dp)).clickable(enabled = !isOcc) { pickSchedule() })
                         MetaCell("Status", when { task.done -> "Completed"; task.totalFocused > 0 -> "In progress"; else -> "Not started" }, Modifier.weight(1f))
                     }
                 }
             }
 
             SectionLabel("Repeat", Modifier.padding(top = 18.dp, bottom = 4.dp))
-            Text(recurrenceLabel(task.recurrence).ifEmpty { "Does not repeat" }, style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(bottom = 6.dp))
-            RecurrenceEditor(task.recurrence) { vm.setRecurrence(task, it) }
+            if (isOcc) {
+                // One day of a recurring series — edit the repeat on the series,
+                // not this occurrence (which would split it off as its own task).
+                Text("One day of “${template!!.name}” (${recurrenceLabel(template!!.recurrence)}).", style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(bottom = 6.dp))
+            } else {
+                Text(recurrenceLabel(task.recurrence).ifEmpty { "Does not repeat" }, style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(bottom = 6.dp))
+                RecurrenceEditor(task.recurrence) { vm.setRecurrence(editTarget, it) }
+            }
 
             SectionLabel("Tags", Modifier.padding(top = 18.dp, bottom = 6.dp))
-            TagPicker(vm, task.tags ?: emptyList()) { vm.updateTask(task.copy(tags = it.ifEmpty { null })) }
+            TagPicker(vm, task.tags ?: emptyList()) { vm.updateTask(editTarget.copy(tags = it.ifEmpty { null })) }
 
             if (taskSessions.isNotEmpty()) {
                 SectionLabel("Sessions", Modifier.padding(top = 18.dp, bottom = 6.dp))
@@ -180,9 +197,11 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
 
             SectionLabel("Captures", Modifier.padding(top = 18.dp, bottom = 6.dp))
             taskCaptures.forEach { cap -> CaptureRow(cap, vm.nowMs(), onPromote = { vm.promoteCapture(cap) }, onDiscard = { vm.deleteCapture(cap.id) }) }
-            AddCaptureRow { tag, body -> vm.saveCapture(task.id, null, tag, body) }
+            AddCaptureRow { tag, body -> vm.saveCapture(editTarget.id, null, tag, body) }
 
-            UButton("Delete", kind = ButtonKind.DANGER, fill = false, modifier = Modifier.padding(top = 22.dp)) { confirmDelete = true }
+            // Occurrences have "Skip today"; deleting the whole series is done
+            // from the template (Recurring tab), not from one day.
+            if (!isOcc) UButton("Delete", kind = ButtonKind.DANGER, fill = false, modifier = Modifier.padding(top = 22.dp)) { confirmDelete = true }
         }
     }
 
@@ -197,7 +216,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                     keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
                 )
             },
-            confirmButton = { TextButton(onClick = { v.toIntOrNull()?.takeIf { it > 0 }?.let { vm.updateTask(task.copy(estimateMin = it)) }; showEstimate = false }) { Text("Save", color = c.primaryDeep) } },
+            confirmButton = { TextButton(onClick = { v.toIntOrNull()?.takeIf { it > 0 }?.let { vm.updateTask(editTarget.copy(estimateMin = it)) }; showEstimate = false }) { Text("Save", color = c.primaryDeep) } },
             dismissButton = { TextButton(onClick = { showEstimate = false }) { Text("Cancel", color = c.ink2) } },
             containerColor = c.surface,
         )

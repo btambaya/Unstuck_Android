@@ -53,6 +53,7 @@ import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.applyCompletion
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
 import tech.csalliance.unstuck.core.logic.newUuid
+import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.Capture
@@ -167,6 +168,14 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun updateTask(task: TaskItem) = launchWrite { write?.upsertTask(task.copy(updatedAt = isoNow())) }
 
     fun toggleDone(task: TaskItem) = launchWrite {
+        // A recurring OCCURRENCE's id is its cal_block id — complete the block,
+        // never the template (which would end the whole series).
+        val occ = occurrenceBlockFor(task.id, tasks.value, blocks.value)
+        if (occ != null) {
+            val nextDone = !occ.done
+            write?.upsertCalBlock(occ.copy(done = nextDone, skipped = false, completedAt = if (nextDone) isoNow() else null))
+            return@launchWrite
+        }
         val flipped = task.copy(done = !task.done)
         write?.upsertTask(applyCompletion(flipped, prior = task, nowISO = isoNow()))
         // Completing a task promoted from a shared collection item → flip the
@@ -174,6 +183,13 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         if (flipped.done && !task.done && task.sourceCollectionId != null && task.sourceItemId != null) {
             share?.taskDone(task.sourceCollectionId!!, task.sourceItemId!!, task.name, currentName ?: "Someone")
         }
+    }
+
+    /** Skip ("cancel today") one recurring occurrence — hides just this day; the
+     *  series keeps generating. blockId == the occurrence row's id. */
+    fun skipOccurrence(blockId: String) = launchWrite {
+        val b = blocks.value.firstOrNull { it.id == blockId } ?: return@launchWrite
+        write?.upsertCalBlock(b.copy(skipped = true, done = false, completedAt = null))
     }
 
     fun setLater(task: TaskItem, later: Boolean) = launchWrite {
@@ -398,6 +414,20 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
 
     fun startFocus(task: TaskItem) = launchWrite {
         val cur = store.getLiveSession()
+        // Focusing a recurring OCCURRENCE: run the session on the TEMPLATE (so
+        // totalFocused accrues on the series) but remember the occurrence block so
+        // completion marks just this day. Resolve before the same-task guard.
+        val occ = occurrenceBlockFor(task.id, tasks.value, blocks.value)
+        if (occ != null) {
+            val tpl = tasks.value.firstOrNull { it.id == occ.taskId }
+            if (tpl != null) {
+                if (cur?.taskId == tpl.id && cur.occurrenceBlockId == occ.id) return@launchWrite
+                val base = cur ?: FocusTimer.empty
+                val live = FocusTimer.start(base, tpl.id, estimateMin = occ.durationMinutes, priorAccumulatedSec = tpl.totalFocused, now = nowMs(), occurrenceBlockId = occ.id)
+                store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
+                return@launchWrite
+            }
+        }
         // Re-entering the SAME task's live session keeps its current state — a
         // paused session stays paused (the user resumes explicitly), it isn't
         // auto-resumed just by opening the focus screen.
@@ -442,14 +472,22 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         write?.upsertSession(
             Session(id = live.id ?: newUuid(), taskId = task.id, taskName = task.name, estimateMin = task.estimateMin, actualSec = elapsed, completedAt = isoNow()),
         )
-        val focused = task.copy(totalFocused = task.totalFocused + elapsed, updatedAt = isoNow())
-        write?.upsertTask(
-            if (markDone) applyCompletion(focused.copy(done = true), prior = task, nowISO = isoNow()) else focused,
-        )
+        // Focusing a recurring occurrence: accrue focus on the series (task = the
+        // template here) but mark THIS day's cal_block done, not the template.
+        val occBlock = live.occurrenceBlockId?.let { id -> blocks.value.firstOrNull { it.id == id } }
+        if (occBlock != null) {
+            write?.upsertTask(task.copy(totalFocused = task.totalFocused + elapsed, updatedAt = isoNow()))
+            if (markDone) write?.upsertCalBlock(occBlock.copy(done = true, skipped = false, completedAt = isoNow()))
+        } else {
+            val focused = task.copy(totalFocused = task.totalFocused + elapsed, updatedAt = isoNow())
+            write?.upsertTask(
+                if (markDone) applyCompletion(focused.copy(done = true), prior = task, nowISO = isoNow()) else focused,
+            )
+        }
         store.setLiveSession(null)
         // Completing a promoted shared-collection task from Focus must also flip the
         // shared item + notify members (same as toggleDone).
-        if (markDone && task.sourceCollectionId != null && task.sourceItemId != null) {
+        if (markDone && occBlock == null && task.sourceCollectionId != null && task.sourceItemId != null) {
             share?.taskDone(task.sourceCollectionId!!, task.sourceItemId!!, task.name, currentName ?: "Someone")
         }
         // Session-end recap (design moment B3): records an in-app card always; the

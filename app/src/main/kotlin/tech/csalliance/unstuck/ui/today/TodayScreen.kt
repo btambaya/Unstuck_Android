@@ -52,8 +52,11 @@ import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.daysSinceCreated
 import tech.csalliance.unstuck.core.logic.formatMMSS
 import tech.csalliance.unstuck.core.logic.isCompletedToday
+import tech.csalliance.unstuck.core.logic.isTemplate
 import tech.csalliance.unstuck.core.logic.pickStartNext
+import tech.csalliance.unstuck.core.logic.projectOccurrences
 import tech.csalliance.unstuck.core.logic.visibleTasks
+import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.model.LiveSession
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.model.TaskListView
@@ -124,7 +127,11 @@ fun TodayScreen(
     // Today = open tasks scheduled/intended for today, plus anything completed today
     // (sorted last), matching the web today-list which keeps today's completions visible.
     val todayOpen = visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false)
-    val todayDone = tasks.filter { isCompletedToday(it, now) && todayOpen.none { o -> o.id == it.id } }
+    // Completed-today = real tasks + today's occurrences (NOT recurring
+    // templates), so a ticked-off occurrence stays visible as a win and a done
+    // template never leaks in.
+    val todayDone = (tasks.filter { !isTemplate(it) } + projectOccurrences(tasks, blocks, Clock.todayIso()))
+        .filter { isCompletedToday(it, now) && todayOpen.none { o -> o.id == it.id } }
     val todayAll = todayOpen + todayDone
     val rows = todayAll.filter { (areaFilter == null || it.lifeArea == areaFilter) && it.id != startNext?.id && it.id != liveId }
     // Backlog view (web parity): the unplanned + overdue stack, area-agnostic.

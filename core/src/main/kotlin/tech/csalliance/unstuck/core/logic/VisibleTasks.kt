@@ -57,18 +57,36 @@ fun visibleTasks(
     slipMode: Boolean,
 ): List<TaskItem> {
     val today = Clock.todayIso()
-    val todayTaskIds = blocks.filter { it.date == today && isTaskBlock(it) }.mapNotNull { it.taskId }.toSet()
-    val upcomingTaskIds = blocks.filter { it.date > today && isTaskBlock(it) }.mapNotNull { it.taskId }.toSet()
-    val scheduledTaskIds = blocks.filter { isTaskBlock(it) }.mapNotNull { it.taskId }.toSet()
+
+    // Hide recurring TEMPLATES; project each template's occurrence cal_blocks
+    // (today + upcoming, non-skipped) into synthetic one-day rows that flow
+    // through the bucketing below like ordinary one-day tasks. An occurrence
+    // row's id is its block id, so seed the today/upcoming sets with those ids
+    // (the block-keyed sets carry taskIds, not block ids).
+    val nonTemplates = tasks.filter { !isTemplate(it) }
+    val occurrences = projectOccurrences(tasks, blocks, today)
+    val composed = nonTemplates + occurrences
+    val templateIds = tasks.filter { it.recurrence != null }.map { it.id }.toSet()
+    val occBlocks = blocks.filter { isTaskBlock(it) && !it.skipped && it.taskId in templateIds && it.date >= today }
+
+    val todayTaskIds = blocks.filter { it.date == today && isTaskBlock(it) }.mapNotNull { it.taskId }.toSet() +
+        occBlocks.filter { it.date == today }.map { it.id }.toSet()
+    val upcomingTaskIds = blocks.filter { it.date > today && isTaskBlock(it) }.mapNotNull { it.taskId }.toSet() +
+        occBlocks.filter { it.date > today }.map { it.id }.toSet()
+    val scheduledTaskIds = blocks.filter { isTaskBlock(it) }.mapNotNull { it.taskId }.toSet() +
+        occBlocks.map { it.id }.toSet()
     // Tasks whose only task-shaped cal_blocks are dated before today —
     // planned for a past day but never done. These are "overdue" → Backlog.
     val pastOnlyTaskIds = scheduledTaskIds.filter { it !in todayTaskIds && it !in upcomingTaskIds }.toSet()
 
     val byView = when (view) {
+        TaskListView.RECURRING ->
+            // The repeating definitions themselves (area/tag still narrow it).
+            tasks.filter { isTemplate(it) }
         TaskListView.TODAY ->
             // Scheduled today OR created today (fresh arrivals count), but
             // not tasks the user explicitly scheduled for a future day.
-            tasks.filter { t ->
+            composed.filter { t ->
                 !t.done && t.later != true && (
                     t.id in todayTaskIds || (isCreatedToday(t, now) && t.id !in upcomingTaskIds)
                 )
@@ -76,19 +94,19 @@ fun visibleTasks(
         TaskListView.BACKLOG ->
             // Open work not actively planned AND sitting ≥ a day: never
             // scheduled, or only ever scheduled in the past (overdue).
-            tasks.filter { t ->
+            composed.filter { t ->
                 !t.done && t.later != true && !isCreatedToday(t, now) && (
                     t.id !in scheduledTaskIds || t.id in pastOnlyTaskIds
                 )
             }
         TaskListView.UPCOMING ->
-            tasks.filter { t -> !t.done && t.id in upcomingTaskIds && t.id !in todayTaskIds }
+            composed.filter { t -> !t.done && t.id in upcomingTaskIds && t.id !in todayTaskIds }
         TaskListView.LATER ->
-            tasks.filter { !it.done && it.later == true }
+            composed.filter { !it.done && it.later == true }
         TaskListView.COMPLETED ->
-            tasks.filter { it.done }
+            composed.filter { it.done }
         TaskListView.ALL ->
-            tasks.filter { !it.done || isCompletedToday(it, now) }
+            composed.filter { !it.done || isCompletedToday(it, now) }
     }
 
     // Today is area-agnostic on purpose.

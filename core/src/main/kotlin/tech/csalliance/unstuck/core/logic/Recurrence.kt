@@ -73,8 +73,9 @@ fun regenerateForTask(
     val futureExisting = existing.filter { it.date > todayIso }
 
     if (recurrence == null) {
-        // Clearing recurrence — delete every future occurrence, keep history.
-        return RegenPlan(emptyList(), futureExisting.map { it.id })
+        // Clearing recurrence — delete future occurrences but keep any the user
+        // already completed/skipped (history), same as web.
+        return RegenPlan(emptyList(), futureExisting.filter { !it.done && !it.skipped }.map { it.id })
     }
 
     val desired = materializeOccurrences(recurrence, startDate, startTime, horizonDays)
@@ -82,7 +83,9 @@ fun regenerateForTask(
     val desiredKeys = desired.map { "${it.date}|${it.startTime}" }.toSet()
     val existingFutureKeys = futureExisting.map { "${it.date}|${it.startTime}" }.toSet()
 
-    val toDelete = futureExisting.filter { "${it.date}|${it.startTime}" !in desiredKeys }.map { it.id }
+    // Never delete an occurrence already completed/skipped — that would erase
+    // history (and resurrect a done day as undone on retime).
+    val toDelete = futureExisting.filter { !it.done && !it.skipped && "${it.date}|${it.startTime}" !in desiredKeys }.map { it.id }
     val toUpsert = desired.filter { "${it.date}|${it.startTime}" !in existingFutureKeys }.map { o ->
         CalBlock(
             id = newUuid(), taskId = task.id, taskName = task.name,

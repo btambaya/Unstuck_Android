@@ -71,6 +71,7 @@ object FocusTimer {
         estimateMin: Int? = null,
         priorAccumulatedSec: Int? = null,
         now: Long,
+        occurrenceBlockId: String? = null,
         newId: () -> String = ::newUuid,
     ): LiveSession {
         if (cur.sessionStart != null && cur.taskId == taskId && cur.paused) return resume(cur, now)
@@ -85,6 +86,7 @@ object FocusTimer {
             nudge80Fired = false,
             overrunPromptFired = false,
             priorAccumulatedSec = priorAccumulatedSec ?: 0,
+            occurrenceBlockId = occurrenceBlockId,
         )
     }
 

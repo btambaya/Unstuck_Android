@@ -47,7 +47,7 @@ import tech.csalliance.unstuck.ui.components.areaColorFor
 // then All / Today / Upcoming / Later / Completed. Default is Today.
 private val TAB_ORDER = listOf(
     TaskListView.BACKLOG, TaskListView.ALL, TaskListView.TODAY,
-    TaskListView.UPCOMING, TaskListView.LATER, TaskListView.COMPLETED,
+    TaskListView.UPCOMING, TaskListView.LATER, TaskListView.RECURRING, TaskListView.COMPLETED,
 )
 
 @Composable
@@ -89,6 +89,7 @@ fun TasksScreen(
                         TaskListView.TODAY -> c.coralSoft to c.coralDeep
                         TaskListView.UPCOMING -> c.blueSoft to c.blueInk
                         TaskListView.LATER -> c.primarySoft to c.primaryDeep
+                        TaskListView.RECURRING -> c.blueSoft to c.blueInk
                         TaskListView.COMPLETED -> c.greenSoft to c.greenInk
                         else -> null
                     }

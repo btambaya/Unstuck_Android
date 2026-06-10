@@ -35,7 +35,9 @@ fun pickStartNext(
     areaFilter: String? = null,
 ): TaskItem? =
     tasks
-        .filter { !it.done && it.later != true && it.id != liveTaskId }
+        // recurrence == null: skip recurring TEMPLATES (hidden definitions);
+        // their per-day occurrences surface in Today on their own.
+        .filter { !it.done && it.later != true && it.recurrence == null && it.id != liveTaskId }
         .filter { matchesArea(it.lifeArea, areaFilter) }
         .sortedWith(ranker)
         .firstOrNull()
@@ -49,7 +51,7 @@ fun pickUpNext(
 ): List<TaskItem> {
     val skip = setOfNotNull(liveTaskId, startNextId)
     return tasks
-        .filter { !it.done && it.later != true && it.id !in skip }
+        .filter { !it.done && it.later != true && it.recurrence == null && it.id !in skip }
         .sortedWith(ranker)
         .take(limit)
 }

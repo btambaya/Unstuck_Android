@@ -119,12 +119,20 @@ internal data class CalBlockRow(
     @SerialName("external_event_id") val externalEventId: String?,
     @SerialName("external_connection_id") val externalConnectionId: String?,
     val kind: CalBlockKind,
+    // NO Kotlin default — the columns are `not null default false`, so the
+    // server always sends them. A default here would let a partial/legacy
+    // payload silently decode as false and mask a sync bug (same reason `kind`
+    // has no default). completed_at is genuinely nullable.
+    val done: Boolean,
+    val skipped: Boolean,
+    @SerialName("completed_at") val completedAt: String?,
 ) {
     constructor(b: CalBlock) : this(
         b.id, uuidOrNull(b.taskId), b.taskName, b.startTime, b.durationMinutes, b.date,
         b.externalEventId, uuidOrNull(b.externalConnectionId), b.kind ?: CalBlockKind.TASK,
+        b.done, b.skipped, b.completedAt,
     )
-    fun toModel() = CalBlock(id, taskId, taskName, startTime, durationMinutes, date, externalEventId, externalConnectionId, kind)
+    fun toModel() = CalBlock(id, taskId, taskName, startTime, durationMinutes, date, externalEventId, externalConnectionId, kind, done, skipped, completedAt)
 }
 
 @Serializable

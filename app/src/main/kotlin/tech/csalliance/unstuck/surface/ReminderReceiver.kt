@@ -42,30 +42,46 @@ class ReminderReceiver : BroadcastReceiver() {
         val taskId = intent.getStringExtra(EXTRA_TASK_ID).orEmpty()
         val blockId = intent.getStringExtra(EXTRA_BLOCK_ID).orEmpty()
         val lead = intent.getIntExtra(EXTRA_LEAD, 0)
+        val drifted = kind == "drifted"
         NotificationChannels.ensureAll(context)
 
-        if (kind == "lead") {
-            val body = if (lead > 0) "$taskName — in $lead minutes." else "$taskName is starting."
-            val deepLink = if (taskId.isNotBlank()) "unstuck://task/$taskId" else "unstuck://today"
-            // External calendar events have a blank task id — key the notif id off the
-            // block id instead so two events close in time don't share one id (overwrite).
-            NotificationRenderer.renderPush(context, kind = "reminder", title = "Coming up", body = body, deepLink = deepLink, notifId = NotifIds.reminder(taskId.ifBlank { blockId }))
-            return
+        fun post() {
+            if (kind == "lead") {
+                val body = if (lead > 0) "$taskName — in $lead minutes." else "$taskName is starting."
+                val deepLink = if (taskId.isNotBlank()) "unstuck://task/$taskId" else "unstuck://today"
+                // External calendar events have a blank task id — key the notif id off the
+                // block id instead so two events close in time don't share one id (overwrite).
+                NotificationRenderer.renderPush(context, kind = "reminder", title = "Coming up", body = body, deepLink = deepLink, notifId = NotifIds.reminder(taskId.ifBlank { blockId }))
+            } else {
+                NotificationRenderer.postTaskStarting(context, taskName, taskId, blockId, drifted)
+            }
         }
 
-        // atstart / drifted — re-check the task is still worth nudging about.
-        val drifted = kind == "drifted"
+        // Validate at fire time so a STALE alarm doesn't post a PHANTOM. A task
+        // can be deleted (or rescheduled) server-side while this device is
+        // offline, so sync() never gets to cancel its already-armed alarm — it
+        // then fires for a task that's no longer there ("got a reminder for a
+        // task I don't see anywhere"). Suppress when the block (the schedule) is
+        // gone, or the task is gone / done / being focused. ALL kinds are now
+        // checked — previously only atstart/drifted re-checked, and only for
+        // `done`, so a deleted task (or any `lead` reminder) still fired.
+        // Only suppress on a CONFIRMED-absent read; a store read error leaves a
+        // possibly-real reminder intact.
         val app = context.applicationContext as? UnstuckApp
-        if (app == null) {
-            NotificationRenderer.postTaskStarting(context, taskName, taskId, blockId, drifted)
-            return
-        }
+        if (app == null) { post(); return }   // no app context → can't validate; best-effort
         val pending = goAsync()
         app.graph.scope.launch {
             try {
-                val done = runCatching { app.graph.store.tasks().first().firstOrNull { it.id == taskId }?.done }.getOrNull() == true
+                val blocks = runCatching { app.graph.store.blocks().first() }.getOrNull()
+                val tasks = runCatching { app.graph.store.tasks().first() }.getOrNull()
+                if (blocks != null && blocks.none { it.id == blockId }) return@launch   // schedule gone
+                if (taskId.isNotBlank() && tasks != null) {
+                    val task = tasks.firstOrNull { it.id == taskId }
+                    if (task == null || task.done) return@launch   // task deleted or already done
+                }
                 val focusingIt = runCatching { app.graph.store.getLiveSession()?.taskId == taskId }.getOrNull() == true
-                if (!done && !focusingIt) NotificationRenderer.postTaskStarting(context, taskName, taskId, blockId, drifted)
+                if ((kind == "atstart" || drifted) && focusingIt) return@launch
+                post()
             } finally {
                 pending.finish()
             }

@@ -3,6 +3,7 @@ package tech.csalliance.unstuck.ui.calendar
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -30,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -40,6 +42,7 @@ import androidx.browser.customtabs.CustomTabsIntent
 import android.net.Uri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
@@ -74,7 +77,7 @@ fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () ->
         CalendarSyncBar(vm)
         when (view) {
             "Day" -> DayGridScreen(vm, onOpen, onCreateAt)
-            "Week" -> WeekView(vm, onOpen)
+            "Week" -> WeekView(vm, onOpen, onCreateAt)
             else -> MonthView(vm)
         }
     }
@@ -131,7 +134,7 @@ private fun CalendarSyncBar(vm: AppViewModel) {
 }
 
 @Composable
-private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
+private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (String, String) -> Unit) {
     val c = UTheme.colors
     val blocks by vm.blocks.collectAsStateWithLifecycle()
     val tasks by vm.tasks.collectAsStateWithLifecycle()
@@ -191,12 +194,22 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit) {
                 }
             }
             val weekDensity = androidx.compose.ui.platform.LocalDensity.current
+            val weekHourPx = with(weekDensity) { WHOUR.toPx() }
             days.forEach { d ->
                 val db = blocks.filter { it.date == d.toString() }
                 var colW by remember(d.toString()) { mutableStateOf(0.dp) }
                 Box(
                     Modifier.weight(1f).fillMaxHeight()
-                        .onGloballyPositioned { colW = with(weekDensity) { it.size.width.toDp() } },
+                        .onGloballyPositioned { colW = with(weekDensity) { it.size.width.toDp() } }
+                        // Tap an empty slot → create a task prefilled at that day + snapped time.
+                        // Blocks sit on top with their own tap (open detail), so they win their hits.
+                        .pointerInput(d.toString()) {
+                            detectTapGestures { off ->
+                                val totalMin = WSTART * 60 + ((off.y / weekHourPx) * 60).roundToInt()
+                                val snapped = ((totalMin / 15) * 15).coerceIn(WSTART * 60, WEND * 60 - 15)
+                                onCreateAt(d.toString(), "%02d:%02d".format(snapped / 60, snapped % 60))
+                            }
+                        },
                 ) {
                     Column(Modifier.fillMaxSize()) {
                         repeat(WEND - WSTART) { Box(Modifier.fillMaxWidth().height(WHOUR).border(0.5.dp, c.line.copy(alpha = 0.6f))) }

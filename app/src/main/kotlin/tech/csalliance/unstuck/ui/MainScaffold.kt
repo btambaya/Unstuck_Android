@@ -53,6 +53,7 @@ import tech.csalliance.unstuck.ui.insights.InsightsScreen
 import tech.csalliance.unstuck.ui.settings.SettingsHub
 import tech.csalliance.unstuck.ui.settings.SettingsSection
 import tech.csalliance.unstuck.ui.tasks.NewTaskSheet
+import tech.csalliance.unstuck.core.logic.taskForBlock
 import tech.csalliance.unstuck.ui.tasks.TaskDetailScreen
 import tech.csalliance.unstuck.ui.tasks.TasksScreen
 import tech.csalliance.unstuck.ui.today.TodayScreen
@@ -122,6 +123,7 @@ fun MainScaffold(vm: AppViewModel) {
     }
 
     val tasks by vm.tasks.collectAsStateWithLifecycle()
+    val blocks by vm.blocks.collectAsStateWithLifecycle()
     val notifUnread by vm.notifUnread.collectAsStateWithLifecycle()
     val inboxCaptures by vm.inboxCaptures.collectAsStateWithLifecycle()
     fun push(r: Route) = stack.add(r)
@@ -257,7 +259,11 @@ fun MainScaffold(vm: AppViewModel) {
             ) {
                 when (route) {
                     is Route.Detail -> {
+                        // A recurring OCCURRENCE's route id is its cal_block id, not a
+                        // task id — resolve it to the projected one-day task so its
+                        // detail opens (and edits/complete/skip route correctly).
                         val t = tasks.firstOrNull { it.id == route.taskId }
+                            ?: blocks.firstOrNull { it.id == route.taskId }?.let { b -> taskForBlock(b, tasks) }
                         // Pop in an effect, not inline — mutating the stack during
                         // composition is a no-no (and can recompose-loop).
                         if (t != null) TaskDetailScreen(vm, t, onBack = ::pop, onStartFocus = { focusTask = t; pop() })

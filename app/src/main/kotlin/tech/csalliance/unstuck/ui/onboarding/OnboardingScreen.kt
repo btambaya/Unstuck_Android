@@ -47,6 +47,8 @@ import tech.csalliance.unstuck.ui.AppViewModel
 
 private val AREA_OPTIONS = listOf("Work", "Personal", "Home", "Health", "Family", "Volunteering", "Study", "Side project")
 private val AREA_PALETTE = listOf("indigo", "coral", "green", "amber", "violet", "blue")
+private val STRUGGLE_OPTIONS = listOf("Getting started", "Switching tasks", "Time blindness", "Distraction", "Overwhelm")
+private const val ONBOARDING_STEPS = 5
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
@@ -56,26 +58,34 @@ fun OnboardingScreen(vm: AppViewModel, onDone: () -> Unit) {
     // lose the typed first task.
     var step by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
     val pickedAreas = remember { mutableStateListOf("Work", "Personal", "Home") }
+    val pickedStruggles = remember { mutableStateListOf<String>() }
     var firstTask by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
+    var firstAction by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
     var treatment by remember { mutableStateOf(FocusTreatment.AMBIENT) }
+    val lastStep = ONBOARDING_STEPS - 1
 
     fun finish() {
         // completeOnboarding seeds the picked areas (single source — no double seed).
         vm.updateSettings { it.copy(treatment = treatment) }   // persist chosen treatment
-        if (firstTask.isNotBlank()) vm.addTask(name = firstTask.trim(), estimateMin = 15, lifeArea = pickedAreas.firstOrNull())
-        vm.completeOnboarding(struggles = emptyList(), areas = pickedAreas.toList())
+        if (firstTask.isNotBlank()) vm.addTask(
+            name = firstTask.trim(),
+            estimateMin = 15,
+            lifeArea = pickedAreas.firstOrNull(),
+            firstPhysicalAction = firstAction.trim().ifBlank { null },
+        )
+        vm.completeOnboarding(struggles = pickedStruggles.toList(), areas = pickedAreas.toList())
         onDone()
     }
 
     Column(Modifier.fillMaxSize().background(c.bg).verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 22.dp, vertical = 30.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
-            (0..3).forEach { i ->
+            (0..lastStep).forEach { i ->
                 Box(Modifier.height(6.dp).width(if (i == step) 16.dp else 6.dp).clip(RoundedCornerShape(999.dp)).background(if (i <= step) c.ink else c.line2))
             }
         }
         Spacer(Modifier.height(22.dp))
         Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(24.dp)).padding(horizontal = 22.dp, vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            SectionLabel("STEP ${step + 1} OF 4", color = c.primaryDeep)
+            SectionLabel("STEP ${step + 1} OF $ONBOARDING_STEPS", color = c.primaryDeep)
             when (step) {
                 0 -> {
                     Text("Welcome.", style = UFont.serifItalic(32), color = c.ink)
@@ -95,10 +105,26 @@ fun OnboardingScreen(vm: AppViewModel, onDone: () -> Unit) {
                     }
                 }
                 2 -> {
+                    Text("What gets you stuck?", style = UFont.serifItalic(26), color = c.ink)
+                    Text("Pick what rings true. It helps us meet you where you are.", style = UFont.sans(14), color = c.ink3)
+                    FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        STRUGGLE_OPTIONS.forEach { s ->
+                            val on = s in pickedStruggles
+                            Box(Modifier.clip(RoundedCornerShape(999.dp)).background(if (on) c.ink else c.bg2).clickable { if (on) pickedStruggles.remove(s) else pickedStruggles.add(s) }.padding(horizontal = 16.dp, vertical = 10.dp)) {
+                                Text(s, style = UFont.sans(13, FontWeight.Medium), color = if (on) c.bg else c.ink2)
+                            }
+                        }
+                    }
+                }
+                3 -> {
                     Text("What's one thing on your mind right now?", style = UFont.serifItalic(26), color = c.ink)
                     Text("Just one. Small is good. We'll start there.", style = UFont.sans(14), color = c.ink3)
                     Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).border(1.dp, c.line2, RoundedCornerShape(10.dp)).padding(horizontal = 16.dp, vertical = 14.dp)) {
                         BasicTextField(value = firstTask, onValueChange = { firstTask = it }, textStyle = UFont.sans(16).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), decorationBox = { inner -> if (firstTask.isEmpty()) Text("Reply to landlord about parking", style = UFont.sans(16), color = c.ink3); inner() })
+                    }
+                    SectionLabel("FIRST STEP", color = c.primaryDeep)
+                    Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).border(1.dp, c.line2, RoundedCornerShape(10.dp)).padding(horizontal = 16.dp, vertical = 14.dp)) {
+                        BasicTextField(value = firstAction, onValueChange = { firstAction = it }, textStyle = UFont.sans(15).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), decorationBox = { inner -> if (firstAction.isEmpty()) Text("The smallest first move (optional)", style = UFont.sans(15), color = c.ink3); inner() })
                     }
                 }
                 else -> {
@@ -125,7 +151,7 @@ fun OnboardingScreen(vm: AppViewModel, onDone: () -> Unit) {
             Row(Modifier.fillMaxWidth().padding(top = 14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text("Skip", style = UFont.sans(14), color = c.ink3, modifier = Modifier.clickable { vm.completeOnboarding(emptyList()); onDone() })
                 Box(Modifier.weight(1f))
-                UButton(if (step == 3) "Begin" else "Continue", kind = ButtonKind.DARK, fill = false) { if (step == 3) finish() else step++ }
+                UButton(if (step == lastStep) "Begin" else "Continue", kind = ButtonKind.DARK, fill = false) { if (step == lastStep) finish() else step++ }
             }
         }
     }

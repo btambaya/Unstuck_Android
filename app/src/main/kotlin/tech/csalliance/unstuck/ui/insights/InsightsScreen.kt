@@ -23,12 +23,15 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.Canvas
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.DEFAULT_AREAS
+import tech.csalliance.unstuck.core.logic.CalibrationDot
 import tech.csalliance.unstuck.core.logic.calibrationDots
 import tech.csalliance.unstuck.core.logic.calibrationHitRate
 import tech.csalliance.unstuck.core.logic.captureBreakdown
@@ -49,6 +52,7 @@ import tech.csalliance.unstuck.design.component.StatCard
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import kotlin.math.abs
 import kotlin.math.roundToInt
 
 @Composable
@@ -111,6 +115,7 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                         val areaNames = lifeAreas.map { it.name }.ifEmpty { DEFAULT_AREAS }
                         StackedBars("When focus happens", weekdayAreaHours(sessions, tasks, areaNames).map { it.d to it.data }, areaNames, lifeAreas)
                     }
+                    if (dots.isNotEmpty()) item { CalibrationScatter(dots, hit) }
                     item { Histogram("When interruptions happen", interruptionBins(captures, sessions), c.coral) }
                     item {
                         val insights = topInsights(sessions, tasks, captures, reasons)
@@ -222,6 +227,45 @@ private fun StackedBars(title: String, bars: List<Pair<String, List<Double>>>, a
             }
             Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 areas.forEach { a -> Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp)) { Box(Modifier.height(8.dp).width(8.dp).clip(RoundedCornerShape(2.dp)).background(tech.csalliance.unstuck.ui.components.areaColorFor(a, lifeAreas, c))); Text(a, style = UFont.sans(9), color = c.ink3) } }
+            }
+        }
+    }
+}
+
+@Composable
+private fun CalibrationScatter(dots: List<CalibrationDot>, hitPct: Int) {
+    val c = UTheme.colors
+    // Square the axes off a shared max so the y=x reference reads as a true
+    // 45° "perfect estimate" line (web parity — components/analytics/report.tsx).
+    val maxVal = (listOf(70) + dots.flatMap { listOf(it.e, it.a) }).max()
+    Card(Modifier.fillMaxWidth().padding(top = 12.dp), radius = 18) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Estimate calibration", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
+            Text("$hitPct% of recent sessions landed within 5 min of estimate.", style = UFont.sans(11), color = c.ink3)
+            Canvas(Modifier.fillMaxWidth().height(180.dp).padding(top = 8.dp)) {
+                val pad = 8.dp.toPx()
+                val w = size.width - 2 * pad
+                val h = size.height - 2 * pad
+                fun px(v: Int) = pad + (v.toFloat() / maxVal) * w
+                fun py(v: Int) = (size.height - pad) - (v.toFloat() / maxVal) * h
+                // Axes.
+                drawLine(c.line2, Offset(pad, size.height - pad), Offset(size.width - pad, size.height - pad), 1.dp.toPx())
+                drawLine(c.line2, Offset(pad, pad), Offset(pad, size.height - pad), 1.dp.toPx())
+                // y = x reference (estimate == actual).
+                drawLine(c.line2, Offset(px(0), py(0)), Offset(px(maxVal), py(maxVal)), 1.dp.toPx())
+                // Dots: green within 5 min of estimate, coral when off.
+                dots.forEach { d ->
+                    val within = abs(d.e - d.a) <= 5
+                    drawCircle(
+                        if (within) c.green else c.coral,
+                        4.dp.toPx(),
+                        Offset(px(d.e.coerceAtMost(maxVal)), py(d.a.coerceAtMost(maxVal))),
+                    )
+                }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                Text("→ estimate", style = UFont.mono(9), color = c.ink3)
+                Text("↑ actual", style = UFont.mono(9), color = c.ink3)
             }
         }
     }

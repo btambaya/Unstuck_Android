@@ -75,6 +75,10 @@ All models are camelCase `@Serializable` data classes. The snake_case ↔ camelC
 
 > **Gotcha:** the serializer requires a `JsonEncoder`/`JsonDecoder` and throws `SerializationException("Recurrence needs JSON")` otherwise — you cannot use it with a non-JSON format. Unknown `kind` values throw. `CoreModelsTest` round-trips all three variants and asserts the exact web JSON shape (`{"kind":"weekly","daysOfWeek":[0,6],"until":null}`) decodes correctly.
 
+#### Templates + per-day occurrences (reworked 2026-06, migration 033)
+
+A task with `recurrence` set is now a hidden **template** — shown only under the `TaskListView.RECURRING` tab, never in All/Today/Upcoming. Its occurrences are still materialised forward as `CalBlock`s (one per date), but each block now carries its own `done` / `skipped` / `completedAt` (the per-occurrence state). `logic/Occurrences.kt` projects those occurrence blocks into synthetic one-day `TaskItem` rows (`projectOccurrences`, `id = block id`) that `VisibleTasks` composes into Today/All/Upcoming, so each occurrence is an independent completable/skippable task. Helpers: `isTemplate(t) = t.recurrence != null`, `occurrenceBlockFor(rowId, …)` (resolve an occurrence row back to its block), `taskForBlock(block, …)` (what to open on a calendar-block tap). **Routing rule:** complete/skip/focus an occurrence writes the `cal_block`, never the template; never `upsertTask` a row whose id is a block id (would mint a phantom occurrence-as-task — `finishFocus` guards this). Surfaces aggregating "open tasks" (`pickStartNext`, the day-grid schedule tray, area counts, slip nudges) must exclude templates. Tests: `OccurrencesTest` + the `RECURRING` cases in `VisibleTasksTest`.
+
 ### The enums (`model/Enums.kt`)
 
 Each enum constant carries a `@SerialName` matching the **string stored server-side** (e.g. `URGENT` ↔ `"urgent"`, `FOLLOW_UP` ↔ `"follow-up"`). Don't rename the serial names — that breaks the wire format.

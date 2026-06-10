@@ -38,7 +38,7 @@ Migrations live in `supabase/migrations/NNN_*.sql` and apply **in numeric order*
 | `user_preferences` | one row/user | `subscription_tier`, `display_name`, `primary_calendar_connection_id`, `adhd_struggles text[]` (003), `usable_minutes_per_day` (007) |
 | `tasks` | the to-dos | `estimate_min`, `priority`, `tags text[]`, `objectives/comments jsonb`, `intent_when/then`, `life_area`, `done`, `completed_at` (005), `later` + `recurrence jsonb` (008), `move_count` (003) |
 | `sessions` | completed focus sessions | `task_name` denormalized so it survives task delete, `actual_sec`, `completed_at` |
-| `cal_blocks` | scheduled blocks on the calendar | `start_time 'HH:MM'`, `duration_minutes`, `date`, `kind` (006: `task`/`placeholder`/`external`), `external_event_id` + `external_connection_id` (Google linkage), `task_id` made nullable in 009 |
+| `cal_blocks` | scheduled blocks on the calendar | `start_time 'HH:MM'`, `duration_minutes`, `date`, `kind` (006: `task`/`placeholder`/`external`), `external_event_id` + `external_connection_id` (Google linkage), `task_id` made nullable in 009, **`done`/`skipped`/`completed_at` (033 — per-occurrence state for a recurring template's blocks; see core-domain "templates + per-day occurrences")** |
 | `reason_logs` | why-I-paused/switched | `reason`, `action`, `duration_sec` (006) |
 | `captures` | quick thoughts during focus (002) | loosely attached to task + session |
 | `tags` (010) + color (011) | curated tag vocabulary | canonical list; `tasks.tags` text[] stays the denormalized reference |

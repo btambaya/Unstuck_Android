@@ -4,21 +4,23 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
-## CURRENT STATUS — v0.4.24 (versionCode 37), 2026-06-05
+## CURRENT STATUS — v0.4.46 (versionCode 59), 2026-06-10
 
-**The app is feature-complete and stable; being locked as a verified beta.** Distributed via Firebase App Distribution to **2 testers only** (justtesting6363@, zyzkazaure@ — NO beta group by default; `-PappDistGroups=beta` to push to the full group). Same Supabase backend (`uaxfteluwctrlgwmmfzi`). 185 unit tests green; release builds signed (dev keystore); backend crons live (`morning-brief-dispatch` /15m, `collection-late-check` /5m).
+**Feature-complete + web-parity, shipping on Firebase App Distribution to 2 testers** (justtesting6363@, zyzkazaure@ — NO beta group by default; `-PappDistGroups=beta` for the full group). Same Supabase backend (`uaxfteluwctrlgwmmfzi`). Release builds signed (dev keystore); backend crons live (morning-brief /15m, collection-late /5m, task-reminder-dispatch /5m). Android is the **native reference for the iOS rebuild**.
 
-**Done since the older sections below (which are historical — trust this block on conflicts):**
-- **Shared collections + accountability** — promote item→task, "keep everyone in the loop" with a "by" time, completion push + live tracker, server-side **late nudge cron** (deployed + verified firing).
-- **Two-way Google Calendar** — pull AND **push** (insert/patch/delete) both implemented; OAuth via the registered HTTPS bounce page.
-- **Reminders reliability** — prompts for POST_NOTIFICATIONS (13+) and SCHEDULE_EXACT_ALARM (denied-by-default on SDK 35 targets); a "Notifications are off" banner on Today surfaces the silent-failure case (notify() suppressed when disabled).
-- **v0.4.23 — 49-bug multi-agent sweep** across the whole app (see [`audit/bug-sweep-0.4.23.md`](audit/bug-sweep-0.4.23.md)); the long-standing **poison-pill outbox bug is FIXED** (OutboxFlusher FAIL_CAP=5 drop + per-row LWW via blockedRows).
-- **v0.4.24** — Calendar Week-view week navigation (‹/› + Today); real date+time **schedule picker** in task detail (was estimate-only); the notifications-off banner.
+**Major work since v0.4.24 (this block is authoritative; the sections below are historical):**
+- **Voice realtime (v0.4.36)** — "Talk" mode (Qwen-Omni via a Cloudflare Worker proxy → DashScope); comm-mode + route-aware duplex barge-in.
+- **Agentic assistant** — bubble = Assistant chat + Feedback; qwen via the stateless `assistant` edge fn + client-side tool execution; on-device $0 voice.
+- **Notifications fully live + refined.** Per-task reminders, morning brief, session recap, paused check-in — all deployed; secrets moved to **Supabase Vault** (migration 031). **Notification "drill-down" (2026-06-10):** Calm now keeps the essentials (pre-task reminders + session recap are on at every level; Calm only mutes morning brief + paused check-in) — `SettingsStore.NotificationLevel`; **quiet hours removed** (migration 032 dropped the unused columns); recap + paused-checkin **also work on web now**; the in-app bell surfaces server `notification_queue` cards (cross-device recaps + collection events).
+- **Forgot-password recovery FIXED (v0.4.42).** PKCE recovery deep links arrive as `unstuck://auth-callback?code=…` with no `type=recovery`, so they were indistinguishable from magic-link/OAuth and just logged the user in. Now MainActivity arms a one-shot probe + AppViewModel classifies the exchanged session by its token `amr` (recovery → SetNewPasswordScreen). The 'check your email' confirmation is a pronounced banner.
+- **RECURRING-TASK REWORK (v0.4.43–v0.4.46).** A repeating task is a hidden **template** shown only under a new **"Recurring"** tab; each occurrence (today + upcoming) is an independent one-day task in Today/All/Upcoming that you complete or **"Skip today"** without touching the series. Model: per-occurrence state on `cal_blocks` (migration 033 adds `done`/`skipped`/`completed_at`, additive, **no backfill**). `core/logic/Occurrences.kt` projects occurrence blocks into synthetic one-day rows (id = block id); complete/skip/focus route to the cal_block, never the template (focus accrues on the template via `LiveSession.occurrenceBlockId`). Verified end-to-end on the emulator. Two on-device-caught bugs fixed: occurrence detail wouldn't open (MainScaffold `Route.Detail` → `taskForBlock` fallback), and focusing an occurrence could mint a phantom occurrence-as-task (`finishFocus` now resolves the template robustly + excludes templates from the schedule tray / area counts / slip nudges).
+- Earlier bug sweeps: v0.4.40 cold-start login flash; v0.4.41 phantom reminder for a deleted task; large 49-bug (v0.4.23) + 107-bug (v0.4.26–28) sweeps (`audit/`).
+
+**Recurring-task gotchas:** a `cal_block` is now an occurrence carrying its own done/skipped state — surfaces that render blocks must hide `skipped` ones and read done off the block; surfaces that aggregate "open tasks" (schedule tray, area counts, slip nudges, pickStartNext) must exclude templates (`recurrence != null`); never `upsertTask` a row whose id is a block id (would mint a phantom occurrence-as-task — `finishFocus` guards this).
 
 **Remaining to fully close out (verification + launch decision, NOT building):**
-1. **On-device verification** of v0.4.23/v0.4.24 — especially that a scheduled reminder reaches the phone as a heads-up (grant POST_NOTIFICATIONS + Alarms & reminders; schedule a task ~15 min out), plus week-nav + the schedule picker.
-2. **Google OAuth app verification** (only for public/non-test Google accounts) — Calendar is a sensitive scope; testing mode caps at 100 users + shows the "unverified app" screen. Redirect is already registered.
-3. **Google Play launch** (only if going public) — would need an AAB + a Play upload key (we ship APK on the dev keystore today) + Play Console listing. NOT needed for the Firebase beta.
+1. **Google OAuth app verification** (only for public/non-test Google accounts) — Calendar is a sensitive scope; testing mode caps at 100 users + shows the "unverified app" screen. Redirect already registered.
+2. **Google Play launch** (only if going public) — would need an AAB + a Play upload key (we ship APK on the dev keystore today) + Play Console listing. NOT needed for the Firebase beta.
 
 ## Calendar + Notifications (v0.3.x–v0.4.x, 2026-05-31)
 

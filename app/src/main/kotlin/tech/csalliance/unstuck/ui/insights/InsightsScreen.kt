@@ -78,7 +78,11 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
     val sessions = allSessions.filter { inWin(it.completedAt) }
     val captures = allCaptures.filter { inWin(it.at) }
     val reasons = allReasons.filter { inWin(it.at) }
-    val enough = sessions.size >= 5   // REAL_DATA_THRESHOLD — below this, show placeholders not numbers
+    // Show real numbers + charts from the FIRST session (kept calm) instead of
+    // blanking everything to "—" until 5. The qualitative "Worth noticing"
+    // insights keep a small floor of their own (REAL_DATA_THRESHOLD) so a single
+    // session can't claim a "strongest day".
+    val enough = sessions.isNotEmpty()
 
     val dots = calibrationDots(sessions, tasks)
     val hit = if (dots.isNotEmpty()) (calibrationHitRate(dots) * 100).roundToInt() else 0
@@ -97,10 +101,10 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
             }
 
             if (!deep) {
-                if (!enough) item { ThresholdNote(sessions.size) }
+                if (!enough) item { ThresholdNote() }
                 item {
                     Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        StatCard("Estimates", if (enough) "$hit%" else "—", "${sessions.size} sessions", c.greenSoft, c.greenInk, "landed within 5 min")
+                        StatCard("Estimates", if (dots.isNotEmpty()) "$hit%" else "—", "${sessions.size} sessions", c.greenSoft, c.greenInk, "landed within 5 min")
                         // Headline is the session COUNT — titling it "Re-entries" overstated it
                         // (the first session isn't a re-entry; the real <5m re-entry rate lives in
                         // the Deep dive). Label it for what the number actually is.
@@ -130,7 +134,7 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                     }
                 }
             } else {
-                if (!enough) item { ThresholdNote(sessions.size) }
+                if (!enough) item { ThresholdNote() }
                 item {
                     // Median over raw SECONDS (round once at display) — truncating each
                     // session to whole minutes first skewed the median (web parity).
@@ -141,7 +145,7 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                     Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             StatCard("Median", if (enough) "${median}m" else "—", caption = "across ${sessions.size} sessions", modifier = Modifier.weight(1f))
-                            StatCard("On estimate", if (enough) "$hit%" else "—", caption = "within 5 min", modifier = Modifier.weight(1f))
+                            StatCard("On estimate", if (dots.isNotEmpty()) "$hit%" else "—", caption = "within 5 min", modifier = Modifier.weight(1f))
                         }
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             StatCard("Re-entry <5m", if (enough) "$reentryPct%" else "—", caption = "fast comebacks", modifier = Modifier.weight(1f))
@@ -197,12 +201,12 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
 }
 
 @Composable
-private fun ThresholdNote(n: Int) {
+private fun ThresholdNote() {
     val c = UTheme.colors
     Card(Modifier.fillMaxWidth().padding(top = 8.dp), radius = 14) {
         Column {
-            Text("Patterns appear after a few sessions.", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
-            Text("$n of 5 focus sessions so far — numbers stay gentle until then.", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 4.dp))
+            Text("No focus sessions yet.", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
+            Text("Your reflection fills in here as you focus — come back after a session or two.", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 4.dp))
         }
     }
 }

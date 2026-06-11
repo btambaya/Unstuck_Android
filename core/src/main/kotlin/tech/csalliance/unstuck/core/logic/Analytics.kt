@@ -14,7 +14,11 @@ import kotlin.math.min
 // Port of lib/analytics.ts. The Compose Report + DeepDive charts consume
 // these; each chart decides whether it has enough data for real numbers.
 
-const val REAL_DATA_THRESHOLD = 5 // < this many sessions → show demo
+// Floor for the qualitative "Worth noticing" insights only — a single session
+// shouldn't claim a "strongest day". The numeric cards + charts no longer gate
+// on this (they show real data from the first session); kept low so the prose
+// insights still surface early.
+const val REAL_DATA_THRESHOLD = 3
 private const val HOUR = 3600.0
 
 private fun parseDate(iso: String): Long? = Time.parseMillis(iso)

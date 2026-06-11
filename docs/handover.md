@@ -4,9 +4,15 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
-## CURRENT STATUS — v0.4.46 (versionCode 59), 2026-06-10
+## CURRENT STATUS — v0.4.47 (versionCode 60), 2026-06-11
 
 **Feature-complete + web-parity, shipping on Firebase App Distribution to 2 testers** (justtesting6363@, zyzkazaure@ — NO beta group by default; `-PappDistGroups=beta` for the full group). Same Supabase backend (`uaxfteluwctrlgwmmfzi`). Release builds signed (dev keystore); backend crons live (morning-brief /15m, collection-late /5m, task-reminder-dispatch /5m). Android is the **native reference for the iOS rebuild**.
+
+**v0.4.47 (2026-06-11) — 3 reported-bug fixes from real testing + Insights, shipped to the 2 testers (also ported to web [live on Cloudflare] + iOS code [committed; iOS NOT on TestFlight yet — see the iOS repo handover]):**
+1. **Recurring tasks no longer flood "All".** A "every Friday" task used to appear 4–5× in All. Now templates show only under the **Recurring** filter, and each occurrence appears in **Today** on its day (the SINGLE next per series in Upcoming) — All/Backlog/Later/Completed use non-templates only. (`core/logic/VisibleTasks.kt` rewrite; tick/skip a single day without touching the series, as before.)
+2. **Cross-device sync fixed.** Completing a task on web didn't reflect on the phone: a stale offline `tasks` upsert op in the outbox re-pushed and clobbered the web's `done=true`, which the next hydrate then pulled back as not-done. Fix: **`Hydrator.pruneStaleTaskOps()`** drops queued task ops the server already supersedes (strictly newer `updatedAt`), run BEFORE flush in `SyncCoordinator.syncNow()` + the sign-in path. (Android's `SyncGateway.upsert` is a whole-row `onConflict=id` with no per-field guard — same clobber class as web; the prune is the load-bearing fix.) Genuine offline edits (op newer than server) still flush.
+3. **Start-Next hero card usable again.** `core/logic/PickStartNext.kt` `pickTodayHero()`: next **scheduled** task today (by start time) → else **lowest-friction** (shortest estimate) among today's tasks → else **nil + a tappable backlog pointer** ("Nothing scheduled today / N in your backlog →"), never pulling a random backlog task. `TodayScreen.kt` `BacklogPointerHero`.
+4. **Insights shows real numbers from the FIRST session.** The Reflection screen hid everything behind a 5-session threshold (testers saw only dashes). UI gate now `sessions.isNotEmpty()`; estimate-hit % gates on calibration dots; the qualitative "Worth noticing" prose keeps a small floor (`REAL_DATA_THRESHOLD` 5→3). Empty state reworded. (`ui/insights/InsightsScreen.kt` + `core/logic/Analytics.kt`.)
 
 **Major work since v0.4.24 (this block is authoritative; the sections below are historical):**
 - **Voice realtime (v0.4.36)** — "Talk" mode (Qwen-Omni via a Cloudflare Worker proxy → DashScope); comm-mode + route-aware duplex barge-in.

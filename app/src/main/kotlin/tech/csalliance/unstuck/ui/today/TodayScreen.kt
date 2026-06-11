@@ -53,7 +53,7 @@ import tech.csalliance.unstuck.core.logic.daysSinceCreated
 import tech.csalliance.unstuck.core.logic.formatMMSS
 import tech.csalliance.unstuck.core.logic.isCompletedToday
 import tech.csalliance.unstuck.core.logic.isTemplate
-import tech.csalliance.unstuck.core.logic.pickStartNext
+import tech.csalliance.unstuck.core.logic.pickTodayHero
 import tech.csalliance.unstuck.core.logic.projectOccurrences
 import tech.csalliance.unstuck.core.logic.visibleTasks
 import tech.csalliance.unstuck.core.time.Clock
@@ -123,7 +123,10 @@ fun TodayScreen(
         while (live != null && live?.paused != true) { nowTick = System.currentTimeMillis(); kotlinx.coroutines.delay(1000) }
     }
 
-    val startNext = pickStartNext(tasks, blocks, liveId, areaFilter)
+    // Start-Next hero — scoped to TODAY (next-scheduled by time → else
+    // shortest-estimate → else null so the hero points to the Backlog instead of
+    // pulling a backlog task). Excludes the live-focused task + honours the area.
+    val startNext = pickTodayHero(tasks, blocks, now, liveId, areaFilter)
     // Today = open tasks scheduled/intended for today, plus anything completed today
     // (sorted last), matching the web today-list which keeps today's completions visible.
     val todayOpen = visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false)
@@ -252,7 +255,13 @@ fun TodayScreen(
             if (empty) {
                 item { EmptyHero(onAdd = onSearch) }
             } else {
-                if (startNext != null) item { StartNextHero(startNext, onStart = { onStartFocus(startNext) }, onPickAnother = onSearch) }
+                if (startNext != null) {
+                    item { StartNextHero(startNext, onStart = { onStartFocus(startNext) }, onPickAnother = onSearch) }
+                } else if (backlogAll.isNotEmpty()) {
+                    // Nothing scheduled today — point to the Backlog (don't pull a backlog
+                    // task into the hero). Tapping flips the list below to the Backlog.
+                    item { BacklogPointerHero(count = backlogAll.size, onOpenBacklog = { backlogActive = true; areaFilter = null }) }
+                }
                 // Filter pills BELOW the banner; they stick to the top of the list on scroll.
                 stickyHeader {
                     Column(Modifier.fillMaxWidth().background(c.bg)) {
@@ -331,6 +340,26 @@ private fun StartNextHero(task: TaskItem, onStart: () -> Unit, onPickAnother: ()
                     UButton("Focus", kind = ButtonKind.CORAL, fill = false, leadingIcon = Icons.Filled.PlayArrow, onClick = onStart)
                     Text("Pick another", style = UFont.sans(13, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(onClick = onPickAnother).padding(horizontal = 10.dp, vertical = 8.dp))
                 }
+            }
+        }
+    }
+}
+
+/** Nothing is scheduled today, but the backlog isn't empty — point the user there
+ *  instead of pulling a backlog task into the hero. Tapping opens the Backlog list. */
+@Composable
+private fun BacklogPointerHero(count: Int, onOpenBacklog: () -> Unit) {
+    val c = UTheme.colors
+    Column(Modifier.padding(horizontal = 18.dp).padding(top = 20.dp)) {
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(heroBrush(c))
+                .clickable(onClick = onOpenBacklog).padding(18.dp),
+        ) {
+            SectionLabel("Nothing scheduled today", color = c.primaryDeep)
+            Text("Pick something to start.", style = UFont.sans(21, FontWeight.Bold), color = c.ink, modifier = Modifier.padding(top = 6.dp))
+            Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                Text("$count in your backlog", style = UFont.sans(13, FontWeight.SemiBold), color = c.primaryDeep)
+                Text("→", style = UFont.sans(13, FontWeight.SemiBold), color = c.primaryDeep)
             }
         }
     }

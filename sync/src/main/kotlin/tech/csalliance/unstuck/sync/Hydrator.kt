@@ -1,9 +1,11 @@
 package tech.csalliance.unstuck.sync
 
 import kotlinx.serialization.KSerializer
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 import tech.csalliance.unstuck.core.logic.isExternalBlock
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalendarConnection
@@ -26,6 +28,34 @@ import tech.csalliance.unstuck.data.db.Tables
 // the iOS Hydrator.swift.
 
 class Hydrator(private val gateway: SyncGateway, private val store: LocalStore) {
+
+    /** Drop queued `tasks` upsert ops the server already supersedes (its row is
+     *  STRICTLY newer by updatedAt). Run BEFORE the flush: without it, a stale
+     *  local op — e.g. an old `done=false` edit still sitting in the outbox —
+     *  re-pushes and clobbers a newer server change (a completion made on the
+     *  WEB), which the following hydrate then faithfully pulls back as not-done.
+     *  This is the load-bearing fix for "completed on web, didn't reflect on the
+     *  phone". Only reads the server when task ops are actually queued, so it's
+     *  free in the common empty-outbox case. (Genuine offline edits — whose op is
+     *  newer than the server — survive and flush normally.) */
+    suspend fun pruneStaleTaskOps() {
+        val taskOps = store.pending().filter { it.recordTable == Tables.TASKS && it.op == "upsert" }
+        if (taskOps.isEmpty()) return
+        val serverUpdatedAt = runCatching {
+            gateway.fetchAll(Tables.TASKS).associate { val t = DbRowCodec.decodeTask(it); t.id to t.updatedAt }
+        }.getOrElse { return }
+        for (op in taskOps) {
+            val payload = op.payload ?: continue
+            val serverTime = serverUpdatedAt[op.recordId] ?: continue
+            val localTime = runCatching {
+                DbRowCodec.decodeTask(Json.parseToJsonElement(payload).jsonObject).updatedAt
+            }.getOrNull() ?: continue
+            if (serverTime > localTime) {
+                println("[outbox] pruning stale tasks op ${op.recordId} — server is newer")
+                store.dequeue(op.seq)
+            }
+        }
+    }
 
     suspend fun hydrate(userId: String) {
         replace(Tables.TASKS, TaskItem.serializer(), { it.id }, { it.updatedAt }) { DbRowCodec.decodeTask(it) }

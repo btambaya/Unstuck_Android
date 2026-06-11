@@ -9,7 +9,9 @@ import tech.csalliance.unstuck.core.logic.isTemplate
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
 import tech.csalliance.unstuck.core.logic.projectOccurrences
 import tech.csalliance.unstuck.core.logic.taskForBlock
+import tech.csalliance.unstuck.core.logic.visibleTasks
 import tech.csalliance.unstuck.core.model.Recurrence
+import tech.csalliance.unstuck.core.model.TaskListView
 
 // Parity with lib/occurrences.test.ts.
 class OccurrencesTest {
@@ -62,5 +64,41 @@ class OccurrencesTest {
         val occ = taskForBlock(mkBlock(id = "b1", taskId = "t1"), listOf(template))
         assertEquals("b1", occ?.id)
         assertNull(occ?.recurrence)
+    }
+
+    @Test fun recurringViewReturnsTemplatesOnly() {
+        val blocks = listOf(mkBlock(id = "b1", taskId = "t1", date = todayPlus(0)), mkBlock(id = "b2", taskId = "t1", date = todayPlus(1)))
+        val recurring = visibleTasks(TaskListView.RECURRING, listOf(template), blocks, NOW, null, slipMode = false)
+        assertEquals(listOf("t1"), recurring.map { it.id })
+        // Today shows the occurrence, NOT the template.
+        val today = visibleTasks(TaskListView.TODAY, listOf(template), blocks, NOW, null, slipMode = false)
+        assertTrue(today.any { it.id == "b1" })
+        assertFalse(today.any { it.id == "t1" })
+    }
+
+    // Recurring occurrences must NOT flood All (a Friday task once per horizon).
+    @Test fun recurringAbsentFromAll() {
+        val blocks = listOf(
+            mkBlock(id = "b0", taskId = "t1", date = todayPlus(0)),
+            mkBlock(id = "b1", taskId = "t1", date = todayPlus(1)),
+            mkBlock(id = "b2", taskId = "t1", date = todayPlus(2)),
+        )
+        val all = visibleTasks(TaskListView.ALL, listOf(template), blocks, NOW, null, slipMode = false)
+        assertTrue("neither the template nor its occurrences belong in All", all.isEmpty())
+        // A normal task still appears in All alongside the recurring series.
+        val normal = mkTask(id = "n1", createdAt = "2026-05-21T10:00:00.000Z")
+        val all2 = visibleTasks(TaskListView.ALL, listOf(template, normal), blocks, NOW, null, slipMode = false)
+        assertEquals(listOf("n1"), all2.map { it.id })
+    }
+
+    // Upcoming shows only the SINGLE next occurrence per series, not the horizon.
+    @Test fun upcomingShowsOnlyNextOccurrence() {
+        val blocks = listOf(
+            mkBlock(id = "b1", taskId = "t1", date = todayPlus(1)),
+            mkBlock(id = "b2", taskId = "t1", date = todayPlus(2)),
+            mkBlock(id = "b3", taskId = "t1", date = todayPlus(3)),
+        )
+        val up = visibleTasks(TaskListView.UPCOMING, listOf(template), blocks, NOW, null, slipMode = false)
+        assertEquals(listOf("b1"), up.map { it.id })
     }
 }

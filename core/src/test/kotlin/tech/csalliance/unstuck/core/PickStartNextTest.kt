@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.pickStartNext
+import tech.csalliance.unstuck.core.logic.pickTodayHero
 import tech.csalliance.unstuck.core.logic.pickUpNext
 import tech.csalliance.unstuck.core.model.Priority
 
@@ -65,5 +66,27 @@ class PickStartNextTest {
         val later = mkTask(id = "later", priority = Priority.URGENT, later = true)
         val open = mkTask(id = "open", priority = Priority.LOW)
         assertEquals(listOf("open"), pickUpNext(listOf(done, later, open), emptyList(), null, null).map { it.id })
+    }
+
+    // --- pickTodayHero (today-scoped, never backlog) ---
+
+    @Test fun heroPrefersScheduledOverShorterUnscheduled() {
+        val sched = mkTask(id = "sched", estimateMin = 25)            // scheduled today (longer)
+        val quick = mkTask(id = "quick", estimateMin = 5, createdAt = iso(NOW))  // created today, unscheduled (shorter)
+        val blocks = listOf(mkBlock(id = "bs", taskId = "sched", startTime = "16:00", date = todayPlus(0)))
+        val hero = pickTodayHero(listOf(sched, quick), blocks, NOW)
+        assertEquals("a scheduled-today task wins over a shorter unscheduled one", "sched", hero?.id)
+    }
+
+    @Test fun heroShortestWhenNoneScheduled() {
+        val a = mkTask(id = "a", estimateMin = 25, createdAt = iso(NOW))
+        val b = mkTask(id = "b", estimateMin = 10, createdAt = iso(NOW))
+        val hero = pickTodayHero(listOf(a, b), emptyList(), NOW)
+        assertEquals("lowest-friction (shortest estimate) when nothing is scheduled today", "b", hero?.id)
+    }
+
+    @Test fun heroNullWhenNoTodayTasks() {
+        val old = mkTask(id = "old", createdAt = "2026-04-01T10:00:00.000Z")   // backlog, not today
+        assertNull("the hero never pulls from the backlog", pickTodayHero(listOf(old), emptyList(), NOW))
     }
 }

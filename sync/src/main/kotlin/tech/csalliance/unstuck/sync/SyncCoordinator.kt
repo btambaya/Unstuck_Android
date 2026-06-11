@@ -114,6 +114,10 @@ class SyncCoordinator(
      *  WorkManager job. No-op when signed out. */
     suspend fun syncNow() {
         val uid = auth.currentUserId ?: return
+        // Drop stale local task ops the server already superseded BEFORE flushing,
+        // so a queued done=false can't clobber a completion made on another platform
+        // (which the hydrate would then pull back). Then push + pull.
+        hydrator.pruneStaleTaskOps()
         flusher.flush(uid) { auth.currentUserId }
         hydrator.hydrate(uid)
         runCatching { pullCalendar() }
@@ -263,9 +267,11 @@ class SyncCoordinator(
                 val prev = prefs.getString(KEY_PREV_USER, null)
                 if (SyncDecision.shouldWipeCache(event, prev, uid)) store.clearAll()
                 prefs.edit().putString(KEY_PREV_USER, uid).apply()
-                // Push offline edits first, then pull server-canonical, then mirror live.
-                // Guard the drain on the LIVE user id so a sign-out + switch mid-flush
-                // doesn't keep stamping queued ops with the prior user.
+                // Prune stale task ops (server already newer) so they can't clobber
+                // another platform's change, then push offline edits, pull
+                // server-canonical, and mirror live. Guard the drain on the LIVE user id
+                // so a sign-out + switch mid-flush doesn't stamp ops with the prior user.
+                hydrator.pruneStaleTaskOps()
                 flusher.flush(uid) { auth.currentUserId }
                 hydrator.hydrate(uid)
                 realtime.subscribeAll(uid) { hydrator.hydrateCollections(uid) }

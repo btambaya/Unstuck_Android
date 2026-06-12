@@ -23,3 +23,6 @@ firebase-service-account.json
 
 # Kotlin compiler incremental/session artifacts
 .kotlin/
+
+# Play AAB build artifacts (reproducible via ./gradlew :app:bundleRelease)
+store-assets/*.aab

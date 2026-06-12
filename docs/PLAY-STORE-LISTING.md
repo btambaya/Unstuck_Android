@@ -51,12 +51,14 @@ Your data syncs across Android, iPhone and the web at unstucknow.io.
 
 ## Graphics (Play requirements)
 
-- **App icon**: 512×512 PNG (32-bit, no alpha for the store icon). Source = the
-  Orbit mark (same as iOS `App/Assets.xcassets`); regenerate at 512.
-- **Feature graphic**: 1024×500 PNG/JPG — REQUIRED. Cream bg + Orbit + wordmark.
-- **Phone screenshots**: 2–8, min 320px, 16:9 or 9:16. Reuse the iOS tour set
-  (Today / Focus / Recap / Tasks / Calendar / Collections / Inbox / Insights)
-  re-shot on an Android emulator, or capture from the demo seed.
+- **App icon** ✅ `store-assets/icon-512.png` (512×512, opaque, Orbit mark).
+- **Feature graphic** ✅ `store-assets/feature-1024x500.png` (cream bg + Orbit +
+  "Unstuck" wordmark + tagline).
+- **Phone screenshots** ⬜ STILL TODO — 2–8, min 320px. Android has no demo-seed
+  harness yet (iOS used UITEST_SEED). Options: build an Android demo boot +
+  emulator capture (reusable, ~the iOS approach), or seed the demo account's
+  data in Supabase and screencap the emulator. NOT required for the Internal
+  testing track — only before Production/Closed rollout.
 
 ## Data safety form (mirror of the iOS App Privacy answers)
 

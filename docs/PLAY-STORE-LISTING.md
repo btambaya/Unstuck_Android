@@ -7,7 +7,7 @@ on 2026-06-12 for the Play launch — permanent once published).
 
 ## Store listing
 
-- **App name** (≤30): `Unstuck`
+- **App name** (≤30): `UnstuckNow` (matches the iOS App Store name)
 - **Short description** (≤80): `Calm ADHD-friendly day planner — plan today, focus, and finish what you start.`
 - **Full description** (≤4000):
 

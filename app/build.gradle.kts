@@ -41,10 +41,15 @@ android {
     compileSdk = 35
 
     defaultConfig {
-        applicationId = "tech.csalliance.unstuck"
+        // applicationId rebranded to the domain (matches iOS io.unstucknow.app)
+        // for the Play Store launch. The Kotlin source package / `namespace`
+        // stays tech.csalliance.unstuck — it's internal and invisible, so we
+        // don't churn 100+ files. Firebase + App Distribution are re-pointed at
+        // the new Android app registered under this id (appId below).
+        applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 60
+        versionCode = 61
         versionName = "0.4.47"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
@@ -99,7 +104,8 @@ android {
 // To push to the whole beta group (when ready): pass -PappDistGroups=beta.
 // Override testers with -PappDistTesters="a@x.com,b@y.com".
 firebaseAppDistribution {
-    appId = "1:806563895083:android:1673707a78b9d39039976e"
+    // Firebase Android app for io.unstucknow.app (registered 2026-06-12).
+    appId = "1:806563895083:android:26d9fa661bf5944a39976e"
     artifactType = "APK"
     val sa = rootProject.file("firebase-service-account.json")
     if (sa.exists()) serviceCredentialsFile = sa.path

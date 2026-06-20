@@ -133,6 +133,21 @@ class OfflineEngineTest {
         assertEquals("local row must survive hydrate", listOf("t1"), store.tasks().first().map { it.id })
     }
 
+    // --- forward-compat: one un-decodable server row must not abort the whole table ---
+
+    @Test fun hydrate_perRowTolerant_oneBadRowKeepsTheRest() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store)
+        // A valid task row + a garbage row missing required fields (un-decodable).
+        // The eager `.map(decode)` would have thrown on the bad row and wiped the
+        // whole table; mapNotNull { runCatching {...} } drops only the bad one.
+        val good = serverRow(task("good", updatedAt = "2026-05-21T10:00:00.000Z"))
+        val bad = Json.parseToJsonElement("""{"id":"bad","whoops":true}""") as JsonObject
+        remote.serverRows[Tables.TASKS] = listOf(good, bad)
+        hydrator.hydrate("u1")
+        assertEquals("good row survives, bad row dropped", listOf("good"), store.tasks().first().map { it.id })
+    }
+
     // --- bug #4: pruneStaleTaskOps instant-based compare ---
 
     @Test fun pruneStaleTaskOps_dropsOpWhenServerStrictlyNewer_instantCompare() = runTest {

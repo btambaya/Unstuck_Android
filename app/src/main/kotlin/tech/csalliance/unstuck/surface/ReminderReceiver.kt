@@ -72,16 +72,25 @@ class ReminderReceiver : BroadcastReceiver() {
         val pending = goAsync()
         app.graph.scope.launch {
             try {
-                val blocks = runCatching { app.graph.store.blocks().first() }.getOrNull()
-                val tasks = runCatching { app.graph.store.tasks().first() }.getOrNull()
-                if (blocks != null && blocks.none { it.id == blockId }) return@launch   // schedule gone
-                if (taskId.isNotBlank() && tasks != null) {
-                    val task = tasks.firstOrNull { it.id == taskId }
-                    if (task == null || task.done) return@launch   // task deleted or already done
+                // Bound the validation reads: on a cold/DB-locked path these suspend
+                // reads can run long enough that the OS kills the receiver before
+                // anything fires — a MISSED reminder. If they don't finish in time,
+                // fall through to a best-effort post() (a possibly-real reminder is
+                // better than a silently-dropped one — same bias as a read error).
+                val validated = kotlinx.coroutines.withTimeoutOrNull(5_000) {
+                    val blocks = runCatching { app.graph.store.blocks().first() }.getOrNull()
+                    val tasks = runCatching { app.graph.store.tasks().first() }.getOrNull()
+                    if (blocks != null && blocks.none { it.id == blockId }) return@withTimeoutOrNull false   // schedule gone
+                    if (taskId.isNotBlank() && tasks != null) {
+                        val task = tasks.firstOrNull { it.id == taskId }
+                        if (task == null || task.done) return@withTimeoutOrNull false   // task deleted or already done
+                    }
+                    val focusingIt = runCatching { app.graph.store.getLiveSession()?.taskId == taskId }.getOrNull() == true
+                    if ((kind == "atstart" || drifted) && focusingIt) return@withTimeoutOrNull false
+                    true   // confirmed still relevant → post
                 }
-                val focusingIt = runCatching { app.graph.store.getLiveSession()?.taskId == taskId }.getOrNull() == true
-                if ((kind == "atstart" || drifted) && focusingIt) return@launch
-                post()
+                // null = reads timed out → best-effort post; false = confirmed-absent → suppress.
+                if (validated != false) post()
             } finally {
                 pending.finish()
             }

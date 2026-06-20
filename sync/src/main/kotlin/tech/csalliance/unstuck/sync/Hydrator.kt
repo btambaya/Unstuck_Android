@@ -81,7 +81,9 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
      *  standalone when a collection_members realtime event fires. */
     suspend fun hydrateCollections(userId: String) {
         runCatching {
-            val base = gateway.fetchAll(Tables.COLLECTIONS).map { DbRowCodec.decodeCollection(it) }
+            // Per-row tolerant decode (see replace()): a single bad collection row
+            // mustn't drop the user's entire list of collections.
+            val base = gateway.fetchAll(Tables.COLLECTIONS).mapNotNull { runCatching { DbRowCodec.decodeCollection(it) }.getOrNull() }
             val memberRows = runCatching { gateway.fetchAll("collection_members") }.getOrDefault(emptyList())
             val byColl = HashMap<String, MutableList<Pair<String, String>>>()   // collectionId -> [(userId, role)]
             for (m in memberRows) {
@@ -110,7 +112,10 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
         decode: (JsonObject) -> T,
     ) {
         runCatching {
-            val models = gateway.fetchAll(table).map(decode)
+            // Per-ROW tolerant decode: one un-decodable row (e.g. a forward-compat
+            // shape this build can't parse) must not abort the whole table and wipe
+            // every good row off the UI. Drop only the bad row.
+            val models = gateway.fetchAll(table).mapNotNull { runCatching { decode(it) }.getOrNull() }
             // Preserve optimistic local rows with a still-pending outbox upsert (e.g.
             // a transient flush failure followed by a successful fetch): they're not
             // in `models`, so the replace would wipe them off the UI until the next
@@ -138,7 +143,9 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
 
     private suspend fun hydrateCalBlocks() {
         runCatching {
-            val remote = gateway.fetchAll(Tables.CAL_BLOCKS).map { DbRowCodec.decodeCalBlock(it) }
+            // Per-row tolerant decode (see replace()): a single bad cal_block row
+            // mustn't wipe the whole schedule.
+            val remote = gateway.fetchAll(Tables.CAL_BLOCKS).mapNotNull { runCatching { DbRowCodec.decodeCalBlock(it) }.getOrNull() }
             val local = store.snapshot(Tables.CAL_BLOCKS, CalBlock.serializer())
             val localExternal = local.filter { isExternalBlock(it) }
             val merged = SyncDecision.mergeHydratedCalBlocks(remote, localExternal)

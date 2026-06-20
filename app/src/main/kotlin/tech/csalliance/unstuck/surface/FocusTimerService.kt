@@ -9,6 +9,7 @@ import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
 import androidx.core.app.ServiceCompat
 import tech.csalliance.unstuck.MainActivity
 import tech.csalliance.unstuck.R
@@ -26,32 +27,48 @@ class FocusTimerService : Service() {
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        // Honour the startForeground()-within-5s contract UNCONDITIONALLY before the
+        // `when`. A STOP (or a redelivered null intent after a cold restart) must still
+        // call startForeground() first — Android 12+ throws ForegroundServiceDidNotStart
+        // InTimeException otherwise. We start, then immediately tear down on STOP.
+        startForegroundNow()
         when (intent?.action) {
-            ACTION_STOP -> { stopSelf(); return START_NOT_STICKY }
+            ACTION_STOP -> {
+                ServiceCompat.stopForeground(this, ServiceCompat.STOP_FOREGROUND_REMOVE)
+                stopSelf()
+                return START_NOT_STICKY
+            }
             ACTION_UPDATE -> {
                 paused = intent.getBooleanExtra(EXTRA_PAUSED, paused)
                 // Refresh the chronometer base on resume — FocusTimer.resume shifts
                 // sessionStart past the pause gap, so the running notification counts
                 // true focus time (not wall-clock incl. the pause).
                 if (intent.hasExtra(EXTRA_START)) startMs = intent.getLongExtra(EXTRA_START, startMs)
+                // Re-post with the refreshed state.
+                startForegroundNow()
             }
             else -> {
                 name = intent?.getStringExtra(EXTRA_NAME) ?: name
                 startMs = intent?.getLongExtra(EXTRA_START, startMs) ?: startMs
                 paused = intent?.getBooleanExtra(EXTRA_PAUSED, false) ?: false
+                startForegroundNow()
             }
         }
-        NotificationChannels.ensureAll(this)
+        // NOT_STICKY: don't let the system recreate us with a null intent (which would
+        // rebuild a stale/generic notification). The focus-screen live-session observer
+        // re-arms the service from real state when needed.
+        return START_NOT_STICKY
+    }
+
+    /** Promote to foreground with the current state. Channels are ensured in
+     *  Application.onCreate, so we don't re-ensure here. */
+    private fun startForegroundNow() {
         val notification = build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
             ServiceCompat.startForeground(this, NotifIds.FOCUS, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(NotifIds.FOCUS, notification)
         }
-        // NOT_STICKY: don't let the system recreate us with a null intent (which would
-        // rebuild a stale/generic notification). The focus-screen live-session observer
-        // re-arms the service from real state when needed.
-        return START_NOT_STICKY
     }
 
     private fun broadcast(action: String): PendingIntent = PendingIntent.getBroadcast(
@@ -109,11 +126,23 @@ class FocusTimerService : Service() {
         fun update(context: Context, paused: Boolean, startMs: Long? = null) {
             val i = Intent(context, FocusTimerService::class.java).setAction(ACTION_UPDATE).putExtra(EXTRA_PAUSED, paused)
             if (startMs != null) i.putExtra(EXTRA_START, startMs)
-            context.startService(i)
+            // startService throws on Android 12+ if the process is backgrounded and the
+            // dead START_NOT_STICKY service can't be recreated (e.g. from a stale shade
+            // action). Swallow it — the live-session observer re-arms the service via
+            // startForegroundService when the app is foregrounded.
+            runCatching { context.startService(i) }
         }
 
         fun stop(context: Context) {
-            context.startService(Intent(context, FocusTimerService::class.java).setAction(ACTION_STOP))
+            // Same guard as update(): a STOP delivered while backgrounded can throw
+            // (BackgroundServiceStartNotAllowed). If we can't reach the service, fall
+            // back to cancelling the focus notification directly so a stale "LIVE"
+            // banner doesn't linger.
+            runCatching {
+                context.startService(Intent(context, FocusTimerService::class.java).setAction(ACTION_STOP))
+            }.onFailure {
+                runCatching { NotificationManagerCompat.from(context).cancel(NotifIds.FOCUS) }
+            }
         }
     }
 }

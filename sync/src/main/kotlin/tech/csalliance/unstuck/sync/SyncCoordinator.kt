@@ -71,6 +71,18 @@ class SyncCoordinator(
         auth.signOut()
     }
 
+    /** Delete the account, then ALWAYS unregister this device's push token (while the
+     *  JWT may still be valid) and sign out — even if the server invoke timed out after
+     *  it already deleted the account. Otherwise a dead local session + a lingering
+     *  push-token row survive (the previous owner's pushes could reach the next user).
+     *  No outbox flush: the account is being destroyed, so queued writes are moot. */
+    suspend fun deleteAccount(): AuthOutcome {
+        val invoke = auth.deleteAccountInvoke()
+        runCatching { push.unregister(thisDeviceId()) }
+        auth.signOut()
+        return invoke
+    }
+
     private fun thisDeviceId(): String =
         android.provider.Settings.Secure.getString(appContext.contentResolver, android.provider.Settings.Secure.ANDROID_ID) ?: "android-device"
 
@@ -271,12 +283,18 @@ class SyncCoordinator(
                 // another platform's change, then push offline edits, pull
                 // server-canonical, and mirror live. Guard the drain on the LIVE user id
                 // so a sign-out + switch mid-flush doesn't stamp ops with the prior user.
-                hydrator.pruneStaleTaskOps()
-                flusher.flush(uid) { auth.currentUserId }
-                hydrator.hydrate(uid)
-                realtime.subscribeAll(uid) { hydrator.hydrateCollections(uid) }
-                runCatching { pullCalendar() }   // ingest Google events if connected
-                maybeTrackLogin(uid)             // best-effort usage analytics (throttled)
+                // Wrap the whole body in runCatching: an uncaught throw here (transient
+                // REST/decode error) would cancel observeJob, and start()'s
+                // `if (observeJob != null) return` means sync would NEVER restart for the
+                // rest of the process — a transient failure must not permanently kill sync.
+                runCatching {
+                    hydrator.pruneStaleTaskOps()
+                    flusher.flush(uid) { auth.currentUserId }
+                    hydrator.hydrate(uid)
+                    realtime.subscribeAll(uid) { hydrator.hydrateCollections(uid) }
+                    runCatching { pullCalendar() }   // ingest Google events if connected
+                    maybeTrackLogin(uid)             // best-effort usage analytics (throttled)
+                }.onFailure { Log.w(TAG, "sync authenticated-branch step failed; sync stays alive", it) }
             }
             is SessionStatus.NotAuthenticated -> if (status.isSignOut) {
                 realtime.unsubscribeAll()

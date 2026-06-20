@@ -100,6 +100,40 @@ class RecurrenceTest {
         assertEquals(listOf("2026-06-01"), plan.toUpsert.map { it.date })
     }
 
+    // --- daysOfWeek normalisation (out-of-range / convention-mismatch rows) ---
+
+    // A row stored with JS getDay()'s 7 for Sunday (vs our 0=Sun) would never match
+    // dayOfWeekJs (0..6) and silently produce ZERO occurrences. [7] folds to 0 (Sun)
+    // and generates the same occurrences as [0]. start = Thu May 21 2026; Sundays are
+    // May 24/31, Jun 7.
+    @Test fun weeklyDay7TreatedAsSunday() {
+        val from7 = materializeOccurrences(Recurrence.Weekly(listOf(7)), start, "09:00", 21)
+        val from0 = materializeOccurrences(Recurrence.Weekly(listOf(0)), start, "09:00", 21)
+        assertEquals(listOf("2026-05-24", "2026-05-31", "2026-06-07"), from7.map { it.date })
+        assertEquals(from0.map { it.date }, from7.map { it.date })
+    }
+
+    // A normal weekly set is unaffected by normalisation.
+    @Test fun weeklyValidSetStillGenerates() {
+        val occ = materializeOccurrences(Recurrence.Weekly(listOf(1, 3, 5)), start, "09:00", 14)
+        assertEquals(
+            listOf("2026-05-22", "2026-05-25", "2026-05-27", "2026-05-29", "2026-06-01", "2026-06-03"),
+            occ.map { it.date },
+        )
+    }
+
+    // An EMPTY daysOfWeek (corrupt/legacy row) must NOT regenerate-to-nothing and wipe
+    // every future block of the series — regenerateForTask leaves existing blocks intact.
+    @Test fun weeklyEmptyDaysDoesNotWipeExistingBlocks() {
+        val blocks = listOf(
+            mkBlock(id = "future1", taskId = "task-1", date = "2026-05-22"),
+            mkBlock(id = "future2", taskId = "task-1", date = "2026-05-23"),
+        )
+        val plan = regenerateForTask(task, Recurrence.Weekly(emptyList()), blocks, today, "09:00", start)
+        assertEquals(emptyList<String>(), plan.toDelete)
+        assertEquals(emptyList<Any>(), plan.toUpsert)
+    }
+
     // --- recurrenceLabel ---
 
     @Test fun labelNilIsEmpty() = assertEquals("", recurrenceLabel(null))

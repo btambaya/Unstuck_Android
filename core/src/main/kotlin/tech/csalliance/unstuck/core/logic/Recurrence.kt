@@ -3,6 +3,7 @@ package tech.csalliance.unstuck.core.logic
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.Recurrence
+import tech.csalliance.unstuck.core.model.RecurrenceSerializer
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.time.Time
@@ -21,11 +22,17 @@ data class MaterializedOccurrence(val date: String, val startTime: String)
 private val Recurrence.daysOfWeek: List<Int>?
     get() = (this as? Recurrence.Weekly)?.daysOfWeek
 
+/** Normalise stored weekly days to the canonical 0=Sun…6=Sat range. A row written
+ *  by a different convention (e.g. JS getDay()'s 7 for Sunday, or a stray
+ *  out-of-range value) would otherwise never match dayOfWeekJs (0..6), silently
+ *  yielding zero occurrences. `((it % 7) + 7) % 7` folds any int into 0..6. */
+fun normalizeWeekdays(days: List<Int>): List<Int> = days.map { ((it % 7) + 7) % 7 }.distinct()
+
 private fun matchesRecurrence(r: Recurrence, startDate: Long, candidate: Long): Boolean {
     if (Time.startOfDayMillis(candidate) < Time.startOfDayMillis(startDate)) return false
     return when (r) {
         is Recurrence.Daily -> true
-        is Recurrence.Weekly -> Time.dayOfWeekJs(candidate) in r.daysOfWeek
+        is Recurrence.Weekly -> Time.dayOfWeekJs(candidate) in normalizeWeekdays(r.daysOfWeek)
         // Clamp the start day to the candidate month's length so a task set to the
         // 29th/30th/31st still fires on the last day of shorter months (Feb etc.)
         // instead of being silently skipped (web does this clamp).
@@ -78,6 +85,15 @@ fun regenerateForTask(
         return RegenPlan(emptyList(), futureExisting.filter { !it.done && !it.skipped }.map { it.id })
     }
 
+    // A weekly recurrence with NO valid days (empty, or all out-of-range so they
+    // normalise away) would materialise zero occurrences — regenerate would then
+    // DELETE every future block and upsert nothing, silently erasing the series.
+    // That's almost certainly a corrupt/legacy row, not an intentional "never
+    // repeat", so skip regeneration and leave existing blocks untouched.
+    if (recurrence is Recurrence.Weekly && normalizeWeekdays(recurrence.daysOfWeek).isEmpty()) {
+        return RegenPlan(emptyList(), emptyList())
+    }
+
     val desired = materializeOccurrences(recurrence, startDate, startTime, horizonDays)
         .filter { it.date > todayIso }
     val desiredKeys = desired.map { "${it.date}|${it.startTime}" }.toSet()
@@ -109,7 +125,9 @@ private fun formatDays(days: List<Int>): String {
 
 /** Short human label for the detail pane / row chips. */
 fun recurrenceLabel(r: Recurrence?): String {
-    if (r == null) return ""
+    // An unrecognised recurrence kind decodes to a no-op sentinel (see
+    // RecurrenceSerializer.UNKNOWN_UNTIL) — render nothing, not a bogus "until 0001" chip.
+    if (r == null || RecurrenceSerializer.isUnknown(r)) return ""
     val base = when (r) {
         is Recurrence.Daily -> "Repeats daily"
         is Recurrence.Weekly -> if (r.daysOfWeek.size == 7) "Repeats daily" else "Repeats ${formatDays(r.daysOfWeek)}"

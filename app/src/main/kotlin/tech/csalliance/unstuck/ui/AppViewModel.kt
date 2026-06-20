@@ -892,7 +892,13 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
                         ?.let { Json.decodeFromString<List<ChatMessage>>(it) }
                 }.getOrNull()
             }
-            if (!loaded.isNullOrEmpty() && epoch == assistantEpoch) assistantHistory.addAll(0, loaded)
+            // assistantHistory is a Compose SnapshotStateList — mutate it ONLY on the
+            // main thread (it's read during recomposition; cross-thread mutation risks a
+            // ConcurrentModificationException / dropped updates). Main.immediate is a
+            // no-op hop when we're already on Main.
+            if (!loaded.isNullOrEmpty() && epoch == assistantEpoch) {
+                withContext(Dispatchers.Main.immediate) { assistantHistory.addAll(0, loaded) }
+            }
         }
         // Scrub the conversation on sign-out — same cross-account leak class as
         // the notification log: the next account on a shared device must not see
@@ -901,7 +907,12 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         graph.provider?.client?.let { client ->
             viewModelScope.launch {
                 client.auth.sessionStatus.collect { status ->
-                    if (status is SessionStatus.NotAuthenticated && status.isSignOut) clearAssistant()
+                    // collect resumes on the SDK's emit dispatcher (not guaranteed Main);
+                    // clearAssistant() mutates assistantHistory (a SnapshotStateList) which
+                    // must only be touched on the main thread. Hop explicitly.
+                    if (status is SessionStatus.NotAuthenticated && status.isSignOut) {
+                        withContext(Dispatchers.Main.immediate) { clearAssistant() }
+                    }
                     // A just-exchanged auth-callback session: classify it. A "recovery"
                     // session (forgot-password link) routes to set-new-password; magic-
                     // link / OAuth fall through to the normal app. One-shot probe so a
@@ -970,7 +981,12 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
                 is AssistantResult.Err -> return AssistantTurn.Error(r.code)
                 is AssistantResult.Ok -> {
                     val reply = r.reply
-                    history.add(ChatMessage(role = "assistant", content = reply.content, toolCalls = reply.toolCalls))
+                    // history IS assistantHistory (a Compose SnapshotStateList). a.ask()
+                    // suspends on network and may resume on a worker thread, so every
+                    // mutation here must hop to Main (immediate = free when already on Main).
+                    withContext(Dispatchers.Main.immediate) {
+                        history.add(ChatMessage(role = "assistant", content = reply.content, toolCalls = reply.toolCalls))
+                    }
                     val calls = reply.toolCalls
                     if (calls.isNullOrEmpty()) {
                         return AssistantTurn.Reply(reply.content?.trim().orEmpty().ifEmpty { "Done." })
@@ -978,7 +994,9 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
                     for (call in calls) {
                         val result = runCatching { runAssistantTool(call.function.name, parseToolArgs(call.function.arguments), newTasks, newLists) }
                             .getOrElse { "error: ${it.message ?: "failed"}" }
-                        history.add(ChatMessage(role = "tool", content = result, toolCallId = call.id, name = call.function.name))
+                        withContext(Dispatchers.Main.immediate) {
+                            history.add(ChatMessage(role = "tool", content = result, toolCallId = call.id, name = call.function.name))
+                        }
                     }
                 }
             }
@@ -1200,8 +1218,11 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         auth?.changePassword(password) ?: AuthOutcome.Error("Not configured")
     suspend fun updateDisplayName(name: String): AuthOutcome =
         auth?.updateDisplayName(name) ?: AuthOutcome.Error("Not configured")
+    // Route through the coordinator so the delete ALSO unregisters this device's push
+    // token (+ always signs out even if the server invoke timed out post-deletion).
+    // Falls back to AuthService when no coordinator is wired.
     suspend fun deleteAccount(): AuthOutcome =
-        auth?.deleteAccount() ?: AuthOutcome.Error("Not configured")
+        graph.coordinator?.deleteAccount() ?: auth?.deleteAccount() ?: AuthOutcome.Error("Not configured")
     val hasPassword: Boolean get() = auth?.hasPassword ?: true
     // Unregister this device's push token (while the JWT is still valid) then
     // sign out — prevents the previous user's pushes reaching the next user.

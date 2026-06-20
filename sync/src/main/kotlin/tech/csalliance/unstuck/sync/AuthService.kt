@@ -81,12 +81,25 @@ class AuthService(private val client: SupabaseClient) {
             client.auth.updateUser { data = buildJsonObject { put("full_name", name); put("display_name", name) } }
         }.fold({ AuthOutcome.Ok }, { AuthOutcome.Error(friendly(it)) })
 
-    /** Delete the account via the server-side `account-delete` Edge Function, then sign out. */
-    suspend fun deleteAccount(): AuthOutcome =
-        runCatching {
-            client.functions.invoke("account-delete")
-            client.auth.signOut()
-        }.fold({ AuthOutcome.Ok }, { AuthOutcome.Error(friendly(it)) })
+    /** Invoke the server-side `account-delete` Edge Function ONLY (no sign-out). The
+     *  coordinator calls this so it can ALWAYS run push-unregister + signOut afterwards
+     *  regardless of the invoke result (a timeout AFTER the server deleted the account
+     *  must not strand a dead local session / lingering push row). */
+    suspend fun deleteAccountInvoke(): AuthOutcome =
+        runCatching { client.functions.invoke("account-delete") }
+            .fold({ AuthOutcome.Ok }, { AuthOutcome.Error(friendly(it)) })
+
+    /** Delete the account via the server-side `account-delete` Edge Function, then sign
+     *  out. The invoke and the sign-out are guarded SEPARATELY: a timeout AFTER the
+     *  server completed the deletion would otherwise skip signOut() and strand a dead
+     *  local session. We ALWAYS best-effort sign out so local state is cleared either
+     *  way, and only surface the invoke error to the caller. (The coordinator's
+     *  deleteAccount() is preferred — it also unregisters this device's push token.) */
+    suspend fun deleteAccount(): AuthOutcome {
+        val invoke = deleteAccountInvoke()
+        signOut()   // best-effort, regardless of the invoke outcome (own runCatching)
+        return invoke
+    }
 
     /** True if the account has an email/password identity (vs Google-only). */
     val hasPassword: Boolean

@@ -44,6 +44,15 @@ sealed class Recurrence {
 object RecurrenceSerializer : KSerializer<Recurrence> {
     override val descriptor: SerialDescriptor = buildClassSerialDescriptor("Recurrence")
 
+    /** `until` sentinel for an unrecognised recurrence kind (see [deserialize]). A
+     *  date far enough in the past that the until-guard trips before any occurrence
+     *  is materialised, so the task repeats zero times here. [isUnknown] detects it. */
+    const val UNKNOWN_UNTIL = "0001-01-01"
+
+    /** True for the [deserialize] degrade-sentinel — a daily whose until is in the
+     *  distant past. Callers (recurrenceLabel) treat it as "no recurrence". */
+    fun isUnknown(r: Recurrence?): Boolean = r is Recurrence.Daily && r.until == UNKNOWN_UNTIL
+
     override fun serialize(encoder: Encoder, value: Recurrence) {
         val json = encoder as? JsonEncoder ?: throw SerializationException("Recurrence needs JSON")
         val obj = buildJsonObject {
@@ -69,7 +78,13 @@ object RecurrenceSerializer : KSerializer<Recurrence> {
             "monthly" -> Recurrence.Monthly(until)
             "weekly" -> Recurrence.Weekly(
                 obj["daysOfWeek"]?.jsonArray?.map { it.jsonPrimitive.int } ?: emptyList(), until)
-            else -> throw SerializationException("Unknown recurrence kind")
+            // Forward-compat: an UNKNOWN kind (a newer web/iOS release added a
+            // recurrence type this build can't model). A bare throw aborts the WHOLE
+            // TaskItem decode, so the task would VANISH from the list. Degrade to a no-op
+            // daily that already ENDED (UNKNOWN_UNTIL): zero occurrences materialise and
+            // recurrenceLabel renders nothing, so the task stays usable (it just doesn't
+            // repeat on this build) instead of disappearing.
+            else -> Recurrence.Daily(until = UNKNOWN_UNTIL)
         }
     }
 }

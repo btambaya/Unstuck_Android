@@ -82,10 +82,22 @@ import java.time.format.DateTimeFormatter
 // engine's WriteThrough). Screens compose these with :core (visibleTasks /
 // pickStartNext / analytics) in memory — same model as web + iOS.
 @OptIn(kotlinx.coroutines.FlowPreview::class)   // debounce() on the widget input flow
-class AppViewModel(private val graph: AppGraph) : ViewModel() {
+class AppViewModel(
+    private val graph: AppGraph,
+    // --- TEST SEAMS (additive, optional) ---
+    // All default to null → production `AppViewModel(graph)` is byte-identical to
+    // before (every getter below falls through to the original graph/clock expression).
+    // A unit test can inject a real WriteThrough over an in-memory LocalStore plus a
+    // controllable identity + clock to exercise the orchestration paths offline +
+    // deterministically, WITHOUT a Supabase client / network.
+    private val writeOverride: tech.csalliance.unstuck.sync.WriteThrough? = null,
+    private val currentUidProvider: (() -> String?)? = null,
+    private val currentNameProvider: (() -> String?)? = null,
+    private val nowProvider: (() -> Long)? = null,
+) : ViewModel() {
 
     private val store = graph.store
-    private val write get() = graph.coordinator?.write
+    private val write get() = writeOverride ?: graph.coordinator?.write
     val auth get() = graph.coordinator?.auth
     private val share get() = graph.coordinator?.collectionShare
     private val feedback get() = graph.coordinator?.feedback
@@ -139,7 +151,7 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
 
     // --- helpers ---
 
-    fun nowMs(): Long = System.currentTimeMillis()
+    fun nowMs(): Long = nowProvider?.invoke() ?: System.currentTimeMillis()
     fun isoNow(): String = ISO.format(Instant.now())
 
     private fun launchWrite(block: suspend () -> Unit) { viewModelScope.launch { block() } }
@@ -579,7 +591,7 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
     fun deleteCollection(id: String) = launchWrite { write?.deleteCollection(id) }
 
     // --- shared-collection helpers (migration 020/022) ---
-    private fun currentUid(): String? = auth?.currentUserId
+    private fun currentUid(): String? = currentUidProvider?.invoke() ?: auth?.currentUserId
     /** A collection is shared if it has members, or it's owned by someone else. Guard on
      *  a KNOWN current uid — a transiently-null uid must not mis-classify your OWN list as
      *  shared (that routes edits down the RPC-only path with no outbox → silent loss). */
@@ -838,7 +850,7 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
 
     /** Signed-in identity for the avatar / account UI (null when signed out). */
     val currentEmail: String? get() = auth?.currentEmail
-    val currentName: String? get() = auth?.currentName
+    val currentName: String? get() = currentNameProvider?.invoke() ?: auth?.currentName
 
     /** Send one-way beta feedback with auto-attached context. Returns false on
      *  failure (offline / not configured) so the sheet can offer a retry. */

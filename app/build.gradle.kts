@@ -102,6 +102,10 @@ android {
         compose = true
         buildConfig = true
     }
+    // Robolectric needs Android resources on the unit-test classpath (mirrors
+    // :data / :sync). Lets the AppViewModel orchestration tests run a real
+    // AppGraph (in-memory Room → real LocalStore + WriteThrough) on the JVM.
+    testOptions { unitTests.isIncludeAndroidResources = true }
 }
 
 // Firebase App Distribution — `./gradlew :app:appDistributionUploadRelease`
@@ -165,5 +169,13 @@ dependencies {
     implementation(platform(libs.supabase.bom))
     implementation(libs.supabase.auth)
 
+    // Unit tests. Robolectric + an in-memory Room DB let the AppViewModel
+    // orchestration tests run against a real LocalStore + WriteThrough on the
+    // JVM (mirrors how :data / :sync set theirs up). No network / Supabase.
     testImplementation(libs.junit)
+    testImplementation(libs.kotlinx.coroutines.test)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.androidx.test.core)
+    testImplementation(libs.room.runtime)
+    testImplementation(libs.room.ktx)
 }

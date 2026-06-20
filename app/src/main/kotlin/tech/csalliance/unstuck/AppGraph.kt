@@ -15,8 +15,18 @@ import tech.csalliance.unstuck.sync.SyncCoordinator
 // UnstuckApp. Holds the Room store, the Supabase client, and the sync engine.
 // `configured` is false until the anon key is supplied (secrets.properties →
 // BuildConfig); the UI shows a setup screen until then, exactly like iOS.
-class AppGraph(context: Context) {
-    val configured: Boolean = BuildConfig.SUPABASE_ANON_KEY.isNotEmpty()
+class AppGraph(
+    context: Context,
+    // --- TEST SEAMS (additive, optional) ---
+    // Production `AppGraph(context)` is byte-identical: `configured` defaults to the
+    // same BuildConfig expression and `storeOverride` defaults to null → the real
+    // file-backed LocalStore. A unit test can force `configured = false` (so no
+    // SupabaseClientProvider / network is built) and inject an in-memory LocalStore
+    // so the whole graph reads + writes the same isolated store.
+    configured: Boolean = BuildConfig.SUPABASE_ANON_KEY.isNotEmpty(),
+    storeOverride: LocalStore? = null,
+) {
+    val configured: Boolean = configured
     val appContext: Context = context.applicationContext
 
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
@@ -34,8 +44,9 @@ class AppGraph(context: Context) {
      *  the session observer reads the token's `amr`: a "recovery" session routes to
      *  set-new-password; magic-link / OAuth sign in normally. One-shot. */
     val pendingRecoveryProbe = MutableStateFlow(false)
-    val db: UnstuckDatabase = UnstuckDatabase.build(context.applicationContext)
-    val store = LocalStore(db)
+    // A test may supply an in-memory store; production builds the file-backed DB.
+    val db: UnstuckDatabase? = if (storeOverride == null) UnstuckDatabase.build(context.applicationContext) else null
+    val store: LocalStore = storeOverride ?: LocalStore(db!!)
 
     val provider: SupabaseClientProvider? =
         if (configured) SupabaseClientProvider(SyncConfig(BuildConfig.SUPABASE_URL, BuildConfig.SUPABASE_ANON_KEY)) else null

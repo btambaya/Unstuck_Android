@@ -100,6 +100,17 @@ Answer "No" to all violence/sexual/gambling/etc. questions.
 - First track: **Internal testing** (instant, no review) → add Ahmad + Zubair →
   then promote to Closed/Production when ready.
 
+## Foreground-service special-use declaration (App content)
+
+The app declares `FOREGROUND_SERVICE_SPECIAL_USE` for `FocusTimerService`
+(subtype `focus_timer`) — the live focus-session chronometer notification.
+Play's "Foreground service permissions" section requires: tick **Other**, a
+**description** (why it starts immediately + can't be paused/restarted — the
+running timer must stay accurate), AND a **demo video link** (unlisted
+YouTube or shareable Drive) showing the focus timer + its persistent
+notification. The video is required to complete the declaration; special-use
+enforcement bites at Production review, so Internal testing can roll out first.
+
 ## Still TODO (needs the verified Play account / console)
 
 - [ ] Create the app in Play Console under `io.unstucknow.app`.

@@ -16,6 +16,9 @@ interface RecordDao {
     @Query("SELECT * FROM records WHERE tableName = :table")
     suspend fun get(table: String): List<RecordEntity>
 
+    @Query("SELECT * FROM records WHERE tableName = :table AND id = :id LIMIT 1")
+    suspend fun getOne(table: String, id: String): RecordEntity?
+
     @Upsert
     suspend fun upsert(rows: List<RecordEntity>)
 

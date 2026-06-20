@@ -7,6 +7,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import tech.csalliance.unstuck.core.logic.isExternalBlock
+import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalendarConnection
 import tech.csalliance.unstuck.core.model.Capture
@@ -27,7 +28,7 @@ import tech.csalliance.unstuck.data.db.Tables
 // optimistic write must not vanish from the UI). RLS auto-scopes reads. Port of
 // the iOS Hydrator.swift.
 
-class Hydrator(private val gateway: SyncGateway, private val store: LocalStore) {
+class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
 
     /** Drop queued `tasks` upsert ops the server already supersedes (its row is
      *  STRICTLY newer by updatedAt). Run BEFORE the flush: without it, a stale
@@ -50,7 +51,12 @@ class Hydrator(private val gateway: SyncGateway, private val store: LocalStore) 
             val localTime = runCatching {
                 DbRowCodec.decodeTask(Json.parseToJsonElement(payload).jsonObject).updatedAt
             }.getOrNull() ?: continue
-            if (serverTime > localTime) {
+            // Compare as instants, NOT strings: ISO timestamps with differing
+            // precision/offset ("…Z" vs "+00:00", millis vs not) don't sort
+            // lexicographically, so a string compare could wrongly keep or prune.
+            val serverMs = Time.parseMillis(serverTime) ?: continue
+            val localMs = Time.parseMillis(localTime) ?: continue
+            if (serverMs > localMs) {
                 println("[outbox] pruning stale tasks op ${op.recordId} — server is newer")
                 store.dequeue(op.seq)
             }

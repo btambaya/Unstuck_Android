@@ -18,13 +18,20 @@ import tech.csalliance.unstuck.data.db.Tables
 // the op is removed; if all remaining ops error the pass stops (retried on the
 // next reconnect/sign-in). Port of the iOS OutboxFlusher.swift.
 
-class OutboxFlusher(private val gateway: SyncGateway, private val store: LocalStore) {
+class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalStore) {
 
     // Per-op consecutive-failure tally (keyed by outbox seq). After FAIL_CAP
-    // failures an op is treated as a poison pill and dropped so it can't wedge
-    // its dependents (e.g. a cal_block whose parent task upsert keeps failing)
+    // failures an op is QUARANTINED (dead-lettered) so it can't wedge its
+    // dependents (e.g. a cal_block whose parent task upsert keeps failing)
     // forever. Resets on app restart, so a transient failure still gets retries.
     private val failCounts = mutableMapOf<Long, Int>()
+
+    // Dead-lettered op seqs: hit FAIL_CAP, so we stop RETRYING them this session,
+    // but we DO NOT dequeue them — the op stays in the outbox so the next hydrate
+    // still preserves the user's local row (pendingLocalRows keys off the outbox).
+    // Dropping the op here is the data-loss bug: a transiently-failing write would
+    // evaporate the row on the following replace. In-memory, so a restart retries.
+    private val deadLettered = mutableSetOf<Long>()
 
     // One drain at a time. flush() is reachable from four concurrent contexts
     // (auth handle, SyncWorker, calendar connect, sign-out); overlapping drains
@@ -39,10 +46,29 @@ class OutboxFlusher(private val gateway: SyncGateway, private val store: LocalSt
             // this avoids confusing FK/RLS errors + a stuck op. Mirrors the web
             // bridge's intendedUserId guard.
             if (currentUserId() != userId) return@withLock
-            val all = store.pending()   // FIFO by seq
+            val raw = store.pending()   // FIFO by seq
+            if (raw.isEmpty()) break
+            // Per-(table,id) coalescing: when two whole-row upserts for the SAME
+            // row are queued, the older one carries a stale full payload that would
+            // overwrite the newer one server-side (both flush, last-applied wins =
+            // the older if order slips). Drop every superseded older upsert so only
+            // the latest survives. tasks already had pruneStaleTaskOps; this covers
+            // cal_blocks/sessions/captures/etc. Deletes are never coalesced.
+            val superseded = supersededUpsertSeqs(raw)
+            if (superseded.isNotEmpty()) {
+                // A newer upsert for a row supersedes an older one — including a
+                // dead-lettered one: a fresh edit replaces the stuck write and is
+                // eligible to flush again, so clear its quarantine too.
+                superseded.forEach { store.dequeue(it); failCounts.remove(it); deadLettered.remove(it) }
+            }
+            val all = raw.filter { it.seq !in superseded }
             if (all.isEmpty()) break
             val localIds = mutableMapOf<String, Set<String>>()   // per-pass snapshot cache
+            // Quarantined (dead-lettered) ops are NOT retried — skip them when
+            // choosing what to flush. They remain in `all` (and the outbox) so they
+            // still gate their dependents and keep their local row preserved.
             val flushable = flushableOps(all) { table -> localIds.getOrPut(table) { localRowIds(table) } }
+                .filter { it.seq !in deadLettered }
             if (flushable.isEmpty()) break
             var progressed = false
             // Once an op for a given row fails this pass, skip that row's LATER ops
@@ -71,14 +97,20 @@ class OutboxFlusher(private val gateway: SyncGateway, private val store: LocalSt
                     val n = (failCounts[op.seq] ?: 0) + 1
                     failCounts[op.seq] = n
                     if (n >= FAIL_CAP) {
-                        println("[outbox] dropping poison op $rowKey after $n failures")
-                        store.dequeue(op.seq); failCounts.remove(op.seq); progressed = true
-                        // Also drop ops that depended on this row — their FK parent will
-                        // never exist server-side, so flushing them would push a dangling
-                        // reference (or fail forever in turn). Don't orphan them.
+                        // QUARANTINE, don't drop. The op stays in the outbox so the row
+                        // it represents is still preserved across the next hydrate; we
+                        // just stop retrying it this session (a restart resets and tries
+                        // again). Dropping it here would let a transiently-failing write
+                        // evaporate the user's local row on the following replace.
+                        println("[outbox] WARNING quarantining op $rowKey after $n failures — keeping local row, will retry after restart")
+                        deadLettered.add(op.seq)
+                        // Also quarantine ops that depended on this row — their FK parent
+                        // isn't on the server yet, so flushing them would fail in turn.
+                        // Keep them queued (don't orphan/drop them) so their rows survive.
                         all.filter { it.dependsOn == op.recordId }.forEach { dep ->
-                            println("[outbox] dropping orphaned dependent ${dep.recordTable}:${dep.recordId}")
-                            store.dequeue(dep.seq); failCounts.remove(dep.seq)
+                            println("[outbox] quarantining dependent ${dep.recordTable}:${dep.recordId} (parent $rowKey stuck)")
+                            deadLettered.add(dep.seq)
+                            blockedRows.add("${dep.recordTable}:${dep.recordId}")
                         }
                     }
                 }
@@ -97,6 +129,29 @@ class OutboxFlusher(private val gateway: SyncGateway, private val store: LocalSt
 
     companion object {
         private const val FAIL_CAP = 5
+
+        /** Seqs of upsert ops that a LATER upsert for the same (table,id) makes
+         *  redundant. Keeps only the highest-seq upsert per row; returns the older
+         *  ones to drop. A `delete` op resets a row's run (an upsert after a delete
+         *  is a genuine re-create, not a duplicate), so coalescing never spans a
+         *  delete. Deletes themselves are never collapsed. */
+        internal fun supersededUpsertSeqs(all: List<OutboxEntity>): Set<Long> {
+            // Walk in seq order; track the most recent upsert seq per row and, when a
+            // newer upsert arrives, mark the previous one superseded. A delete clears
+            // the tracked upsert so a later re-create upsert isn't dropped.
+            val latestUpsert = HashMap<String, Long>()   // "table:id" -> seq
+            val drop = HashSet<Long>()
+            for (op in all.sortedBy { it.seq }) {
+                val key = "${op.recordTable}:${op.recordId}"
+                if (op.op == "upsert") {
+                    latestUpsert.remove(key)?.let { drop.add(it) }
+                    latestUpsert[key] = op.seq
+                } else {
+                    latestUpsert.remove(key)
+                }
+            }
+            return drop
+        }
 
         /** The table a child table's dependsOn rowId lives in (its FK parent):
          *  cal_block upserts wait on their task row, capture upserts wait on

@@ -14,6 +14,7 @@ import tech.csalliance.unstuck.core.model.ReasonLog
 import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.data.db.LiveSessionEntity
 import tech.csalliance.unstuck.data.db.OutboxEntity
 import tech.csalliance.unstuck.data.db.RecordEntity
@@ -61,6 +62,24 @@ class LocalStore(private val db: UnstuckDatabase) {
 
     suspend fun <T> upsert(table: String, model: T, ser: KSerializer<T>, id: String, updatedAt: String? = null) {
         records.upsertOne(entity(table, model, ser, id, updatedAt))
+    }
+
+    /** Last-write-wins guarded upsert for INCOMING remote rows (realtime mirror).
+     *  Skips the write — returning false — when the local row is STRICTLY newer
+     *  than the incoming row by `updatedAt`, so a delayed/out-of-order remote
+     *  echo can't clobber a newer local edit. Timestamps are parsed to epoch
+     *  millis (instant compare), never string-compared. When the incoming row
+     *  carries no timestamp, or neither can be parsed, the write proceeds (we
+     *  can't prove it's stale) — matching the prior unconditional behaviour. */
+    suspend fun <T> upsertIfNewer(table: String, model: T, ser: KSerializer<T>, id: String, incomingUpdatedAt: String?): Boolean {
+        if (incomingUpdatedAt != null) {
+            val incoming = Time.parseMillis(incomingUpdatedAt)
+            val localIso = records.getOne(table, id)?.updatedAt
+            val local = localIso?.let { Time.parseMillis(it) }
+            if (incoming != null && local != null && local > incoming) return false
+        }
+        records.upsertOne(entity(table, model, ser, id, incomingUpdatedAt))
+        return true
     }
 
     suspend fun delete(table: String, id: String) = records.deleteById(table, id)

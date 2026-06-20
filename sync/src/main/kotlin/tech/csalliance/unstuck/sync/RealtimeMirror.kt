@@ -40,20 +40,25 @@ class RealtimeMirror(
 
     suspend fun subscribeAll(userId: String, onMembersChanged: suspend () -> Unit = {}) {
         unsubscribeAll()
+        // Timestamp-bearing tables go through upsertIfNewer: an incoming remote
+        // UPDATE is SKIPPED when the local row is strictly newer by its timestamp
+        // (instant compare), so a delayed/out-of-order echo can't clobber a newer
+        // local edit (the data-loss bug). Tables with no comparable timestamp
+        // (cal_blocks, tags, life_areas, collections) stay last-write-wins.
         subscribe(Tables.TASKS, userId,
-            { o -> val m = DbRowCodec.decodeTask(o); store.upsert(Tables.TASKS, m, TaskItem.serializer(), m.id, m.updatedAt) },
+            { o -> val m = DbRowCodec.decodeTask(o); store.upsertIfNewer(Tables.TASKS, m, TaskItem.serializer(), m.id, m.updatedAt) },
             { id -> store.delete(Tables.TASKS, id) })
         subscribe(Tables.SESSIONS, userId,
-            { o -> val m = DbRowCodec.decodeSession(o); store.upsert(Tables.SESSIONS, m, Session.serializer(), m.id, m.completedAt) },
+            { o -> val m = DbRowCodec.decodeSession(o); store.upsertIfNewer(Tables.SESSIONS, m, Session.serializer(), m.id, m.completedAt) },
             { id -> store.delete(Tables.SESSIONS, id) })
         subscribe(Tables.CAL_BLOCKS, userId,
             { o -> val m = DbRowCodec.decodeCalBlock(o); store.upsert(Tables.CAL_BLOCKS, m, CalBlock.serializer(), m.id) },
             { id -> store.delete(Tables.CAL_BLOCKS, id) })
         subscribe(Tables.CAPTURES, userId,
-            { o -> val m = DbRowCodec.decodeCapture(o); store.upsert(Tables.CAPTURES, m, Capture.serializer(), m.id, m.at) },
+            { o -> val m = DbRowCodec.decodeCapture(o); store.upsertIfNewer(Tables.CAPTURES, m, Capture.serializer(), m.id, m.at) },
             { id -> store.delete(Tables.CAPTURES, id) })
         subscribe(Tables.REASON_LOGS, userId,
-            { o -> val m = DbRowCodec.decodeReasonLog(o); store.upsert(Tables.REASON_LOGS, m, ReasonLog.serializer(), m.id, m.at) },
+            { o -> val m = DbRowCodec.decodeReasonLog(o); store.upsertIfNewer(Tables.REASON_LOGS, m, ReasonLog.serializer(), m.id, m.at) },
             { id -> store.delete(Tables.REASON_LOGS, id) })
         // Collections: shared rows are owned by someone else, so subscribe
         // WITHOUT the user_id filter and rely on RLS for delivery (members get

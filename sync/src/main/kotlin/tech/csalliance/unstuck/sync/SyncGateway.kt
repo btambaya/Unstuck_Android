@@ -11,16 +11,24 @@ import kotlinx.serialization.json.JsonPrimitive
 // On every write it injects `user_id` the way the web bridge does
 // (payload = { ...row, user_id }). Reads rely on RLS to auto-scope.
 
-class SyncGateway(private val client: SupabaseClient) {
+/** The CRUD surface the offline engine (OutboxFlusher / Hydrator) depends on.
+ *  Lets the JVM tests substitute a fake without a live SupabaseClient. */
+interface SyncRemote {
+    suspend fun fetchAll(table: String): List<JsonObject>
+    suspend fun upsert(table: String, row: JsonObject, userId: String)
+    suspend fun delete(table: String, id: String)
+}
 
-    suspend fun fetchAll(table: String): List<JsonObject> =
+class SyncGateway(private val client: SupabaseClient) : SyncRemote {
+
+    override suspend fun fetchAll(table: String): List<JsonObject> =
         client.from(table).select(Columns.ALL).decodeList<JsonObject>()
 
-    suspend fun upsert(table: String, row: JsonObject, userId: String) {
+    override suspend fun upsert(table: String, row: JsonObject, userId: String) {
         client.from(table).upsert(withUserId(row, userId)) { onConflict = "id" }
     }
 
-    suspend fun delete(table: String, id: String) {
+    override suspend fun delete(table: String, id: String) {
         client.from(table).delete { filter { eq("id", id) } }
     }
 

@@ -68,4 +68,42 @@ class OutboxFlusherTest {
         assertEquals(Tables.SESSIONS, OutboxFlusher.dependsOnParentTable(Tables.CAPTURES))
         assertEquals(null, OutboxFlusher.dependsOnParentTable(Tables.TASKS))
     }
+
+    // --- per-row upsert coalescing (bug #2) ---
+
+    @Test fun coalescing_keepsOnlyLatestUpsertPerRow() {
+        // Two whole-row upserts for the SAME cal_block — the older (seq 1) is
+        // superseded by the newer (seq 2); only the older is dropped.
+        val a = op(Tables.CAL_BLOCKS, "b1")   // seq 1
+        val b = op(Tables.CAL_BLOCKS, "b1")   // seq 2
+        assertEquals(setOf(a.seq), OutboxFlusher.supersededUpsertSeqs(listOf(a, b)))
+    }
+
+    @Test fun coalescing_threeUpsertsDropAllButNewest() {
+        val a = op(Tables.SESSIONS, "s1") // 1
+        val b = op(Tables.SESSIONS, "s1") // 2
+        val c = op(Tables.SESSIONS, "s1") // 3
+        assertEquals(setOf(a.seq, b.seq), OutboxFlusher.supersededUpsertSeqs(listOf(a, b, c)))
+    }
+
+    @Test fun coalescing_distinctRowsAreIndependent() {
+        val a = op(Tables.CAPTURES, "c1")
+        val b = op(Tables.CAPTURES, "c2")
+        assertEquals(emptySet<Long>(), OutboxFlusher.supersededUpsertSeqs(listOf(a, b)))
+    }
+
+    @Test fun coalescing_neverSpansADelete() {
+        // upsert → delete → upsert for the same row: the trailing upsert is a
+        // genuine re-create, NOT a duplicate of the first, so nothing is dropped.
+        val up1 = op(Tables.TASKS, "t1")               // 1
+        val del = op(Tables.TASKS, "t1", op = "delete") // 2
+        val up2 = op(Tables.TASKS, "t1")               // 3
+        assertEquals(emptySet<Long>(), OutboxFlusher.supersededUpsertSeqs(listOf(up1, del, up2)))
+    }
+
+    @Test fun coalescing_deletesAreNeverCollapsed() {
+        val d1 = op(Tables.TASKS, "t1", op = "delete")
+        val d2 = op(Tables.TASKS, "t1", op = "delete")
+        assertEquals(emptySet<Long>(), OutboxFlusher.supersededUpsertSeqs(listOf(d1, d2)))
+    }
 }

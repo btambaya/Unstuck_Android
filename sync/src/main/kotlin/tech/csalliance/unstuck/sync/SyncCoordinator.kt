@@ -54,6 +54,10 @@ class SyncCoordinator(
     private val appContext = context.applicationContext
     private val prefs = context.getSharedPreferences("unstuck.sync", Context.MODE_PRIVATE)
     private var observeJob: Job? = null
+    // Guards realtime against double-subscribe: the auth flow and the
+    // foreground/background lifecycle both drive (un)subscribeAll. True only while
+    // the ~9 channels + websocket are live.
+    private var realtimeSubscribed = false
 
     /** Sign out, first deleting this device's push-token row WHILE the JWT is
      *  still valid (RLS: user_id = auth.uid()). Stops the previous user's
@@ -114,6 +118,41 @@ class SyncCoordinator(
     fun stop() {
         observeJob?.cancel()
         observeJob = null
+    }
+
+    /** Subscribe the realtime mirror for [uid], guarding against a double-subscribe.
+     *  subscribeAll() already unsubscribes first, so a redundant call is harmless —
+     *  the guard just avoids the extra teardown/rebuild churn. */
+    private suspend fun subscribeRealtime(uid: String) {
+        if (realtimeSubscribed) return
+        realtime.subscribeAll(uid) { hydrator.hydrateCollections(uid) }
+        realtimeSubscribed = true
+    }
+
+    /** Drop the realtime channels + websocket while the app is backgrounded — they
+     *  otherwise stay subscribed (and the socket alive) indefinitely. The auth
+     *  observer keeps running; a missed change is caught by the next hydrate on
+     *  resume / the periodic SyncWorker. No-op if already paused. */
+    fun pauseRealtime() {
+        if (!realtimeSubscribed) return
+        scope.launch {
+            realtime.unsubscribeAll()
+            realtimeSubscribed = false
+        }
+    }
+
+    /** Re-subscribe realtime on foreground IF a user is signed in and we're not
+     *  already subscribed (don't fight the auth-driven subscribe). Hydrates first so
+     *  any change missed while backgrounded is pulled before the live mirror resumes. */
+    fun resumeRealtime() {
+        if (realtimeSubscribed) return
+        val uid = auth.currentUserId ?: return
+        scope.launch {
+            runCatching {
+                hydrator.hydrate(uid)
+                subscribeRealtime(uid)
+            }.onFailure { Log.w(TAG, "realtime resume failed; will retry on next foreground", it) }
+        }
     }
 
     /** Re-pull collections + membership (after the owner shares/unshares — their
@@ -291,13 +330,14 @@ class SyncCoordinator(
                     hydrator.pruneStaleTaskOps()
                     flusher.flush(uid) { auth.currentUserId }
                     hydrator.hydrate(uid)
-                    realtime.subscribeAll(uid) { hydrator.hydrateCollections(uid) }
+                    subscribeRealtime(uid)
                     runCatching { pullCalendar() }   // ingest Google events if connected
                     maybeTrackLogin(uid)             // best-effort usage analytics (throttled)
                 }.onFailure { Log.w(TAG, "sync authenticated-branch step failed; sync stays alive", it) }
             }
             is SessionStatus.NotAuthenticated -> if (status.isSignOut) {
                 realtime.unsubscribeAll()
+                realtimeSubscribed = false
                 store.clearAll()
                 prefs.edit().remove(KEY_PREV_USER).apply()
             }

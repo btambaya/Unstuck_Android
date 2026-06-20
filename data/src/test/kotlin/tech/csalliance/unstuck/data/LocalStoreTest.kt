@@ -3,7 +3,9 @@ package tech.csalliance.unstuck.data
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -94,6 +96,25 @@ class LocalStoreTest {
         assertEquals("s1", store.getLiveSession()?.id)
         store.setLiveSession(null)
         assertNull(store.getLiveSession())
+    }
+
+    // distinctUntilChanged + flowOn on the observe() chain must preserve value
+    // correctness: an identical re-write doesn't change state, and a genuine change
+    // is still delivered. Guards the perf optimisation from silently dropping changes.
+    // (Run on the real default dispatcher because the chain uses flowOn(Default).)
+    @Test fun observeStaysCorrectThroughDistinctChain() = runBlocking {
+        store.upsert(Tables.TASKS, task("a", "First"), TaskItem.serializer(), "a")
+        assertEquals("First", store.tasks().first().single().name)
+        // Identical write (same bytes) — distinctUntilChanged swallows it; value unchanged.
+        store.upsert(Tables.TASKS, task("a", "First"), TaskItem.serializer(), "a")
+        assertEquals("First", store.tasks().first().single().name)
+        // A real change still propagates through the chain.
+        store.upsert(Tables.TASKS, task("a", "Renamed"), TaskItem.serializer(), "a")
+        val renamed = withTimeoutOrNull(5_000) {
+            store.tasks().first { it.singleOrNull()?.name == "Renamed" }
+        }
+        requireNotNull(renamed) { "renamed change was not delivered through the chain" }
+        assertEquals("Renamed", renamed.single().name)
     }
 
     @Test fun clearAllWipesEverything() = runTest {

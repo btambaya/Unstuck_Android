@@ -126,28 +126,44 @@ fun TodayScreen(
     // Start-Next hero — scoped to TODAY (next-scheduled by time → else
     // shortest-estimate → else null so the hero points to the Backlog instead of
     // pulling a backlog task). Excludes the live-focused task + honours the area.
-    val startNext = pickTodayHero(tasks, blocks, now, liveId, areaFilter)
+    // Memoized on the bucketing-relevant inputs (coarse 60s `now`, NOT the 1s
+    // `nowTick`) so these don't recompute every live-session frame.
+    val startNext = remember(tasks, blocks, now, liveId, areaFilter) {
+        pickTodayHero(tasks, blocks, now, liveId, areaFilter)
+    }
     // Today = open tasks scheduled/intended for today, plus anything completed today
     // (sorted last), matching the web today-list which keeps today's completions visible.
-    val todayOpen = visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false)
+    val todayOpen = remember(tasks, blocks, now) {
+        visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false)
+    }
     // Completed-today = real tasks + today's occurrences (NOT recurring
     // templates), so a ticked-off occurrence stays visible as a win and a done
     // template never leaks in.
-    val todayDone = (tasks.filter { !isTemplate(it) } + projectOccurrences(tasks, blocks, Clock.todayIso()))
-        .filter { isCompletedToday(it, now) && todayOpen.none { o -> o.id == it.id } }
-    val todayAll = todayOpen + todayDone
-    val rows = todayAll.filter { (areaFilter == null || it.lifeArea == areaFilter) && it.id != startNext?.id && it.id != liveId }
+    val todayDone = remember(tasks, blocks, now, todayOpen) {
+        (tasks.filter { !isTemplate(it) } + projectOccurrences(tasks, blocks, Clock.todayIso()))
+            .filter { isCompletedToday(it, now) && todayOpen.none { o -> o.id == it.id } }
+    }
+    val todayAll = remember(todayOpen, todayDone) { todayOpen + todayDone }
+    val rows = remember(todayAll, areaFilter, startNext, liveId) {
+        todayAll.filter { (areaFilter == null || it.lifeArea == areaFilter) && it.id != startNext?.id && it.id != liveId }
+    }
     // Backlog view (web parity): the unplanned + overdue stack, area-agnostic.
-    val backlogAll = visibleTasks(TaskListView.BACKLOG, tasks, blocks, now, activeArea = null, slipMode = false)
-    val backlogRows = backlogAll.filter { it.id != startNext?.id && it.id != liveId }
+    val backlogAll = remember(tasks, blocks, now) {
+        visibleTasks(TaskListView.BACKLOG, tasks, blocks, now, activeArea = null, slipMode = false)
+    }
+    val backlogRows = remember(backlogAll, startNext, liveId) {
+        backlogAll.filter { it.id != startNext?.id && it.id != liveId }
+    }
     val displayRows = if (backlogActive) backlogRows else rows
-    val liveTask = liveId?.let { id -> tasks.firstOrNull { it.id == id } }
+    val liveTask = remember(liveId, tasks) { liveId?.let { id -> tasks.firstOrNull { it.id == id } } }
     // Judge "empty" from the UNFILTERED backlog (+ startNext), not backlogRows:
     // backlogRows has start-next/live subtracted, so a lone overdue task (which
     // becomes the start-next) would otherwise read as empty and hide the Backlog
     // toggle. A genuinely empty account still has no todayAll/backlogAll/startNext.
     val empty = todayAll.isEmpty() && live == null && backlogAll.isEmpty() && startNext == null
-    val weekMin = sessions.filter { (now - (it.completedAtMs() ?: 0)) in 0..(7L * 86_400_000) }.sumOf { it.actualSec } / 60
+    val weekMin = remember(sessions, now) {
+        sessions.filter { (now - (it.completedAtMs() ?: 0)) in 0..(7L * 86_400_000) }.sumOf { it.actualSec } / 60
+    }
 
     Column(Modifier.fillMaxWidth()) {
         // ── Pinned header: avatar + bell, greeting, and (when there's content) the

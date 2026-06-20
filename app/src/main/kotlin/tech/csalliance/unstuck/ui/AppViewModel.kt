@@ -7,6 +7,7 @@ import io.github.jan.supabase.auth.status.SessionStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
 import kotlinx.coroutines.flow.distinctUntilChanged
 import androidx.glance.appwidget.updateAll
 import kotlinx.coroutines.flow.asSharedFlow
@@ -80,6 +81,7 @@ import java.time.format.DateTimeFormatter
 // action (which apply the :core mutation rules then go through the sync
 // engine's WriteThrough). Screens compose these with :core (visibleTasks /
 // pickStartNext / analytics) in memory — same model as web + iOS.
+@OptIn(kotlinx.coroutines.FlowPreview::class)   // debounce() on the widget input flow
 class AppViewModel(private val graph: AppGraph) : ViewModel() {
 
     private val store = graph.store
@@ -376,14 +378,23 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         // was never written, so the widget shipped frozen on "All clear". Recompute
         // the recommendation on task/block/live-session change and push it.
         viewModelScope.launch {
-            combine(tasks, blocks, liveSession) { ts, bs, live ->
-                tech.csalliance.unstuck.core.logic.pickStartNext(ts, bs, live?.taskId, null)
-            }.distinctUntilChanged().collect { rec ->
-                runCatching {
-                    tech.csalliance.unstuck.surface.writeStartNext(graph.appContext, rec?.name, rec?.estimateMin)
-                    tech.csalliance.unstuck.surface.StartNextWidget().updateAll(graph.appContext)
+            // distinctUntilChanged is now UPSTREAM of pickStartNext: only re-run the
+            // recommendation when an INPUT actually changes (the live mirror re-emits
+            // full collections on any write — see LocalStore — so this dropped a lot of
+            // redundant picks). debounce coalesces rapid input flips (e.g. a burst of
+            // hydrate upserts) into one recompute. A downstream distinct on the RESULT
+            // still suppresses a no-op widget write when the pick is unchanged.
+            combine(tasks, blocks, liveSession) { ts, bs, live -> Triple(ts, bs, live?.taskId) }
+                .distinctUntilChanged()
+                .debounce(300)
+                .map { (ts, bs, liveId) -> tech.csalliance.unstuck.core.logic.pickStartNext(ts, bs, liveId, null) }
+                .distinctUntilChanged()
+                .collect { rec ->
+                    runCatching {
+                        tech.csalliance.unstuck.surface.writeStartNext(graph.appContext, rec?.name, rec?.estimateMin)
+                        tech.csalliance.unstuck.surface.StartNextWidget().updateAll(graph.appContext)
+                    }
                 }
-            }
         }
     }
 

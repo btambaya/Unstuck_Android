@@ -1,6 +1,9 @@
 package tech.csalliance.unstuck.data
 
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
@@ -39,8 +42,17 @@ class LocalStore(private val db: UnstuckDatabase) {
 
     // --- reactive reads ---
 
+    // Room invalidates per-table, so ANY write to a table re-emits its full row set
+    // to every collector. Decode off the main thread (flowOn Default) and drop
+    // structurally-identical emissions (distinctUntilChanged) so an unrelated write —
+    // or a no-op re-emit — doesn't propagate a fresh decode + recomposition downstream.
+    // The chain stays cold (one decode per active collector); semantics are unchanged
+    // beyond suppressing duplicate emissions.
     private fun <T> observe(table: String, ser: KSerializer<T>): Flow<List<T>> =
-        records.observe(table).map { rows -> rows.mapNotNull { runCatching { json.decodeFromString(ser, it.data) }.getOrNull() } }
+        records.observe(table)
+            .map { rows -> rows.mapNotNull { runCatching { json.decodeFromString(ser, it.data) }.getOrNull() } }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
 
     fun tasks(): Flow<List<TaskItem>> = observe(Tables.TASKS, TaskItem.serializer())
     fun blocks(): Flow<List<CalBlock>> = observe(Tables.CAL_BLOCKS, CalBlock.serializer())
@@ -114,7 +126,7 @@ class LocalStore(private val db: UnstuckDatabase) {
 
     fun liveSession(): Flow<LiveSession?> = liveDao.observe().map { e ->
         e?.let { runCatching { json.decodeFromString(LiveSession.serializer(), it.data) }.getOrNull() }
-    }
+    }.distinctUntilChanged().flowOn(Dispatchers.Default)
 
     suspend fun getLiveSession(): LiveSession? =
         liveDao.get()?.let { runCatching { json.decodeFromString(LiveSession.serializer(), it.data) }.getOrNull() }

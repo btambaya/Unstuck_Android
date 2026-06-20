@@ -149,7 +149,7 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (
     val c = UTheme.colors
     val blocksRaw by vm.blocks.collectAsStateWithLifecycle()
     // Skipped recurring occurrences are cancelled for that day — drop them.
-    val blocks = blocksRaw.filter { !it.skipped }
+    val blocks = remember(blocksRaw) { blocksRaw.filter { !it.skipped } }
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     // Monday-anchored week, navigable via the ‹ / › arrows (weekOffset = weeks from
@@ -158,9 +158,12 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (
     var weekOffset by rememberSaveable { mutableStateOf(0) }
     val today = java.time.LocalDate.now()
     val monday = today.minusDays(((today.dayOfWeek.value + 6) % 7).toLong()).plusWeeks(weekOffset.toLong())
-    val days = (0..6).map { monday.plusDays(it.toLong()) }
+    val days = remember(weekOffset) { (0..6).map { monday.plusDays(it.toLong()) } }
     val dows = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-    val plannedByDay = days.map { d -> blocks.filter { it.date == d.toString() && isTaskBlock(it) }.sumOf { it.durationMinutes } }
+    // Per-day lane layout for all 7 columns — computed once per (blocks, weekOffset)
+    // instead of re-running layoutLanes for every day on each scroll/recomposition.
+    val laidByDay = remember(blocks, days) { days.associate { d -> d.toString() to layoutLanes(blocks.filter { it.date == d.toString() }) } }
+    val plannedByDay = remember(blocks, days) { days.map { d -> blocks.filter { it.date == d.toString() && isTaskBlock(it) }.sumOf { it.durationMinutes } } }
     val totalPlanned = plannedByDay.sum()
     val maxPlanned = plannedByDay.maxOrNull() ?: 0
     val minPlanned = plannedByDay.minOrNull() ?: 0
@@ -209,8 +212,9 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (
             }
             val weekDensity = androidx.compose.ui.platform.LocalDensity.current
             val weekHourPx = with(weekDensity) { WHOUR.toPx() }
+            // O(1) task lookup for block colour/title instead of a per-block scan.
+            val tasksById = remember(tasks) { tasks.associateBy { it.id } }
             days.forEach { d ->
-                val db = blocks.filter { it.date == d.toString() }
                 var colW by remember(d.toString()) { mutableStateOf(0.dp) }
                 Box(
                     Modifier.weight(1f).fillMaxHeight()
@@ -229,11 +233,11 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (
                         repeat(WEND - WSTART) { Box(Modifier.fillMaxWidth().height(WHOUR).border(0.5.dp, c.line.copy(alpha = 0.6f))) }
                     }
                     // Overlapping blocks split the column into side-by-side lanes.
-                    layoutLanes(db).forEach { laid ->
+                    (laidByDay[d.toString()] ?: emptyList()).forEach { laid ->
                         val b = laid.block
                         val top = hhmmToMin(b.startTime) - WSTART * 60
                         if (top in 0..((WEND - WSTART) * 60)) {
-                            val bt = if (isTaskBlock(b)) tasks.firstOrNull { it.id == b.taskId } else null
+                            val bt = if (isTaskBlock(b)) b.taskId?.let { tasksById[it] } else null
                             // For a recurring occurrence the completion lives on the block.
                             val done = b.done || bt?.done == true
                             val fill = if (isTaskBlock(b)) c.areaSwatch(tech.csalliance.unstuck.ui.components.areaColorFor(bt?.lifeArea, areas, c)) else c.blueSoft

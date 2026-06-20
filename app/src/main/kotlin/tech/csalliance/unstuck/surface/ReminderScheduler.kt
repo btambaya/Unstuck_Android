@@ -5,9 +5,13 @@ import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
 import android.os.Build
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import tech.csalliance.unstuck.UnstuckApp
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.model.CalBlock
@@ -32,11 +36,34 @@ object ReminderScheduler {
 
     private enum class Kind(val tag: String) { LEAD("lead"), ATSTART("atstart"), DRIFTED("drifted") }
 
-    /** Re-sync reminders whenever the blocks or tasks change while the app is alive. */
+    /** Re-sync reminders whenever the blocks or tasks change while the app is alive.
+     *  Debounced + de-duped on an alarm-relevant projection so a burst of unrelated
+     *  store writes doesn't rebuild the whole alarm set (with its blocking settings +
+     *  SharedPreferences IO) on every emission; the actual sync runs off the main
+     *  thread on Dispatchers.IO. */
+    @OptIn(kotlinx.coroutines.FlowPreview::class)   // debounce()
     fun observe(app: UnstuckApp) {
         app.graph.scope.launch {
             app.graph.store.blocks().combine(app.graph.store.tasks()) { b, t -> b to t }
-                .collect { (blocks, tasks) -> runCatching { sync(app, blocks, tasks) } }
+                // Projection = only the fields the alarm set is derived from (block
+                // timing/identity + which referenced tasks are done). Settings-driven
+                // changes (lead overrides, level) go through reschedule() separately.
+                .distinctUntilChanged { (oldB, oldT), (newB, newT) -> alarmSignature(oldB, oldT) == alarmSignature(newB, newT) }
+                .debounce(500)
+                .collect { (blocks, tasks) -> runCatching { withContext(Dispatchers.IO) { sync(app, blocks, tasks) } } }
+        }
+    }
+
+    /** Stable signature of everything [sync] reads from the store, so identical
+     *  re-emissions (or changes to unrelated fields like a task's name) don't trigger
+     *  a full alarm rebuild. */
+    private fun alarmSignature(
+        blocks: List<CalBlock>,
+        tasks: List<tech.csalliance.unstuck.core.model.TaskItem>,
+    ): List<String> {
+        val doneTaskIds = tasks.asSequence().filter { it.done }.map { it.id }.toSet()
+        return blocks.map { b ->
+            "${b.id}|${b.date}|${b.startTime}|${b.durationMinutes}|${b.kind}|${b.taskId}|${b.taskId in doneTaskIds}"
         }
     }
 

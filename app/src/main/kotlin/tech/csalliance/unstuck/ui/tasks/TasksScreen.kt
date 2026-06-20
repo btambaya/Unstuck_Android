@@ -81,7 +81,11 @@ fun TasksScreen(
     LaunchedEffect(Unit) { while (true) { nowState = vm.nowMs(); kotlinx.coroutines.delay(60_000) } }
     // Today is area-agnostic on purpose (web parity) — the area filter applies
     // to every other view. The tag filter applies to every view.
-    val list = visibleTasks(view, tasks, blocks, nowState, activeArea = if (view == TaskListView.TODAY) null else activeArea, activeTag = activeTag, slipMode = false)
+    // Memoized so the 60s ticker (or any unrelated recomposition) doesn't re-bucket
+    // the whole list every frame — only when an input that affects bucketing changes.
+    val list = remember(view, tasks, blocks, nowState, activeArea, activeTag) {
+        visibleTasks(view, tasks, blocks, nowState, activeArea = if (view == TaskListView.TODAY) null else activeArea, activeTag = activeTag, slipMode = false)
+    }
 
     Column(Modifier.fillMaxSize()) {
         // No leading hamburger — the area-filter pills below cover what it did.

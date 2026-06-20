@@ -74,20 +74,24 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
         "Month" -> day.withDayOfMonth(1).atStartOfDay(zone).toInstant().toEpochMilli()
         else -> 0L
     }
-    fun inWin(iso: String): Boolean = (Time.parseMillis(iso) ?: 0L) >= cutoff
-    val sessions = allSessions.filter { inWin(it.completedAt) }
-    val captures = allCaptures.filter { inWin(it.at) }
-    val reasons = allReasons.filter { inWin(it.at) }
+    // Window filters memoized on the source list + cutoff so re-bucketing only
+    // happens when the data or the selected range actually changes.
+    val sessions = remember(allSessions, cutoff) { allSessions.filter { (Time.parseMillis(it.completedAt) ?: 0L) >= cutoff } }
+    val captures = remember(allCaptures, cutoff) { allCaptures.filter { (Time.parseMillis(it.at) ?: 0L) >= cutoff } }
+    val reasons = remember(allReasons, cutoff) { allReasons.filter { (Time.parseMillis(it.at) ?: 0L) >= cutoff } }
     // Show real numbers + charts from the FIRST session (kept calm) instead of
     // blanking everything to "—" until 5. The qualitative "Worth noticing"
     // insights keep a small floor of their own (REAL_DATA_THRESHOLD) so a single
     // session can't claim a "strongest day".
     val enough = sessions.isNotEmpty()
 
-    val dots = calibrationDots(sessions, tasks)
-    val hit = if (dots.isNotEmpty()) (calibrationHitRate(dots) * 100).roundToInt() else 0
-    val slips = slipping(tasks, now)
-    val totalMin = sessions.sumOf { it.actualSec } / 60
+    val dots = remember(sessions, tasks) { calibrationDots(sessions, tasks) }
+    val hit = remember(dots) { if (dots.isNotEmpty()) (calibrationHitRate(dots) * 100).roundToInt() else 0 }
+    val slips = remember(tasks, now) { slipping(tasks, now) }
+    val totalMin = remember(sessions) { sessions.sumOf { it.actualSec } / 60 }
+    // Computed once (was run twice: the deep-dive "Re-entry <5m" stat + the
+    // "How fast you come back" histogram). Shared across both deep-dive items.
+    val reEntry = remember(sessions) { reEntryDistribution(sessions) }
     val rangeLabel = range.uppercase().let { if (it == "ALL") "ALL TIME" else it }
 
     Column(Modifier.fillMaxSize().background(c.bg)) {
@@ -116,13 +120,17 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                     item {
                         // Drive the chart from the user's OWN areas — DEFAULT_AREAS dropped
                         // every custom/renamed area's hours and greyed the legend.
-                        val areaNames = lifeAreas.map { it.name }.ifEmpty { DEFAULT_AREAS }
-                        StackedBars("When focus happens", weekdayAreaHours(sessions, tasks, areaNames).map { it.d to it.data }, areaNames, lifeAreas)
+                        val areaNames = remember(lifeAreas) { lifeAreas.map { it.name }.ifEmpty { DEFAULT_AREAS } }
+                        val weekdayBars = remember(sessions, tasks, areaNames) { weekdayAreaHours(sessions, tasks, areaNames).map { it.d to it.data } }
+                        StackedBars("When focus happens", weekdayBars, areaNames, lifeAreas)
                     }
                     if (dots.isNotEmpty()) item { CalibrationScatter(dots, hit) }
-                    item { Histogram("When interruptions happen", interruptionBins(captures, sessions), c.coral) }
                     item {
-                        val insights = topInsights(sessions, tasks, captures, reasons)
+                        val interruptions = remember(captures, sessions) { interruptionBins(captures, sessions) }
+                        Histogram("When interruptions happen", interruptions, c.coral)
+                    }
+                    item {
+                        val insights = remember(sessions, tasks, captures, reasons) { topInsights(sessions, tasks, captures, reasons) }
                         if (insights.isNotEmpty()) {
                             SectionLabel("Worth noticing", Modifier.padding(top = 18.dp, bottom = 6.dp))
                             insights.take(4).forEach { ins ->
@@ -138,10 +146,11 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                 item {
                     // Median over raw SECONDS (round once at display) — truncating each
                     // session to whole minutes first skewed the median (web parity).
-                    val secs = sessions.map { it.actualSec }.sorted()
-                    val median = if (secs.isEmpty()) 0 else (secs[secs.size / 2] / 60.0).roundToInt()
-                    val reentry = reEntryDistribution(sessions)
-                    val reentryPct = reentry.sum().let { if (it == 0) 0 else (reentry[0] * 100.0 / it).roundToInt() }
+                    val median = remember(sessions) {
+                        val secs = sessions.map { it.actualSec }.sorted()
+                        if (secs.isEmpty()) 0 else (secs[secs.size / 2] / 60.0).roundToInt()
+                    }
+                    val reentryPct = remember(reEntry) { reEntry.sum().let { if (it == 0) 0 else (reEntry[0] * 100.0 / it).roundToInt() } }
                     Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                             StatCard("Median", if (enough) "${median}m" else "—", caption = "across ${sessions.size} sessions", modifier = Modifier.weight(1f))
@@ -154,7 +163,7 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                     }
                 }
                 item {
-                    val pauses = pauseAnatomy(reasons)
+                    val pauses = remember(reasons) { pauseAnatomy(reasons) }
                     if (pauses.isNotEmpty()) {
                         SectionLabel("What pauses you", Modifier.padding(top = 18.dp, bottom = 6.dp))
                         Card(Modifier.fillMaxWidth(), radius = 14) {
@@ -165,9 +174,9 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                         }
                     }
                 }
-                item { Histogram("How fast you come back", reEntryDistribution(sessions), c.primary) }
+                item { Histogram("How fast you come back", reEntry, c.primary) }
                 item {
-                    val breakdown = captureBreakdown(captures)
+                    val breakdown = remember(captures) { captureBreakdown(captures) }
                     // Guard on the captures themselves — breakdown always has the 5 fixed
                     // tag keys (all 0 when empty), so it would otherwise draw 5 zero bars.
                     if (captures.isNotEmpty()) {
@@ -193,7 +202,7 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                         }
                     }
                 }
-                item { Heatmap(timeOfDayHeatmap(sessions)) }
+                item { Heatmap(remember(sessions) { timeOfDayHeatmap(sessions) }) }
             }
             item { Box(Modifier.padding(24.dp)) {} }
         }

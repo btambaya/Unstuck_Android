@@ -103,8 +103,11 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocksRaw by vm.blocks.collectAsStateWithLifecycle()
     // Skipped recurring occurrences are cancelled for that day — drop them.
-    val blocks = blocksRaw.filter { !it.skipped }
+    val blocks = remember(blocksRaw) { blocksRaw.filter { !it.skipped } }
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
+    // Id → task map (built once per task list) so each block's colour/title lookup
+    // is O(1) instead of a per-block firstOrNull scan on every drag/ticker frame.
+    val tasksById = remember(tasks) { tasks.associateBy { it.id } }
     val density = LocalDensity.current
     val hourPx = with(density) { HOUR_HEIGHT.toPx() }
 
@@ -151,13 +154,16 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
     var dragPos by remember { mutableStateOf(Offset.Zero) } // window coords
     var editingBlock by remember { mutableStateOf<CalBlock?>(null) }
 
-    val dayBlocks = blocks.filter { it.date == date }
+    val dayBlocks = remember(blocks, date) { blocks.filter { it.date == date } }
+    // Precompute the lane layout for the day's blocks once per (blocks, date) — was
+    // re-running the greedy interval colouring on every drag-position / 30s-ticker frame.
+    val laidDayBlocks = remember(dayBlocks) { layoutLanes(dayBlocks) }
     // Scheduled-anywhere, not just on the viewed day — otherwise a task scheduled on
     // another date reappears in the unscheduled tray and dragging it MOVES its block.
-    val scheduledIds = blocks.filter { isTaskBlock(it) }.mapNotNull { it.taskId }.toSet()
+    val scheduledIds = remember(blocks) { blocks.filter { isTaskBlock(it) }.mapNotNull { it.taskId }.toSet() }
     // recurrence == null: never offer a recurring TEMPLATE in the schedule tray —
     // it's a hidden definition that generates occurrences, not a schedulable task.
-    val unscheduled = tasks.filter { !it.done && it.later != true && it.recurrence == null && it.id !in scheduledIds }
+    val unscheduled = remember(tasks, scheduledIds) { tasks.filter { !it.done && it.later != true && it.recurrence == null && it.id !in scheduledIds } }
 
     // Map the current drag position (window coords) to a snapped HH:MM on the grid.
     fun dropTimeOrNull(): String? {
@@ -225,7 +231,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                 // Blocks for the day, absolutely positioned by start time. Overlapping
                 // blocks split the width into side-by-side lanes (see layoutLanes).
                 val gridWidthDp = with(density) { gridBounds.width.toDp() }
-                layoutLanes(dayBlocks).forEach { laid ->
+                laidDayBlocks.forEach { laid ->
                     val b = laid.block
                     val topMin = parseHhmm(b.startTime) - START_HOUR * 60
                     if (topMin >= 0) {
@@ -233,7 +239,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                         val hDp = HOUR_HEIGHT * (b.durationMinutes / 60f)
                         // Color by source: external = blue, a task = its life-area swatch,
                         // placeholder = neutral. Mirrors the web bgFor().
-                        val bt = if (isTaskBlock(b)) tasks.firstOrNull { it.id == b.taskId } else null
+                        val bt = if (isTaskBlock(b)) b.taskId?.let { tasksById[it] } else null
                         // For a recurring occurrence the completion lives on the block.
                         val done = b.done || bt?.done == true
                         val fill = when {

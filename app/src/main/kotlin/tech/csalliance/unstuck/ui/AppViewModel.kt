@@ -122,7 +122,13 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
                 when (status) {
                     is SessionStatus.Authenticated -> true
                     is SessionStatus.NotAuthenticated -> false
-                    is SessionStatus.RefreshFailure -> false   // couldn't refresh → needs re-auth
+                    // A refresh failure is transient — almost always OFFLINE with an
+                    // expired access token. supabase-kt keeps the cached session and
+                    // retries when connectivity returns, so treat it as still-signed-in
+                    // rather than bouncing to the login screen (the iOS counterpart of
+                    // this bug was emitLocalSessionAsInitialSession=false). A genuine
+                    // logout / revoked session arrives as NotAuthenticated instead.
+                    is SessionStatus.RefreshFailure -> true
                     is SessionStatus.Initializing -> null      // still loading from storage → stay on splash
                 }
             }

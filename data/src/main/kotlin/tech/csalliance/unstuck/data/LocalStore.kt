@@ -42,14 +42,22 @@ class LocalStore(private val db: UnstuckDatabase) {
 
     // --- reactive reads ---
 
-    // Room invalidates per-table, so ANY write to a table re-emits its full row set
-    // to every collector. Decode off the main thread (flowOn Default) and drop
-    // structurally-identical emissions (distinctUntilChanged) so an unrelated write —
-    // or a no-op re-emit — doesn't propagate a fresh decode + recomposition downstream.
-    // The chain stays cold (one decode per active collector); semantics are unchanged
-    // beyond suppressing duplicate emissions.
+    // The whole local store lives in ONE `records` table, so Room's per-table
+    // InvalidationTracker re-runs EVERY observe() query on ANY write — a single
+    // task toggle re-emits the full row set to all ~9 collectors. The expensive
+    // part is the per-row JSON decode (O(total rows) per write), so the FIRST
+    // distinctUntilChanged is BEFORE the decode, on the raw List<RecordEntity>
+    // (a data class → value equality): an unrelated table's write re-emits
+    // byte-identical rows for this table, which we drop here and SKIP the decode
+    // entirely — the cross-table re-decode the audit flagged. The decode then
+    // runs off the main thread (flowOn Default), and a second distinctUntilChanged
+    // suppresses the rare case where raw rows differ but the decoded list doesn't.
+    // (The 9 cheap indexed query re-runs remain — eliminating those needs a
+    // per-domain table split + a live-data migration; deferred as not worth the
+    // risk once the decode is gone.) Chain stays cold (one decode per collector).
     private fun <T> observe(table: String, ser: KSerializer<T>): Flow<List<T>> =
         records.observe(table)
+            .distinctUntilChanged()
             .map { rows -> rows.mapNotNull { runCatching { json.decodeFromString(ser, it.data) }.getOrNull() } }
             .distinctUntilChanged()
             .flowOn(Dispatchers.Default)

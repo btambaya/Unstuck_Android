@@ -101,9 +101,11 @@ class AuthService(private val client: SupabaseClient) {
         return invoke
     }
 
-    /** True if the account has an email/password identity (vs Google-only). */
+    /** True if the account has an email/password identity (vs Google-only). Defaults
+     *  FALSE when signed out / identities are null — never offer "Change password" to a
+     *  Google-only account; we only claim a password when a real `email` identity exists. */
     val hasPassword: Boolean
-        get() = client.auth.currentUserOrNull()?.identities?.any { it.provider == "email" } ?: true
+        get() = client.auth.currentUserOrNull()?.identities?.any { it.provider == "email" } ?: false
 
     suspend fun signOut() {
         runCatching { client.auth.signOut() }

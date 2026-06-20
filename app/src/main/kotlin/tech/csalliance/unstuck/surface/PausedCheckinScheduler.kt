@@ -7,6 +7,8 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
 import androidx.work.workDataOf
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.UnstuckApp
 import java.util.concurrent.TimeUnit
 
@@ -21,8 +23,21 @@ object PausedCheckinScheduler {
     private const val DELAY_MIN = 14L
 
     fun arm(context: Context, taskName: String) {
+        // settings.load() reads SharedPreferences (disk I/O); off the main thread so a
+        // shade-action receiver / Compose caller never blocks the UI thread on it.
+        val app = context.applicationContext as? UnstuckApp
+        val scope = app?.graph?.scope
+        if (scope == null) {
+            // No app graph (shouldn't happen) — fall back to a one-shot background thread.
+            Thread { armOnBackground(context, app, taskName) }.start()
+            return
+        }
+        scope.launch(Dispatchers.IO) { armOnBackground(context, app, taskName) }
+    }
+
+    private fun armOnBackground(context: Context, app: UnstuckApp?, taskName: String) {
         // Respect the notification level — Calm doesn't do paused check-ins.
-        val level = (context.applicationContext as? UnstuckApp)?.graph?.settings?.load()?.notificationLevel
+        val level = app?.graph?.settings?.load()?.notificationLevel
         if (level != null && !level.pausedCheckin) return
         val req = OneTimeWorkRequestBuilder<PausedCheckinWorker>()
             .setInitialDelay(DELAY_MIN, TimeUnit.MINUTES)

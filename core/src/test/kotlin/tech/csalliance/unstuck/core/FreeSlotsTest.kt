@@ -45,6 +45,18 @@ class FreeSlotsTest {
         assertEquals("08:00", slots[0].startTime)
     }
 
+    @Test fun nonPositiveDurationCoercedToOne() {
+        // durationMin <= 0 would make `cursor + durationMin <= gapEnd` perpetually true
+        // (garbage zero/negative-length slots). It must behave like a 1-minute duration.
+        val zero = findFreeSlots(emptyList(), 0, now, startDate = now, daysToScan = 1, limit = 5)
+        val one = findFreeSlots(emptyList(), 1, now, startDate = now, daysToScan = 1, limit = 5)
+        assertEquals(one.map { it.startTime }, zero.map { it.startTime })
+        assertEquals("08:00", zero[0].startTime)
+        // A full-day block leaves NO room for even a 1-min slot.
+        val full = listOf(mkBlock(startTime = "08:00", durationMinutes = 600, date = "2026-05-21")) // 08:00–18:00
+        assertEquals(emptyList<Any>(), findFreeSlots(full, -10, now, startDate = now, daysToScan = 1, limit = 5))
+    }
+
     @Test fun conflictsReturnsOverlappingBlocks() {
         val blocks = listOf(
             mkBlock(id = "a", startTime = "09:00", durationMinutes = 30, date = "2026-05-21"),

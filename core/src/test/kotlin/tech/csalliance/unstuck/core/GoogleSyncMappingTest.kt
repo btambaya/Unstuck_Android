@@ -64,4 +64,22 @@ class GoogleSyncMappingTest {
         assertEquals("2026-05-21T09:00:00.000Z", start)
         assertEquals("2026-05-21T10:30:00.000Z", end)
     }
+
+    @Test fun blockToIsoRangeClampsOutOfRangeTimeNoThrow() {
+        // A corrupt stored time ("24:00" / "25:70") must not throw DateTimeException on
+        // the Google push path — clamp the hour/minute into a valid clock instead.
+        val b = mkBlock(taskId = "t", startTime = "25:70", durationMinutes = 30, date = "2026-05-21")
+        val (start, end) = blockToIsoRange(b)
+        // 23:59 (clamped) + 30 min spills into the next UTC day; just assert valid ISO.
+        assertTrue(Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$").matches(start))
+        assertTrue(Regex("^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}\\.\\d{3}Z$").matches(end))
+    }
+
+    @Test fun blockToIsoRangeInvalidDateFallsBackNoThrow() {
+        // Month 13 is unrepresentable — must fall back to the raw date, not throw.
+        val b = mkBlock(taskId = "t", startTime = "09:00", durationMinutes = 30, date = "2026-13-40")
+        val (start, end) = blockToIsoRange(b)
+        assertEquals("2026-13-40", start)
+        assertEquals("2026-13-40", end)
+    }
 }

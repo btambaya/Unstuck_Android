@@ -160,7 +160,17 @@ fun OnboardingScreen(vm: AppViewModel, onDone: () -> Unit) {
                 }
             }
             Row(Modifier.fillMaxWidth().padding(top = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                Text("Skip", style = UFont.sans(14), color = c.ink3, modifier = Modifier.clickable { vm.completeOnboarding(emptyList()); onDone() })
+                // Back to the previous step (hidden on step 0). Picks survive — the state
+                // lives above the `when`, so stepping back and forward keeps selections.
+                if (step > 0) {
+                    Text("Back", style = UFont.sans(14), color = c.ink3, modifier = Modifier.clickable { step-- })
+                    Spacer(Modifier.width(16.dp))
+                }
+                // Skip keeps the areas/struggles already picked (was discarding them by
+                // passing emptyList → falling back to canonical defaults).
+                Text("Skip", style = UFont.sans(14), color = c.ink3, modifier = Modifier.clickable {
+                    vm.completeOnboarding(struggles = pickedStruggles.toList(), areas = pickedAreas.toList()); onDone()
+                })
                 Box(Modifier.weight(1f))
                 UButton(if (step == lastStep) "Begin" else "Continue", kind = ButtonKind.DARK, fill = false) { if (step == lastStep) finish() else step++ }
             }

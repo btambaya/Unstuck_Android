@@ -89,6 +89,26 @@ class AnalyticsTest {
         assertEquals(6, pauseAnatomy(logs).size)
     }
 
+    @Test fun interruptionBinsZeroBinCountIsEmptyNotCrash() {
+        // binCount <= 0 must not throw (NegativeArraySize / AIOOBE on bins[-1]).
+        val completedMs = Time.parseMillis("2026-01-01T10:30:00.000Z")!!
+        val startMs = completedMs - 30 * 60 * 1000
+        val s = sess("sess", "t", 30 * 60, "2026-01-01T10:30:00.000Z")
+        val c = cap("c", sessionId = "sess", tag = CaptureTag.FOLLOW_UP, at = iso(startMs + 10 * 60_000))
+        assertEquals(emptyList<Int>(), interruptionBins(listOf(c), listOf(s), 3, 0))
+        assertEquals(emptyList<Int>(), interruptionBins(listOf(c), listOf(s), 3, -1))
+    }
+
+    @Test fun reEntryDistributionZeroBinCountIsEmptyNotCrash() {
+        val startMs = Time.parseMillis("2026-01-01T10:00:00.000Z")!!
+        val sessions = listOf(
+            sess("s1", "t", 25 * 60, iso(startMs + 25 * 60_000)),
+            sess("s2", "t", 25 * 60, iso(startMs + (25 + 35) * 60_000)),
+        )
+        assertEquals(emptyList<Int>(), reEntryDistribution(sessions, 5, 0))
+        assertEquals(emptyList<Int>(), reEntryDistribution(sessions, 5, -3))
+    }
+
     @Test fun reEntryDistributionTenMinGap() {
         val startMs = Time.parseMillis("2026-01-01T10:00:00.000Z")!!
         val sessions = listOf(

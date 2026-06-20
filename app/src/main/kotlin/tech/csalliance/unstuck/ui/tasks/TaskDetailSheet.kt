@@ -139,7 +139,14 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
             Row(Modifier.fillMaxWidth().padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                 Box(Modifier.weight(1f)) { UButton("Focus", kind = ButtonKind.CORAL, leadingIcon = Icons.Filled.PlayArrow, onClick = onStartFocus) }
                 if (!isOcc) UButton("Schedule", kind = ButtonKind.OUTLINED, fill = false) { pickSchedule() }
-                UButton(if (task.done) "✓ Done" else "Mark done", kind = ButtonKind.TEXT, fill = false) { vm.toggleDone(task) }
+                UButton(if (task.done) "✓ Done" else "Mark done", kind = ButtonKind.TEXT, fill = false) {
+                    val wasDone = task.done
+                    vm.toggleDone(task)
+                    // For a recurring OCCURRENCE, completing it removes that day's row — pop the
+                    // sheet (consistent with Skip/Delete) so it doesn't sit on a stale/auto-
+                    // bouncing item. Un-completing or a normal task keeps the sheet open.
+                    if (isOcc && !wasDone) onBack()
+                }
                 if (isOcc) UButton("Skip today", kind = ButtonKind.TEXT, fill = false) { vm.skipOccurrence(task.id); onBack() }
             }
             scheduled?.let { Text("Scheduled $it", style = UFont.sans(12), color = c.green, modifier = Modifier.padding(top = 8.dp)) }

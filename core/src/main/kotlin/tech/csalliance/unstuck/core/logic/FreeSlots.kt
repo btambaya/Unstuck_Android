@@ -62,6 +62,9 @@ fun findFreeSlots(
 ): List<Slot> {
     val start = startDate ?: now
     val out = mutableListOf<Slot>()
+    // A non-positive duration would make `cursor + durationMin <= gapEnd` perpetually
+    // true → garbage zero/negative-length slots. A slot must span real time.
+    val durationMin = durationMin.coerceAtLeast(1)
     val nowMin = Time.hourOf(now) * 60 + Time.minuteOf(now)
 
     var d = 0

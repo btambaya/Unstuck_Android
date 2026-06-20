@@ -16,12 +16,14 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -108,7 +110,10 @@ fun ColorChip(color: Color, modifier: Modifier = Modifier, box: Int = 30, dot: I
 fun FilterPill(label: String, selected: Boolean, modifier: Modifier = Modifier, dotColor: Color? = null, onClick: () -> Unit) {
     val c = UTheme.colors
     Row(
-        modifier.clip(pill).background(if (selected) c.ink else c.bg2).selectable(selected = selected, onClick = onClick)
+        modifier.clip(pill).background(if (selected) c.ink else c.bg2)
+            .selectable(selected = selected, role = Role.Button, onClick = onClick)
+            // Grow the hit target to the 48dp minimum without changing the drawn pill.
+            .minimumInteractiveComponentSize()
             .padding(horizontal = 12.dp, vertical = 6.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(5.dp),

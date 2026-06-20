@@ -17,6 +17,13 @@ import tech.csalliance.unstuck.R
  */
 object NotificationRenderer {
 
+    /** True when the user has notifications enabled for the app (master toggle). When
+     *  false, NotificationManagerCompat.notify() silently no-ops anyway — but we must
+     *  ALSO skip the NotificationLog "shown" entry, or the in-app unread badge counts a
+     *  notification the user never actually saw. */
+    private fun enabled(context: Context): Boolean =
+        NotificationManagerCompat.from(context).areNotificationsEnabled()
+
     /** Map the server's `data.kind` to a channel + stable id. */
     private fun channelFor(kind: String?): Pair<String, Int> = when (kind) {
         "session_recap" -> NotificationChannels.RECAP to NotifIds.RECAP
@@ -51,6 +58,7 @@ object NotificationRenderer {
     /** Render an incoming FCM push (or a local reminder). Pass [notifId] to keep
      *  distinct items (e.g. per-task reminders) from replacing each other. */
     fun renderPush(context: Context, kind: String?, title: String, body: String, deepLink: String?, notifId: Int? = null) {
+        if (!enabled(context)) return // don't log a "shown" entry for a notification the system suppresses
         val (channel, defaultId) = channelFor(kind)
         val id = notifId ?: defaultId
         val n = base(context, channel)
@@ -65,6 +73,7 @@ object NotificationRenderer {
 
     /** Post the paused-too-long check-in locally, with Resume / Snooze / End. */
     fun postPausedCheckin(context: Context, taskName: String) {
+        if (!enabled(context)) return
         fun action(act: String) = PendingIntent.getBroadcast(
             context, act.hashCode(),
             Intent(context, NotificationActionReceiver::class.java).setAction(act)
@@ -89,6 +98,7 @@ object NotificationRenderer {
      *  into Focus for the task and begins the timer) and **Reschedule** (one tap →
      *  moves the block to the next free slot today). */
     fun postTaskStarting(context: Context, taskName: String, taskId: String, blockId: String, drifted: Boolean) {
+        if (!enabled(context)) return
         val title = if (drifted) "Didn't get to it?" else "Time to start"
         val body = if (drifted) "“$taskName” was set for a little while ago — want to start now?" else "“$taskName” starts now."
         // Start → launch the activity into the focus screen for this task.
@@ -123,6 +133,7 @@ object NotificationRenderer {
 
     /** Brief confirmation after a one-tap Reschedule (replaces the start-now notif). */
     fun postRescheduleConfirmation(context: Context, taskName: String, newTime: String, taskId: String) {
+        if (!enabled(context)) return
         val n = base(context, NotificationChannels.REMINDERS)
             .setContentTitle("Rescheduled")
             .setContentText("“$taskName” moved to ${formatClock(newTime)}.")

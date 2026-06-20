@@ -1250,7 +1250,9 @@ class AppViewModel(
     // Falls back to AuthService when no coordinator is wired.
     suspend fun deleteAccount(): AuthOutcome =
         graph.coordinator?.deleteAccount() ?: auth?.deleteAccount() ?: AuthOutcome.Error("Not configured")
-    val hasPassword: Boolean get() = auth?.hasPassword ?: true
+    // Default FALSE when auth isn't wired (mirrors AuthService.hasPassword) — never
+    // offer "Change password" to a Google-only / not-yet-known account.
+    val hasPassword: Boolean get() = auth?.hasPassword ?: false
     // Unregister this device's push token (while the JWT is still valid) then
     // sign out — prevents the previous user's pushes reaching the next user.
     fun signOut() = launchWrite { graph.coordinator?.signOutAndUnregister() ?: auth?.signOut() }

@@ -19,6 +19,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -52,7 +53,9 @@ fun NotificationCenterScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (
     val notifs by vm.notifications.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
     val tasks by vm.tasks.collectAsStateWithLifecycle()
-    val now = remember { vm.nowMs() }  // stable for this screen open (not a per-frame key)
+    // Tick ~every 30s so the "Xm ago" / "in Xm" labels don't freeze at screen-open time.
+    var now by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(vm.nowMs()) }
+    androidx.compose.runtime.LaunchedEffect(Unit) { while (true) { now = vm.nowMs(); kotlinx.coroutines.delay(30_000) } }
 
     val upcoming = remember(blocks, tasks) {
         blocks.asSequence()

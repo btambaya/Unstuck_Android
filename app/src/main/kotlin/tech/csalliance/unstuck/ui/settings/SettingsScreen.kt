@@ -323,6 +323,7 @@ private fun FieldDialog(title: String, label: String, initial: String = "", pass
 @Composable
 private fun AreasContent(vm: AppViewModel) {
     val c = UTheme.colors
+    val context = LocalContext.current
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     var draft by remember { mutableStateOf("") }
@@ -359,7 +360,17 @@ private fun AreasContent(vm: AppViewModel) {
                 }
                 if (editing) {
                     BasicTextField(value = nameDraft, onValueChange = { nameDraft = it }, textStyle = UFont.sans(14, FontWeight.SemiBold).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
-                    Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable(role = Role.Button) { vm.renameLifeArea(a, nameDraft); editing = false }.minimumInteractiveComponentSize().semantics { contentDescription = "Save name" }.padding(4.dp))
+                    Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable(role = Role.Button) {
+                        val nm = nameDraft.trim()
+                        val dup = areas.any { it.id != a.id && it.name.equals(nm, ignoreCase = true) }
+                        when {
+                            // Blank / unchanged → just close the editor (no-op, no error noise).
+                            nm.isEmpty() -> { nameDraft = a.name; editing = false }
+                            nm == a.name -> editing = false
+                            dup -> android.widget.Toast.makeText(context, "An area named \"$nm\" already exists.", android.widget.Toast.LENGTH_SHORT).show()
+                            else -> { vm.renameLifeArea(a, nm); editing = false }
+                        }
+                    }.minimumInteractiveComponentSize().semantics { contentDescription = "Save name" }.padding(4.dp))
                 } else {
                     Column(Modifier.weight(1f)) {
                         Text(a.name, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink)
@@ -410,6 +421,7 @@ private fun AreasContent(vm: AppViewModel) {
 @Composable
 private fun TagsContent(vm: AppViewModel) {
     val c = UTheme.colors
+    val context = LocalContext.current
     val tags by vm.tags.collectAsStateWithLifecycle()
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     var draft by remember { mutableStateOf("") }
@@ -446,7 +458,16 @@ private fun TagsContent(vm: AppViewModel) {
                 }
                 if (editing) {
                     BasicTextField(value = nameDraft, onValueChange = { nameDraft = it }, textStyle = UFont.sans(14, FontWeight.SemiBold).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
-                    Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable(role = Role.Button) { vm.renameTag(tag, nameDraft); editing = false }.minimumInteractiveComponentSize().semantics { contentDescription = "Save name" }.padding(4.dp))
+                    Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable(role = Role.Button) {
+                        val nm = nameDraft.trim()
+                        val dup = tags.any { it.id != tag.id && it.name.equals(nm, ignoreCase = true) }
+                        when {
+                            nm.isEmpty() -> { nameDraft = tag.name; editing = false }
+                            nm == tag.name -> editing = false
+                            dup -> android.widget.Toast.makeText(context, "A tag named \"$nm\" already exists.", android.widget.Toast.LENGTH_SHORT).show()
+                            else -> { vm.renameTag(tag, nm); editing = false }
+                        }
+                    }.minimumInteractiveComponentSize().semantics { contentDescription = "Save name" }.padding(4.dp))
                 } else {
                     Text("#${tag.name}", style = UFont.sans(14, FontWeight.SemiBold), color = c.ink, modifier = Modifier.weight(1f).clickable { nameDraft = tag.name; editing = true })
                 }

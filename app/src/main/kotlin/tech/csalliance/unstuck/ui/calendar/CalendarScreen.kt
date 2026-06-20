@@ -80,6 +80,9 @@ fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () ->
     val c = UTheme.colors
     // Saveable so the chosen Day/Week/Month tab survives rotation / process death.
     var view by rememberSaveable { mutableStateOf("Day") }
+    // A day tapped in Month view → switch to Day view focused on it. Saveable so the
+    // jump survives rotation; consumed by DayGridScreen via its initialDate.
+    var jumpDate by rememberSaveable { mutableStateOf<String?>(null) }
     Column(Modifier.fillMaxSize()) {
         AppBar(title = "Calendar", leading = Leading.NONE, onSearch = onSearch, onNotifications = onNotifications, notifUnread = notifUnread, onAvatar = onAvatar, avatarInitials = avatarInitials)
         Box(Modifier.padding(horizontal = 18.dp, vertical = 4.dp)) {
@@ -87,9 +90,9 @@ fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () ->
         }
         CalendarSyncBar(vm)
         when (view) {
-            "Day" -> DayGridScreen(vm, onOpen, onCreateAt)
+            "Day" -> DayGridScreen(vm, onOpen, onCreateAt, initialDate = jumpDate)
             "Week" -> WeekView(vm, onOpen, onCreateAt)
-            else -> MonthView(vm)
+            else -> MonthView(vm) { iso -> jumpDate = iso; view = "Day" }
         }
     }
 }
@@ -269,7 +272,7 @@ private fun RollupStat(label: String, value: String, bg: androidx.compose.ui.gra
 }
 
 @Composable
-private fun MonthView(vm: AppViewModel) {
+private fun MonthView(vm: AppViewModel, onPickDay: (String) -> Unit) {
     val c = UTheme.colors
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     var ym by rememberSaveable(stateSaver = YearMonthSaver) { mutableStateOf(java.time.YearMonth.now()) }
@@ -309,7 +312,10 @@ private fun MonthView(vm: AppViewModel) {
                                 val t = (v.toFloat() / max).coerceIn(0f, 1f)
                                 val isToday = iso == todayIso
                                 Box(
-                                    Modifier.weight(1f).aspectRatio(1f).clip(RoundedCornerShape(7.dp)).background(if (isToday) c.coral else if (v == 0) c.bg2 else lerp(c.bg2, c.primary, 0.2f + 0.6f * t)),
+                                    Modifier.weight(1f).aspectRatio(1f).clip(RoundedCornerShape(7.dp))
+                                        .background(if (isToday) c.coral else if (v == 0) c.bg2 else lerp(c.bg2, c.primary, 0.2f + 0.6f * t))
+                                        // Tap a day → open it in Day view.
+                                        .clickable(role = androidx.compose.ui.semantics.Role.Button) { onPickDay(iso) },
                                     contentAlignment = Alignment.Center,
                                 ) {
                                     Text("${d.dayOfMonth}", style = UFont.sans(11, FontWeight.SemiBold), color = if (isToday || t > 0.5f) c.bg else c.ink2, textAlign = TextAlign.Center)

@@ -182,7 +182,10 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 listOf("Today", "Tomorrow", "Pick date", "Later").forEach { w ->
                     SelectableChip(if (w == "Pick date" && whenSel == "Pick date") pickedDate.takeLast(5) else w, selected = whenSel == w) {
-                        autoTime = true   // re-auto-pick a slot for the new date
+                        // Re-auto-pick a slot for the new date ONLY if the user hasn't set an
+                        // explicit time — changing the date must not silently overwrite a
+                        // custom/prefilled time (it's a date-independent HH:MM that should ride along).
+                        if (pickedTime == null) autoTime = true
                         // "Pick date" only commits AFTER the dialog's OK — so cancelling
                         // leaves the previous selection instead of a stale "Pick date".
                         if (w == "Pick date") showDatePicker = true else whenSel = w

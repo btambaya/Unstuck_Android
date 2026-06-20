@@ -66,10 +66,13 @@ fun blockToIsoRange(b: CalBlock): Pair<String, String> {
     val tParts = b.startTime.split(":").map { it.toIntOrNull() }
     if (dParts.size != 3 || dParts.any { it == null }) return b.date to b.date
     val (y, m, d) = dParts.map { it!! }
-    val hour = tParts.getOrNull(0) ?: 0
-    val minute = tParts.getOrNull(1) ?: 0
-    val startInstant = LocalDateTime.of(y, m, d, hour, minute)
-        .atZone(ZoneId.systemDefault()).toInstant()
+    // Clamp the stored clock components: a corrupt "24:00" / "25:70" would otherwise
+    // throw an uncaught DateTimeException from LocalDateTime.of in the Google push path.
+    val hour = (tParts.getOrNull(0) ?: 0).coerceIn(0, 23)
+    val minute = (tParts.getOrNull(1) ?: 0).coerceIn(0, 59)
+    val startInstant = runCatching {
+        LocalDateTime.of(y, m, d, hour, minute).atZone(ZoneId.systemDefault()).toInstant()
+    }.getOrNull() ?: return b.date to b.date   // out-of-range date components (e.g. month 13)
     val endInstant = startInstant.plusSeconds(b.durationMinutes.toLong() * 60)
     return ISO_UTC_MS.format(startInstant) to ISO_UTC_MS.format(endInstant)
 }

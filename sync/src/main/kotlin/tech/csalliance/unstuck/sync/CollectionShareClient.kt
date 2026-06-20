@@ -6,12 +6,15 @@ import io.github.jan.supabase.postgrest.from
 import io.github.jan.supabase.postgrest.postgrest
 import io.github.jan.supabase.postgrest.rpc
 import io.ktor.client.call.body
+import io.ktor.client.plugins.ResponseException
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.Json
 
 // CollectionShareClient — the Android port of the web shared-collections plumbing
 // (use-collections.ts share/unshare/leave/listMembers + the atomic item RPCs).
@@ -74,6 +77,8 @@ class CollectionShareClient(private val client: SupabaseClient) {
         val isOwner: Boolean? = null,
     )
 
+    private val lenientJson = Json { ignoreUnknownKeys = true }
+
     private suspend fun call(body: ShareBody): ShareResponse =
         client.functions.invoke("share-collection") {
             method = HttpMethod.Post
@@ -81,17 +86,30 @@ class CollectionShareClient(private val client: SupabaseClient) {
             setBody(body)
         }.body()
 
-    /** Share with an email. Existing account → member; otherwise pending invite + email. */
-    suspend fun share(collectionId: String, email: String, role: String): ShareOutcome = runCatching {
-        val r = call(ShareBody("add", collectionId, email = email, role = role))
-        when {
+    /** Decode a ShareResponse even from a non-2xx (the supabase ktor client has
+     *  expectSuccess=true, so 4xx/5xx throw before .body() — but they still carry a
+     *  `{error: ...}` JSON body we want to surface as a specific outcome). Returns null
+     *  on a non-HTTP failure (no response, e.g. offline) → caller maps to ERROR. */
+    private suspend fun callOrError(body: ShareBody): ShareResponse? =
+        runCatching { call(body) }.getOrElse { e ->
+            val resp = (e as? ResponseException)?.response ?: return null
+            runCatching { lenientJson.decodeFromString<ShareResponse>(resp.bodyAsText()) }.getOrNull()
+        }
+
+    /** Share with an email. Existing account → member; otherwise pending invite + email.
+     *  Maps the distinct server error codes (`self`, `not_found`) to their outcomes even
+     *  when the function returns them at a 4xx status. */
+    suspend fun share(collectionId: String, email: String, role: String): ShareOutcome {
+        val r = callOrError(ShareBody("add", collectionId, email = email, role = role)) ?: return ShareOutcome.ERROR
+        return when {
             r.error == "not_found" -> ShareOutcome.NOT_FOUND
             r.error == "self" -> ShareOutcome.SELF
+            r.error != null -> ShareOutcome.ERROR
             r.invited == true -> ShareOutcome.INVITED
-            r.ok == true && r.userId != null -> ShareOutcome.OK
+            r.ok == true -> ShareOutcome.OK
             else -> ShareOutcome.ERROR
         }
-    }.getOrDefault(ShareOutcome.ERROR)
+    }
 
     /** Remove a joined member (owner-only). */
     suspend fun unshare(collectionId: String, userId: String) {

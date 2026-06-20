@@ -55,6 +55,7 @@ import tech.csalliance.unstuck.ui.AppViewModel
 @Composable
 fun InboxScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (String) -> Unit) {
     val c = UTheme.colors
+    val context = androidx.compose.ui.platform.LocalContext.current
     val inbox by vm.inboxCaptures.collectAsStateWithLifecycle()
     val allCaptures by vm.captures.collectAsStateWithLifecycle()
     val archivedIds by vm.archivedCaptureIds.collectAsStateWithLifecycle()
@@ -64,6 +65,9 @@ fun InboxScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (String) -> Un
     androidx.compose.runtime.LaunchedEffect(Unit) { while (true) { now = vm.nowMs(); kotlinx.coroutines.delay(30_000) } }
 
     var showArchived by remember { mutableStateOf(false) }
+    // Discard is irreversible (deletes the capture) → confirm first, mirroring the
+    // iOS/web confirm. Holds the capture pending deletion.
+    var confirmDiscard by remember { mutableStateOf<Capture?>(null) }
     val archived = remember(allCaptures, archivedIds) {
         allCaptures.filter { it.id in archivedIds }.sortedByDescending { it.at }
     }
@@ -107,15 +111,37 @@ fun InboxScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (String) -> Un
                         sourceTaskName = taskName(cap.taskId),
                         relTime = relPast(now - (Time.parseMillis(cap.at) ?: now)),
                         archivedView = showArchived,
-                        onPromote = { vm.promoteCapture(cap); vm.archiveCapture(cap.id) },
+                        onPromote = {
+                            // Promote creates a task (capture preserved + archived). Confirm it
+                            // happened — it used to silently archive with no feedback.
+                            vm.promoteCapture(cap); vm.archiveCapture(cap.id)
+                            android.widget.Toast.makeText(context, "Added to your tasks.", android.widget.Toast.LENGTH_SHORT).show()
+                        },
                         onOpen = cap.taskId?.let { tid -> { onOpenTask(tid) } },
                         onArchive = { if (showArchived) vm.unarchiveCapture(cap.id) else vm.archiveCapture(cap.id) },
-                        onDiscard = { vm.deleteCapture(cap.id); vm.unarchiveCapture(cap.id) },
+                        onDiscard = { confirmDiscard = cap },
                     )
                 }
             }
             item { Box(Modifier.size(24.dp)) }
         }
+    }
+
+    confirmDiscard?.let { cap ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { confirmDiscard = null },
+            title = { Text("Discard this capture?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+            text = { Text("\"${cap.body}\" will be deleted. This can't be undone.", style = UFont.sans(13), color = c.ink2) },
+            confirmButton = {
+                androidx.compose.material3.TextButton(onClick = {
+                    vm.deleteCapture(cap.id); vm.unarchiveCapture(cap.id); confirmDiscard = null
+                }) { Text("Discard", color = c.red) }
+            },
+            dismissButton = {
+                androidx.compose.material3.TextButton(onClick = { confirmDiscard = null }) { Text("Cancel", color = c.ink2) }
+            },
+            containerColor = c.surface,
+        )
     }
 }
 

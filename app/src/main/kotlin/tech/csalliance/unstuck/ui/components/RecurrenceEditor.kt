@@ -65,8 +65,15 @@ fun RecurrenceEditor(value: Recurrence?, modifier: Modifier = Modifier, onChange
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 DOW.forEachIndexed { idx, label ->
                     SelectableChip(label, selected = idx in days, a11yLabel = DOW_FULL[idx]) {
+                        // A weekly recurrence needs at least one day (an empty set is treated as
+                        // corrupt downstream + would erase the series). Rather than silently
+                        // snapping the last day back on, tell the user it must stay selected.
+                        if (idx in days && days.size <= 1) {
+                            android.widget.Toast.makeText(context, "Pick at least one day for a weekly repeat.", android.widget.Toast.LENGTH_SHORT).show()
+                            return@SelectableChip
+                        }
                         val next = if (idx in days) days - idx else days + idx
-                        onChange(Recurrence.Weekly(next.sorted().ifEmpty { listOf(idx) }, until))
+                        onChange(Recurrence.Weekly(next.sorted(), until))
                     }
                 }
             }

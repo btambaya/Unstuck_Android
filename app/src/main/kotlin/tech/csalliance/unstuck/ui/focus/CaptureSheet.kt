@@ -72,13 +72,17 @@ fun CaptureSheet(vm: AppViewModel, task: TaskItem, sessionId: String?, onDismiss
                 }
             }
             Box(Modifier.padding(top = 4.dp)) {
-                tech.csalliance.unstuck.design.component.UButton("Save", kind = tech.csalliance.unstuck.design.component.ButtonKind.DARK, fill = false) {
+                // Disabled while empty + guarded so tapping Save never dismisses without
+                // saving (an empty capture was silently discarded before).
+                tech.csalliance.unstuck.design.component.UButton("Save", kind = tech.csalliance.unstuck.design.component.ButtonKind.DARK, fill = false, enabled = text.isNotBlank()) {
+                    if (text.isBlank()) return@UButton
                     // Resolve the session id at SAVE time: on a freshly started session the
                     // `live` row can still be null when the sheet opened (so the passed-in
                     // sessionId is null), which would orphan the capture from the Session the
                     // interruption histogram keys on. Fall back to the now-current live id.
                     val sid = sessionId ?: vm.liveSession.value?.id
-                    if (text.isNotBlank()) vm.saveCapture(task.id, sid, tag, text.trim()); onDismiss()
+                    vm.saveCapture(task.id, sid, tag, text.trim())
+                    onDismiss()
                 }
             }
         }

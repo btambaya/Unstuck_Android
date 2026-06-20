@@ -72,6 +72,13 @@ class SyncCoordinator(
             runCatching { kotlinx.coroutines.withTimeoutOrNull(5_000) { flusher.flush(uid) { auth.currentUserId } } }
         }
         runCatching { push.unregister(thisDeviceId()) }
+        // Narrow the sign-out-vs-write race: a write landing AFTER the first flush
+        // window (or during the push unregister) would otherwise be wiped by clearAll.
+        // The JWT is still valid here, so a final bounded re-flush captures it. (Writes
+        // after THIS flush but before clearAll remain a residual hair — acceptable.)
+        auth.currentUserId?.let { uid ->
+            runCatching { kotlinx.coroutines.withTimeoutOrNull(3_000) { flusher.flush(uid) { auth.currentUserId } } }
+        }
         auth.signOut()
     }
 
@@ -266,7 +273,13 @@ class SyncCoordinator(
         val d = b.date.split("-").mapNotNull { it.toIntOrNull() }
         val t = b.startTime.split(":").mapNotNull { it.toIntOrNull() }
         if (d.size != 3 || t.size < 2) return "" to ""
-        val start = LocalDate.of(d[0], d[1], d[2]).atTime(t[0], t[1]).atZone(java.time.ZoneId.systemDefault())
+        // Clamp clock components + guard the date: a corrupt "24:00" / month 13 would
+        // otherwise throw an uncaught DateTimeException on the Google push path.
+        val hour = t[0].coerceIn(0, 23)
+        val minute = t[1].coerceIn(0, 59)
+        val start = runCatching {
+            LocalDate.of(d[0], d[1], d[2]).atTime(hour, minute).atZone(java.time.ZoneId.systemDefault())
+        }.getOrNull() ?: return "" to ""
         val end = start.plusMinutes(b.durationMinutes.coerceAtLeast(1).toLong())
         val fmt = java.time.format.DateTimeFormatter.ISO_INSTANT
         return fmt.format(start.toInstant()) to fmt.format(end.toInstant())

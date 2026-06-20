@@ -148,7 +148,7 @@ class VoiceAudioEngine(private val context: Context) {
     }
 
     // ── capture ──
-    private var record: AudioRecord? = null
+    @Volatile private var record: AudioRecord? = null
     @Volatile private var capturing = false
     private var captureThread: Thread? = null
     private var aec: AcousticEchoCanceler? = null
@@ -219,7 +219,11 @@ class VoiceAudioEngine(private val context: Context) {
     }
 
     // ── playback ──
-    private var track: AudioTrack? = null
+    @Volatile private var track: AudioTrack? = null
+    // Guards all AudioTrack control-vs-write contention: the playback thread writes
+    // inside this lock while the WS reader thread (flushPlayback) pauses/flushes/plays
+    // inside it too. Concurrent control + write() on one AudioTrack is undefined.
+    private val trackLock = Any()
     private val queue = LinkedBlockingQueue<ByteArray>()
     @Volatile private var playing = false
     @Volatile private var lastOutputMs = 0L
@@ -262,7 +266,10 @@ class VoiceAudioEngine(private val context: Context) {
                 if (chunk === poison || !playing) continue
                 var off = 0
                 while (off < chunk.size && playing) {
-                    val w = t.write(chunk, off, chunk.size - off)
+                    // Serialize each write against flush/pause/play from the WS reader
+                    // thread (block-level lock, not held across queue.take, so a barge-in
+                    // flush isn't blocked waiting for the next chunk).
+                    val w = synchronized(trackLock) { if (playing) t.write(chunk, off, chunk.size - off) else -1 }
                     if (w <= 0) break
                     off += w
                     lastOutputMs = SystemClock.uptimeMillis()
@@ -275,19 +282,24 @@ class VoiceAudioEngine(private val context: Context) {
         if (playing && pcm.isNotEmpty()) { lastOutputMs = SystemClock.uptimeMillis(); queue.offer(pcm) }
     }
 
-    /** Barge-in: drop queued audio + cut current playback immediately. */
+    /** Barge-in: drop queued audio + cut current playback immediately. Called from the
+     *  WS reader thread; serialized against the playback thread's write() via trackLock. */
     fun flushPlayback() {
         queue.clear()
         lastOutputMs = 0L
-        track?.let { runCatching { it.pause() }; runCatching { it.flush() }; runCatching { it.play() } }
+        synchronized(trackLock) {
+            track?.let { runCatching { it.pause() }; runCatching { it.flush() }; runCatching { it.play() } }
+        }
     }
 
     fun stopPlayback() {
         playing = false
         queue.offer(poison)
         playThread?.interrupt(); playThread?.join(300); playThread = null
-        track?.let { runCatching { it.pause() }; runCatching { it.flush() }; runCatching { it.release() } }
-        track = null
+        synchronized(trackLock) {
+            track?.let { runCatching { it.pause() }; runCatching { it.flush() }; runCatching { it.release() } }
+            track = null
+        }
         queue.clear()
     }
 

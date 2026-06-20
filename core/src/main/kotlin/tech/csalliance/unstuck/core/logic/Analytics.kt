@@ -77,6 +77,7 @@ fun calibrationHitRate(dots: List<CalibrationDot>, slackMin: Int = 5): Double {
 // H3 — interruption histogram (captures as the proxy)
 
 fun interruptionBins(captures: List<Capture>, sessions: List<Session>, binMin: Int = 3, binCount: Int = 10): List<Int> {
+    if (binCount < 1) return emptyList()
     val bins = IntArray(binCount)
     val sessionStart = HashMap<String, Double>()
     for (s in sessions) {
@@ -133,6 +134,7 @@ fun pauseAnatomy(reasonLogs: List<ReasonLog>): List<PauseBar> {
 // H6 — re-entry distribution
 
 fun reEntryDistribution(sessions: List<Session>, binMin: Int = 5, binCount: Int = 12): List<Int> {
+    if (binCount < 1) return emptyList()
     val bins = IntArray(binCount)
     val byTask = HashMap<String, MutableList<Session>>()
     for (s in sessions) {

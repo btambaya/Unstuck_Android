@@ -98,7 +98,7 @@ internal fun layoutLanes(blocks: List<CalBlock>): List<Laid> {
 /** Day grid with drag-to-schedule: long-press an unscheduled task in the tray
  *  and drop it onto an hour slot to create a cal_block at that time. */
 @Composable
-fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (String, String) -> Unit) {
+fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (String, String) -> Unit, initialDate: String? = null) {
     val c = UTheme.colors
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocksRaw by vm.blocks.collectAsStateWithLifecycle()
@@ -112,7 +112,10 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
     val hourPx = with(density) { HOUR_HEIGHT.toPx() }
 
     // Saveable (ISO date string) so the viewed day doesn't snap back to today on rotation.
-    var date by rememberSaveable { mutableStateOf(Clock.todayIso()) }
+    var date by rememberSaveable { mutableStateOf(initialDate ?: Clock.todayIso()) }
+    // A fresh day tapped in Month view jumps us straight to it (only when it actually
+    // changes, so the user can still navigate days afterward without being snapped back).
+    LaunchedEffect(initialDate) { if (initialDate != null) date = initialDate }
     val scroll = rememberScrollState()
     // Open today's grid scrolled to roughly an hour before now.
     LaunchedEffect(date) {
@@ -147,6 +150,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
         }
     }
 
+    val context = androidx.compose.ui.platform.LocalContext.current
     var gridBounds by remember { mutableStateOf(Rect.Zero) }
     var rootOrigin by remember { mutableStateOf(Offset.Zero) } // window coords of this screen's top-left
     var dragTask by remember { mutableStateOf<TaskItem?>(null) }
@@ -274,8 +278,14 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                                             onDragCancel = { dragBlock = null },
                                         )
                                         // External/placeholder blocks are display-only — swallow taps so
-                                        // they don't fall through to the grid's create-task handler.
-                                    } else Modifier.pointerInput(b.id) { detectTapGestures { } },
+                                        // they don't fall through to the grid's create-task handler, but
+                                        // give a brief hint instead of feeling broken/unresponsive.
+                                    } else Modifier.pointerInput(b.id) {
+                                        detectTapGestures {
+                                            val msg = if (b.kind == CalBlockKind.EXTERNAL) "From Google Calendar — view only here." else "Reserved time."
+                                            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+                                        }
+                                    },
                                 )
                                 .padding(horizontal = 6.dp, vertical = 2.dp),
                         ) {

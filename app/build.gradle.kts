@@ -75,7 +75,15 @@ android {
 
     buildTypes {
         release {
-            isMinifyEnabled = false
+            // R8: code shrinking/obfuscation + resource shrinking. Keep rules live in
+            // app/proguard-rules.pro (kotlinx-serialization is load-bearing — see that
+            // file's header). Uses the AGP "optimize" default config.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
             if (hasReleaseKeystore) signingConfig = signingConfigs.getByName("release")
         }
     }

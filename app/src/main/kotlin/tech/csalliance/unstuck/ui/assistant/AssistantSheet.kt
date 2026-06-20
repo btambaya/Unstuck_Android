@@ -35,6 +35,7 @@ import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -190,7 +191,11 @@ private fun AssistantChat(vm: AppViewModel) {
         ) {
             if (vm.voiceConfigured()) {
                 Row(
-                    Modifier.clip(RoundedCornerShape(999.dp)).background(c.coral).clickable { voiceOpen = true }
+                    Modifier.clip(RoundedCornerShape(999.dp)).background(c.coral)
+                        .clickable(role = Role.Button, onClickLabel = "Talk to the assistant") { voiceOpen = true }
+                        .minimumInteractiveComponentSize()
+                        // One spoken label for the icon+text pill.
+                        .semantics(mergeDescendants = true) { contentDescription = "Talk" }
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
@@ -201,7 +206,7 @@ private fun AssistantChat(vm: AppViewModel) {
             if (shown.isNotEmpty()) {
                 Text(
                     "New chat", style = UFont.sans(12, FontWeight.Medium), color = c.ink3,
-                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { vm.clearAssistant() }.padding(horizontal = 8.dp, vertical = 4.dp),
+                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(role = Role.Button) { vm.clearAssistant() }.minimumInteractiveComponentSize().padding(horizontal = 8.dp, vertical = 4.dp),
                 )
             }
         }
@@ -319,7 +324,10 @@ private fun RoundIcon(
     onClick: () -> Unit,
 ) {
     Box(
+        // 40dp visual circle, but minimumInteractiveComponentSize grows the hit
+        // target to the 48dp minimum (drawn size unchanged).
         Modifier.size(40.dp).clip(RoundedCornerShape(999.dp)).background(bg).clickable(onClick = onClick)
+            .minimumInteractiveComponentSize()
             .semantics {
                 this.role = role
                 contentDescription = label

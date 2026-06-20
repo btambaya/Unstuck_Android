@@ -5,10 +5,12 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.unit.dp
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.design.component.SectionLabel
@@ -19,6 +21,9 @@ import tech.csalliance.unstuck.ui.tasks.SelectableChip
 private enum class Mode { NONE, DAILY, WEEKLY, MONTHLY }
 
 private val DOW = listOf("S", "M", "T", "W", "T", "F", "S") // index 0=Sun … 6=Sat
+// Spoken-out names so TalkBack can tell the two "S" (Sun/Sat) and two "T"
+// (Tue/Thu) chips apart — the visible single letters stay unchanged.
+private val DOW_FULL = listOf("Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday")
 
 private fun untilOf(r: Recurrence?): String? = when (r) {
     is Recurrence.Daily -> r.until
@@ -59,7 +64,7 @@ fun RecurrenceEditor(value: Recurrence?, modifier: Modifier = Modifier, onChange
         if (mode == Mode.WEEKLY) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 DOW.forEachIndexed { idx, label ->
-                    SelectableChip(label, selected = idx in days) {
+                    SelectableChip(label, selected = idx in days, a11yLabel = DOW_FULL[idx]) {
                         val next = if (idx in days) days - idx else days + idx
                         onChange(Recurrence.Weekly(next.sorted().ifEmpty { listOf(idx) }, until))
                     }
@@ -78,7 +83,7 @@ fun RecurrenceEditor(value: Recurrence?, modifier: Modifier = Modifier, onChange
                     dlg.datePicker.minDate = System.currentTimeMillis() - 60_000
                     dlg.show()
                 }
-                if (until != null) Text("Clear", style = UFont.sans(12), color = c.primaryDeep, modifier = Modifier.clickable { onChange(withUntil(value, null)) })
+                if (until != null) Text("Clear", style = UFont.sans(12), color = c.primaryDeep, modifier = Modifier.clickable(role = Role.Button, onClickLabel = "Clear end date") { onChange(withUntil(value, null)) }.minimumInteractiveComponentSize())
             }
         }
     }

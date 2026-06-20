@@ -9,6 +9,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -20,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -29,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -75,7 +78,7 @@ fun CommandPalette(vm: AppViewModel, onDismiss: () -> Unit, onOpenTask: (TaskIte
                 Icon(Icons.Outlined.Search, contentDescription = null, tint = c.ink3, modifier = Modifier.size(15.dp))
                 BasicTextField(value = query, onValueChange = { query = it }, textStyle = UFont.sans(15).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f), decorationBox = { inner -> if (query.isEmpty()) Text("Search tasks + actions", style = UFont.sans(15), color = c.ink3); inner() })
             }
-            Text("Cancel", style = UFont.sans(14, FontWeight.SemiBold), color = c.primaryDeep, modifier = Modifier.clickable(onClick = onDismiss))
+            Text("Cancel", style = UFont.sans(14, FontWeight.SemiBold), color = c.primaryDeep, modifier = Modifier.clickable(role = Role.Button, onClick = onDismiss).minimumInteractiveComponentSize())
         }
         Box(Modifier.fillMaxWidth().padding(horizontal = 10.dp)) {
             LazyColumn {
@@ -90,7 +93,7 @@ fun CommandPalette(vm: AppViewModel, onDismiss: () -> Unit, onOpenTask: (TaskIte
                 // When the query matched nothing, keep navigation reachable: fall back to
                 // the full action list so the palette is never a dead end.
                 items(if (noMatches) allActions else results) { r ->
-                    Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { r.run() }.padding(horizontal = 12.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Row(Modifier.fillMaxWidth().heightIn(min = 48.dp).clip(RoundedCornerShape(10.dp)).clickable(role = Role.Button) { r.run() }.padding(horizontal = 12.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Column(Modifier.weight(1f)) {
                             Text(r.title, style = UFont.sans(14, FontWeight.Medium), color = c.ink, maxLines = 1)
                             if (r.meta != null) Text(r.meta, style = UFont.sans(11), color = c.ink3, modifier = Modifier.padding(top = 2.dp))

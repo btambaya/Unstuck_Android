@@ -103,11 +103,13 @@ fun TaskRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        IconButton(onClick = onToggleDone, modifier = Modifier.size(28.dp)) {
+        // 48dp hit target (IconButton default) with the icon drawn at 24dp — was a
+        // 28dp button, below the 48dp minimum. Visual glyph size is unchanged.
+        IconButton(onClick = onToggleDone, modifier = Modifier.size(48.dp)) {
             if (task.done) {
-                Icon(Icons.Filled.CheckCircle, contentDescription = "Done", tint = c.green)
+                Icon(Icons.Filled.CheckCircle, contentDescription = "Mark not done", tint = c.green, modifier = Modifier.size(24.dp))
             } else {
-                Icon(Icons.Outlined.RadioButtonUnchecked, contentDescription = "Mark done", tint = c.ink3)
+                Icon(Icons.Outlined.RadioButtonUnchecked, contentDescription = "Mark done", tint = c.ink3, modifier = Modifier.size(24.dp))
             }
         }
         if (task.lifeArea != null) AreaDot(task.lifeArea)

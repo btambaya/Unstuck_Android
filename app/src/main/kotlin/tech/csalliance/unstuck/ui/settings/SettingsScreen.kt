@@ -30,6 +30,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -45,6 +46,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -334,16 +338,28 @@ private fun AreasContent(vm: AppViewModel) {
             var palOpen by remember(a.id) { mutableStateOf(false) }
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
                 Box {
-                    Box(Modifier.clickable { palOpen = true }) { ColorChip(c.areaColor(a.color), box = 30, dot = 9) }
+                    Box(
+                        Modifier.clickable(role = Role.Button, onClickLabel = "Change color") { palOpen = true }
+                            .minimumInteractiveComponentSize()
+                            .semantics { contentDescription = "Area color: ${a.color}" },
+                        contentAlignment = Alignment.Center,
+                    ) { ColorChip(c.areaColor(a.color), box = 30, dot = 9) }
                     DropdownMenu(expanded = palOpen, onDismissRequest = { palOpen = false }) {
                         Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            palette.forEach { col -> Box(Modifier.clickable { vm.recolorLifeArea(a, col); palOpen = false }) { ColorChip(c.areaColor(col), box = 26, dot = 8) } }
+                            palette.forEach { col ->
+                                Box(
+                                    Modifier.clickable(role = Role.Button) { vm.recolorLifeArea(a, col); palOpen = false }
+                                        .minimumInteractiveComponentSize()
+                                        .semantics { contentDescription = col; selected = (col == a.color) },
+                                    contentAlignment = Alignment.Center,
+                                ) { ColorChip(c.areaColor(col), box = 26, dot = 8) }
+                            }
                         }
                     }
                 }
                 if (editing) {
                     BasicTextField(value = nameDraft, onValueChange = { nameDraft = it }, textStyle = UFont.sans(14, FontWeight.SemiBold).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
-                    Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable { vm.renameLifeArea(a, nameDraft); editing = false }.padding(4.dp))
+                    Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable(role = Role.Button) { vm.renameLifeArea(a, nameDraft); editing = false }.minimumInteractiveComponentSize().semantics { contentDescription = "Save name" }.padding(4.dp))
                 } else {
                     Column(Modifier.weight(1f)) {
                         Text(a.name, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink)
@@ -351,7 +367,12 @@ private fun AreasContent(vm: AppViewModel) {
                     }
                 }
                 Box {
-                    Icon(Icons.Filled.MoreVert, contentDescription = "Area options", tint = c.ink3, modifier = Modifier.size(20.dp).clickable { menu = true })
+                    // Wrap the 20dp glyph in a 48dp clickable box so the hit target meets
+                    // the minimum without enlarging the drawn icon.
+                    Box(
+                        Modifier.clickable(role = Role.Button, onClickLabel = "Area options") { menu = true }.minimumInteractiveComponentSize(),
+                        contentAlignment = Alignment.Center,
+                    ) { Icon(Icons.Filled.MoreVert, contentDescription = "Area options", tint = c.ink3, modifier = Modifier.size(20.dp)) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(text = { Text("Rename", style = UFont.sans(14), color = c.ink) }, onClick = { menu = false; nameDraft = a.name; editing = true })
                         DropdownMenuItem(text = { Text("Delete area", style = UFont.sans(14), color = c.red) }, onClick = { menu = false; confirm = true })
@@ -404,22 +425,37 @@ private fun TagsContent(vm: AppViewModel) {
             var palOpen by remember(tag.id) { mutableStateOf(false) }
             Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
                 Box {
-                    Box(Modifier.clickable { palOpen = true }) { ColorChip(c.areaColor(tag.color), box = 26, dot = 8) }
+                    Box(
+                        Modifier.clickable(role = Role.Button, onClickLabel = "Change color") { palOpen = true }
+                            .minimumInteractiveComponentSize()
+                            .semantics { contentDescription = "Tag color: ${tag.color}" },
+                        contentAlignment = Alignment.Center,
+                    ) { ColorChip(c.areaColor(tag.color), box = 26, dot = 8) }
                     DropdownMenu(expanded = palOpen, onDismissRequest = { palOpen = false }) {
                         Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            palette.forEach { col -> Box(Modifier.clickable { vm.recolorTag(tag, col); palOpen = false }) { ColorChip(c.areaColor(col), box = 26, dot = 8) } }
+                            palette.forEach { col ->
+                                Box(
+                                    Modifier.clickable(role = Role.Button) { vm.recolorTag(tag, col); palOpen = false }
+                                        .minimumInteractiveComponentSize()
+                                        .semantics { contentDescription = col; selected = (col == tag.color) },
+                                    contentAlignment = Alignment.Center,
+                                ) { ColorChip(c.areaColor(col), box = 26, dot = 8) }
+                            }
                         }
                     }
                 }
                 if (editing) {
                     BasicTextField(value = nameDraft, onValueChange = { nameDraft = it }, textStyle = UFont.sans(14, FontWeight.SemiBold).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
-                    Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable { vm.renameTag(tag, nameDraft); editing = false }.padding(4.dp))
+                    Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable(role = Role.Button) { vm.renameTag(tag, nameDraft); editing = false }.minimumInteractiveComponentSize().semantics { contentDescription = "Save name" }.padding(4.dp))
                 } else {
                     Text("#${tag.name}", style = UFont.sans(14, FontWeight.SemiBold), color = c.ink, modifier = Modifier.weight(1f).clickable { nameDraft = tag.name; editing = true })
                 }
                 Text("$uses", style = UFont.sans(12), color = c.ink3)
                 Box {
-                    Icon(Icons.Filled.MoreVert, contentDescription = "Tag options", tint = c.ink3, modifier = Modifier.size(20.dp).clickable { menu = true })
+                    Box(
+                        Modifier.clickable(role = Role.Button, onClickLabel = "Tag options") { menu = true }.minimumInteractiveComponentSize(),
+                        contentAlignment = Alignment.Center,
+                    ) { Icon(Icons.Filled.MoreVert, contentDescription = "Tag options", tint = c.ink3, modifier = Modifier.size(20.dp)) }
                     DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                         DropdownMenuItem(text = { Text("Rename", style = UFont.sans(14), color = c.ink) }, onClick = { menu = false; nameDraft = tag.name; editing = true })
                         DropdownMenuItem(text = { Text("Delete", style = UFont.sans(14), color = c.red) }, onClick = { menu = false; confirm = true })

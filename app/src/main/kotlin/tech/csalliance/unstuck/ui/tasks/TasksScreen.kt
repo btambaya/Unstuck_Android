@@ -15,10 +15,15 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.LaunchedEffect
@@ -106,7 +111,7 @@ fun TasksScreen(
                         TaskListView.COMPLETED -> c.greenSoft to c.greenInk
                         else -> null
                     }
-                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(if (active) (pair?.first ?: c.ink) else c.bg2).clickable { view = v }.padding(horizontal = 14.dp, vertical = 7.dp)) {
+                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(if (active) (pair?.first ?: c.ink) else c.bg2).selectable(selected = active, role = Role.Tab, onClick = { view = v }).minimumInteractiveComponentSize().padding(horizontal = 14.dp, vertical = 7.dp)) {
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                             if (pair != null && !active) Box(Modifier.size(6.dp).clip(CircleShape).background(pair.second))
                             Text(v.label, style = UFont.sans(12, FontWeight.Medium), color = if (active) (pair?.second ?: c.bg) else c.ink2)
@@ -122,7 +127,11 @@ fun TasksScreen(
             }
             if (activeTag != null) {
                 Row(
-                    Modifier.padding(bottom = 12.dp).clip(RoundedCornerShape(999.dp)).background(c.primarySoft).clickable { activeTag = null }.padding(horizontal = 11.dp, vertical = 6.dp),
+                    Modifier.padding(bottom = 12.dp).clip(RoundedCornerShape(999.dp)).background(c.primarySoft)
+                        .clickable(onClickLabel = "Clear tag filter", role = Role.Button) { activeTag = null }
+                        // One spoken label for the whole pill so the "✕" glyph isn't read literally.
+                        .semantics(mergeDescendants = true) { contentDescription = "Filtering by tag #$activeTag" }
+                        .padding(horizontal = 11.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Text("Filtering by tag ", style = UFont.sans(12), color = c.primaryDeep)

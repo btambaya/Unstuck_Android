@@ -27,6 +27,8 @@ import androidx.compose.foundation.Canvas
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -224,7 +226,13 @@ private fun ThresholdNote() {
 private fun StackedBars(title: String, bars: List<Pair<String, List<Double>>>, areas: List<String>, lifeAreas: List<tech.csalliance.unstuck.core.model.LifeArea>) {
     val c = UTheme.colors
     val max = bars.maxOfOrNull { it.second.sum() }?.coerceAtLeast(0.001) ?: 0.001
-    Card(Modifier.fillMaxWidth().padding(top = 12.dp), radius = 18) {
+    // Spoken summary so screen-reader users get the per-day totals the bars encode.
+    val a11y = "$title. " + bars.joinToString("; ") { (day, data) ->
+        val total = data.sum()
+        val h = total / 60.0
+        "$day ${if (h >= 1) "${(h * 10).roundToInt() / 10.0}h" else "${total.roundToInt()}m"}"
+    }
+    Card(Modifier.fillMaxWidth().padding(top = 12.dp).semantics { contentDescription = a11y }, radius = 18) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(title, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
             bars.forEach { (day, data) ->
@@ -251,7 +259,10 @@ private fun CalibrationScatter(dots: List<CalibrationDot>, hitPct: Int) {
     // Square the axes off a shared max so the y=x reference reads as a true
     // 45° "perfect estimate" line (web parity — components/analytics/report.tsx).
     val maxVal = (listOf(70) + dots.flatMap { listOf(it.e, it.a) }).max()
-    Card(Modifier.fillMaxWidth().padding(top = 12.dp), radius = 18) {
+    // Scatter is a Canvas with no inherent semantics — describe the key numbers.
+    val a11y = "Estimate calibration scatter. ${dots.size} sessions; " +
+        "$hitPct% landed within 5 minutes of the estimate."
+    Card(Modifier.fillMaxWidth().padding(top = 12.dp).semantics { contentDescription = a11y }, radius = 18) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("Estimate calibration", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
             Text("$hitPct% of recent sessions landed within 5 min of estimate.", style = UFont.sans(11), color = c.ink3)
@@ -288,7 +299,10 @@ private fun CalibrationScatter(dots: List<CalibrationDot>, hitPct: Int) {
 private fun Histogram(title: String, bins: List<Int>, color: Color) {
     val c = UTheme.colors
     val max = (bins.maxOrNull() ?: 0).coerceAtLeast(1)
-    Card(Modifier.fillMaxWidth().padding(top = 12.dp), radius = 18) {
+    // Each bar is a Box with no semantics — summarize the bin counts + total.
+    val a11y = "$title. ${bins.sum()} sessions across ${bins.size} buckets: " +
+        bins.joinToString(", ")
+    Card(Modifier.fillMaxWidth().padding(top = 12.dp).semantics { contentDescription = a11y }, radius = 18) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text(title, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
             Row(Modifier.fillMaxWidth().height(80.dp), horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.Bottom) {
@@ -320,7 +334,15 @@ private fun Heatmap(grid: List<List<Double>>) {
     val c = UTheme.colors
     val max = (grid.flatten().maxOrNull() ?: 0.0).coerceAtLeast(0.001)
     val days = listOf("Mon", "Tue", "Wed", "Thu", "Fri")
-    Card(Modifier.fillMaxWidth().padding(top = 12.dp), radius = 18) {
+    // Color-only grid — name the busiest day and its focus minutes for SR users.
+    val a11y = run {
+        val dayTotals = grid.mapIndexed { i, row -> (days.getOrElse(i) { "Day ${i + 1}" }) to row.sum() }
+        val busiest = dayTotals.maxByOrNull { it.second }
+        val totalMin = grid.flatten().sum().roundToInt()
+        "Focus by hour and weekday heatmap. $totalMin total focus minutes" +
+            (busiest?.takeIf { it.second > 0 }?.let { ", busiest on ${it.first}" } ?: "") + "."
+    }
+    Card(Modifier.fillMaxWidth().padding(top = 12.dp).semantics { contentDescription = a11y }, radius = 18) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("Hour × day", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
             grid.forEachIndexed { d, row ->

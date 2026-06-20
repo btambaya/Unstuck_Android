@@ -19,6 +19,9 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -65,7 +68,14 @@ fun AreasMenu(vm: AppViewModel, onPick: (String?) -> Unit, onDismiss: () -> Unit
 private fun AreaRow(dot: androidx.compose.ui.graphics.Color, label: String, count: Int, onClick: () -> Unit) {
     val c = UTheme.colors
     Row(
-        Modifier.fillMaxWidth().clickable(onClick = onClick).padding(horizontal = 20.dp, vertical = 12.dp),
+        Modifier.fillMaxWidth()
+            .clickable(role = Role.Button, onClick = onClick)
+            // Merge so the row reads as one button "<area>, N open tasks" — the bare
+            // count "$count" alone was meaningless out of context.
+            .semantics(mergeDescendants = true) {
+                contentDescription = "$label, $count open ${if (count == 1) "task" else "tasks"}"
+            }
+            .padding(horizontal = 20.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp),
     ) {
         Box(Modifier.size(10.dp).clip(CircleShape).background(dot))

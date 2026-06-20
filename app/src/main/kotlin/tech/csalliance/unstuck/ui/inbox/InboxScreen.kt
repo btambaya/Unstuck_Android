@@ -18,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -27,6 +28,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -159,7 +163,17 @@ private fun InboxCard(
 
 @Composable
 private fun Action(label: String, color: Color, weight: FontWeight, onClick: () -> Unit) {
-    Text(label, style = UFont.sans(12, weight), color = color, modifier = Modifier.clickable(onClick = onClick).padding(vertical = 2.dp))
+    // Spoken label drops any trailing arrow glyph ("Promote →" → "Promote"); the
+    // touch target is grown to the 48dp minimum without changing the drawn text.
+    val spoken = label.replace("→", "").trim()
+    Text(
+        label, style = UFont.sans(12, weight), color = color,
+        modifier = Modifier
+            .clickable(role = Role.Button, onClick = onClick)
+            .minimumInteractiveComponentSize()
+            .semantics { contentDescription = spoken }
+            .padding(vertical = 2.dp),
+    )
 }
 
 private fun tagColor(tag: CaptureTag, c: UnstuckColors): Color = when (tag) {

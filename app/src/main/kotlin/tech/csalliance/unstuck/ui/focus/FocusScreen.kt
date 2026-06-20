@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.Canvas
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -28,6 +29,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -212,14 +214,14 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
             Row(Modifier.padding(top = 12.dp, bottom = 6.dp), horizontalArrangement = Arrangement.spacedBy(14.dp), verticalAlignment = Alignment.CenterVertically) {
                 Text(
                     "Save for later", style = UFont.sans(13, FontWeight.Medium), color = Color.White.copy(alpha = 0.72f),
-                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable {
+                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(role = Role.Button) {
                         vm.pauseFocus()
                         if (settings.focusPauseReasons) { exitAfterReason = true; showPauseReasons = true } else onClose()
-                    }.padding(horizontal = 14.dp, vertical = 8.dp),
+                    }.minimumInteractiveComponentSize().padding(horizontal = 14.dp, vertical = 8.dp),
                 )
                 Text(
                     "End for now", style = UFont.sans(13, FontWeight.Medium), color = Color.White.copy(alpha = 0.72f),
-                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { reflectElapsed = FocusTimer.elapsedSec(l ?: return@clickable, nowMs); vm.finishFocus(task, markDone = false); FocusTimerService.stop(context); PausedCheckinScheduler.cancel(context); showReflect = true }.padding(horizontal = 14.dp, vertical = 8.dp),
+                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(role = Role.Button) { reflectElapsed = FocusTimer.elapsedSec(l ?: return@clickable, nowMs); vm.finishFocus(task, markDone = false); FocusTimerService.stop(context); PausedCheckinScheduler.cancel(context); showReflect = true }.minimumInteractiveComponentSize().padding(horizontal = 14.dp, vertical = 8.dp),
                 )
             }
         }
@@ -267,7 +269,12 @@ private fun PauseReasons(onPick: (String) -> Unit, onDismiss: () -> Unit) {
 @Composable
 private fun FocusBtn(label: String, soft: Boolean, onClick: () -> Unit) {
     val c = UTheme.colors
-    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(if (soft) Color.White.copy(alpha = 0.10f) else c.coral).clickable(onClick = onClick).padding(horizontal = 22.dp, vertical = 12.dp)) {
+    Box(
+        Modifier.clip(RoundedCornerShape(999.dp)).background(if (soft) Color.White.copy(alpha = 0.10f) else c.coral)
+            .clickable(role = Role.Button, onClick = onClick).minimumInteractiveComponentSize()
+            .padding(horizontal = 22.dp, vertical = 12.dp),
+        contentAlignment = Alignment.Center,
+    ) {
         Text(label, style = UFont.sans(14, FontWeight.Medium), color = Color.White)
     }
 }

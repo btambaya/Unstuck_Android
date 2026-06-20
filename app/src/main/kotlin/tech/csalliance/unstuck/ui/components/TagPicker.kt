@@ -12,10 +12,12 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -25,6 +27,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -47,7 +52,12 @@ fun TagPicker(vm: AppViewModel, selected: List<String>, onChange: (List<String>)
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         selected.forEach { name ->
             Row(
-                Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).clickable { onChange(selected - name) }.padding(horizontal = 10.dp, vertical = 5.dp),
+                Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft)
+                    .clickable(role = Role.Button) { onChange(selected - name) }
+                    .minimumInteractiveComponentSize()
+                    // One spoken label so the "✕" glyph isn't read as "times".
+                    .semantics(mergeDescendants = true) { contentDescription = "Remove tag #$name" }
+                    .padding(horizontal = 10.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 Text("#$name", style = UFont.sans(12, FontWeight.Medium), color = c.primaryDeep)
@@ -56,7 +66,10 @@ fun TagPicker(vm: AppViewModel, selected: List<String>, onChange: (List<String>)
         }
         Box {
             Box(
-                Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, c.line2, RoundedCornerShape(999.dp)).clickable { open = true; query = "" }.padding(horizontal = 11.dp, vertical = 5.dp),
+                Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, c.line2, RoundedCornerShape(999.dp))
+                    .clickable(role = Role.Button) { open = true; query = "" }
+                    .minimumInteractiveComponentSize()
+                    .padding(horizontal = 11.dp, vertical = 5.dp),
             ) { Text("+ Tag", style = UFont.sans(12, FontWeight.Medium), color = c.ink2) }
 
             DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
@@ -71,9 +84,14 @@ fun TagPicker(vm: AppViewModel, selected: List<String>, onChange: (List<String>)
                 matches.forEach { tag ->
                     val on = tag.name in selected
                     Row(
-                        Modifier.widthIn(min = 200.dp).clickable {
-                            onChange(if (on) selected - tag.name else selected + tag.name)
-                        }.padding(horizontal = 14.dp, vertical = 10.dp),
+                        Modifier.widthIn(min = 200.dp)
+                            // `selectable` announces the on/off state; the merged label drops
+                            // the "✓"/blank glyph in favor of the tag name.
+                            .selectable(selected = on, role = Role.Checkbox) {
+                                onChange(if (on) selected - tag.name else selected + tag.name)
+                            }
+                            .semantics(mergeDescendants = true) { contentDescription = "#${tag.name}" }
+                            .padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
                         Text(if (on) "✓" else " ", style = UFont.sans(13), color = c.primaryDeep)
@@ -83,7 +101,7 @@ fun TagPicker(vm: AppViewModel, selected: List<String>, onChange: (List<String>)
                 val q = query.trim()
                 if (q.isNotEmpty() && vocab.none { it.name.equals(q, ignoreCase = true) }) {
                     Row(
-                        Modifier.widthIn(min = 200.dp).clickable {
+                        Modifier.widthIn(min = 200.dp).clickable(role = Role.Button) {
                             onChange(selected + vm.ensureTag(q)); query = ""
                         }.padding(horizontal = 14.dp, vertical = 10.dp),
                     ) { Text("Create \"$q\"", style = UFont.sans(13, FontWeight.Medium), color = c.primaryDeep) }

@@ -22,6 +22,8 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -71,7 +73,7 @@ fun NotificationCenterScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (
             if (upcoming.isNotEmpty()) {
                 item { SectionLabel("Upcoming", Modifier.padding(top = 4.dp, bottom = 8.dp)) }
                 items(upcoming, key = { "up:${it.taskId}:${it.at}" }) { u ->
-                    Card(c.coral, u.name, relFuture(u.at - now), onClick = { if (u.taskId.isNotBlank()) onOpenTask(u.taskId) })
+                    Card(c.coral, u.name, relFuture(u.at - now), onClick = { if (u.taskId.isNotBlank()) onOpenTask(u.taskId) }, kindLabel = "Upcoming reminder")
                 }
             }
             item { SectionLabel("Recent", Modifier.padding(top = if (upcoming.isEmpty()) 4.dp else 18.dp, bottom = 8.dp)) }
@@ -83,6 +85,7 @@ fun NotificationCenterScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (
                     val taskId = dl?.takeIf { it.startsWith("unstuck://task/") }?.removePrefix("unstuck://task/")
                     Card(
                         dotColor = accentFor(n.kind, c),
+                        kindLabel = kindLabel(n.kind),
                         title = n.title,
                         meta = "${n.body}  ·  ${relPast(now - n.at)}",
                         // Task links open the task; any other deep link (collection share,
@@ -101,11 +104,16 @@ fun NotificationCenterScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (
 }
 
 @Composable
-private fun Card(dotColor: androidx.compose.ui.graphics.Color, title: String, meta: String, onClick: (() -> Unit)?) {
+private fun Card(dotColor: androidx.compose.ui.graphics.Color, title: String, meta: String, onClick: (() -> Unit)?, kindLabel: String? = null) {
     val c = UTheme.colors
     val base = Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp))
+    // The colored dot is the ONLY signal of the notification kind — fold a textual
+    // kind into the row's spoken label so the meaning isn't color-only.
+    val rowSemantics = if (kindLabel != null) {
+        Modifier.semantics(mergeDescendants = true) { contentDescription = "$kindLabel. $title. $meta" }
+    } else Modifier
     Row(
-        (if (onClick != null) base.clickable(onClick = onClick) else base).padding(horizontal = 12.dp, vertical = 12.dp),
+        (if (onClick != null) base.clickable(onClick = onClick) else base).then(rowSemantics).padding(horizontal = 12.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp),
     ) {
         Box(Modifier.size(7.dp).clip(CircleShape).background(dotColor))
@@ -114,6 +122,18 @@ private fun Card(dotColor: androidx.compose.ui.graphics.Color, title: String, me
             Text(meta, style = UFont.sans(12), color = c.ink3, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
         }
     }
+}
+
+/** Human-readable name for a notification kind (the dot's color encodes this). */
+private fun kindLabel(kind: String): String = when (kind) {
+    "paused_checkin" -> "Paused check-in"
+    "atstart" -> "Start reminder"
+    "drifted" -> "Drift alert"
+    "session_recap" -> "Session recap"
+    "morning_brief" -> "Morning brief"
+    "evening_preview" -> "Evening preview"
+    "daily_nudge" -> "Daily nudge"
+    else -> "Reminder"
 }
 
 private fun accentFor(kind: String, c: tech.csalliance.unstuck.design.theme.UnstuckColors) = when (kind) {

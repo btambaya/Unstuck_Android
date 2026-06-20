@@ -2,7 +2,7 @@ package tech.csalliance.unstuck.ui.feedback
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,6 +18,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -30,6 +31,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.delay
@@ -100,7 +102,10 @@ fun FeedbackForm(vm: AppViewModel, currentScreen: String?, onDone: () -> Unit) {
                 Box(
                     Modifier.clip(RoundedCornerShape(999.dp)).background(if (sel) c.ink else c.surface)
                         .then(if (sel) Modifier else Modifier.border(1.dp, c.line2, RoundedCornerShape(999.dp)))
-                        .clickable { category = key }.padding(horizontal = 13.dp, vertical = 6.dp),
+                        .selectable(selected = sel, role = Role.Button) { category = key }
+                        .minimumInteractiveComponentSize()
+                        .padding(horizontal = 13.dp, vertical = 6.dp),
+                    contentAlignment = Alignment.Center,
                 ) { Text(label, style = UFont.sans(12, FontWeight.Medium), color = if (sel) c.bg else c.ink3) }
             }
         }

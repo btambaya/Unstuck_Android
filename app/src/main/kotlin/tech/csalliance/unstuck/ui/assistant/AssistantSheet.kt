@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -40,6 +41,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -124,15 +126,23 @@ private fun AssistantChat(vm: AppViewModel) {
     val messages = vm.assistantHistory
     val sending by vm.assistantSending.collectAsStateWithLifecycle()
     val errorCode by vm.assistantError.collectAsStateWithLifecycle()
-    var input by remember { mutableStateOf("") }
+    // Saveable so a half-typed brain-dump + the speaker toggle survive rotation.
+    // (`listening` is transient — a config change tears down the recognizer anyway.)
+    var input by rememberSaveable { mutableStateOf("") }
     var listening by remember { mutableStateOf(false) }
-    var speakReplies by remember { mutableStateOf(false) }
+    var speakReplies by rememberSaveable { mutableStateOf(false) }
     var note by remember { mutableStateOf<String?>(null) }
     val listState = rememberLazyListState()
 
-    val shown = messages.filter { (it.role == "user" || it.role == "assistant") && !it.content.isNullOrBlank() }
+    // Carry each message's index in the append-only history so the LazyColumn can key
+    // on a STABLE id (messages are appended, never reordered) — without that, a
+    // streaming turn reuses the wrong row's animation/state as content fills in.
+    val shown = messages.withIndex()
+        .filter { (it.value.role == "user" || it.value.role == "assistant") && !it.value.content.isNullOrBlank() }
     LaunchedEffect(shown.size, sending) {
-        if (shown.isNotEmpty()) listState.animateScrollToItem(shown.size) // last + the thinking row
+        // Scroll to the genuine last index; only reach one-past-end while the
+        // "Thinking…" row is showing, so a tall final reply isn't clipped.
+        if (shown.isNotEmpty()) listState.animateScrollToItem(if (sending) shown.size else shown.lastIndex)
     }
     // Speak replies as turns complete. Replies can land after a dismissal (the
     // turn outlives the sheet) — only an open sheet collects + speaks.
@@ -211,8 +221,7 @@ private fun AssistantChat(vm: AppViewModel) {
                 modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                items(shown.size) { i ->
-                    val m = shown[i]
+                items(shown, key = { it.index }) { (_, m) ->
                     MessageBubble(text = m.content!!, fromUser = m.role == "user")
                 }
                 if (sending) item { ThinkingRow() }
@@ -238,7 +247,10 @@ private fun AssistantChat(vm: AppViewModel) {
                 Modifier.weight(1f).clip(RoundedCornerShape(22.dp)).background(c.bg2).padding(horizontal = 16.dp, vertical = 12.dp),
             ) {
                 BasicTextField(
-                    value = input, onValueChange = { input = it },
+                    // Clear the sticky error/note banner the moment the user starts a
+                    // retry, so it doesn't linger through typing (it also clears on send).
+                    value = input,
+                    onValueChange = { input = it; if (it.isNotEmpty()) { note = null; vm.clearAssistantError() } },
                     textStyle = UFont.sans(15).copy(color = c.ink), cursorBrush = SolidColor(c.ink),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = { send(input) }),

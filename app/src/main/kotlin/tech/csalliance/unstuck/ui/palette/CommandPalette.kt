@@ -48,13 +48,14 @@ fun CommandPalette(vm: AppViewModel, onDismiss: () -> Unit, onOpenTask: (TaskIte
     var query by remember { mutableStateOf("") }
     val q = query.trim().lowercase()
 
-    val actions = listOf(
+    val allActions = listOf(
         Result("Go to Today", null, "ACTION") { onTab("today") },
         Result("Go to Tasks", null, "ACTION") { onTab("tasks") },
         Result("Go to Calendar", null, "ACTION") { onTab("calendar") },
         Result("Go to Lists", null, "ACTION") { onTab("lists") },
         Result("Settings", null, "ACTION") { onSettings() },
-    ).filter { q.isEmpty() || it.title.lowercase().contains(q) }
+    )
+    val actions = allActions.filter { q.isEmpty() || it.title.lowercase().contains(q) }
     val taskResults = tasks.filter { !it.done && (q.isEmpty() || it.name.lowercase().contains(q)) }
         .take(8).map { t -> Result(t.name, t.lifeArea ?: "—", "TASK") { onOpenTask(t) } }
     // Note rows route to their owning task (was a dead end that just closed
@@ -64,6 +65,9 @@ fun CommandPalette(vm: AppViewModel, onDismiss: () -> Unit, onOpenTask: (TaskIte
         .mapNotNull { cap -> tasks.find { it.id == cap.taskId }?.let { t -> Result(cap.body, cap.tag.name.lowercase(), "NOTE") { onOpenTask(t) } } }
         .take(4)
     val results = taskResults + noteResults + actions
+    // A no-match query left a blank screen (dead end). Surface a calm empty state and
+    // keep the navigation actions reachable so the palette is never a trap.
+    val noMatches = q.isNotEmpty() && results.isEmpty()
 
     Column(Modifier.fillMaxSize().background(c.bg).imePadding()) {
         Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 16.dp, top = 8.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -75,7 +79,17 @@ fun CommandPalette(vm: AppViewModel, onDismiss: () -> Unit, onOpenTask: (TaskIte
         }
         Box(Modifier.fillMaxWidth().padding(horizontal = 10.dp)) {
             LazyColumn {
-                items(results) { r ->
+                if (noMatches) {
+                    item {
+                        Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 20.dp)) {
+                            Text("No matches for “${query.trim()}”.", style = UFont.sans(14, FontWeight.Medium), color = c.ink2)
+                            Text("Try a different word, or jump somewhere:", style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 4.dp))
+                        }
+                    }
+                }
+                // When the query matched nothing, keep navigation reachable: fall back to
+                // the full action list so the palette is never a dead end.
+                items(if (noMatches) allActions else results) { r ->
                     Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).clickable { r.run() }.padding(horizontal = 12.dp, vertical = 11.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                         Column(Modifier.weight(1f)) {
                             Text(r.title, style = UFont.sans(14, FontWeight.Medium), color = c.ink, maxLines = 1)

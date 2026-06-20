@@ -25,6 +25,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,10 +53,12 @@ import tech.csalliance.unstuck.ui.AppViewModel
 fun AuthScreen(vm: AppViewModel) {
     val c = UTheme.colors
     val scope = rememberCoroutineScope()
-    var signUp by remember { mutableStateOf(false) }
-    var email by remember { mutableStateOf("") }
+    // Saveable so a rotation mid-typing keeps the chosen mode + email/name. Password
+    // is intentionally transient (don't persist secrets through saved state).
+    var signUp by rememberSaveable { mutableStateOf(false) }
+    var email by rememberSaveable { mutableStateOf("") }
     var password by remember { mutableStateOf("") }
-    var name by remember { mutableStateOf("") }
+    var name by rememberSaveable { mutableStateOf("") }
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var messageOk by remember { mutableStateOf(false) }

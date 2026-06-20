@@ -26,6 +26,8 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.Saver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -66,10 +68,18 @@ private fun hhmmToMin(s: String): Int {
     return (p.getOrNull(0)?.toIntOrNull() ?: 0) * 60 + (p.getOrNull(1)?.toIntOrNull() ?: 0)
 }
 
+// Saves the viewed month as its ISO "yyyy-MM" string so the Month view doesn't snap
+// back to the current month on rotation / process death.
+private val YearMonthSaver = Saver<java.time.YearMonth, String>(
+    save = { it.toString() },
+    restore = { runCatching { java.time.YearMonth.parse(it) }.getOrDefault(java.time.YearMonth.now()) },
+)
+
 @Composable
 fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, onNotifications: () -> Unit, notifUnread: Int, avatarInitials: String, onCreateAt: (String, String) -> Unit) {
     val c = UTheme.colors
-    var view by remember { mutableStateOf("Day") }
+    // Saveable so the chosen Day/Week/Month tab survives rotation / process death.
+    var view by rememberSaveable { mutableStateOf("Day") }
     Column(Modifier.fillMaxSize()) {
         AppBar(title = "Calendar", leading = Leading.NONE, onSearch = onSearch, onNotifications = onNotifications, notifUnread = notifUnread, onAvatar = onAvatar, avatarInitials = avatarInitials)
         Box(Modifier.padding(horizontal = 18.dp, vertical = 4.dp)) {
@@ -143,8 +153,9 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     // Monday-anchored week, navigable via the ‹ / › arrows (weekOffset = weeks from
-    // the current week; 0 = the week containing today).
-    var weekOffset by remember { mutableStateOf(0) }
+    // the current week; 0 = the week containing today). Saveable so the viewed week
+    // doesn't snap back to today on rotation.
+    var weekOffset by rememberSaveable { mutableStateOf(0) }
     val today = java.time.LocalDate.now()
     val monday = today.minusDays(((today.dayOfWeek.value + 6) % 7).toLong()).plusWeeks(weekOffset.toLong())
     val days = (0..6).map { monday.plusDays(it.toLong()) }
@@ -257,7 +268,7 @@ private fun RollupStat(label: String, value: String, bg: androidx.compose.ui.gra
 private fun MonthView(vm: AppViewModel) {
     val c = UTheme.colors
     val sessions by vm.sessions.collectAsStateWithLifecycle()
-    var ym by remember { mutableStateOf(java.time.YearMonth.now()) }
+    var ym by rememberSaveable(stateSaver = YearMonthSaver) { mutableStateOf(java.time.YearMonth.now()) }
     val byDay = remember(sessions) {
         HashMap<String, Int>().apply {
             sessions.forEach { s -> Time.parseMillis(s.completedAt)?.let { val k = Clock.dateIso(it); put(k, (get(k) ?: 0) + s.actualSec) } }

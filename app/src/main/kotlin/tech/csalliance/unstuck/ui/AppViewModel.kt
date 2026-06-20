@@ -946,6 +946,10 @@ class AppViewModel(private val graph: AppGraph) : ViewModel() {
         runCatching { assistantPrefs.edit().clear().apply() }
     }
 
+    /** Dismiss the last turn's error banner (e.g. the user starts typing a retry) so it
+     *  doesn't linger through the retry or across reopening the sheet. */
+    fun clearAssistantError() { _assistantError.value = null }
+
     /** Append a user message + run the agentic turn on viewModelScope, persisting.
      *  Fire-and-forget for the caller: progress/result surface via
      *  [assistantSending], [assistantError] and [assistantReplies]. */

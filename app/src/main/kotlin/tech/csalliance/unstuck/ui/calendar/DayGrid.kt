@@ -25,6 +25,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -107,7 +108,8 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
     val density = LocalDensity.current
     val hourPx = with(density) { HOUR_HEIGHT.toPx() }
 
-    var date by remember { mutableStateOf(Clock.todayIso()) }
+    // Saveable (ISO date string) so the viewed day doesn't snap back to today on rotation.
+    var date by rememberSaveable { mutableStateOf(Clock.todayIso()) }
     val scroll = rememberScrollState()
     // Open today's grid scrolled to roughly an hour before now.
     LaunchedEffect(date) {

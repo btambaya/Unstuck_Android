@@ -21,8 +21,11 @@ import androidx.compose.material3.Text
 import androidx.compose.ui.graphics.Color
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -68,11 +71,17 @@ fun TasksScreen(
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
-    var view by remember { mutableStateOf(TaskListView.TODAY) }
-    var activeTag by remember { mutableStateOf<String?>(null) }
+    // Saveable so the selected tab + tag filter survive rotation / process death
+    // (TaskListView is a Serializable enum). String? saves directly.
+    var view by rememberSaveable { mutableStateOf(TaskListView.TODAY) }
+    var activeTag by rememberSaveable { mutableStateOf<String?>(null) }
+    // Minute ticker (mirrors TodayScreen): kept open across midnight, "Today" rolls
+    // over and Backlog age badges advance instead of freezing at composition time.
+    var nowState by remember { mutableLongStateOf(vm.nowMs()) }
+    LaunchedEffect(Unit) { while (true) { nowState = vm.nowMs(); kotlinx.coroutines.delay(60_000) } }
     // Today is area-agnostic on purpose (web parity) — the area filter applies
     // to every other view. The tag filter applies to every view.
-    val list = visibleTasks(view, tasks, blocks, vm.nowMs(), activeArea = if (view == TaskListView.TODAY) null else activeArea, activeTag = activeTag, slipMode = false)
+    val list = visibleTasks(view, tasks, blocks, nowState, activeArea = if (view == TaskListView.TODAY) null else activeArea, activeTag = activeTag, slipMode = false)
 
     Column(Modifier.fillMaxSize()) {
         // No leading hamburger — the area-filter pills below cover what it did.
@@ -142,7 +151,7 @@ fun TasksScreen(
                             }
                         }
                         if (view == TaskListView.BACKLOG) {
-                            val age = tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, vm.nowMs())
+                            val age = tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, nowState)
                             Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
                                 Text("${age.coerceAtLeast(1)}d", style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
                             }

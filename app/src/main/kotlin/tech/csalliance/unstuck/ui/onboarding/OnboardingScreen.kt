@@ -27,7 +27,11 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.listSaver
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshots.SnapshotStateList
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -50,18 +54,25 @@ private val AREA_PALETTE = listOf("indigo", "coral", "green", "amber", "violet",
 private val STRUGGLE_OPTIONS = listOf("Getting started", "Switching tasks", "Time blindness", "Distraction", "Overwhelm")
 private const val ONBOARDING_STEPS = 5
 
+// Mirrors NewTaskSheet's TagsSaver: a string multi-select survives config change so a
+// rotation mid-onboarding doesn't reset the picks while the step number is kept.
+private val StringListSaver = listSaver<SnapshotStateList<String>, String>(
+    save = { it.toList() },
+    restore = { it.toMutableStateList() },
+)
+
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun OnboardingScreen(vm: AppViewModel, onDone: () -> Unit) {
     val c = UTheme.colors
     // Saveable so a rotation / theme change doesn't restart onboarding from step 0 or
     // lose the typed first task.
-    var step by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf(0) }
-    val pickedAreas = remember { mutableStateListOf("Work", "Personal", "Home") }
-    val pickedStruggles = remember { mutableStateListOf<String>() }
-    var firstTask by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
-    var firstAction by androidx.compose.runtime.saveable.rememberSaveable { mutableStateOf("") }
-    var treatment by remember { mutableStateOf(FocusTreatment.AMBIENT) }
+    var step by rememberSaveable { mutableStateOf(0) }
+    val pickedAreas = rememberSaveable(saver = StringListSaver) { mutableStateListOf("Work", "Personal", "Home") }
+    val pickedStruggles = rememberSaveable(saver = StringListSaver) { mutableStateListOf<String>() }
+    var firstTask by rememberSaveable { mutableStateOf("") }
+    var firstAction by rememberSaveable { mutableStateOf("") }
+    var treatment by rememberSaveable { mutableStateOf(FocusTreatment.AMBIENT) }
     val lastStep = ONBOARDING_STEPS - 1
 
     fun finish() {

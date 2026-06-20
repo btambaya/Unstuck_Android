@@ -20,6 +20,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -45,8 +46,10 @@ private val TAGS = listOf(
 fun CaptureSheet(vm: AppViewModel, task: TaskItem, sessionId: String?, onDismiss: () -> Unit) {
     val c = UTheme.colors
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var text by remember { mutableStateOf("") }
-    var tag by remember { mutableStateOf(CaptureTag.FOLLOW_UP) }
+    // Saveable so a typed capture + chosen tag survive rotation (CaptureTag is a
+    // Serializable enum; String saves directly).
+    var text by rememberSaveable { mutableStateOf("") }
+    var tag by rememberSaveable { mutableStateOf(CaptureTag.FOLLOW_UP) }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = SheetScrim, dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } }) {
         Column(Modifier.fillMaxWidth().imePadding().padding(horizontal = 22.dp).padding(bottom = 26.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("CAPTURE · STAYS ATTACHED", style = UFont.mono(11, FontWeight.Medium), color = c.ink3)
@@ -70,7 +73,12 @@ fun CaptureSheet(vm: AppViewModel, task: TaskItem, sessionId: String?, onDismiss
             }
             Box(Modifier.padding(top = 4.dp)) {
                 tech.csalliance.unstuck.design.component.UButton("Save", kind = tech.csalliance.unstuck.design.component.ButtonKind.DARK, fill = false) {
-                    if (text.isNotBlank()) vm.saveCapture(task.id, sessionId, tag, text.trim()); onDismiss()
+                    // Resolve the session id at SAVE time: on a freshly started session the
+                    // `live` row can still be null when the sheet opened (so the passed-in
+                    // sessionId is null), which would orphan the capture from the Session the
+                    // interruption histogram keys on. Fall back to the now-current live id.
+                    val sid = sessionId ?: vm.liveSession.value?.id
+                    if (text.isNotBlank()) vm.saveCapture(task.id, sid, tag, text.trim()); onDismiss()
                 }
             }
         }

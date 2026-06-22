@@ -171,6 +171,19 @@ object FocusCopilot {
         return FocusCommand.None
     }
 
+    // --- push-to-talk capture (Phase 1.5: pure dictation, NO parseCommand) ---
+
+    /**
+     * Turn a raw spoken [transcript] into the body of a VERBATIM capture, or null
+     * if there's nothing to save. This is the ENTIRE brain of push-to-talk
+     * capture: it trims surrounding whitespace and returns null on blank — it does
+     * NOT run [parseCommand] or any keyword matching, so "I should stop
+     * procrastinating" is saved word-for-word and is NEVER interpreted as a stop
+     * command. Pure, deterministic, on-device — no LLM, no network, no rewriting.
+     */
+    fun captureFromTranscript(transcript: String): String? =
+        transcript.trim().ifBlank { null }
+
     /** Resolve a [command] into its [FocusEffect] (+ spoken ack). The wiring runs
      *  the effect against the real session; this stays pure. */
     fun effectFor(command: FocusCommand): FocusEffect = when (command) {

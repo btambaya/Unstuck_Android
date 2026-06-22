@@ -97,6 +97,9 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
     // The on-device VoiceController (TTS/STT) is reused; the controller drives the
     // pure FocusCopilot brain off the per-second tick below. Effects route to the VM.
     val copilotVoice = tech.csalliance.unstuck.ui.assistant.rememberVoiceController()
+    // Transient on-screen confirm for a push-to-talk capture ("Captured." /
+    // "Didn't catch that."). Cleared after a beat by the LaunchedEffect below.
+    var captureToast by remember { mutableStateOf<String?>(null) }
     val copilot = remember(task.id) {
         FocusCopilotController(
             context = context,
@@ -105,18 +108,52 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
             onKeepGoing = { /* sets no-re-nag in the controller; nothing to persist */ },
             onStop = { vm.finishFocus(task, markDone = false) },
             onCapture = { text -> vm.saveCapture(task.id, vm.liveSession.value?.id, tech.csalliance.unstuck.core.model.CaptureTag.FOLLOW_UP, text) },
+            onCaptureResult = { result ->
+                captureToast = when (result) {
+                    FocusCopilotController.CaptureResult.SAVED -> "Captured."
+                    FocusCopilotController.CaptureResult.EMPTY -> "Didn't catch that."
+                }
+            },
         )
     }
-    // Ask for the mic ONCE when "Voice replies" is enabled (speak-only needs no mic).
+    LaunchedEffect(captureToast) { if (captureToast != null) { delay(1600); captureToast = null } }
+    // The mic permission is requested on the FIRST deliberate capture tap (below)
+    // OR once when "Voice replies" is enabled. On grant we open the capture window
+    // immediately; on denial the button degrades to a hint (no crash).
+    var captureAwaitingPermission by remember { mutableStateOf(false) }
     val micPermission = androidx.activity.compose.rememberLauncherForActivityResult(
         androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
-    ) { /* if denied, the listen window simply no-ops (sttAvailable/startListening fail-safe) */ }
+    ) { granted ->
+        if (captureAwaitingPermission) {
+            captureAwaitingPermission = false
+            if (granted) copilot.toggleCapture() else captureToast = "Mic permission needed."
+        }
+        // Voice-replies path: if denied, the listen window simply no-ops
+        // (sttAvailable/startListening are fail-safe).
+    }
     LaunchedEffect(settings.focusCopilotVoice, settings.focusCopilotSpeak) {
         if (settings.focusCopilotSpeak && settings.focusCopilotVoice) {
             val granted = androidx.core.content.ContextCompat.checkSelfPermission(
                 context, android.Manifest.permission.RECORD_AUDIO,
             ) == android.content.pm.PackageManager.PERMISSION_GRANTED
             if (!granted) runCatching { micPermission.launch(android.Manifest.permission.RECORD_AUDIO) }
+        }
+    }
+    // Deliberate-tap entry: request RECORD_AUDIO on first use, then open the
+    // on-device capture window (or toggle/cancel if already capturing).
+    val onCaptureTap: () -> Unit = {
+        if (copilot.capturing) {
+            copilot.cancelCapture()
+        } else {
+            val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.RECORD_AUDIO,
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (granted) {
+                copilot.toggleCapture()
+            } else {
+                captureAwaitingPermission = true
+                runCatching { micPermission.launch(android.Manifest.permission.RECORD_AUDIO) }
+            }
         }
     }
     // Reset per session; tear the copilot down on leave (no speech leaks past focus).
@@ -182,17 +219,24 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
             Spacer(Modifier.height(8.dp))
             SectionLabel(if (paused) "PAUSED" else "FOCUSING", color = Color.White.copy(alpha = 0.55f))
 
-            // Hands-free "Listening…" pill — only while the copilot mic window is live
-            // (a few seconds after a spoken question). Makes mic use unmistakable.
-            if (copilot.listening) {
+            // "Listening…" pill — while EITHER the copilot voice-reply window or a
+            // push-to-talk capture window is live. Makes mic use unmistakable.
+            if (copilot.listening || copilot.capturing) {
                 Spacer(Modifier.height(6.dp))
                 Row(
                     Modifier.clip(RoundedCornerShape(999.dp)).background(c.coral.copy(alpha = 0.22f)).padding(horizontal = 12.dp, vertical = 5.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
                     Box(Modifier.size(7.dp).clip(RoundedCornerShape(999.dp)).background(c.coral))
-                    Text("Listening…", style = UFont.sans(12, FontWeight.Medium), color = Color.White.copy(alpha = 0.9f))
+                    Text(if (copilot.capturing) "Listening… tap to cancel" else "Listening…", style = UFont.sans(12, FontWeight.Medium), color = Color.White.copy(alpha = 0.9f))
                 }
+            }
+            // Brief capture confirm ("Captured." / "Didn't catch that.").
+            captureToast?.let { msg ->
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.12f)).padding(horizontal = 12.dp, vertical = 5.dp),
+                ) { Text(msg, style = UFont.sans(12, FontWeight.Medium), color = Color.White.copy(alpha = 0.9f)) }
             }
 
             // Always show the treatment switcher — including in Monk — so picking
@@ -260,6 +304,11 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                 FocusBtn("Capture", soft = true) { showCapture = true }
+                // Push-to-talk capture (Phase 1.5): tap → speak → saved VERBATIM as a
+                // capture, 100% on-device. Only shown when a recognizer is available.
+                if (copilot.captureAvailable) {
+                    FocusBtn(if (copilot.capturing) "🎤…" else "🎤", soft = !copilot.capturing, onClick = onCaptureTap)
+                }
                 FocusBtn(if (paused) "Resume" else "Pause", soft = true) {
                     if (paused) vm.resumeFocus()
                     else { vm.pauseFocus(); if (settings.focusPauseReasons) showPauseReasons = true }

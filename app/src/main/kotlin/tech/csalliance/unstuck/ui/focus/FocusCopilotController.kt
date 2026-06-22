@@ -6,7 +6,6 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import tech.csalliance.unstuck.core.logic.CopilotLevel
-import tech.csalliance.unstuck.core.logic.FocusCommand
 import tech.csalliance.unstuck.core.logic.FocusCopilot
 import tech.csalliance.unstuck.core.logic.FocusEffect
 import tech.csalliance.unstuck.core.logic.FocusMilestone
@@ -38,6 +37,16 @@ import tech.csalliance.unstuck.ui.assistant.SpeechSurface
  *  - FAIL-SAFE: every TTS/STT/permission call is wrapped — any failure degrades
  *    silently to the existing visual buttons and NEVER stops/corrupts the timer.
  *  - No voice command deletes data (only stop/extend/keepGoing/capture).
+ *
+ * Phase 1.5 — Push-to-talk capture (the deliberate-tap dictation path):
+ *  - [toggleCapture] opens the SAME on-device [SpeechSurface] listen window on an
+ *    EXPLICIT user tap, and on result saves the heard text VERBATIM as a capture
+ *    via [onCapture]. It runs the transcript through the PURE
+ *    [FocusCopilot.captureFromTranscript] helper only — it NEVER touches
+ *    [FocusCopilot.parseCommand], so "I should stop procrastinating" is saved
+ *    word-for-word and never interpreted as a stop command. Same ZERO LLM /
+ *    network / off-device guarantee; same fail-safe wrapping (a throwing speech
+ *    surface can never stop/corrupt the focus timer).
  */
 class FocusCopilotController(
     private val context: Context,
@@ -47,10 +56,25 @@ class FocusCopilotController(
     private val onKeepGoing: () -> Unit,
     private val onStop: () -> Unit,
     private val onCapture: (String) -> Unit,
+    // Push-to-talk capture result — wired to a transient on-screen confirm
+    // ("Captured." / "Didn't catch that."). Optional; pure local callback.
+    private val onCaptureResult: (CaptureResult) -> Unit = {},
 ) {
-    /** True while the mic window is live — the UI renders a "Listening…" pill. */
+    /** Outcome of a push-to-talk capture window, for the transient UI confirm. */
+    enum class CaptureResult { SAVED, EMPTY }
+
+    /** True while a Phase-1 voice-reply mic window is live — the UI renders a
+     *  "Listening…" pill. */
     var listening by mutableStateOf(false)
         private set
+
+    /** True while a push-to-talk CAPTURE mic window is live — the UI renders the
+     *  same "Listening…" pill and the capture button reads as active/cancelable. */
+    var capturing by mutableStateOf(false)
+        private set
+
+    /** True if the on-device speech recognizer is available (gates the button). */
+    val captureAvailable: Boolean get() = runCatching { voice.sttAvailable }.getOrDefault(false)
 
     // Per-session state (reset by [reset]).
     private val fired = mutableSetOf<FocusMilestone>()
@@ -70,6 +94,7 @@ class FocusCopilotController(
     /** Tear down — cut any speech/listen and restore ambient. Safe to call repeatedly. */
     fun stopAll() {
         listening = false
+        capturing = false
         runCatching { voice.stopListening() }
         runCatching { voice.stopSpeaking() }
         runCatching { AmbientAudio.unduck() }
@@ -136,6 +161,71 @@ class FocusCopilotController(
             is FocusEffect.None -> { /* unrecognized — stay quiet, visual buttons remain */ }
         }
     }
+
+    // --- push-to-talk capture (Phase 1.5: pure dictation, deliberate tap) ---
+
+    /**
+     * Deliberate-tap entry point for the focus-screen capture button. Tapping
+     * while idle OPENS the on-device listen window for a verbatim capture; tapping
+     * again WHILE capturing CANCELS it (saves nothing). Fully fail-safe — any
+     * STT/permission error degrades silently and never disturbs the focus timer.
+     *
+     * Guardrails on this path:
+     *  - Reuses the same on-device [SpeechSurface] — nothing leaves the device.
+     *  - The mic opens ONLY on this explicit tap and closes on result/timeout/
+     *    cancel.
+     *  - The transcript is fed ONLY to the pure [FocusCopilot.captureFromTranscript]
+     *    and then to [onCapture]; it is NEVER run through [parseCommand], stored, or
+     *    transmitted. (So "I should stop procrastinating" saves verbatim.)
+     */
+    fun toggleCapture() = runCatching {
+        if (capturing) { cancelCapture(); return@runCatching }
+        if (listening) return@runCatching // don't fight a live voice-reply window
+        if (!voice.sttAvailable) return@runCatching
+        capturing = true
+        AmbientAudio.duck()
+        voice.startListening(
+            onPartial = { /* live transcript — shown nowhere, never stored */ },
+            onFinal = { text -> handleCaptureTranscript(text) },
+            onDone = {
+                // Always restore on close (ok / error / timeout / cancel).
+                capturing = false
+                runCatching { AmbientAudio.unduck() }
+            },
+        )
+    }.getOrElse {
+        // Any failure: degrade silently — the focus timer is unaffected.
+        capturing = false
+        runCatching { AmbientAudio.unduck() }
+    }
+
+    /** Cancel an in-flight capture window without saving anything. */
+    fun cancelCapture() = runCatching {
+        capturing = false
+        runCatching { voice.stopListening() }
+        runCatching { AmbientAudio.unduck() }
+    }.getOrElse {
+        capturing = false
+        runCatching { AmbientAudio.unduck() }
+    }
+
+    /**
+     * A push-to-talk transcript landed → save it VERBATIM as a capture. This path
+     * deliberately does NOT call [FocusCopilot.parseCommand]; it uses only the pure
+     * [FocusCopilot.captureFromTranscript] (trim / blank→null). Blank saves nothing
+     * and gives a "didn't catch that" confirm.
+     */
+    private fun handleCaptureTranscript(transcript: String) = runCatching {
+        val body = FocusCopilot.captureFromTranscript(transcript)
+        if (body == null) {
+            runCatching { onCaptureResult(CaptureResult.EMPTY) }
+            speak("Didn't catch that.")
+            return@runCatching
+        }
+        runCatching { onCapture(body) }
+        runCatching { onCaptureResult(CaptureResult.SAVED) }
+        speak("Captured.")
+    }.getOrElse { stopAll() }
 
     // --- voice plumbing (all fail-safe) ---
 

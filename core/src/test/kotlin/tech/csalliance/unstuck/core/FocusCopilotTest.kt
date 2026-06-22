@@ -427,6 +427,37 @@ class FocusCopilotTest {
         }
     }
 
+    // ---------- push-to-talk capture: captureFromTranscript (Phase 1.5) ----------
+
+    @Test fun captureFromTranscript_normalTextSavedVerbatim() {
+        assertEquals("call the bank at 3", FocusCopilot.captureFromTranscript("call the bank at 3"))
+    }
+
+    @Test fun captureFromTranscript_trimsSurroundingWhitespace() {
+        assertEquals("idea for the deck", FocusCopilot.captureFromTranscript("   idea for the deck   "))
+        assertEquals("tabs and newlines", FocusCopilot.captureFromTranscript("\t tabs and newlines \n"))
+    }
+
+    @Test fun captureFromTranscript_blankReturnsNull() {
+        assertNull(FocusCopilot.captureFromTranscript(""))
+        assertNull(FocusCopilot.captureFromTranscript("   "))
+        assertNull(FocusCopilot.captureFromTranscript("\t \n "))
+    }
+
+    @Test fun captureFromTranscript_isPureDictation_neverParsedAsCommand() {
+        // CRITICAL: dictation must be saved VERBATIM and NEVER routed through the
+        // keyword parser. "I should stop procrastinating" contains "stop" but must
+        // be captured word-for-word, not turned into a Stop command.
+        val phrase = "I should stop procrastinating"
+        assertEquals(phrase, FocusCopilot.captureFromTranscript(phrase))
+        // Sanity: the command parser WOULD have read this as Stop — proving the
+        // capture path deliberately bypasses parseCommand.
+        assertEquals(FocusCommand.Stop, FocusCopilot.parseCommand(phrase))
+        // Other command-like phrases are likewise saved verbatim by capture.
+        assertEquals("add ten more emails to the list", FocusCopilot.captureFromTranscript("add ten more emails to the list"))
+        assertEquals("done with the easy part", FocusCopilot.captureFromTranscript("done with the easy part"))
+    }
+
     @Test fun coreModule_hasNoNetworkOrLlmDependency() {
         // Structural guarantee: :core declares no Android / Supabase / HTTP /
         // assistant dependency (see core/build.gradle.kts — only kotlinx

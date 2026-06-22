@@ -93,6 +93,35 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
         onDispose { tech.csalliance.unstuck.surface.AmbientAudio.stop() }
     }
 
+    // --- Hands-Free Focus Copilot (Phase 1: spoken progress + optional voice replies) ---
+    // The on-device VoiceController (TTS/STT) is reused; the controller drives the
+    // pure FocusCopilot brain off the per-second tick below. Effects route to the VM.
+    val copilotVoice = tech.csalliance.unstuck.ui.assistant.rememberVoiceController()
+    val copilot = remember(task.id) {
+        FocusCopilotController(
+            context = context,
+            voice = copilotVoice,
+            onExtend = { min -> vm.extendFocus(min) },
+            onKeepGoing = { /* sets no-re-nag in the controller; nothing to persist */ },
+            onStop = { vm.finishFocus(task, markDone = false) },
+            onCapture = { text -> vm.saveCapture(task.id, vm.liveSession.value?.id, tech.csalliance.unstuck.core.model.CaptureTag.FOLLOW_UP, text) },
+        )
+    }
+    // Ask for the mic ONCE when "Voice replies" is enabled (speak-only needs no mic).
+    val micPermission = androidx.activity.compose.rememberLauncherForActivityResult(
+        androidx.activity.result.contract.ActivityResultContracts.RequestPermission(),
+    ) { /* if denied, the listen window simply no-ops (sttAvailable/startListening fail-safe) */ }
+    LaunchedEffect(settings.focusCopilotVoice, settings.focusCopilotSpeak) {
+        if (settings.focusCopilotSpeak && settings.focusCopilotVoice) {
+            val granted = androidx.core.content.ContextCompat.checkSelfPermission(
+                context, android.Manifest.permission.RECORD_AUDIO,
+            ) == android.content.pm.PackageManager.PERMISSION_GRANTED
+            if (!granted) runCatching { micPermission.launch(android.Manifest.permission.RECORD_AUDIO) }
+        }
+    }
+    // Reset per session; tear the copilot down on leave (no speech leaks past focus).
+    DisposableEffect(task.id) { copilot.reset(); onDispose { copilot.stopAll() } }
+
     var confirmExit by remember { mutableStateOf(false) }
     var showCapture by remember { mutableStateOf(autoCapture) }
     // Arriving via the notification "Capture" action opens the capture sheet straight
@@ -116,6 +145,23 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
     val graceSec = if (settings.focusOverrunMin <= 0) Double.POSITIVE_INFINITY else settings.focusOverrunMin * 60.0
     val state = if (l != null) FocusTimer.deriveState(l, nowMs, graceSec) else FocusState.IDLE
 
+    // Copilot tick: feed ACCUMULATED FOCUS seconds (paused time excluded) only while
+    // the session is actively running. Pausing/ending tears the copilot down so it
+    // never speaks over a paused screen. Whole call is fail-safe inside the controller.
+    val focusSec = if (l != null && sessionStart != null && !paused) FocusTimer.displayedElapsedSec(l, nowMs) else -1
+    LaunchedEffect(focusSec, paused) {
+        if (paused || sessionStart == null) { copilot.stopAll(); return@LaunchedEffect }
+        if (focusSec >= 0) {
+            copilot.onTick(
+                estimateMin = l?.sessionEstimateMin ?: task.estimateMin,
+                level = settings.notificationLevel.copilotLevel,
+                focusedSec = focusSec,
+                enabled = settings.focusCopilotSpeak,
+                voiceReplies = settings.focusCopilotVoice,
+            )
+        }
+    }
+
     // Dark indigo radial background.
     val bg = Brush.radialGradient(listOf(oklch(0.30, 0.10, 280.0), oklch(0.16, 0.02, 280.0)), center = Offset(0.5f, 0f), radius = 1400f)
 
@@ -135,6 +181,19 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
 
             Spacer(Modifier.height(8.dp))
             SectionLabel(if (paused) "PAUSED" else "FOCUSING", color = Color.White.copy(alpha = 0.55f))
+
+            // Hands-free "Listening…" pill — only while the copilot mic window is live
+            // (a few seconds after a spoken question). Makes mic use unmistakable.
+            if (copilot.listening) {
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    Modifier.clip(RoundedCornerShape(999.dp)).background(c.coral.copy(alpha = 0.22f)).padding(horizontal = 12.dp, vertical = 5.dp),
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                    Box(Modifier.size(7.dp).clip(RoundedCornerShape(999.dp)).background(c.coral))
+                    Text("Listening…", style = UFont.sans(12, FontWeight.Medium), color = Color.White.copy(alpha = 0.9f))
+                }
+            }
 
             // Always show the treatment switcher — including in Monk — so picking
             // Monk doesn't trap the user with no way back out.

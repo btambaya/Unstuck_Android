@@ -28,7 +28,18 @@ import java.util.Locale
 // Best-effort throughout: if a recognizer/permission/voice is unavailable it
 // silently no-ops so the chat stays usable as text-only.
 
-class VoiceController(private val context: Context) {
+/** The on-device speech surface the Focus Copilot drives. Lets the copilot
+ *  controller be unit-tested with a fake (no real TTS/STT engine), and keeps the
+ *  copilot decoupled from any concrete engine. Implemented by [VoiceController]. */
+interface SpeechSurface {
+    val sttAvailable: Boolean
+    fun startListening(onPartial: (String) -> Unit, onFinal: (String) -> Unit, onDone: () -> Unit)
+    fun stopListening()
+    fun speak(text: String)
+    fun stopSpeaking()
+}
+
+class VoiceController(private val context: Context) : SpeechSurface {
 
     private var recognizer: SpeechRecognizer? = null
     private var tts: TextToSpeech? = null
@@ -37,13 +48,13 @@ class VoiceController(private val context: Context) {
     // is still warming up — buffer it and flush from the init callback.
     private var pendingSpeak: String? = null
 
-    val sttAvailable: Boolean get() = SpeechRecognizer.isRecognitionAvailable(context)
+    override val sttAvailable: Boolean get() = SpeechRecognizer.isRecognitionAvailable(context)
 
     // --- speech-to-text ---
 
     /** Start listening. [onPartial] streams live transcript; [onFinal] fires with
      *  the best result; [onDone] always fires when listening ends (ok or error). */
-    fun startListening(
+    override fun startListening(
         onPartial: (String) -> Unit,
         onFinal: (String) -> Unit,
         onDone: () -> Unit,
@@ -85,14 +96,14 @@ class VoiceController(private val context: Context) {
         runCatching { rec.startListening(intent) }.onFailure { onDone() }
     }
 
-    fun stopListening() {
+    override fun stopListening() {
         recognizer?.let { runCatching { it.stopListening() }; runCatching { it.destroy() } }
         recognizer = null
     }
 
     // --- text-to-speech ---
 
-    fun speak(text: String) {
+    override fun speak(text: String) {
         if (text.isBlank()) return
         val engine = tts ?: TextToSpeech(context.applicationContext) { status ->
             ttsReady = status == TextToSpeech.SUCCESS
@@ -120,7 +131,7 @@ class VoiceController(private val context: Context) {
         }
     }
 
-    fun stopSpeaking() { pendingSpeak = null; runCatching { tts?.stop() } }
+    override fun stopSpeaking() { pendingSpeak = null; runCatching { tts?.stop() } }
 
     fun shutdown() {
         stopListening()

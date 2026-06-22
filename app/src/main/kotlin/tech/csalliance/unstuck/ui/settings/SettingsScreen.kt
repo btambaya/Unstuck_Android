@@ -147,7 +147,23 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
                     )
                     ToggleRow("Hide right rail while focusing", s.focusCollapseRail) { v -> vm.updateSettings { it.copy(focusCollapseRail = v) } }
                     ToggleRow("Soft exit", s.focusSoftExit) { v -> vm.updateSettings { it.copy(focusSoftExit = v) } }
-                    ToggleRow("Pause reasons", s.focusPauseReasons, last = true) { v -> vm.updateSettings { it.copy(focusPauseReasons = v) } }
+                    ToggleRow("Pause reasons", s.focusPauseReasons) { v -> vm.updateSettings { it.copy(focusPauseReasons = v) } }
+                    // Hands-Free Focus Copilot (Phase 1, on-device, no LLM/network).
+                    ToggleRow("Spoken focus coach", s.focusCopilotSpeak) { v -> vm.updateSettings { it.copy(focusCopilotSpeak = v) } }
+                    Text(
+                        "Speaks short progress check-ins out loud during a focus block (halfway, five-to-go, time's up). On-device.",
+                        style = UFont.sans(12, FontWeight.Normal), color = c.ink2,
+                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = if (s.focusCopilotSpeak) 0.dp else 12.dp),
+                    )
+                    // Sub-toggle: only meaningful when the spoken coach is on (it adds the mic).
+                    if (s.focusCopilotSpeak) {
+                        ToggleRow("Voice replies", s.focusCopilotVoice, last = true) { v -> vm.updateSettings { it.copy(focusCopilotVoice = v) } }
+                        Text(
+                            "After a spoken question, listen for a hands-free reply (\"add five\", \"stop\", \"keep going\", \"note …\"). Uses the mic only for a few seconds; nothing is recorded or sent.",
+                            style = UFont.sans(12, FontWeight.Normal), color = c.ink2,
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                        )
+                    }
                 }
                 SettingsSection.SOUND -> SettingsCard {
                     ToggleRow("Start chime", s.soundStartChime) { v -> vm.updateSettings { it.copy(soundStartChime = v) } }

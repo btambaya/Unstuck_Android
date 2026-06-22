@@ -46,7 +46,7 @@ object AmbientAudio {
         focusRequest = fr
         player = MediaPlayer.create(app, R.raw.ambient_focus)?.apply {
             isLooping = true
-            setVolume(0.45f, 0.45f)
+            setVolume(FULL_VOLUME, FULL_VOLUME)
             setAudioAttributes(attrs)
             start()
         }
@@ -58,6 +58,16 @@ object AmbientAudio {
         player = null
         abandonFocus()
     }
+
+    private const val FULL_VOLUME = 0.45f
+    private const val DUCK_VOLUME = 0.12f
+
+    /** Lower the loop while the copilot speaks / listens, so its voice (or the
+     *  mic) isn't fighting the ambient track. Best-effort; no-op if not playing. */
+    fun duck() { runCatching { player?.setVolume(DUCK_VOLUME, DUCK_VOLUME) } }
+
+    /** Restore the loop to its normal level after the copilot finishes. */
+    fun unduck() { runCatching { player?.setVolume(FULL_VOLUME, FULL_VOLUME) } }
 
     private fun abandonFocus() {
         val am = audioManager

@@ -29,6 +29,14 @@ enum class NotificationLevel(val label: String, val blurb: String) {
     /** Quiet in-app nudge cards on Today (no push). */
     val nudges: Boolean get() = this != CALM
 
+    /** The pure-core copilot level this maps to (drives the spoken cadence). */
+    val copilotLevel: tech.csalliance.unstuck.core.logic.CopilotLevel
+        get() = when (this) {
+            CALM -> tech.csalliance.unstuck.core.logic.CopilotLevel.CALM
+            BALANCED -> tech.csalliance.unstuck.core.logic.CopilotLevel.BALANCED
+            COACH -> tech.csalliance.unstuck.core.logic.CopilotLevel.COACH
+        }
+
     companion object {
         fun fromLabel(l: String): NotificationLevel = entries.firstOrNull { it.label == l } ?: BALANCED
     }
@@ -61,6 +69,9 @@ data class SettingsState(
     val treatment: FocusTreatment = FocusTreatment.AMBIENT,
     val reminderLeadMin: Int = 10,         // default "remind me N min before a scheduled task"; 0 = Off
     val notificationLevel: NotificationLevel = NotificationLevel.BALANCED,
+    // Hands-free Focus Copilot (Phase 1, on-device, no LLM):
+    val focusCopilotSpeak: Boolean = true, // spoken progress coach during a block (speak-only)
+    val focusCopilotVoice: Boolean = false, // also LISTEN for a hands-free reply (mic) — opt-in
 ) {
     /** density + larger-type folded into one sp multiplier (web parity). */
     val fontScale: Float
@@ -97,6 +108,8 @@ class SettingsStore(context: Context) {
         treatment = enumOf(p.getString("treatment", null), FocusTreatment.AMBIENT),
         reminderLeadMin = p.getInt("reminderLeadMin", 10),
         notificationLevel = enumOf(p.getString("notificationLevel", null), NotificationLevel.BALANCED),
+        focusCopilotSpeak = p.getBoolean("focusCopilotSpeak", true),
+        focusCopilotVoice = p.getBoolean("focusCopilotVoice", false),
     )
 
     fun save(s: SettingsState) {
@@ -120,6 +133,8 @@ class SettingsStore(context: Context) {
             .putString("treatment", s.treatment.name)
             .putInt("reminderLeadMin", s.reminderLeadMin)
             .putString("notificationLevel", s.notificationLevel.name)
+            .putBoolean("focusCopilotSpeak", s.focusCopilotSpeak)
+            .putBoolean("focusCopilotVoice", s.focusCopilotVoice)
             .apply()
     }
 

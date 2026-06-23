@@ -16,6 +16,10 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.Canvas
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.outlined.Mic
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
@@ -213,7 +217,31 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
                 }.padding(horizontal = 12.dp, vertical = 6.dp)) {
                     Text("← Out", style = UFont.sans(12), color = Color.White.copy(alpha = 0.7f))
                 }
-                Box {}
+                // Header capture cluster (web parity): the typed "Capture" affordance and,
+                // right beside it, the compact push-to-talk mic. The mic is on-device
+                // dictation only — tap → speak → saved VERBATIM as a capture. It's shown
+                // only when a recognizer is available; while capturing it tints coral and
+                // swaps to a filled mic so listening is unmistakable.
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.10f)).clickable(role = Role.Button) { showCapture = true }.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                        Text("Capture", style = UFont.sans(12), color = Color.White.copy(alpha = 0.7f))
+                    }
+                    if (copilot.captureAvailable) {
+                        Box(
+                            Modifier.size(32.dp).clip(RoundedCornerShape(999.dp))
+                                .background(if (copilot.capturing) c.coral else Color.White.copy(alpha = 0.10f))
+                                .clickable(role = Role.Button, onClick = onCaptureTap),
+                            contentAlignment = Alignment.Center,
+                        ) {
+                            Icon(
+                                if (copilot.capturing) Icons.Filled.Mic else Icons.Outlined.Mic,
+                                contentDescription = if (copilot.capturing) "Stop voice capture" else "Voice capture",
+                                tint = Color.White.copy(alpha = if (copilot.capturing) 1f else 0.7f),
+                                modifier = Modifier.size(18.dp),
+                            )
+                        }
+                    }
+                }
             }
 
             Spacer(Modifier.height(8.dp))
@@ -303,12 +331,8 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
             Spacer(Modifier.weight(1f))
 
             Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                FocusBtn("Capture", soft = true) { showCapture = true }
-                // Push-to-talk capture (Phase 1.5): tap → speak → saved VERBATIM as a
-                // capture, 100% on-device. Only shown when a recognizer is available.
-                if (copilot.captureAvailable) {
-                    FocusBtn(if (copilot.capturing) "🎤…" else "🎤", soft = !copilot.capturing, onClick = onCaptureTap)
-                }
+                // "Capture" + the push-to-talk mic now live in the focus header (web
+                // parity); the primary action row keeps the session controls.
                 FocusBtn(if (paused) "Resume" else "Pause", soft = true) {
                     if (paused) vm.resumeFocus()
                     else { vm.pauseFocus(); if (settings.focusPauseReasons) showPauseReasons = true }

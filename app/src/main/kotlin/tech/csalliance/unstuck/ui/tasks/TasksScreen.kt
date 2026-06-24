@@ -39,7 +39,9 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.daysSinceCreated
+import tech.csalliance.unstuck.core.logic.overdueOccurrenceLabel
 import tech.csalliance.unstuck.core.logic.visibleTasks
+import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.model.TaskListView
 import tech.csalliance.unstuck.design.component.AppBar
@@ -164,9 +166,20 @@ fun TasksScreen(
                             }
                         }
                         if (view == TaskListView.BACKLOG) {
-                            val age = tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, nowState)
-                            Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
-                                Text("${age.coerceAtLeast(1)}d", style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
+                            // A missed recurring occurrence shows "Overdue · Fri" (the missed
+                            // weekday) so it's obvious why it's here; everything else shows its
+                            // age. The occurrence row's createdAt is the template's, so the age
+                            // badge would be meaningless for it.
+                            val overdue = overdueOccurrenceLabel(t.id, tasks, blocks, Clock.todayIso())
+                            if (overdue != null) {
+                                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
+                                    Text(overdue, style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
+                                }
+                            } else {
+                                val age = tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, nowState)
+                                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
+                                    Text("${age.coerceAtLeast(1)}d", style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
+                                }
                             }
                         }
                         Text("${t.estimateMin}m", style = UFont.mono(11), color = c.ink3)

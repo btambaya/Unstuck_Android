@@ -78,6 +78,10 @@ fun visibleTasks(
     val projected = projectOccurrences(tasks, blocks, today)
     val todayOccurrences = projected.filter { it.id in todayOccIds }
     val upcomingOccurrences = projected.filter { it.id in nextUpcomingOccIds }
+    // Missed recurring occurrences: one overdue row per template whose most-
+    // recent past occurrence went undone — surfaced in Backlog so a skipped
+    // "every Friday" task doesn't silently vanish until next Friday.
+    val overdueOccurrences = projectOverdueOccurrences(tasks, blocks, today)
 
     // Non-template task bucketing — over NON-recurring task blocks only (an
     // occurrence block's taskId is its template, never a row in these buckets).
@@ -105,12 +109,13 @@ fun visibleTasks(
         }
         TaskListView.BACKLOG ->
             // Open work not actively planned AND sitting ≥ a day: never scheduled, or
-            // only ever scheduled in the past (overdue). No recurring occurrences.
+            // only ever scheduled in the past (overdue). PLUS one overdue row per
+            // recurring template whose most-recent occurrence was missed.
             nonTemplates.filter { t ->
                 !t.done && t.later != true && !isCreatedToday(t, now) && (
                     t.id !in scheduledTaskIds || t.id in pastOnlyTaskIds
                 )
-            }
+            } + overdueOccurrences
         TaskListView.UPCOMING -> {
             // Future-scheduled tasks + the single NEXT occurrence per recurring series.
             val nt = nonTemplates.filter { t -> !t.done && t.id in upcomingTaskIds && t.id !in todayTaskIds }

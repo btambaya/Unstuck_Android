@@ -7,7 +7,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.isTemplate
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
+import tech.csalliance.unstuck.core.logic.overdueOccurrenceLabel
 import tech.csalliance.unstuck.core.logic.projectOccurrences
+import tech.csalliance.unstuck.core.logic.projectOverdueOccurrences
 import tech.csalliance.unstuck.core.logic.taskForBlock
 import tech.csalliance.unstuck.core.logic.visibleTasks
 import tech.csalliance.unstuck.core.model.Recurrence
@@ -100,5 +102,90 @@ class OccurrencesTest {
         )
         val up = visibleTasks(TaskListView.UPCOMING, listOf(template), blocks, NOW, null, slipMode = false)
         assertEquals(listOf("b1"), up.map { it.id })
+    }
+
+    // ── projectOverdueOccurrences — missed recurring surfaces once (parity with
+    //    lib/occurrences.test.ts "projectOverdueOccurrences"). ──────────────────
+    private val TODAY = "2026-06-12"
+    private val weekly = mkTask(id = "t1", name = "Call mom")
+        .copy(recurrence = Recurrence.Weekly(daysOfWeek = listOf(5)))
+
+    @Test fun overdueSurfacesOneRowForMostRecentMiss() {
+        val blocks = listOf(
+            mkBlock(id = "b1", taskId = "t1", date = "2026-06-05"),   // older miss
+            mkBlock(id = "b2", taskId = "t1", date = "2026-06-11"),   // most-recent miss
+        )
+        val out = projectOverdueOccurrences(listOf(weekly), blocks, TODAY)
+        assertEquals(1, out.size)
+        assertEquals("b2", out[0].id)
+        assertEquals("Call mom", out[0].name)
+        assertFalse(out[0].done)
+        assertNull(out[0].recurrence)
+        assertNull(out[0].completedAt)
+    }
+
+    @Test fun overdueNeverStacksAcrossMultipleMisses() {
+        val blocks = listOf(
+            mkBlock(id = "b1", taskId = "t1", date = "2026-05-29"),
+            mkBlock(id = "b2", taskId = "t1", date = "2026-06-05"),
+            mkBlock(id = "b3", taskId = "t1", date = "2026-06-11"),
+        )
+        val out = projectOverdueOccurrences(listOf(weekly), blocks, TODAY)
+        assertEquals(1, out.size)
+        assertEquals("b3", out[0].id)   // only the most-recent
+    }
+
+    @Test fun overdueSupersededByTodayOccurrence() {
+        val blocks = listOf(
+            mkBlock(id = "b1", taskId = "t1", date = "2026-06-11"),   // missed
+            mkBlock(id = "b2", taskId = "t1", date = TODAY),          // today's occurrence takes over
+        )
+        assertTrue(projectOverdueOccurrences(listOf(weekly), blocks, TODAY).isEmpty())
+    }
+
+    @Test fun overdueClearsWhenMostRecentDone() {
+        val blocks = listOf(
+            mkBlock(id = "b1", taskId = "t1", date = "2026-06-05"),                  // older, still undone
+            mkBlock(id = "b2", taskId = "t1", date = "2026-06-11").copy(done = true), // most-recent, done
+        )
+        assertTrue(projectOverdueOccurrences(listOf(weekly), blocks, TODAY).isEmpty())
+    }
+
+    @Test fun overdueClearsWhenMostRecentSkipped() {
+        val blocks = listOf(mkBlock(id = "b2", taskId = "t1", date = "2026-06-11").copy(skipped = true))
+        assertTrue(projectOverdueOccurrences(listOf(weekly), blocks, TODAY).isEmpty())
+    }
+
+    @Test fun overdueNoneForFutureOnly() {
+        val blocks = listOf(mkBlock(id = "b1", taskId = "t1", date = "2026-06-19"))
+        assertTrue(projectOverdueOccurrences(listOf(weekly), blocks, TODAY).isEmpty())
+    }
+
+    @Test fun overdueNoneForNonRecurring() {
+        val normal = mkTask(id = "t1")   // no recurrence
+        val blocks = listOf(mkBlock(id = "b1", taskId = "t1", date = "2026-06-11"))
+        assertTrue(projectOverdueOccurrences(listOf(normal), blocks, TODAY).isEmpty())
+    }
+
+    // The overdue row surfaces in BACKLOG (not Today) via visibleTasks. Use
+    // todayPlus(-N) so the missed date is genuinely in the past relative to the
+    // runtime "today" visibleTasks computes via Clock.todayIso().
+    @Test fun overdueRowSurfacesInBacklogOnly() {
+        val blocks = listOf(mkBlock(id = "miss", taskId = "t1", date = todayPlus(-3)))
+        val backlog = visibleTasks(TaskListView.BACKLOG, listOf(weekly), blocks, NOW, null, slipMode = false)
+        assertTrue("missed occurrence shows in Backlog", backlog.any { it.id == "miss" })
+        val today = visibleTasks(TaskListView.TODAY, listOf(weekly), blocks, NOW, null, slipMode = false)
+        assertFalse("missed occurrence must NOT show in Today", today.any { it.id == "miss" })
+    }
+
+    // The Backlog indicator label is "Overdue · <weekday-of-missed-date>".
+    @Test fun overdueLabelShowsMissedWeekday() {
+        // 2026-06-11 is a Thursday.
+        val blocks = listOf(mkBlock(id = "b2", taskId = "t1", date = "2026-06-11"))
+        assertEquals("Overdue · Thu", overdueOccurrenceLabel("b2", listOf(weekly), blocks, TODAY))
+        // A non-occurrence / non-past row gets no label.
+        val future = listOf(mkBlock(id = "fut", taskId = "t1", date = "2026-06-19"))
+        assertNull(overdueOccurrenceLabel("fut", listOf(weekly), future, TODAY))
+        assertNull(overdueOccurrenceLabel("nope", listOf(weekly), blocks, TODAY))
     }
 }

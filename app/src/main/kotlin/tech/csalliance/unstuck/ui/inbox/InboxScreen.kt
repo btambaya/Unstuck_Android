@@ -76,7 +76,7 @@ fun InboxScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (String) -> Un
     fun taskName(id: String?): String? = id?.let { tid -> tasks.firstOrNull { it.id == tid }?.name }
 
     Column(Modifier.fillMaxSize().background(c.bg)) {
-        AppBar(title = "Inbox", leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
+        AppBar(title = "Captures", leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
             item {
                 Row(
@@ -87,7 +87,7 @@ fun InboxScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (String) -> Un
                     Spacer(Modifier.weight(1f))
                     if (showArchived || archived.isNotEmpty()) {
                         Text(
-                            if (showArchived) "← Back to inbox" else "Archived (${archived.size})",
+                            if (showArchived) "← Back to captures" else "Archived (${archived.size})",
                             style = UFont.sans(12, FontWeight.SemiBold),
                             color = c.ink3,
                             modifier = Modifier.clickable { showArchived = !showArchived }.padding(4.dp),
@@ -100,7 +100,7 @@ fun InboxScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (String) -> Un
                 item {
                     Text(
                         if (showArchived) "No archived captures."
-                        else "Inbox zero. Capture a thought with the capture action during a focus session.",
+                        else "All clear. Capture a thought during a focus session — it keeps the task it came from.",
                         style = UFont.sans(13), color = c.ink3, modifier = Modifier.padding(vertical = 24.dp),
                     )
                 }

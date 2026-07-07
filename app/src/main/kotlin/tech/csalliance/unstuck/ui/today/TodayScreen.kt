@@ -174,7 +174,7 @@ fun TodayScreen(
             Orbit(size = 24)
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onInbox), contentAlignment = Alignment.Center) {
-                    Icon(Icons.Outlined.MoveToInbox, contentDescription = "Inbox", tint = c.ink2, modifier = Modifier.size(20.dp))
+                    Icon(Icons.Outlined.MoveToInbox, contentDescription = "Captures", tint = c.ink2, modifier = Modifier.size(20.dp))
                     if (inboxCount > 0) Box(Modifier.align(Alignment.TopEnd).padding(top = 9.dp, end = 9.dp).size(7.dp).clip(CircleShape).background(c.coral))
                 }
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onNotifications), contentAlignment = Alignment.Center) {

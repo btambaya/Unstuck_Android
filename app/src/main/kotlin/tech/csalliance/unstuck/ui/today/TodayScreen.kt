@@ -22,7 +22,9 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.MoveToInbox
 import androidx.compose.material.icons.outlined.Notifications
@@ -58,8 +60,12 @@ import tech.csalliance.unstuck.core.logic.projectOccurrences
 import tech.csalliance.unstuck.core.logic.visibleTasks
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.model.LiveSession
+import tech.csalliance.unstuck.core.model.ShareBadge
+import tech.csalliance.unstuck.core.model.ShareLevel
+import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.model.TaskListView
+import tech.csalliance.unstuck.core.model.shareStatusLabel
 import tech.csalliance.unstuck.design.color.oklch
 import tech.csalliance.unstuck.design.component.AreaDotColor
 import tech.csalliance.unstuck.design.component.ButtonKind
@@ -71,6 +77,7 @@ import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UnstuckColors
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.ui.sharing.PartnerPresence
 import tech.csalliance.unstuck.ui.components.areaColorFor
 import tech.csalliance.unstuck.ui.components.dateEyebrow
 import tech.csalliance.unstuck.ui.components.greeting
@@ -105,6 +112,11 @@ fun TodayScreen(
     val live by vm.liveSession.collectAsStateWithLifecycle()
     val recap by vm.lastRecap.collectAsStateWithLifecycle()
     val nudges by vm.nudges.collectAsStateWithLifecycle()
+    // Sharing (M2/M3): tasks OTHERS shared with me, badges on MY outgoing shares, and
+    // the taskId→assignee map for tasks I assigned away (they leave the active list).
+    val sharedWithMe by vm.sharedWithMe.collectAsStateWithLifecycle()
+    val shareBadges by vm.shareBadges.collectAsStateWithLifecycle()
+    val assignedOut by vm.assignedOut.collectAsStateWithLifecycle()
     // Refresh ~once a minute so the date eyebrow, "today" task filtering and
     // "completed today" roll over at midnight on a screen left open (was captured
     // once at composition → stuck on yesterday until something else recomposed).
@@ -128,8 +140,9 @@ fun TodayScreen(
     // pulling a backlog task). Excludes the live-focused task + honours the area.
     // Memoized on the bucketing-relevant inputs (coarse 60s `now`, NOT the 1s
     // `nowTick`) so these don't recompute every live-session frame.
-    val startNext = remember(tasks, blocks, now, liveId, areaFilter) {
-        pickTodayHero(tasks, blocks, now, liveId, areaFilter)
+    val startNext = remember(tasks, blocks, now, liveId, areaFilter, assignedOut) {
+        // excludeIds = tasks I assigned away — never the hero (they're in Delegated).
+        pickTodayHero(tasks, blocks, now, liveId, areaFilter, assignedOut.keys)
     }
     // Today = open tasks scheduled/intended for today, plus anything completed today
     // (sorted last), matching the web today-list which keeps today's completions visible.
@@ -144,15 +157,25 @@ fun TodayScreen(
             .filter { isCompletedToday(it, now) && todayOpen.none { o -> o.id == it.id } }
     }
     val todayAll = remember(todayOpen, todayDone) { todayOpen + todayDone }
-    val rows = remember(todayAll, areaFilter, startNext, liveId) {
-        todayAll.filter { (areaFilter == null || it.lifeArea == areaFilter) && it.id != startNext?.id && it.id != liveId }
+    // Tasks I assigned away leave my active list (they collect in Delegated instead).
+    val rows = remember(todayAll, areaFilter, startNext, liveId, assignedOut) {
+        todayAll.filter { (areaFilter == null || it.lifeArea == areaFilter) && it.id != startNext?.id && it.id != liveId && it.id !in assignedOut }
     }
     // Backlog view (web parity): the unplanned + overdue stack, area-agnostic.
     val backlogAll = remember(tasks, blocks, now) {
         visibleTasks(TaskListView.BACKLOG, tasks, blocks, now, activeArea = null, slipMode = false)
     }
-    val backlogRows = remember(backlogAll, startNext, liveId) {
-        backlogAll.filter { it.id != startNext?.id && it.id != liveId }
+    val backlogRows = remember(backlogAll, startNext, liveId, assignedOut) {
+        backlogAll.filter { it.id != startNext?.id && it.id != liveId && it.id !in assignedOut }
+    }
+    // Delegated group: MY tasks handed off at 'assign'. A completed hand-off lingers
+    // today (a quiet "done ✓"), then ages out — mirrors delegated-group.tsx.
+    val delegatedRows = remember(tasks, assignedOut, areaFilter, now) {
+        tasks.filter { t ->
+            assignedOut.containsKey(t.id) &&
+                (areaFilter == null || t.lifeArea == areaFilter) &&
+                !(t.done && !isCompletedToday(t, now))
+        }
     }
     val displayRows = if (backlogActive) backlogRows else rows
     val liveTask = remember(liveId, tasks) { liveId?.let { id -> tasks.firstOrNull { it.id == id } } }
@@ -160,7 +183,9 @@ fun TodayScreen(
     // backlogRows has start-next/live subtracted, so a lone overdue task (which
     // becomes the start-next) would otherwise read as empty and hide the Backlog
     // toggle. A genuinely empty account still has no todayAll/backlogAll/startNext.
-    val empty = todayAll.isEmpty() && live == null && backlogAll.isEmpty() && startNext == null
+    // "Company" (tasks shared WITH me) also counts as content, so a user whose only
+    // rows are shared-with-you still sees them instead of the all-clear empty hero.
+    val empty = todayAll.isEmpty() && live == null && backlogAll.isEmpty() && startNext == null && sharedWithMe.isEmpty() && delegatedRows.isEmpty()
     val weekMin = remember(sessions, now) {
         sessions.filter { (now - (it.completedAtMs() ?: 0)) in 0..(7L * 86_400_000) }.sumOf { it.actualSec } / 60
     }
@@ -297,6 +322,16 @@ fun TodayScreen(
                         }
                     }
                 }
+                // Sharing groups sit at the top of the Today list (web parity), not in
+                // the Backlog view: tasks OTHERS shared with me, then tasks I delegated.
+                if (!backlogActive) {
+                    if (sharedWithMe.isNotEmpty()) item(key = "shared-with-you") {
+                        SharedWithYouSection(vm, sharedWithMe, onToggle = { taskId, done -> vm.completeSharedTask(taskId, done) })
+                    }
+                    if (delegatedRows.isNotEmpty()) item(key = "delegated") {
+                        DelegatedSection(delegatedRows, assignedOut, onOpen)
+                    }
+                }
                 if (liveTask != null && live != null) {
                     item {
                         LiveSessionCard(
@@ -307,7 +342,7 @@ fun TodayScreen(
                         )
                     }
                 }
-                items(displayRows, key = { it.id }) { t -> TaskRow(t, areaColorFor(t.lifeArea, areas, c), ageDays = if (backlogActive) tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, now) else null) { onOpen(t) } }
+                items(displayRows, key = { it.id }) { t -> TaskRow(t, areaColorFor(t.lifeArea, areas, c), ageDays = if (backlogActive) tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, now) else null, shareBadges = shareBadges[t.id].orEmpty()) { onOpen(t) } }
                 // Per-view empty note: switching to Backlog or an area filter with no
                 // matches showed a blank list under the header (looked broken). The live
                 // card counts as content, so only show this when nothing else is there.
@@ -434,8 +469,11 @@ private fun LiveSessionCard(
 }
 
 @Composable
-private fun TaskRow(task: TaskItem, areaColor: Color, ageDays: Int? = null, onOpen: () -> Unit) {
+private fun TaskRow(task: TaskItem, areaColor: Color, ageDays: Int? = null, shareBadges: List<ShareBadge> = emptyList(), onOpen: () -> Unit) {
     val c = UTheme.colors
+    // Assign-level shares move a task to the Delegated group, so an active row only
+    // ever carries view/partner badges — a quiet "shared with N" chip.
+    val visibleBadges = shareBadges.filter { it.level != ShareLevel.ASSIGN }
     Row(
         Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 3.dp).clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).clickable(onClick = onOpen).padding(horizontal = 12.dp, vertical = 11.dp),
         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
@@ -463,12 +501,107 @@ private fun TaskRow(task: TaskItem, areaColor: Color, ageDays: Int? = null, onOp
                 }
             }
         }
+        if (visibleBadges.isNotEmpty()) {
+            val label = if (visibleBadges.size == 1) visibleBadges.first().recipientName.substringBefore('@') else "${visibleBadges.size} people"
+            Row(
+                Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 7.dp, vertical = 2.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp),
+            ) {
+                Icon(Icons.Filled.Person, contentDescription = null, tint = c.primaryDeep, modifier = Modifier.size(10.dp))
+                Text(label, style = UFont.sans(10, FontWeight.Medium), color = c.primaryDeep, maxLines = 1)
+            }
+        }
         if (ageDays != null) {
             Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
                 Text("${ageDays.coerceAtLeast(1)}d", style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
             }
         }
         Text("${task.estimateMin}m", style = UFont.mono(11), color = c.ink3)
+    }
+}
+
+/** "Shared with you" — the quiet-company section: tasks other people in your circle
+ *  shared WITH you, at the top of Today. view = read-only company; partner + assign
+ *  add a completion checkbox (either side can tick it). Port of shared-with-me-group.tsx
+ *  add a completion checkbox. Partner rows also carry live co-focus (PartnerPresence:
+ *  a "focusing now" pulse when the owner is focusing + a "Sit with them" toggle). */
+@Composable
+private fun SharedWithYouSection(vm: AppViewModel, items: List<SharedWithMe>, onToggle: (taskId: String, done: Boolean) -> Unit) {
+    val c = UTheme.colors
+    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 2.dp)) {
+            Icon(Icons.Filled.Person, contentDescription = null, tint = c.ink3, modifier = Modifier.size(12.dp))
+            SectionLabel("Shared with you")
+        }
+        items.forEach { s ->
+            val done = s.done
+            val canComplete = s.level.canComplete
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.primarySoft, RoundedCornerShape(12.dp)).padding(horizontal = 13.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                if (canComplete) {
+                    Box(
+                        Modifier.size(18.dp).clip(RoundedCornerShape(6.dp)).background(if (done) c.green else Color.Transparent)
+                            .border(if (done) 0.dp else 1.5.dp, if (done) Color.Transparent else c.line2, RoundedCornerShape(6.dp))
+                            .clickable { onToggle(s.taskId, !done) },
+                        contentAlignment = Alignment.Center,
+                    ) { if (done) Icon(Icons.Filled.Check, contentDescription = "Mark done", tint = Color.White, modifier = Modifier.size(12.dp)) }
+                } else {
+                    Box(Modifier.size(18.dp))   // spacer keeps view-only rows title-aligned
+                }
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        s.title, style = UFont.sans(14, FontWeight.Medium),
+                        color = if (done) c.ink3 else c.ink,
+                        textDecoration = if (done) TextDecoration.LineThrough else null,
+                        maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
+                    Text("from ${s.ownerName.substringBefore('@')}", style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 2.dp))
+                    // Partner rows: live co-focus — "focusing now" + "Sit with them".
+                    if (s.level == ShareLevel.PARTNER && !done) {
+                        PartnerPresence(vm, s.taskId, modifier = Modifier.padding(top = 6.dp))
+                    }
+                }
+                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 9.dp, vertical = 2.dp)) {
+                    Text(shareStatusLabel(s.level, done), style = UFont.sans(10, FontWeight.Bold), color = c.primaryDeep)
+                }
+            }
+        }
+    }
+}
+
+/** "Delegated" — MY tasks handed off at 'assign'. Once assigned they become the
+ *  recipient's to do, so they leave my active list and collect here (I keep view +
+ *  their done state; a tap opens the task to change the level or take it back).
+ *  Port of delegated-group.tsx. */
+@Composable
+private fun DelegatedSection(rows: List<TaskItem>, assignedOut: Map<String, String>, onOpen: (TaskItem) -> Unit) {
+    val c = UTheme.colors
+    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 2.dp)) {
+            Icon(Icons.Filled.Person, contentDescription = null, tint = c.ink3, modifier = Modifier.size(12.dp))
+            SectionLabel("Delegated")
+        }
+        rows.forEach { t ->
+            Row(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.primarySoft, RoundedCornerShape(12.dp)).clickable { onOpen(t) }.padding(horizontal = 13.dp, vertical = 11.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+            ) {
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        t.name, style = UFont.sans(14, FontWeight.Medium),
+                        color = if (t.done) c.ink3 else c.ink,
+                        textDecoration = if (t.done) TextDecoration.LineThrough else null,
+                        maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    )
+                    Text("assigned to ${assignedOut[t.id]?.substringBefore('@') ?: "someone"}", style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 2.dp))
+                }
+                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 9.dp, vertical = 2.dp)) {
+                    Text(if (t.done) "done" else "assigned", style = UFont.sans(10, FontWeight.Bold), color = c.primaryDeep)
+                }
+            }
+        }
     }
 }
 

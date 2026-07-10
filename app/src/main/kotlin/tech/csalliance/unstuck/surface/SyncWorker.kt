@@ -30,8 +30,17 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         // widget goes stale across process death.
         runCatching {
             val store = app.graph.store
+            // Exclude tasks I've assigned away — a delegated task is someone else's now
+            // and must never surface in the widget's Start-Next (parity with Today's hero
+            // + the in-app widget updater). Best-effort: an offline/failed badge read just
+            // yields no exclusions rather than blocking the widget refresh.
+            val assigned = runCatching {
+                tech.csalliance.unstuck.core.model.assignedOutIds(
+                    app.graph.coordinator?.circle?.myTaskShareBadges() ?: emptyMap(),
+                )
+            }.getOrDefault(emptySet())
             val rec = tech.csalliance.unstuck.core.logic.pickStartNext(
-                store.tasks().first(), store.blocks().first(), store.getLiveSession()?.taskId, null,
+                store.tasks().first(), store.blocks().first(), store.getLiveSession()?.taskId, null, assigned,
             )
             writeStartNext(applicationContext, rec?.name, rec?.estimateMin)
             StartNextWidget().updateAll(applicationContext)

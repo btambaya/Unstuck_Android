@@ -73,6 +73,7 @@ import tech.csalliance.unstuck.ui.AppViewModel
 
 enum class SettingsSection(val title: String, val eyebrow: String) {
     ACCOUNT("Your account.", "SETTINGS · ACCOUNT"),
+    PEOPLE("Sit with someone, not be watched.", "SETTINGS · PEOPLE"),
     FOCUS("How focus mode behaves.", "SETTINGS · FOCUS"),
     SOUND("Quiet by default.", "SETTINGS · SOUND"),
     A11Y("Adjust to your brain.", "SETTINGS · ACCESSIBILITY"),
@@ -83,7 +84,7 @@ enum class SettingsSection(val title: String, val eyebrow: String) {
 }
 
 private val HUB = listOf(
-    "Account" to SettingsSection.ACCOUNT, "Focus" to SettingsSection.FOCUS, "Sound" to SettingsSection.SOUND,
+    "Account" to SettingsSection.ACCOUNT, "People" to SettingsSection.PEOPLE, "Focus" to SettingsSection.FOCUS, "Sound" to SettingsSection.SOUND,
     "Accessibility" to SettingsSection.A11Y, "Interface" to SettingsSection.INTERFACE, "Backup" to SettingsSection.BACKUP,
     "Areas" to SettingsSection.AREAS, "Tags" to SettingsSection.TAGS,
 )
@@ -124,6 +125,7 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
                 SettingsSection.AREAS -> AreasContent(vm)
                 SettingsSection.TAGS -> TagsContent(vm)
                 SettingsSection.ACCOUNT -> AccountContent(vm)
+                SettingsSection.PEOPLE -> ConnectionsContent(vm)
                 SettingsSection.FOCUS -> SettingsCard {
                     SegRow("Default focus length", listOf("15", "25", "45"), s.focusDefaultMin.toString()) { v ->
                         vm.updateSettings { it.copy(focusDefaultMin = v.toIntOrNull() ?: 25) }

@@ -48,8 +48,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.formatMMSS
+import tech.csalliance.unstuck.core.model.CoFocusState
 import tech.csalliance.unstuck.core.model.FocusState
 import tech.csalliance.unstuck.core.model.FocusTreatment
+import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.design.color.oklch
 import tech.csalliance.unstuck.design.component.Orbit
@@ -59,6 +61,8 @@ import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.surface.FocusTimerService
 import tech.csalliance.unstuck.surface.PausedCheckinScheduler
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.ui.sharing.CoFocusBar
+import tech.csalliance.unstuck.ui.sharing.rememberCoFocusPeers
 import tech.csalliance.unstuck.ui.tasks.SelectableChip
 
 @Composable
@@ -66,6 +70,7 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
     val c = UTheme.colors
     val live by vm.liveSession.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
+    val shareBadges by vm.shareBadges.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     LaunchedEffect(task.id) { vm.startFocus(task) }
@@ -186,6 +191,16 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
     val graceSec = if (settings.focusOverrunMin <= 0) Double.POSITIVE_INFINITY else settings.focusOverrunMin * 60.0
     val state = if (l != null) FocusTimer.deriveState(l, nowMs, graceSec) else FocusState.IDLE
 
+    // --- M5 co-focus (owner side): while focusing a PARTNER-shared task, broadcast
+    // presence 'focusing' on cofocus:<taskId> and show a calm "X is here with you" pill
+    // when a partner is actually present. Key on the live session's taskId (the shared
+    // task — the template for a recurring occurrence), matching what the recipient joins.
+    val focusTaskId = l?.taskId ?: task.id
+    val partnerShared = shareBadges[focusTaskId].orEmpty().any { it.level == ShareLevel.PARTNER }
+    val coFocusPeers = rememberCoFocusPeers(
+        vm, focusTaskId, active = partnerShared && sessionStart != null, track = CoFocusState.FOCUSING,
+    )
+
     // Copilot tick: feed ACCUMULATED FOCUS seconds (paused time excluded) only while
     // the session is actively running. Pausing/ending tears the copilot down so it
     // never speaks over a paused screen. Whole call is fail-safe inside the controller.
@@ -265,6 +280,12 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
                 Row(
                     Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.12f)).padding(horizontal = 12.dp, vertical = 5.dp),
                 ) { Text(msg, style = UFont.sans(12, FontWeight.Medium), color = Color.White.copy(alpha = 0.9f)) }
+            }
+
+            // Co-focus (owner): a partner is here with you. Calm, only when present.
+            if (coFocusPeers.isNotEmpty()) {
+                Spacer(Modifier.height(6.dp))
+                CoFocusBar(coFocusPeers)
             }
 
             // Always show the treatment switcher — including in Monk — so picking

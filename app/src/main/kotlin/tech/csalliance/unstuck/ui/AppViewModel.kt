@@ -18,6 +18,11 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.emitAll
+import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
@@ -59,6 +64,7 @@ import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.CaptureTag
+import tech.csalliance.unstuck.core.model.CircleMember
 import tech.csalliance.unstuck.core.model.FocusTreatment
 import tech.csalliance.unstuck.core.model.CollectionItem
 import tech.csalliance.unstuck.core.model.ItemCollection
@@ -69,6 +75,10 @@ import tech.csalliance.unstuck.core.model.ReasonAction
 import tech.csalliance.unstuck.core.model.ReasonLog
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.Session
+import tech.csalliance.unstuck.core.model.ShareBadge
+import tech.csalliance.unstuck.core.model.ShareForTask
+import tech.csalliance.unstuck.core.model.ShareLevel
+import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.sync.AuthOutcome
@@ -120,6 +130,41 @@ class AppViewModel(
     val pendingCount = store.pendingCount().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     val configured = graph.configured
+
+    // --- sharing projections (M2/M3) ---
+    // Both RPC-backed (a recipient has NO RLS read on the raw task row): tasks OTHERS
+    // shared WITH me (tasksSharedWithMe) and the badges on MY OWN outgoing shares
+    // (myTaskShareBadges → row chips + the Delegated group). Each refetches on the
+    // CollabRealtime `sharesChanged` signal (a task_shares row I can see changed — my
+    // outgoing OR incoming) AND after my own writes (the manual pulse), exactly like
+    // `circle` on the circleChanged signal. Declared HERE (above the widget init that
+    // reads assignedOut) so property init order is safe. circleClient/collab are
+    // custom getters (no backing field) → safe to reference before their textual decl.
+    private val _sharesRefresh = MutableSharedFlow<Unit>(
+        extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /** Tasks other people have shared WITH me — the "Shared with you" group. Read via
+     *  the tasks_shared_with_me projection (raw task rows are RLS-forbidden). */
+    val sharedWithMe: StateFlow<List<SharedWithMe>> =
+        merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
+            .onStart { emit(Unit) }
+            .map { graph.coordinator?.circle?.tasksSharedWithMe() ?: emptyList() }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** My outgoing shares grouped by taskId → the row badges (mirrors the web
+     *  useShareBadges().byTask). Drives the on-row "shared" chips + the Delegated group. */
+    val shareBadges: StateFlow<Map<String, List<ShareBadge>>> =
+        merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
+            .onStart { emit(Unit) }
+            .map { graph.coordinator?.circle?.myTaskShareBadges() ?: emptyMap() }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    /** taskId → assignee name for tasks I've assigned away ('assign' level). These
+     *  LEAVE my active list (→ Delegated group) and are excluded from Start-Next. */
+    val assignedOut: StateFlow<Map<String, String>> =
+        shareBadges.map { tech.csalliance.unstuck.core.model.assignedOutMap(it) }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     /** null until the auth state resolves; true/false once known. */
     // Tri-state so AppRoot shows the splash (null) — NOT the sign-in screen —
@@ -396,10 +441,12 @@ class AppViewModel(
             // redundant picks). debounce coalesces rapid input flips (e.g. a burst of
             // hydrate upserts) into one recompute. A downstream distinct on the RESULT
             // still suppresses a no-op widget write when the pick is unchanged.
-            combine(tasks, blocks, liveSession) { ts, bs, live -> Triple(ts, bs, live?.taskId) }
+            combine(tasks, blocks, liveSession, assignedOut) { ts, bs, live, assigned -> WidgetInputs(ts, bs, live?.taskId, assigned.keys) }
                 .distinctUntilChanged()
                 .debounce(300)
-                .map { (ts, bs, liveId) -> tech.csalliance.unstuck.core.logic.pickStartNext(ts, bs, liveId, null) }
+                // excludeIds: a task assigned away is someone else's now — never
+                // recommend it in the home-screen widget (parity with Today's hero).
+                .map { (ts, bs, liveId, assigned) -> tech.csalliance.unstuck.core.logic.pickStartNext(ts, bs, liveId, null, assigned) }
                 .distinctUntilChanged()
                 .collect { rec ->
                     runCatching {
@@ -409,6 +456,51 @@ class AppViewModel(
                 }
         }
     }
+
+    // --- M4: session-signal observer (start/finish pings to people I've shared with) ---
+    // Port of lib/use-share-session-signals. Watches the live focus session + my
+    // outgoing shareBadges; on the EDGES of a SHARED task's session it pings
+    // share-notify (session_start / session_end). The pure sessionSignalStep
+    // (unit-tested in :core) decides: a start fires once, a mid-session reload is
+    // adopted (never re-announced), the paired end fires on done / cancel / switch.
+    // Fed from the RAW store.liveSession() flow (NOT the null-seeded StateFlow) so a
+    // cold start MID-session sees the restored session as its FIRST observation and
+    // adopts it — exactly the web's session-id reload guard. distinctUntilChanged
+    // collapses pause/resume ticks (same sid, same shared) so they stay quiet.
+    private var sigState = tech.csalliance.unstuck.core.logic.initSigState()
+
+    init {
+        viewModelScope.launch {
+            combine(store.liveSession(), shareBadges) { live, byTask ->
+                val active = live?.sessionStart != null
+                // Session id (matches the web live.id ?? live.taskId); null when idle.
+                val sid = if (active) (live?.id ?: live?.taskId) else null
+                val taskId = if (active) live?.taskId else null
+                // Shared iff I have at least one outgoing share on this task.
+                val shared = if (taskId != null && !byTask[taskId].isNullOrEmpty()) taskId else null
+                sid to shared
+            }
+                .distinctUntilChanged()
+                .collect { (sid, shared) ->
+                    val (next, fires) = tech.csalliance.unstuck.core.logic.sessionSignalStep(sigState, sid, shared)
+                    sigState = next
+                    for (f in fires) {
+                        val started = f.kind == tech.csalliance.unstuck.core.logic.SessionSignalKind.START
+                        // Best-effort, server-revalidated fan-out; don't block the collector.
+                        launch { circleClient?.notifySession(f.taskId, started) }
+                    }
+                }
+        }
+    }
+
+    // --- M5: co-focus presence (body-doubling on a partner-shared task) ---
+    private val cofocus get() = graph.coordinator?.cofocus
+
+    /** Open a co-focus presence session on `cofocus:<taskId>` with the given initial
+     *  [track] (null = observe only). Returns null when signed out / not configured.
+     *  The caller (a screen) MUST close() it on dispose. */
+    fun openCoFocus(taskId: String, track: tech.csalliance.unstuck.core.model.CoFocusState?): tech.csalliance.unstuck.sync.CoFocusSession? =
+        cofocus?.open(taskId, track)
 
     // --- in-app notification center: the log of shown notifications + an unread badge ---
     val notifications: StateFlow<List<tech.csalliance.unstuck.surface.NotificationLog.Entry>>
@@ -738,6 +830,92 @@ class AppViewModel(
     }
     suspend fun listCollectionMembers(collectionId: String): List<tech.csalliance.unstuck.sync.CollectionMemberInfo> =
         share?.listMembers(collectionId) ?: emptyList()
+
+    // --- connections / trusted circle (M1) ---
+    // The unified "people you share with" roster. All reads/writes go through the
+    // SECURITY DEFINER RPCs + circle-invite edge fn (CircleClient). The roster is a
+    // reactive StateFlow that refetches on the CollabRealtime circle-changed signal
+    // (another user accepts an invite / leaves — RLS-scoped postgres_changes) AND
+    // after each of my own writes (the manual pulse). Both getters read the (nullable)
+    // coordinator lazily so the flow is safe before it's wired / in tests.
+    private val circleClient get() = graph.coordinator?.circle
+    private val collab get() = graph.coordinator?.collab
+
+    private val _circleRefresh = MutableSharedFlow<Unit>(
+        extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /** My connections: active members (resolved names) + pending invites (with their
+     *  code, so the link can be re-copied). Empty until first collected — the
+     *  Connections screen drives it (WhileSubscribed, so it stops when off-screen). */
+    val circle: StateFlow<List<CircleMember>> =
+        merge(_circleRefresh, flow { collab?.circleChanged?.let { emitAll(it) } })
+            .onStart { emit(Unit) }
+            .map { circleClient?.circleList() ?: emptyList() }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Force a roster refetch now (after a write). */
+    fun refreshCircle() { _circleRefresh.tryEmit(Unit) }
+
+    /** One-shot roster read (non-reactive callers / tests). */
+    suspend fun listCircle(): List<CircleMember> = circleClient?.circleList() ?: emptyList()
+
+    /** Invite to my circle. With an email the server reaches them (adds an existing
+     *  Unstuck user directly, or emails a new person the join link); blank → a
+     *  one-time link I share myself. Returns what happened; refetches the roster. */
+    suspend fun inviteToCircle(email: String?): tech.csalliance.unstuck.sync.InviteResult {
+        val r = circleClient?.circleInvite(email) ?: tech.csalliance.unstuck.sync.InviteResult(error = "not_configured")
+        refreshCircle()
+        return r
+    }
+
+    /** Redeem an invite code → join that owner's circle. Refetches on success. */
+    suspend fun redeemCircle(code: String): tech.csalliance.unstuck.sync.RedeemResult {
+        val r = circleClient?.circleRedeem(code) ?: tech.csalliance.unstuck.sync.RedeemResult(ok = false, error = "not_configured")
+        if (r.ok) refreshCircle()
+        return r
+    }
+
+    /** Remove a connection (or cancel a pending invite); cascades their task shares
+     *  server-side. Refetches the roster. */
+    suspend fun removeFromCircle(id: String) {
+        circleClient?.circleRemove(id)
+        refreshCircle()
+    }
+
+    // --- per-task sharing (M2) + shared-with-you / delegated groups (M3) ---
+    // The reactive projections (sharedWithMe / shareBadges / assignedOut) are declared
+    // NEAR THE TOP (before the widget init that reads assignedOut) so they're already
+    // initialized when that init's coroutine starts. The write methods live here.
+
+    /** Force a shares refetch now (after a share/unshare/complete write). */
+    fun refreshShares() { _sharesRefresh.tryEmit(Unit) }
+
+    /** Who a task I own is shared with — drives the share sheet's current state. */
+    suspend fun sharesForTask(taskId: String): List<ShareForTask> =
+        circleClient?.taskSharesForTask(taskId) ?: emptyList()
+
+    /** Share a task I own with a circle member at [level]. THROWS on error (the sheet
+     *  needs to know), then pings the recipient (best-effort) + refetches. */
+    suspend fun shareTask(taskId: String, userId: String, level: ShareLevel) {
+        circleClient?.taskShare(taskId, userId, level)
+        circleClient?.notifyTaskShare(taskId, userId)
+        refreshShares()
+    }
+
+    /** Remove a share by its id (owner-only, RPC-enforced). Best-effort; refetches. */
+    suspend fun unshareTask(shareId: String) {
+        circleClient?.taskUnshare(shareId)
+        refreshShares()
+    }
+
+    /** Complete/uncomplete a task shared WITH me — partner OR assign only (the RPC
+     *  rejects view). Pings the owner on completion (best-effort), then refetches. */
+    fun completeSharedTask(taskId: String, done: Boolean) = launchWrite {
+        runCatching { circleClient?.sharedTaskSetDone(taskId, done) }
+        if (done) circleClient?.notifyTaskDone(taskId)
+        refreshShares()
+    }
 
     // --- tags & areas ---
 
@@ -1297,6 +1475,14 @@ data class ExportBundle(
 
 /** A just-finished focus session, surfaced as the Today recap card (B3). */
 data class RecapState(val taskName: String, val focusedSec: Int, val at: Long = 0L)
+
+/** The debounced inputs for the home-screen Start-Next widget recomputation. */
+private data class WidgetInputs(
+    val tasks: List<TaskItem>,
+    val blocks: List<CalBlock>,
+    val liveTaskId: String?,
+    val excludeIds: Set<String>,
+)
 
 /** A quiet, in-app nudge surfaced on Today (no push) — see the notifications catalog. */
 enum class NudgeKind { SLIPPING, CAPTURE }

@@ -30,7 +30,12 @@ object NotificationRenderer {
         "paused_checkin" -> NotificationChannels.PAUSED to NotifIds.PAUSED
         "morning_brief", "evening_preview", "daily_nudge" -> NotificationChannels.DAILY to NotifIds.BRIEF
         "reminder", "event_soon" -> NotificationChannels.REMINDERS to NotifIds.REMINDER_BASE
-        "collection_share" -> NotificationChannels.COLLAB to NotifIds.COLLAB
+        // Sharing + collaboration (M4): a task shared with you, a partner/assignee
+        // finishing it, and the owner starting/finishing a focus session on a task
+        // they shared with you. All calm, on the COLLAB channel. (Push.kt supplies a
+        // content-derived notifId so distinct events coexist instead of replacing.)
+        "collection_share", "task_share", "shared_task_done",
+        "shared_session_start", "shared_session_end" -> NotificationChannels.COLLAB to NotifIds.COLLAB
         else -> NotificationChannels.RECAP to NotifIds.RECAP
     }
 

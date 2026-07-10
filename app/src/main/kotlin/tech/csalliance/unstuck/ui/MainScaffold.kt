@@ -188,7 +188,10 @@ fun MainScaffold(vm: AppViewModel) {
                 }
             }
             dl == "unstuck://collections" -> { tab = "lists"; stack.clear() }   // a shared collection
-            else -> { tab = "today"; stack.clear() }   // unstuck://today, /recap, /brief
+            // Today hosts the "Shared with you" + "Delegated" sections, so the sharing
+            // pings (unstuck://tasks: task_share / shared_task_done / shared_session_*)
+            // land there alongside unstuck://today, /recap, /brief.
+            else -> { tab = "today"; stack.clear() }
         }
         vm.consumeDeepLink()
     }

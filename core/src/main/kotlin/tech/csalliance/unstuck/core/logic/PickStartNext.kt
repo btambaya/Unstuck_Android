@@ -36,11 +36,13 @@ fun pickStartNext(
     blocks: List<CalBlock>,
     liveTaskId: String?,
     areaFilter: String? = null,
+    // excludeIds: tasks you've assigned away — they're someone else's now.
+    excludeIds: Set<String>? = null,
 ): TaskItem? =
     tasks
         // recurrence == null: skip recurring TEMPLATES (hidden definitions);
         // their per-day occurrences surface in Today on their own.
-        .filter { !it.done && it.later != true && it.recurrence == null && it.id != liveTaskId }
+        .filter { !it.done && it.later != true && it.recurrence == null && it.id != liveTaskId && it.id !in (excludeIds ?: emptySet()) }
         .filter { matchesArea(it.lifeArea, areaFilter) }
         .sortedWith(ranker)
         .firstOrNull()
@@ -51,10 +53,12 @@ fun pickUpNext(
     liveTaskId: String?,
     startNextId: String?,
     limit: Int = 3,
+    // excludeIds: tasks you've assigned away — no longer your work to queue up.
+    excludeIds: Set<String>? = null,
 ): List<TaskItem> {
     val skip = setOfNotNull(liveTaskId, startNextId)
     return tasks
-        .filter { !it.done && it.later != true && it.recurrence == null && it.id !in skip }
+        .filter { !it.done && it.later != true && it.recurrence == null && it.id !in skip && it.id !in (excludeIds ?: emptySet()) }
         .sortedWith(ranker)
         .take(limit)
 }
@@ -75,11 +79,13 @@ fun pickTodayHero(
     now: Long,
     liveTaskId: String? = null,
     areaFilter: String? = null,
+    // excludeIds: tasks you've assigned away — never surface them in the hero.
+    excludeIds: Set<String>? = null,
 ): TaskItem? {
-    // Today's open rows (non-template today tasks + today's occurrences), minus
-    // the live-focused task, narrowed by the active area.
+    // Today's open rows (non-template today tasks + today's occurrences), minus the
+    // live-focused task and anything assigned away, narrowed by the active area.
     val rows = visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false)
-        .filter { it.id != liveTaskId && matchesArea(it.lifeArea, areaFilter) }
+        .filter { it.id != liveTaskId && it.id !in (excludeIds ?: emptySet()) && matchesArea(it.lifeArea, areaFilter) }
     if (rows.isEmpty()) return null
 
     val today = Clock.todayIso()

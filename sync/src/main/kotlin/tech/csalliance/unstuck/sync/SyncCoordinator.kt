@@ -43,6 +43,7 @@ class SyncCoordinator(
     val notifications = NotificationsClient(client)
     val preferences = PreferencesClient(client)
     val collectionShare = CollectionShareClient(client)
+    val circle = CircleClient(client)
     val feedback = FeedbackClient(client)
     val assistant = AssistantClient(client)
     private val loginTracker = LoginTrackerClient(client)
@@ -50,6 +51,13 @@ class SyncCoordinator(
     private val hydrator = Hydrator(gateway, store)
     private val flusher = OutboxFlusher(gateway, store)
     private val realtime = RealtimeMirror(client, store, scope)
+    // Live change SIGNALS for sharing (RPC-backed surfaces can't be table-mirrored;
+    // recipients have no RLS read on raw task rows). ViewModels observe
+    // collab.sharesChanged / .circleChanged and refetch via `circle`.
+    val collab = CollabRealtime(client, scope)
+    // Co-focus / body-doubling presence (M5): opens per-task Realtime PRESENCE
+    // channels (`cofocus:<taskId>`) on demand from Focus / the shared-with-you rows.
+    val cofocus = CoFocusPresence(client, auth, scope)
 
     private val appContext = context.applicationContext
     private val prefs = context.getSharedPreferences("unstuck.sync", Context.MODE_PRIVATE)
@@ -133,6 +141,7 @@ class SyncCoordinator(
     private suspend fun subscribeRealtime(uid: String) {
         if (realtimeSubscribed) return
         realtime.subscribeAll(uid) { hydrator.hydrateCollections(uid) }
+        collab.subscribe()   // sharing change-signals (task_shares + trusted_circle)
         realtimeSubscribed = true
     }
 
@@ -144,6 +153,7 @@ class SyncCoordinator(
         if (!realtimeSubscribed) return
         scope.launch {
             realtime.unsubscribeAll()
+            collab.unsubscribe()
             realtimeSubscribed = false
         }
     }
@@ -350,6 +360,7 @@ class SyncCoordinator(
             }
             is SessionStatus.NotAuthenticated -> if (status.isSignOut) {
                 realtime.unsubscribeAll()
+                collab.unsubscribe()
                 realtimeSubscribed = false
                 store.clearAll()
                 prefs.edit().remove(KEY_PREV_USER).apply()

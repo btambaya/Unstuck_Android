@@ -89,4 +89,32 @@ class PickStartNextTest {
         val old = mkTask(id = "old", createdAt = "2026-04-01T10:00:00.000Z")   // backlog, not today
         assertNull("the hero never pulls from the backlog", pickTodayHero(listOf(old), emptyList(), NOW))
     }
+
+    // --- excludeIds — tasks assigned away are never recommended (M3 delegation) ---
+
+    @Test fun startNextSkipsExcludedIds() {
+        val a = mkTask(id = "a", priority = Priority.HIGH)
+        val b = mkTask(id = "b", priority = Priority.LOW)
+        // Without exclusion, the high-priority 'a' wins.
+        assertEquals("a", pickStartNext(listOf(a, b), emptyList(), null)?.id)
+        // Assigning 'a' away hands the pick to 'b'.
+        assertEquals("b", pickStartNext(listOf(a, b), emptyList(), null, null, setOf("a"))?.id)
+    }
+
+    @Test fun upNextDropsExcludedIds() {
+        val a = mkTask(id = "a", priority = Priority.URGENT)
+        val b = mkTask(id = "b", priority = Priority.MEDIUM)
+        val c = mkTask(id = "c", priority = Priority.LOW)
+        val ids = pickUpNext(listOf(a, b, c), emptyList(), null, null, 3, setOf("b")).map { it.id }
+        assertEquals(listOf("a", "c"), ids)
+    }
+
+    @Test fun heroSkipsExcludedTask() {
+        val a = mkTask(id = "a", estimateMin = 5, createdAt = iso(NOW))
+        val b = mkTask(id = "b", estimateMin = 30, createdAt = iso(NOW))
+        // 'a' is lower friction, so normally the hero.
+        assertEquals("a", pickTodayHero(listOf(a, b), emptyList(), NOW)?.id)
+        // Assigned away → hero falls to 'b'.
+        assertEquals("b", pickTodayHero(listOf(a, b), emptyList(), NOW, null, null, setOf("a"))?.id)
+    }
 }

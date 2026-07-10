@@ -12,13 +12,17 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -54,6 +58,7 @@ import tech.csalliance.unstuck.design.component.UButton
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.ui.sharing.ShareTaskSheet
 import tech.csalliance.unstuck.ui.components.RecurrenceEditor
 import tech.csalliance.unstuck.ui.components.TagPicker
 import tech.csalliance.unstuck.ui.components.areaColorFor
@@ -99,6 +104,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     }
     var confirmDelete by remember { mutableStateOf(false) }
     var showEstimate by remember { mutableStateOf(false) }
+    var showShare by remember { mutableStateOf(false) }
     val taskSessions = sessions.filter { it.taskId == task.id }
     val taskCaptures = captures.filter { it.taskId == task.id }
     val myBlocks = blocks.filter { it.taskId == task.id }.sortedWith(compareBy({ it.date }, { it.startTime }))
@@ -111,9 +117,16 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 AreaDotColor(areaColorFor(task.lifeArea, areas, c), size = 6)
                 SectionLabel("${(task.lifeArea ?: "Task").uppercase()} · TASK")
+                Box(Modifier.weight(1f))
+                // Share a real task with your circle at a graded level (not a
+                // recurring occurrence — one day of a series isn't its own task).
+                if (!isOcc) Icon(
+                    Icons.Filled.Share, contentDescription = "Share task", tint = c.ink2,
+                    modifier = Modifier.size(20.dp).clip(CircleShape).clickable { showShare = true },
+                )
             }
 
             EditableText(
@@ -237,6 +250,8 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
         dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel", color = c.ink2) } },
         containerColor = c.surface,
     )
+
+    if (showShare) ShareTaskSheet(vm, task.id, task.name, onDismiss = { showShare = false })
 }
 
 @Composable

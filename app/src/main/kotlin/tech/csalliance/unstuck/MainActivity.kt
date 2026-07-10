@@ -132,8 +132,9 @@ class MainActivity : ComponentActivity() {
         } else if (data?.scheme == "unstuck" && data.host == "auth-callback") {
             graph.pendingRecoveryProbe.value = true
         }
-        // Notification taps → route to the task / today / recap / brief / focus / collections (consumed by MainScaffold).
-        if (data?.scheme == "unstuck" && (data.host == "task" || data.host == "today" || data.host == "focus" || data.host == "collections")) {
+        // Notification taps → route to the task / today / tasks / recap / brief / focus / collections (consumed by MainScaffold).
+        // `tasks` is what share-notify sends (unstuck://tasks) for shared/session/done pings.
+        if (data?.scheme == "unstuck" && (data.host == "task" || data.host == "tasks" || data.host == "today" || data.host == "focus" || data.host == "collections")) {
             graph.pendingDeepLink.value = data.toString()
             return
         }

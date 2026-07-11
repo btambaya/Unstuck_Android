@@ -34,6 +34,12 @@ class RealtimeMirror(
     private val client: SupabaseClient,
     private val store: LocalStore,
     private val scope: CoroutineScope,
+    // Invoked when a channel that HAD been SUBSCRIBED drops to UNSUBSCRIBED while the
+    // socket stays connected (a server-side channel close). The socket-status observer
+    // never fires for this, so without a per-channel heal only the ~60s pull recovers
+    // it. The callback must be cheap/non-blocking (it launches the heal itself) and is
+    // expected to coalesce (several channels can close at once). See BUG 4.
+    private val onChannelClosed: () -> Unit = {},
 ) {
     private val channels = mutableListOf<RealtimeChannel>()
     private val jobs = mutableListOf<Job>()
@@ -114,8 +120,36 @@ class RealtimeMirror(
         }.launchIn(scope)
         runCatching { channel.subscribe() }
             .onFailure { println("[realtime] subscribe $tableName failed: $it") }
+        // Observability + self-heal: surface the channel's status transitions AND
+        // trigger a re-subscribe if it closes server-side while the socket stays up.
+        // Tracked in jobs so it's cancelled on unsubscribeAll.
+        val statusJob = observeChannelStatus(channel, tableName)
         channels += channel
         jobs += job
+        jobs += statusJob
+    }
+
+    /** Observe one channel's status: log every transition (a silent (re)subscribe
+     *  failure must be visible) AND self-heal (BUG 4). If the channel had reached
+     *  SUBSCRIBED and then drops to UNSUBSCRIBED (a server-side close while the socket
+     *  is still CONNECTED — the socket observer won't fire), invoke [onChannelClosed]
+     *  once to trigger a coalesced re-subscribe + hydrate. Intentional teardown is
+     *  NOT seen here: [unsubscribeAll] cancels these jobs BEFORE unsubscribing the
+     *  channels, so we never observe the teardown transition. */
+    private fun observeChannelStatus(channel: RealtimeChannel, label: String): Job {
+        var wasSubscribed = false
+        return channel.status.onEach { status ->
+            println("[realtime] $label channel status: $status")
+            when (status) {
+                RealtimeChannel.Status.SUBSCRIBED -> wasSubscribed = true
+                RealtimeChannel.Status.UNSUBSCRIBED -> if (wasSubscribed) {
+                    wasSubscribed = false   // fire once per close; the rebuild starts fresh
+                    println("[realtime] $label channel closed while socket up — requesting heal")
+                    onChannelClosed()
+                }
+                else -> {}
+            }
+        }.launchIn(scope)
     }
 
     /** collection_members for ME (filtered user_id=eq). Any insert/update/delete
@@ -133,8 +167,10 @@ class RealtimeMirror(
         }.launchIn(scope)
         runCatching { channel.subscribe() }
             .onFailure { println("[realtime] subscribe collection_members failed: $it") }
+        val statusJob = observeChannelStatus(channel, "collection_members")
         channels += channel
         jobs += job
+        jobs += statusJob
     }
 
     suspend fun unsubscribeAll() {

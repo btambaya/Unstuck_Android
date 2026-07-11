@@ -6,11 +6,19 @@ import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.status.SessionSource
 import io.github.jan.supabase.auth.status.SessionStatus
+import io.github.jan.supabase.realtime.Realtime
+import io.github.jan.supabase.realtime.realtime
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicBoolean
 import tech.csalliance.unstuck.core.logic.externalEventToBlock
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
@@ -50,7 +58,10 @@ class SyncCoordinator(
 
     private val hydrator = Hydrator(gateway, store)
     private val flusher = OutboxFlusher(gateway, store)
-    private val realtime = RealtimeMirror(client, store, scope)
+    // onChannelClosed: a single channel closing server-side while the socket stays
+    // CONNECTED (so startHealthObserver never fires) — self-heal by rebuilding the
+    // mirror + a coalesced backfill hydrate. See healClosedChannel (BUG 4).
+    private val realtime = RealtimeMirror(client, store, scope, onChannelClosed = { healClosedChannel() })
     // Live change SIGNALS for sharing (RPC-backed surfaces can't be table-mirrored;
     // recipients have no RLS read on raw task rows). ViewModels observe
     // collab.sharesChanged / .circleChanged and refetch via `circle`.
@@ -62,10 +73,72 @@ class SyncCoordinator(
     private val appContext = context.applicationContext
     private val prefs = context.getSharedPreferences("unstuck.sync", Context.MODE_PRIVATE)
     private var observeJob: Job? = null
-    // Guards realtime against double-subscribe: the auth flow and the
-    // foreground/background lifecycle both drive (un)subscribeAll. True only while
-    // the ~9 channels + websocket are live.
-    private var realtimeSubscribed = false
+    // Foreground safety nets — started on foreground, cancelled on background.
+    private var healthJob: Job? = null        // realtime socket-reconnect self-heal
+    private var periodicPullJob: Job? = null  // ~60s backstop full pull
+    // Serializes the realtime subscription lifecycle so the auth flow and the
+    // foreground/background lifecycle can't race into the broken "foregrounded but
+    // UNSUBSCRIBED with no refresh" state (the live-sync bug). Owns the thread-safe
+    // subscribed flag; the injected callbacks are the real engine (un)subscribe +
+    // hydrate calls. See RealtimeLifecycle.
+    private val realtimeLifecycle = RealtimeLifecycle(
+        scope = scope,
+        hydrate = { auth.currentUserId?.let { coalescedHydrate(it) } },
+        // Return TRUE only when a REAL subscribe happened (a user exists). A null
+        // user (resume() racing the async session restore) must NOT leave the
+        // lifecycle flag set, or the later SIGNED_IN would skip the real subscribe
+        // and the session would have no live mirror (BUG 1).
+        subscribe = { auth.currentUserId?.let { doSubscribeRealtime(it); true } ?: false },
+        unsubscribe = { doUnsubscribeRealtime() },
+        onError = { Log.w(TAG, "realtime lifecycle step failed; will retry", it) },
+    )
+
+    // --- Hydrate coalescer (BUG 3). The socket-reconnect heal, the ~60s periodic
+    // pull, the resume hydrate, and the auth-branch hydrate all issue the same full
+    // pull. Serialize them behind a Mutex + drop-if-in-flight coalescer so they can't
+    // run concurrently (redundant full-table replaces + a TOCTOU window in the
+    // non-transactional read-modify-write paths). ---
+    private val hydrateMutex = Mutex()
+    private val hydrateInFlight = AtomicBoolean(false)
+    // Coalesces channel-close self-heals (BUG 4) so several channels dropping at
+    // once collapse to a single mirror rebuild.
+    private val healInFlight = AtomicBoolean(false)
+
+    /** Full server-canonical pull, coalesced: at most one runs at a time. A caller
+     *  arriving while a pull is in flight is DROPPED (coalesced to the running one —
+     *  its fresh snapshot already reflects whatever prompted this call). The Mutex
+     *  serializes the actual pull so no two overlap. Deadlock-free: the mutex is only
+     *  ever held around [Hydrator.hydrate], never across an unrelated suspend. */
+    private suspend fun coalescedHydrate(uid: String) {
+        if (!hydrateInFlight.compareAndSet(false, true)) return
+        try {
+            hydrateMutex.withLock { hydrator.hydrate(uid) }
+        } finally {
+            hydrateInFlight.set(false)
+        }
+    }
+
+    /** BUG-4 self-heal: rebuild the whole mirror (a fresh real subscribe) + a
+     *  coalesced backfill hydrate after a channel closed server-side. Runs on its own
+     *  coroutine so the resubscribe's teardown — which cancels the very status job
+     *  that triggered this — can't cancel the heal itself. Coalesced via [healInFlight]. */
+    private fun healClosedChannel() {
+        val uid = auth.currentUserId ?: return
+        if (!healInFlight.compareAndSet(false, true)) return
+        scope.launch {
+            try {
+                Log.i(TAG, "realtime channel closed while socket up — rebuilding mirror + backfilling")
+                realtimeLifecycle.resubscribe()
+                coalescedHydrate(uid)
+            } catch (t: CancellationException) {
+                throw t
+            } catch (t: Throwable) {
+                Log.w(TAG, "channel-close self-heal failed", t)
+            } finally {
+                healInFlight.set(false)
+            }
+        }
+    }
 
     /** Sign out, first deleting this device's push-token row WHILE the JWT is
      *  still valid (RLS: user_id = auth.uid()). Stops the previous user's
@@ -135,40 +208,89 @@ class SyncCoordinator(
         observeJob = null
     }
 
-    /** Subscribe the realtime mirror for [uid], guarding against a double-subscribe.
-     *  subscribeAll() already unsubscribes first, so a redundant call is harmless —
-     *  the guard just avoids the extra teardown/rebuild churn. */
-    private suspend fun subscribeRealtime(uid: String) {
-        if (realtimeSubscribed) return
+    /** Build the realtime mirror for [uid]. Idempotent: subscribeAll() tears down
+     *  any existing channels first, so a repeat call cleanly rebuilds (no double-
+     *  subscribe / channel leak). Invoked only via RealtimeLifecycle (serialized). */
+    private suspend fun doSubscribeRealtime(uid: String) {
         realtime.subscribeAll(uid) { hydrator.hydrateCollections(uid) }
         collab.subscribe()   // sharing change-signals (task_shares + trusted_circle)
-        realtimeSubscribed = true
+    }
+
+    /** Drop the realtime channels + websocket. Invoked only via RealtimeLifecycle. */
+    private suspend fun doUnsubscribeRealtime() {
+        realtime.unsubscribeAll()
+        collab.unsubscribe()
     }
 
     /** Drop the realtime channels + websocket while the app is backgrounded — they
      *  otherwise stay subscribed (and the socket alive) indefinitely. The auth
      *  observer keeps running; a missed change is caught by the next hydrate on
-     *  resume / the periodic SyncWorker. No-op if already paused. */
+     *  resume / the periodic SyncWorker. Also stops the foreground safety nets. */
     fun pauseRealtime() {
-        if (!realtimeSubscribed) return
-        scope.launch {
-            realtime.unsubscribeAll()
-            collab.unsubscribe()
-            realtimeSubscribed = false
+        stopForegroundNets()
+        realtimeLifecycle.pause()
+    }
+
+    /** Foreground: ALWAYS re-hydrate (pull anything missed while backgrounded) AND
+     *  ensure the live mirror is subscribed — never early-returns on a stale flag,
+     *  and serialized against pause so a quick background→foreground can't settle
+     *  unsubscribed with no refresh. Also (re)arms the foreground safety nets: the
+     *  socket-reconnect self-heal + the ~60s backstop pull. */
+    fun resumeRealtime() {
+        realtimeLifecycle.resume()
+        startForegroundNets()
+    }
+
+    // --- Foreground safety nets: only run while the app is foregrounded. ---
+
+    private fun startForegroundNets() {
+        startHealthObserver()
+        startPeriodicPull()
+    }
+
+    private fun stopForegroundNets() {
+        healthJob?.cancel(); healthJob = null
+        periodicPullJob?.cancel(); periodicPullJob = null
+    }
+
+    /** REALTIME SELF-HEAL. Watch the socket status; when it RE-connects after a
+     *  drop (a network blip / doze), supabase-kt auto-rejoins the channels but any
+     *  change made while offline was missed — so pull server-canonical to backfill.
+     *  The first CONNECTED after (re)start is our own intentional subscribe and is
+     *  ignored (wasConnected starts false). Restarted fresh on each foreground. */
+    private fun startHealthObserver() {
+        if (healthJob?.isActive == true) return
+        healthJob = scope.launch {
+            var wasConnected = false
+            client.realtime.status.collect { status ->
+                Log.d(TAG, "realtime socket status: $status")
+                if (status == Realtime.Status.CONNECTED) {
+                    if (wasConnected) {
+                        auth.currentUserId?.let { uid ->
+                            Log.i(TAG, "realtime reconnected after a drop — backfilling via hydrate")
+                            runCatching { coalescedHydrate(uid) }
+                                .onFailure { Log.w(TAG, "post-reconnect hydrate failed", it) }
+                        }
+                    }
+                    wasConnected = true
+                }
+            }
         }
     }
 
-    /** Re-subscribe realtime on foreground IF a user is signed in and we're not
-     *  already subscribed (don't fight the auth-driven subscribe). Hydrates first so
-     *  any change missed while backgrounded is pulled before the live mirror resumes. */
-    fun resumeRealtime() {
-        if (realtimeSubscribed) return
-        val uid = auth.currentUserId ?: return
-        scope.launch {
-            runCatching {
-                hydrator.hydrate(uid)
-                subscribeRealtime(uid)
-            }.onFailure { Log.w(TAG, "realtime resume failed; will retry on next foreground", it) }
+    /** FOREGROUND SAFETY-NET PULL. A lightweight periodic full pull (~60s) as a
+     *  backstop for the continuously-foregrounded case (user watching this device
+     *  while editing on another) where no socket event ever fires. It's the same
+     *  full hydrate — cheap at this cadence. Cancelled on background. */
+    private fun startPeriodicPull() {
+        if (periodicPullJob?.isActive == true) return
+        periodicPullJob = scope.launch {
+            while (isActive) {
+                delay(FOREGROUND_PULL_INTERVAL_MS)
+                val uid = auth.currentUserId ?: continue
+                runCatching { coalescedHydrate(uid) }
+                    .onFailure { Log.w(TAG, "foreground safety-net pull failed", it) }
+            }
         }
     }
 
@@ -352,16 +474,29 @@ class SyncCoordinator(
                 runCatching {
                     hydrator.pruneStaleTaskOps()
                     flusher.flush(uid) { auth.currentUserId }
-                    hydrator.hydrate(uid)
-                    subscribeRealtime(uid)
+                    coalescedHydrate(uid)
+                    // A user now definitively exists. On sign-in / initial session force
+                    // a fresh REAL (re)subscribe regardless of the lifecycle flag — a
+                    // resume() that ran before the session was restored may have flipped
+                    // the flag without creating channels (BUG 1). USER_UPDATED (same user,
+                    // metadata) just ensures the mirror is up (idempotent).
+                    if (event == SyncAuthEvent.SIGNED_IN || event == SyncAuthEvent.INITIAL_SESSION) {
+                        realtimeLifecycle.resubscribe()
+                    } else {
+                        realtimeLifecycle.ensureSubscribed()   // idempotent + serialized vs pause/resume
+                    }
+                    // Re-arm the foreground safety nets. A sign-out→sign-in WITHIN one
+                    // continuous foreground cancels them via stopForegroundNets() and
+                    // would otherwise never restart them until the next onStart (BUG 2).
+                    // Idempotent (isActive guards), so redundant with resumeRealtime's call.
+                    startForegroundNets()
                     runCatching { pullCalendar() }   // ingest Google events if connected
                     maybeTrackLogin(uid)             // best-effort usage analytics (throttled)
                 }.onFailure { Log.w(TAG, "sync authenticated-branch step failed; sync stays alive", it) }
             }
             is SessionStatus.NotAuthenticated -> if (status.isSignOut) {
-                realtime.unsubscribeAll()
-                collab.unsubscribe()
-                realtimeSubscribed = false
+                stopForegroundNets()
+                realtimeLifecycle.forceUnsubscribe()
                 store.clearAll()
                 prefs.edit().remove(KEY_PREV_USER).apply()
             }
@@ -372,6 +507,9 @@ class SyncCoordinator(
     companion object {
         private const val TAG = "UnstuckSync"
         private const val KEY_PREV_USER = "unstuck.prevUserId"
+        // Foreground backstop pull cadence — cheap full hydrate; catches the
+        // continuously-foregrounded case where no realtime socket event fires.
+        private const val FOREGROUND_PULL_INTERVAL_MS = 60_000L
         // Google rejects custom schemes (unstuck://) on a Web OAuth client, so the
         // redirect_uri we hand Google is the HTTPS bounce page the web app serves
         // (the same one iOS uses). That page forwards ?code&state to

@@ -38,6 +38,7 @@ object UFont {
     val serif = InstrumentSerif
     val mono = PlexMono
 
+    fun serif(size: Int, italic: Boolean = false) = TextStyle(fontFamily = serif, fontStyle = if (italic) FontStyle.Italic else FontStyle.Normal, fontSize = size.sp)
     fun serifItalic(size: Int) = TextStyle(fontFamily = serif, fontStyle = FontStyle.Italic, fontSize = size.sp)
     fun mono(size: Int, weight: FontWeight = FontWeight.Normal) = TextStyle(fontFamily = mono, fontWeight = weight, fontSize = size.sp)
     fun sans(size: Int, weight: FontWeight = FontWeight.Normal) = TextStyle(fontFamily = sans, fontWeight = weight, fontSize = size.sp)

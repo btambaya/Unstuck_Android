@@ -105,6 +105,10 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     var confirmDelete by remember { mutableStateOf(false) }
     var showEstimate by remember { mutableStateOf(false) }
     var showShare by remember { mutableStateOf(false) }
+    // Current per-task reminder lead override (null = the global default from
+    // Settings, 0 = off). Keyed on the TEMPLATE for occurrences — that's the id
+    // ReminderScheduler looks up per block.
+    var reminderLead by remember(editTarget.id) { mutableStateOf(vm.reminderOverride(editTarget.id)) }
     val taskSessions = sessions.filter { it.taskId == task.id }
     val taskCaptures = captures.filter { it.taskId == task.id }
     val myBlocks = blocks.filter { it.taskId == task.id }.sortedWith(compareBy({ it.date }, { it.startTime }))
@@ -191,6 +195,26 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                         // Tapping the schedule cell opens the same date/time picker.
                         MetaCell("Schedule", scheduleLabel, Modifier.weight(1f).clip(RoundedCornerShape(8.dp)).clickable(enabled = !isOcc) { pickSchedule() })
                         MetaCell("Status", when { task.done -> "Completed"; task.totalFocused > 0 -> "In progress"; else -> "Not started" }, Modifier.weight(1f))
+                    }
+                    // Pre-task reminder — "Default" uses the global lead from Settings;
+                    // pick a specific lead (or Off) to override just this task. Only shown
+                    // when a reminder can actually fire, i.e. the task is scheduled and not
+                    // parked in Later (mirrors the old create-sheet condition). The override
+                    // lives in prefs, so re-arm the alarms explicitly (same as Settings).
+                    if (task.later != true && (myBlocks.isNotEmpty() || isOcc)) {
+                        Column {
+                            SectionLabel("Remind me")
+                            fun pick(lead: Int?) {
+                                reminderLead = lead
+                                vm.setReminderOverride(editTarget.id, lead)
+                                runCatching { tech.csalliance.unstuck.surface.ReminderScheduler.reschedule(context.applicationContext as tech.csalliance.unstuck.UnstuckApp) }
+                            }
+                            Row(Modifier.padding(top = 6.dp).horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                SelectableChip("Default", selected = reminderLead == null) { pick(null) }
+                                SelectableChip("Off", selected = reminderLead == 0) { pick(0) }
+                                listOf(5, 10, 15).forEach { m -> SelectableChip("${m}m before", selected = reminderLead == m) { pick(m) } }
+                            }
+                        }
                     }
                 }
             }

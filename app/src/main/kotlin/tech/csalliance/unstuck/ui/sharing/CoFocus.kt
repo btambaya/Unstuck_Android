@@ -33,9 +33,14 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import androidx.compose.runtime.mutableLongStateOf
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import tech.csalliance.unstuck.core.logic.formatMMSS
 import tech.csalliance.unstuck.core.model.CoFocusPeer
 import tech.csalliance.unstuck.core.model.CoFocusState
+import tech.csalliance.unstuck.core.model.CoFocusTimer
+import tech.csalliance.unstuck.core.model.coFocusElapsedSec
 import tech.csalliance.unstuck.core.model.coFocusPeopleLabel
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
@@ -61,6 +66,7 @@ fun rememberCoFocusPeers(
     taskId: String?,
     active: Boolean,
     track: CoFocusState?,
+    timer: CoFocusTimer? = null,
 ): List<CoFocusPeer> {
     var peers by remember { mutableStateOf<List<CoFocusPeer>>(emptyList()) }
     var session by remember { mutableStateOf<tech.csalliance.unstuck.sync.CoFocusSession?>(null) }
@@ -68,7 +74,7 @@ fun rememberCoFocusPeers(
 
     DisposableEffect(taskId, active) {
         if (active && taskId != null) {
-            val s = vm.openCoFocus(taskId, track)
+            val s = vm.openCoFocus(taskId, track, timer)
             session = s
             val job = s?.let { sess -> scope.launch { sess.peers.collect { peers = it } } }
             onDispose { job?.cancel(); s?.close(); session = null; peers = emptyList() }
@@ -79,6 +85,10 @@ fun rememberCoFocusPeers(
     }
     // A track change (observe → here) re-tracks on the SAME channel without a rebuild.
     LaunchedEffect(session, track) { session?.setTrack(track) }
+    // A timer change (pause / resume / extend / start) re-tracks in place so a partner's
+    // shared view updates live. `timer` is a value class → stable while running, so this
+    // fires only on an actual state change, not every tick.
+    LaunchedEffect(session, timer) { session?.setTimer(timer) }
     return peers
 }
 
@@ -93,6 +103,9 @@ fun CoFocusBar(peers: List<CoFocusPeer>, modifier: Modifier = Modifier) {
         peers.size == 1 -> "is here with you"
         else -> "are here with you"
     }
+    // The shared timer of a focusing partner (if one is broadcasting a live session), so
+    // the owner SEES the same running/paused mm:ss — a shared view, not a remote control.
+    val focusingPeer = peers.firstOrNull { it.state == CoFocusState.FOCUSING && it.timer != null }
     Row(
         modifier
             .clip(RoundedCornerShape(999.dp))
@@ -107,7 +120,35 @@ fun CoFocusBar(peers: List<CoFocusPeer>, modifier: Modifier = Modifier) {
             style = UFont.sans(12, FontWeight.SemiBold),
             color = Color.White.copy(alpha = 0.92f),
         )
+        focusingPeer?.timer?.let { SharedTimer(it, onDark = true) }
     }
+}
+
+/** A partner's live focus timer, rendered from their broadcast session so both people
+ *  see the SAME mm:ss + a "Paused" badge. Ticks locally each second; paused elapsed is
+ *  frozen (computed from pausedAtMs) so it holds still. Pure elapsed math lives in core. */
+@Composable
+private fun SharedTimer(timer: CoFocusTimer, onDark: Boolean) {
+    val c = UTheme.colors
+    val now = rememberSecondTicker()
+    val elapsed = coFocusElapsedSec(timer, now)
+    val timeColor = if (onDark) Color.White.copy(alpha = 0.85f) else c.ink2
+    Text(formatMMSS(elapsed), style = UFont.mono(12, FontWeight.SemiBold), color = timeColor)
+    if (timer.paused) {
+        val badgeBg = if (onDark) Color.White.copy(alpha = 0.18f) else c.amberSoft
+        val badgeFg = if (onDark) Color.White.copy(alpha = 0.9f) else c.amberInk
+        Box(Modifier.clip(RoundedCornerShape(999.dp)).background(badgeBg).padding(horizontal = 7.dp, vertical = 2.dp)) {
+            Text("Paused", style = UFont.sans(10, FontWeight.Bold), color = badgeFg)
+        }
+    }
+}
+
+/** A local 1-second clock for the calm shared timer. Cheap; paused peers freeze anyway. */
+@Composable
+private fun rememberSecondTicker(): Long {
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) { while (true) { now = System.currentTimeMillis(); delay(1000) } }
+    return now
 }
 
 /** RECIPIENT: inline presence on a partner "shared with you" row. Shows a live
@@ -118,7 +159,8 @@ fun PartnerPresence(vm: AppViewModel, taskId: String, modifier: Modifier = Modif
     val c = UTheme.colors
     var sitting by remember(taskId) { mutableStateOf(false) }
     val peers = rememberCoFocusPeers(vm, taskId, active = true, track = if (sitting) CoFocusState.HERE else null)
-    val ownerFocusing = peers.any { it.state == CoFocusState.FOCUSING }
+    val focusingPeer = peers.firstOrNull { it.state == CoFocusState.FOCUSING }
+    val ownerFocusing = focusingPeer != null
 
     // Nothing to show until the owner is focusing or you've chosen to sit in.
     if (!ownerFocusing && !sitting) return
@@ -128,6 +170,8 @@ fun PartnerPresence(vm: AppViewModel, taskId: String, modifier: Modifier = Modif
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 PulseDot(c.green)
                 Text("focusing now", style = UFont.sans(11, FontWeight.SemiBold), color = c.greenInk)
+                // The owner's live session, so the recipient sees the SAME mm:ss + Paused.
+                focusingPeer?.timer?.let { SharedTimer(it, onDark = false) }
             }
         }
         Row(

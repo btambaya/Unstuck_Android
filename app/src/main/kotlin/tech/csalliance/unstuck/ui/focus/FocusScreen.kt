@@ -214,8 +214,17 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
     // meet the other side on cofocus:<taskId>, so each sees the other as "focusing".
     val sharedPartner = (l?.sharedLevel ?: sharedLevel?.wire) == ShareLevel.PARTNER.wire
     val partnerShared = sharedPartner || shareBadges[focusTaskId].orEmpty().any { it.level == ShareLevel.PARTNER }
+    // Broadcast my live session's timer so a partner sees the SAME running/paused mm:ss.
+    // sessionStart is resume-adjusted; the value is stable while running (re-tracks only on
+    // pause / resume / extend), so this doesn't churn the channel every tick.
+    val coFocusTimer = l?.sessionStart?.let { start ->
+        tech.csalliance.unstuck.core.model.CoFocusTimer(
+            sessionStartMs = start, paused = l.paused, pausedAtMs = l.pausedAt, estimateMin = l.sessionEstimateMin,
+        )
+    }
     val coFocusPeers = rememberCoFocusPeers(
         vm, focusTaskId, active = partnerShared && sessionStart != null, track = CoFocusState.FOCUSING,
+        timer = coFocusTimer,
     )
 
     // Copilot tick: feed ACCUMULATED FOCUS seconds (paused time excluded) only while

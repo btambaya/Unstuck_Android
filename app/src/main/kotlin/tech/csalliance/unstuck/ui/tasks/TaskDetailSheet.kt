@@ -84,6 +84,14 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     val isOcc = occBlock != null && template != null
     val editTarget = if (isOcc) template!! else task
 
+    // A REAL task the owner assigned OUT is view-only here: hide Focus + Mark-done (the
+    // recipient owns doing it now) and show a hint. Share controls stay live so the owner
+    // can always take it back (downgrade / unshare re-enables Focus + completion).
+    // Occurrences are never assigned out, so only gate real tasks.
+    val assignedOut by vm.assignedOut.collectAsStateWithLifecycle()
+    val assignedOutName = if (!isOcc) assignedOut[task.id] else null
+    val isAssignedOut = assignedOutName != null
+
     // Pick an actual date + time (platform dialogs, local-zone — no Material UTC
     // off-by-one). scheduleTask both creates and reschedules in place; scheduling a
     // concrete time also moves the task out of "Later".
@@ -154,9 +162,13 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
             }
 
             Row(Modifier.fillMaxWidth().padding(top = 14.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box(Modifier.weight(1f)) { UButton("Focus", kind = ButtonKind.CORAL, leadingIcon = Icons.Filled.PlayArrow, onClick = onStartFocus) }
+                // Assigned out → view-only: no live Focus, no Mark-done (guarded in the VM too).
+                if (!isAssignedOut) {
+                    Box(Modifier.weight(1f)) { UButton("Focus", kind = ButtonKind.CORAL, leadingIcon = Icons.Filled.PlayArrow, onClick = { if (!isAssignedOut) onStartFocus() }) }
+                }
                 if (!isOcc) UButton("Schedule", kind = ButtonKind.OUTLINED, fill = false) { pickSchedule() }
-                UButton(if (task.done) "✓ Done" else "Mark done", kind = ButtonKind.TEXT, fill = false) {
+                if (!isAssignedOut) UButton(if (task.done) "✓ Done" else "Mark done", kind = ButtonKind.TEXT, fill = false) {
+                    if (isAssignedOut) return@UButton
                     val wasDone = task.done
                     vm.toggleDone(task)
                     // For a recurring OCCURRENCE, completing it removes that day's row — pop the
@@ -165,6 +177,12 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                     if (isOcc && !wasDone) onBack()
                 }
                 if (isOcc) UButton("Skip today", kind = ButtonKind.TEXT, fill = false) { vm.skipOccurrence(task.id); onBack() }
+            }
+            if (isAssignedOut) {
+                Text(
+                    "You assigned this to ${assignedOutName?.substringBefore('@') ?: "someone"} — view only",
+                    style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 8.dp),
+                )
             }
             scheduled?.let { Text("Scheduled $it", style = UFont.sans(12), color = c.green, modifier = Modifier.padding(top = 8.dp)) }
             if (task.later == true) {

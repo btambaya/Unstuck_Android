@@ -159,13 +159,43 @@ enum class CoFocusState(val wire: String) {
     }
 }
 
-/** Another participant present on a co-focus channel (never yourself). Port of CoFocusPeer. */
+/** A focusing peer's LIVE session timer, carried in the presence payload so the other
+ *  side renders the SAME running/paused mm:ss — a SHARED VIEW, never a remote control.
+ *  Minor clock skew (a few seconds) is fine; this is a calm indicator, not a synced
+ *  machine. All epoch ms. Wire names (sessionStartMs / paused / pausedAtMs / estimateMin)
+ *  ship IDENTICALLY on web + iOS + Android so the three interoperate on one channel.
+ *  Only a FOCUSING peer with a live session carries one (HERE / observe → null). */
+data class CoFocusTimer(
+    val sessionStartMs: Long,   // resume-adjusted: elapsed = now − sessionStartMs while running
+    val paused: Boolean,
+    val pausedAtMs: Long?,      // epoch ms when paused, else null
+    val estimateMin: Int,       // the focusing peer's session estimate
+)
+
+/** Another participant present on a co-focus channel (never yourself). Port of CoFocusPeer.
+ *  [timer] is non-null only for a FOCUSING peer broadcasting a live session. */
 data class CoFocusPeer(
     val userId: String,
     val name: String,
     val state: CoFocusState,
     val sinceMs: Long,
+    val timer: CoFocusTimer? = null,
 )
+
+/** Seconds elapsed in a focusing peer's shared session: FROZEN at the pause point while
+ *  paused, else wall-clock since (resume-adjusted) start. Clamped at ≥ 0. Pure — the SAME
+ *  computation runs on web + iOS + Android so the shared timer agrees across platforms. */
+fun coFocusElapsedSec(timer: CoFocusTimer, now: Long): Int {
+    val elapsedMs =
+        if (timer.paused && timer.pausedAtMs != null) timer.pausedAtMs - timer.sessionStartMs
+        else now - timer.sessionStartMs
+    return (elapsedMs / 1000L).coerceAtLeast(0L).toInt()
+}
+
+/** Seconds remaining against the peer's session estimate; may go negative on overrun
+ *  (the caller decides how to render that). Pure — same math on every platform. */
+fun coFocusRemainingSec(timer: CoFocusTimer, now: Long): Int =
+    timer.estimateMin * 60 - coFocusElapsedSec(timer, now)
 
 /** First name for the calm "X is here with you" label. Mirrors firstName() in cofocus.tsx. */
 fun coFocusFirstName(name: String): String =

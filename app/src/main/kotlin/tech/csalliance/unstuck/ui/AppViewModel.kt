@@ -269,6 +269,10 @@ class AppViewModel(
     fun updateTask(task: TaskItem) = launchWrite { write?.upsertTask(task.copy(updatedAt = isoNow())) }
 
     fun toggleDone(task: TaskItem) = launchWrite {
+        // Defense in depth: a task the owner ASSIGNED OUT is view-only — never flip its
+        // completion, even via a deep-link / command that bypasses the hidden button.
+        // (Recurring occurrences are never assigned out, so their block id won't match.)
+        if (assignedOut.value.containsKey(task.id)) return@launchWrite
         // A recurring OCCURRENCE's id is its cal_block id — complete the block,
         // never the template (which would end the whole series).
         val occ = occurrenceBlockFor(task.id, tasks.value, blocks.value)
@@ -533,10 +537,15 @@ class AppViewModel(
     private val cofocus get() = graph.coordinator?.cofocus
 
     /** Open a co-focus presence session on `cofocus:<taskId>` with the given initial
-     *  [track] (null = observe only). Returns null when signed out / not configured.
-     *  The caller (a screen) MUST close() it on dispose. */
-    fun openCoFocus(taskId: String, track: tech.csalliance.unstuck.core.model.CoFocusState?): tech.csalliance.unstuck.sync.CoFocusSession? =
-        cofocus?.open(taskId, track)
+     *  [track] (null = observe only) and, when focusing, an initial [timer] to broadcast
+     *  so a partner sees the SAME live mm:ss. Returns null when signed out / not
+     *  configured. The caller (a screen) MUST close() it on dispose. */
+    fun openCoFocus(
+        taskId: String,
+        track: tech.csalliance.unstuck.core.model.CoFocusState?,
+        timer: tech.csalliance.unstuck.core.model.CoFocusTimer? = null,
+    ): tech.csalliance.unstuck.sync.CoFocusSession? =
+        cofocus?.open(taskId, track, timer)
 
     // --- in-app notification center: the log of shown notifications + an unread badge ---
     val notifications: StateFlow<List<tech.csalliance.unstuck.surface.NotificationLog.Entry>>
@@ -571,6 +580,10 @@ class AppViewModel(
     // --- focus / live session ---
 
     fun startFocus(task: TaskItem) = launchWrite {
+        // Defense in depth: a task the owner ASSIGNED OUT is view-only — never open a live
+        // session on it, even via a deep-link / command that bypasses the hidden button.
+        // (Recurring occurrences are never assigned out, so their block id won't match.)
+        if (assignedOut.value.containsKey(task.id)) return@launchWrite
         val cur = store.getLiveSession()
         // Focusing a recurring OCCURRENCE: run the session on the TEMPLATE (so
         // totalFocused accrues on the series) but remember the occurrence block so

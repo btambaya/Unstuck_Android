@@ -12,13 +12,16 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import tech.csalliance.unstuck.core.model.CoFocusPeer
 import tech.csalliance.unstuck.core.model.CoFocusState
+import tech.csalliance.unstuck.core.model.CoFocusTimer
 
 // Co-focus / body-doubling presence — the Android port of lib/cofocus-presence.ts,
 // the FIRST use of Supabase Realtime PRESENCE in the app (the rest of realtime is
@@ -44,12 +47,13 @@ class CoFocusPresence(
     private val scope: CoroutineScope,
 ) {
     /** Open a presence session on `cofocus:<taskId>` with the given initial [track]
-     *  (null = observe only). Returns null when signed out. The caller MUST close()
-     *  it when done (a screen closes on dispose). */
-    fun open(taskId: String, track: CoFocusState?): CoFocusSession? {
+     *  (null = observe only) and, when focusing, an initial [timer] to broadcast so the
+     *  other side sees the SAME live mm:ss. Returns null when signed out. The caller MUST
+     *  close() it when done (a screen closes on dispose). */
+    fun open(taskId: String, track: CoFocusState?, timer: CoFocusTimer? = null): CoFocusSession? {
         val myId = auth.currentUserId ?: return null
         val name = auth.currentName ?: "Someone"
-        return CoFocusSession(client, scope, taskId, myId, name, track)
+        return CoFocusSession(client, scope, taskId, myId, name, track, timer)
     }
 }
 
@@ -62,6 +66,7 @@ class CoFocusSession internal constructor(
     private val myId: String,
     private val name: String,
     initialTrack: CoFocusState?,
+    initialTimer: CoFocusTimer? = null,
 ) {
     // Stable session-join timestamp so re-tracking (a state flip) doesn't reset it.
     private val sinceMs = System.currentTimeMillis()
@@ -73,6 +78,8 @@ class CoFocusSession internal constructor(
     val peers: StateFlow<List<CoFocusPeer>> = _peers.asStateFlow()
 
     @Volatile private var track: CoFocusState? = initialTrack
+    // The live focus-session timer to broadcast while FOCUSING (null when not focusing).
+    @Volatile private var timer: CoFocusTimer? = initialTimer
     private var collectJob: Job? = null
     private var trackJob: Job? = null
     @Volatile private var closed = false
@@ -105,9 +112,18 @@ class CoFocusSession internal constructor(
         trackJob = scope.launch { applyTrack() }
     }
 
+    /** Update the broadcast focus-session timer (pause / resume / extend / start) and
+     *  re-track in place so the partner's shared view stays live. No-op if unchanged. */
+    fun setTimer(next: CoFocusTimer?) {
+        if (closed || next == timer) return
+        timer = next
+        trackJob = scope.launch { applyTrack() }
+    }
+
     private suspend fun applyTrack() {
         if (closed) return
         val t = track
+        val tm = timer
         runCatching {
             if (t != null) {
                 channel.track(buildJsonObject {
@@ -115,6 +131,15 @@ class CoFocusSession internal constructor(
                     put("name", name)
                     put("state", t.wire)
                     put("sinceMs", sinceMs)
+                    // A focusing peer also carries its live session's timer so the other
+                    // side renders the SAME running/paused mm:ss (identical wire fields
+                    // on web + iOS + Android). Omitted for HERE / observe.
+                    if (t == CoFocusState.FOCUSING && tm != null) {
+                        put("sessionStartMs", tm.sessionStartMs)
+                        put("paused", tm.paused)
+                        tm.pausedAtMs?.let { put("pausedAtMs", it) }
+                        put("estimateMin", tm.estimateMin)
+                    }
                 })
             } else {
                 channel.untrack()
@@ -141,7 +166,18 @@ class CoFocusSession internal constructor(
         val name = st["name"]?.jsonPrimitive?.contentOrNull ?: "Someone"
         val state = CoFocusState.fromWire(st["state"]?.jsonPrimitive?.contentOrNull)
         val since = st["sinceMs"]?.jsonPrimitive?.longOrNull ?: 0L
-        return CoFocusPeer(userId, name, state, since)
+        // A focusing peer carries its live-session timer (sessionStartMs present) so we can
+        // render the shared mm:ss. Absent for HERE / observe, or a peer on an older build.
+        val startMs = st["sessionStartMs"]?.jsonPrimitive?.longOrNull
+        val timer = if (state == CoFocusState.FOCUSING && startMs != null) {
+            CoFocusTimer(
+                sessionStartMs = startMs,
+                paused = st["paused"]?.jsonPrimitive?.booleanOrNull ?: false,
+                pausedAtMs = st["pausedAtMs"]?.jsonPrimitive?.longOrNull,
+                estimateMin = st["estimateMin"]?.jsonPrimitive?.intOrNull ?: 25,
+            )
+        } else null
+        return CoFocusPeer(userId, name, state, since, timer)
     }
 
     private companion object {

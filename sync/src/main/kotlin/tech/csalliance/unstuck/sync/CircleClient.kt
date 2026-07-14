@@ -14,11 +14,14 @@ import io.ktor.http.contentType
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.model.CircleMember
 import tech.csalliance.unstuck.core.model.CircleStatus
+import tech.csalliance.unstuck.core.model.Objective
 import tech.csalliance.unstuck.core.model.ShareBadge
 import tech.csalliance.unstuck.core.model.ShareForTask
 import tech.csalliance.unstuck.core.model.ShareLevel
+import tech.csalliance.unstuck.core.model.SharedTaskDetail
 import tech.csalliance.unstuck.core.model.SharedWithMe
 
 // CircleClient — the Android port of the web trusted-circle + per-task-sharing
@@ -49,6 +52,14 @@ import tech.csalliance.unstuck.core.model.SharedWithMe
 @Serializable internal data class SetDoneParams(
     @SerialName("p_task_id") val taskId: String,
     @SerialName("p_done") val done: Boolean,
+)
+
+@Serializable internal data class LogFocusParams(
+    @SerialName("p_task_id") val taskId: String,
+    @SerialName("p_actual_sec") val actualSec: Int,
+    // migration 046: the live focus session's uuid. The RPC is IDEMPOTENT per session
+    // id, so a re-fire (double finalize / cross-surface) no-ops server-side.
+    @SerialName("p_session_id") val sessionId: String,
 )
 
 // ── RPC row DTOs (server column names) ──
@@ -83,6 +94,27 @@ import tech.csalliance.unstuck.core.model.SharedWithMe
     @SerialName("task_id") val taskId: String,
     val level: String = "view",
     @SerialName("recipient_name") val recipientName: String = "",
+)
+
+// Read-only detail for a task shared WITH me (shared_task_detail, migration 045).
+// The RPC returns a single-row table; nullable list/date columns tolerate an absent
+// OR explicit-null value (a default only covers an ABSENT key, so these must be
+// nullable to survive a literal `null`). priority is decoded but unused (the detail
+// is read-only + the redesign has no priority surface).
+@Serializable internal data class SharedTaskDetailRow(
+    @SerialName("task_id") val taskId: String,
+    @SerialName("owner_name") val ownerName: String? = null,
+    val level: String = "view",
+    val name: String = "",
+    val done: Boolean = false,
+    @SerialName("estimate_min") val estimateMin: Int = 25,
+    @SerialName("total_focused") val totalFocused: Int = 0,
+    @SerialName("life_area") val lifeArea: String? = null,
+    val priority: String? = null,
+    val tags: List<String>? = null,
+    val objectives: List<Objective>? = null,
+    @SerialName("due_at") val dueAt: String? = null,
+    @SerialName("created_at") val createdAt: String? = null,
 )
 
 // ── Edge-fn bodies ──
@@ -202,6 +234,44 @@ class CircleClient(private val client: SupabaseClient) {
      *  rejects view). THROWS on error so the optimistic UI can roll back. */
     suspend fun sharedTaskSetDone(taskId: String, done: Boolean) {
         client.postgrest.rpc("shared_task_set_done", SetDoneParams(taskId, done))
+    }
+
+    /** Read-only detail for a task shared WITH me at ANY level (migration 045). RLS
+     *  forbids the raw task row; this SECURITY DEFINER projection is the only window.
+     *  Returns null on error / no such share (degrades — the caller keeps the row's
+     *  known title + level). */
+    suspend fun sharedTaskDetail(taskId: String): SharedTaskDetail? = runCatching {
+        client.postgrest.rpc("shared_task_detail", TaskIdParam(taskId))
+            .decodeList<SharedTaskDetailRow>().firstOrNull()?.let { r ->
+                SharedTaskDetail(
+                    taskId = r.taskId,
+                    ownerName = r.ownerName.orEmpty(),
+                    level = ShareLevel.fromWire(r.level),
+                    title = r.name,
+                    done = r.done,
+                    estimateMin = r.estimateMin,
+                    totalFocused = r.totalFocused,
+                    lifeArea = r.lifeArea,
+                    tags = r.tags.orEmpty(),
+                    objectives = r.objectives.orEmpty(),
+                    dueAt = r.dueAt,
+                    createdAt = r.createdAt.orEmpty(),
+                )
+            }
+    }.getOrNull()
+
+    /** Accrue a recipient's focus onto the OWNER's shared task (task.total_focused) —
+     *  the Option-B "focus reflects onto the owner" write. [actualSec] is CLAMPED to the
+     *  session estimate + grace (clampSharedElapsedSec) so a stale wall-clock session
+     *  can't dump hours onto the owner. [sessionId] is the live session's uuid: migration
+     *  046's RPC is IDEMPOTENT per session id, so a re-fire (double finalize) no-ops
+     *  server-side. The RPC allows only the caller's PARTNER or ASSIGN share (raises
+     *  'not_allowed' for view) and no-ops for <= 0. Best-effort fire-and-forget accrual. */
+    suspend fun logSharedFocus(taskId: String, actualSec: Int, sessionId: String, estimateMin: Int) {
+        val capped = FocusTimer.clampSharedElapsedSec(actualSec, estimateMin)
+        if (capped <= 0) return
+        runCatching { client.postgrest.rpc("log_shared_focus", LogFocusParams(taskId, capped, sessionId)) }
+            .onFailure { println("[shared-focus] log_shared_focus failed for $taskId (${capped}s): ${it.message}") }
     }
 
     /** All my outgoing shares, grouped by taskId → the row badges (mirrors the web's

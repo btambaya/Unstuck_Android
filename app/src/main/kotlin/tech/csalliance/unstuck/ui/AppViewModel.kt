@@ -217,6 +217,11 @@ class AppViewModel(
         sourceCollectionId: String? = null,
         sourceItemId: String? = null,
         dueAt: String? = null,
+        // Opt-in per-task shares picked in the create sheet (userId → level). Applied
+        // AFTER the task row lands on the server, IN THE SAME coroutine as the upsert,
+        // so task_share (which validates ownership server-side) can't race the insert
+        // and drop the share (T2). Empty for callers that don't share (e.g. onboarding).
+        shares: Map<String, ShareLevel> = emptyMap(),
     ): TaskItem {
         val now = isoNow()
         val t = TaskItem(
@@ -226,9 +231,40 @@ class AppViewModel(
             sourceCollectionId = sourceCollectionId, sourceItemId = sourceItemId, dueAt = dueAt,
             createdAt = now, updatedAt = now,
         )
-        launchWrite { write?.upsertTask(t) }
+        launchWrite {
+            write?.upsertTask(t)                                   // local write + enqueue (this coroutine)
+            if (shares.isNotEmpty()) applyCreatedShares(t.id, shares)   // then flush + share, ordered
+        }
         return t
     }
+
+    /** Apply the create-sheet's opt-in shares AFTER the task row has landed on the
+     *  server. A task_share RPC that races the not-yet-flushed task upsert raises
+     *  not_your_task and the share is silently dropped (T2, the live bug). Flush the
+     *  outbox so the insert commits, verify it's no longer pending, THEN share each —
+     *  logging failures instead of swallowing them. Mirrors the web create-modal
+     *  (awaitPendingUpsert → pendingIdsForTable guard → task_share). */
+    private suspend fun applyCreatedShares(taskId: String, picks: Map<String, ShareLevel>) {
+        flushOutbox()
+        // If the upsert failed (offline / 5xx), its op is still queued and the row never
+        // committed server-side — firing task_share now just raises not_your_task. Bail;
+        // the row lands on the next outbox replay and the user can re-share then.
+        if (store.pending().any { it.recordTable == "tasks" && it.recordId == taskId && it.op == "upsert" }) {
+            println("[share] task $taskId not committed yet (queued for retry) — skipping ${picks.size} share(s)")
+            return
+        }
+        picks.forEach { (userId, level) ->
+            runCatching {
+                circleClient?.taskShare(taskId, userId, level)
+                circleClient?.notifyTaskShare(taskId, userId)
+            }.onFailure { println("[share] task_share failed for $userId (${level.wire}) on $taskId: ${it.message}") }
+        }
+        refreshShares()
+    }
+
+    /** Push queued writes to the server now (best-effort) — used to land a just-created
+     *  task row before a share RPC. No-op when the coordinator isn't wired (tests). */
+    private suspend fun flushOutbox() { runCatching { graph.coordinator?.flushOutbox() } }
 
     fun updateTask(task: TaskItem) = launchWrite { write?.upsertTask(task.copy(updatedAt = isoNow())) }
 
@@ -544,6 +580,12 @@ class AppViewModel(
             val tpl = tasks.value.firstOrNull { it.id == occ.taskId }
             if (tpl != null) {
                 if (cur?.taskId == tpl.id && cur.occurrenceBlockId == occ.id) return@launchWrite
+                // Displacing a DIFFERENT task's live session (own OR shared): finalize it
+                // first so its elapsed isn't silently discarded — same guard the
+                // non-occurrence path uses. Without this, starting a recurring occurrence
+                // over a live shared session dropped the partner's minutes (owner never
+                // credited). Matches web, which finalizes all displacements.
+                if (cur != null && cur.sessionStart != null && cur.taskId != tpl.id) finalizeDisplaced(cur)
                 val base = cur ?: FocusTimer.empty
                 val live = FocusTimer.start(base, tpl.id, estimateMin = occ.durationMinutes, priorAccumulatedSec = tpl.totalFocused, now = nowMs(), occurrenceBlockId = occ.id)
                 store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
@@ -554,22 +596,56 @@ class AppViewModel(
         // paused session stays paused (the user resumes explicitly), it isn't
         // auto-resumed just by opening the focus screen.
         if (cur?.taskId == task.id) return@launchWrite
-        // Replacing a DIFFERENT task's live session: finalize it first (write its
-        // Session row + accumulate its focus time) so the elapsed time isn't silently
-        // discarded — same finalize as finishFocus(markDone=false).
-        if (cur != null && cur.sessionStart != null && cur.taskId != task.id) {
-            val prev = store.tasks().first().firstOrNull { it.id == cur.taskId }
-            if (prev != null) {
-                val elapsed = FocusTimer.elapsedSec(cur, nowMs())
-                write?.upsertSession(Session(id = cur.id ?: newUuid(), taskId = prev.id, taskName = prev.name, estimateMin = prev.estimateMin, actualSec = elapsed, completedAt = isoNow()))
-                write?.upsertTask(prev.copy(totalFocused = prev.totalFocused + elapsed, updatedAt = isoNow()))
-            }
-        }
+        // Replacing a DIFFERENT task's live session: finalize it first (own → write its
+        // Session row + accumulate focus; shared → accrue onto the owner) so the elapsed
+        // time isn't silently discarded — same finalize as finishFocus(markDone=false).
+        if (cur != null && cur.sessionStart != null && cur.taskId != task.id) finalizeDisplaced(cur)
         val base = cur ?: FocusTimer.empty
         // Seed prior focus so reopening after "End for now" continues from the
         // accumulated total instead of restarting the displayed timer at 0.
         val live = FocusTimer.start(base, task.id, estimateMin = task.estimateMin, priorAccumulatedSec = task.totalFocused, now = nowMs())
         store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
+    }
+
+    /** Start a REAL focus session on a task someone shared WITH me (T3, Option B). The
+     *  task is NOT in my store, so the session carries a shared marker ([sharedTitle] +
+     *  [level]); finish / cancel / displace then accrue the time onto the OWNER's task
+     *  via log_shared_focus instead of writing an own Session row / totalFocused. Gated
+     *  to partner/assign (view can't act; the RPC rejects it server-side too). */
+    fun startSharedFocus(taskId: String, title: String, estimateMin: Int, level: ShareLevel) = launchWrite {
+        if (!level.canComplete) return@launchWrite   // view is read-only company
+        val cur = store.getLiveSession()
+        // Already focusing this shared task (e.g. returning from Today) — keep its state.
+        if (cur?.taskId == taskId) return@launchWrite
+        // Replacing a different live session: finalize it first (own OR shared).
+        if (cur != null && cur.sessionStart != null && cur.taskId != taskId) finalizeDisplaced(cur)
+        val base = cur ?: FocusTimer.empty
+        // priorAccumulatedSec = 0: the recipient's session is standalone; the owner's
+        // running total is reflected server-side via log_shared_focus on finish.
+        val live = FocusTimer.start(base, taskId, estimateMin = estimateMin, priorAccumulatedSec = 0, now = nowMs())
+            .copy(sharedTitle = title, sharedLevel = level.wire)
+        store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
+    }
+
+    /** Finalize a live session being DISPLACED by starting another one. Own → write the
+     *  Session row + accrue totalFocused; shared → accrue onto the owner via
+     *  log_shared_focus (never mint an own-store row for a task that isn't mine). */
+    private suspend fun finalizeDisplaced(cur: LiveSession) {
+        val elapsed = FocusTimer.elapsedSec(cur, nowMs())
+        if (cur.sharedTitle != null) {
+            // Snapshot the id + clear the live session BEFORE the suspending RPC so a
+            // concurrent finalize can't observe a still-live shared session (server
+            // idempotency also guards, but this is cleaner). The caller installs the
+            // replacement session after we return.
+            val sid = cur.id ?: newUuid()
+            store.setLiveSession(null)
+            runCatching { circleClient?.logSharedFocus(cur.taskId, elapsed, sid, cur.sessionEstimateMin) }
+            refreshShares()
+            return
+        }
+        val prev = store.tasks().first().firstOrNull { it.id == cur.taskId } ?: return
+        write?.upsertSession(Session(id = cur.id ?: newUuid(), taskId = prev.id, taskName = prev.name, estimateMin = prev.estimateMin, actualSec = elapsed, completedAt = isoNow()))
+        write?.upsertTask(prev.copy(totalFocused = prev.totalFocused + elapsed, updatedAt = isoNow()))
     }
 
     fun pauseFocus() = launchWrite { mutateLive { FocusTimer.pause(it, nowMs()) } }
@@ -589,6 +665,27 @@ class AppViewModel(
     fun finishFocus(task: TaskItem, markDone: Boolean = false) = launchWrite {
         val live = store.getLiveSession() ?: return@launchWrite
         val elapsed = FocusTimer.elapsedSec(live, nowMs())
+        // Shared focus (T3, Option B): the task isn't in MY store — reflect the time
+        // onto the OWNER's task via log_shared_focus (partner/assign only) instead of
+        // writing an own Session row / totalFocused, and complete it via
+        // shared_task_set_done. The recipient still gets a normal local recap.
+        val sharedTitle = live.sharedTitle
+        if (sharedTitle != null) {
+            // Snapshot the id + clear the live session BEFORE the suspending RPCs so a
+            // concurrent finalize can't observe a still-live shared session (server
+            // idempotency also guards, but this is cleaner). elapsed is snapshotted above.
+            val sid = live.id ?: newUuid()
+            store.setLiveSession(null)
+            runCatching { circleClient?.logSharedFocus(live.taskId, elapsed, sid, live.sessionEstimateMin) }
+            if (markDone) {
+                runCatching { circleClient?.sharedTaskSetDone(live.taskId, true) }
+                circleClient?.notifyTaskDone(live.taskId)
+            }
+            refreshShares()
+            runCatching { graph.coordinator?.notifications?.sessionRecap(sharedTitle, away = false) }
+            _lastRecap.value = RecapState(taskName = sharedTitle, focusedSec = elapsed, at = nowMs())
+            return@launchWrite
+        }
         // Resolve a recurring OCCURRENCE robustly — via live.occurrenceBlockId OR
         // (defensively) the passed task's id being a cal_block id. The session +
         // totalFocused always accrue on the TEMPLATE; completion marks the DAY's
@@ -628,23 +725,6 @@ class AppViewModel(
     private val _lastRecap = MutableStateFlow<RecapState?>(null)
     val lastRecap: StateFlow<RecapState?> = _lastRecap
     fun dismissRecap() { _lastRecap.value = null }
-
-    fun cancelFocus() = launchWrite {
-        // Captures taken during the cancelled session reference a sessions row that
-        // would otherwise never be written — the outbox gate would hold them (and the
-        // server FK reject them) forever. Materialize a minimal session row first so
-        // those captures can still sync; a captureless cancel leaves no trace, and the
-        // task's totalFocused is deliberately NOT bumped (cancel discards the time).
-        val live = store.getLiveSession()
-        val sid = live?.id
-        if (live != null && sid != null && store.captures().first().any { it.sessionId == sid }) {
-            val task = store.tasks().first().firstOrNull { it.id == live.taskId }
-            write?.upsertSession(
-                Session(id = sid, taskId = live.taskId, taskName = task?.name.orEmpty(), estimateMin = task?.estimateMin ?: live.sessionEstimateMin, actualSec = FocusTimer.elapsedSec(live, nowMs()), completedAt = isoNow()),
-            )
-        }
-        store.setLiveSession(null)
-    }
 
     private suspend fun mutateLive(transform: (LiveSession) -> LiveSession) {
         val cur = store.getLiveSession() ?: return
@@ -908,6 +988,12 @@ class AppViewModel(
         circleClient?.taskUnshare(shareId)
         refreshShares()
     }
+
+    /** Read-only detail for a task shared WITH me (any level) — drives the shared-task
+     *  detail sheet (T1). RLS forbids the raw task row; this SECURITY DEFINER projection
+     *  is the only window. Null on error / no such share. */
+    suspend fun sharedTaskDetail(taskId: String): tech.csalliance.unstuck.core.model.SharedTaskDetail? =
+        circleClient?.sharedTaskDetail(taskId)
 
     /** Complete/uncomplete a task shared WITH me — partner OR assign only (the RPC
      *  rejects view). Pings the owner on completion (best-effort), then refetches. */

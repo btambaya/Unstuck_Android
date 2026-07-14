@@ -39,6 +39,41 @@ class FocusTimerTest {
         assertEquals(300, FocusTimer.estimateSec(live))
     }
 
+    // A fresh (own) start must CLEAR any prior shared marker so an own-task session
+    // can't inherit the recipient-shared routing of a displaced shared session (T3).
+    @Test fun startClearsAPriorSharedMarker() {
+        val shared = FocusTimer.start(FocusTimer.empty, "owners-task", estimateMin = 25, now = t0)
+            .copy(sharedTitle = "Ship it", sharedLevel = "partner")
+        assertEquals("Ship it", shared.sharedTitle)
+        val own = FocusTimer.start(shared, "my-task", estimateMin = 25, now = t0)
+        assertEquals("my-task", own.taskId)
+        assertNull(own.sharedTitle)
+        assertNull(own.sharedLevel)
+    }
+
+    // A shared session's elapsed is CLAMPED to estimate + grace before it's credited
+    // onto the OWNER, so a stale wall-clock resume can't dump hours onto their total.
+    @Test fun clampSharedElapsedCapsAStaleSessionToEstimatePlusGrace() {
+        // 25m estimate → cap = 25*60 + 600 (10m grace) = 2100s.
+        assertEquals(2100, FocusTimer.clampSharedElapsedSec(9999, estimateMin = 25))
+        // Under the cap passes through untouched.
+        assertEquals(300, FocusTimer.clampSharedElapsedSec(300, estimateMin = 25))
+        // Non-positive / zero-estimate degrade safely (0-estimate → default 25m cap).
+        assertEquals(0, FocusTimer.clampSharedElapsedSec(0, estimateMin = 25))
+        assertEquals(0, FocusTimer.clampSharedElapsedSec(-5, estimateMin = 25))
+        assertEquals(2100, FocusTimer.clampSharedElapsedSec(9999, estimateMin = 0))
+    }
+
+    // Resuming a paused shared session KEEPS the marker (a paused shared stays shared).
+    @Test fun resumeKeepsTheSharedMarker() {
+        val shared = FocusTimer.start(FocusTimer.empty, "owners-task", estimateMin = 25, now = t0)
+            .copy(sharedTitle = "Ship it", sharedLevel = "partner")
+        val paused = FocusTimer.pause(shared, t0 + 60_000)
+        val resumed = FocusTimer.resume(paused, t0 + 120_000)
+        assertEquals("Ship it", resumed.sharedTitle)
+        assertEquals("partner", resumed.sharedLevel)
+    }
+
     @Test fun pauseThenResume() {
         var live = FocusTimer.start(FocusTimer.empty, "task-1", estimateMin = 5, now = t0)
         live = FocusTimer.pause(live, t0 + 1000)

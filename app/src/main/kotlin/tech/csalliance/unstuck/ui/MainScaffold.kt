@@ -40,6 +40,9 @@ import tech.csalliance.unstuck.BuildConfig
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tech.csalliance.unstuck.core.model.ShareLevel
+import tech.csalliance.unstuck.core.model.SharedTaskDetail
+import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.design.component.BottomNavBar
 import tech.csalliance.unstuck.design.component.NavSpec
@@ -49,6 +52,7 @@ import tech.csalliance.unstuck.ui.collections.CollectionDetailScreen
 import tech.csalliance.unstuck.ui.collections.CollectionsScreen
 import tech.csalliance.unstuck.ui.components.AvatarMenu
 import tech.csalliance.unstuck.ui.focus.FocusScreen
+import tech.csalliance.unstuck.ui.sharing.SharedTaskDetailSheet
 import tech.csalliance.unstuck.ui.insights.InsightsScreen
 import tech.csalliance.unstuck.ui.settings.SettingsHub
 import tech.csalliance.unstuck.ui.settings.SettingsSection
@@ -96,6 +100,11 @@ fun MainScaffold(vm: AppViewModel) {
     )) { mutableStateOf<Pair<String, String>?>(null) }
     var focusTask by remember { mutableStateOf<TaskItem?>(null) }
     var focusAutoCapture by remember { mutableStateOf(false) }
+    // Non-null while the focus overlay is a RECIPIENT's shared-task session (T3): the
+    // level drives startSharedFocus + the co-focus presence broadcast. Cleared with
+    // focusTask. sharedDetail drives the read-only "Shared with you" detail sheet (T1).
+    var focusShared by remember { mutableStateOf<ShareLevel?>(null) }
+    var sharedDetail by remember { mutableStateOf<SharedWithMe?>(null) }
     var activeArea by remember { mutableStateOf<String?>(null) }
     var onboarding by remember { mutableStateOf(!vm.onboarded) }
     // Return to Today whenever the app is backgrounded, so reopening lands on the
@@ -136,6 +145,27 @@ fun MainScaffold(vm: AppViewModel) {
     val deepLink by vm.pendingDeepLink.collectAsStateWithLifecycle()
     val liveSession by vm.liveSession.collectAsStateWithLifecycle()
 
+    // Open the focus overlay on an OWN task. If a live SHARED session is already running
+    // for this id (returning to it from Today's live card), carry its level so the focus
+    // screen re-arms shared mode; otherwise it's a normal own-task focus.
+    val openFocus: (TaskItem) -> Unit = { t ->
+        val ls = liveSession
+        focusShared = if (ls?.taskId == t.id && ls.sharedTitle != null) ShareLevel.fromWire(ls.sharedLevel) else null
+        focusTask = t
+    }
+    // Open the focus overlay on a task shared WITH me (T3) from the read-only detail
+    // sheet — synthesize a display task from the detail + carry the share level.
+    val openSharedFocus: (SharedTaskDetail) -> Unit = { d ->
+        sharedDetail = null
+        focusShared = d.level
+        focusTask = TaskItem(
+            id = d.taskId, name = d.title, estimateMin = d.estimateMin,
+            objectives = d.objectives.ifEmpty { null }, tags = d.tags.ifEmpty { null },
+            lifeArea = d.lifeArea, dueAt = d.dueAt,
+            createdAt = d.createdAt.ifEmpty { "" }, updatedAt = d.createdAt.ifEmpty { "" },
+        )
+    }
+
     // Restore the live-focus foreground service from the persisted session after
     // process death — independent of whether the user is on the Focus screen.
     // The service is START_NOT_STICKY and was only armed from FocusScreen, so a
@@ -147,7 +177,7 @@ fun MainScaffold(vm: AppViewModel) {
         val live = liveSession
         val start = live?.sessionStart
         if (live != null && start != null) {
-            val name = tasks.firstOrNull { it.id == live.taskId }?.name ?: "Focus session"
+            val name = tasks.firstOrNull { it.id == live.taskId }?.name ?: live.sharedTitle ?: "Focus session"
             tech.csalliance.unstuck.surface.FocusTimerService.start(fgsContext, name, start, paused = live.paused)
             tech.csalliance.unstuck.surface.FocusTimerService.update(fgsContext, paused = live.paused, startMs = start)
             if (live.paused) tech.csalliance.unstuck.surface.PausedCheckinScheduler.arm(fgsContext, name)
@@ -172,7 +202,7 @@ fun MainScaffold(vm: AppViewModel) {
                 val id = dl.removePrefix("unstuck://focus/")
                 val t = tasks.firstOrNull { it.id == id }
                 when {
-                    t != null -> { vm.startFocus(t); focusTask = t }
+                    t != null -> { focusShared = null; vm.startFocus(t); focusTask = t }
                     // No Room data yet: wait. If tasks emits, this effect cancels + re-runs
                     // (re-keyed on tasks) and resolves; otherwise fall back to Today.
                     tasks.isEmpty() -> { kotlinx.coroutines.delay(2500); tab = "today"; stack.clear() }
@@ -200,7 +230,7 @@ fun MainScaffold(vm: AppViewModel) {
     // intercepts back itself, so we only handle the focus overlay, the route stack,
     // and the non-Today tab fall-back. (Leaving focus keeps the live session running.)
     val sheetOpen = showNewTask || sheet != null
-    BackHandler(enabled = focusTask != null) { focusTask = null; focusAutoCapture = false }
+    BackHandler(enabled = focusTask != null) { focusTask = null; focusAutoCapture = false; focusShared = null }
     BackHandler(enabled = focusTask == null && !sheetOpen && stack.isNotEmpty()) { pop() }
     BackHandler(enabled = focusTask == null && !sheetOpen && stack.isEmpty() && tab != "today") { tab = "today" }
 
@@ -210,7 +240,7 @@ fun MainScaffold(vm: AppViewModel) {
                 when (tab) {
                     "today" -> TodayScreen(
                         vm,
-                        onStartFocus = { focusTask = it },
+                        onStartFocus = openFocus,
                         onOpen = { push(Route.Detail(it.id)) },
                         onAvatar = { sheet = Sheet.Avatar },
                         onSearch = { push(Route.Palette) },
@@ -219,6 +249,7 @@ fun MainScaffold(vm: AppViewModel) {
                         notifUnread = notifUnread,
                         onInbox = openInbox,
                         inboxCount = inboxCaptures.size,
+                        onOpenShared = { sharedDetail = it },
                     )
                     "tasks" -> TasksScreen(vm, activeArea = activeArea, onClearArea = { activeArea = null }, onAreaPick = { activeArea = it }, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
                     "calendar" -> CalendarScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials, onCreateAt = { d, t -> newTaskPrefill = d to t; showNewTask = true })
@@ -316,9 +347,16 @@ fun MainScaffold(vm: AppViewModel) {
             )
             null -> {}
         }
+        // Read-only detail for a task shared WITH me (T1). Its Focus action starts a
+        // shared focus session (T3); Complete goes through shared_task_set_done.
+        sharedDetail?.let { s ->
+            SharedTaskDetailSheet(vm, s, onFocus = openSharedFocus, onDismiss = { sharedDetail = null })
+        }
         focusTask?.let { t ->
-            val fresh = tasks.firstOrNull { it.id == t.id } ?: t
-            FocusScreen(vm, fresh, onClose = { focusTask = null; focusAutoCapture = false }, autoCapture = focusAutoCapture)
+            // Own tasks resolve fresh from the store; a shared-task focus keeps the
+            // synthesized task (it isn't in the store). focusShared marks shared mode.
+            val fresh = if (focusShared != null) t else tasks.firstOrNull { it.id == t.id } ?: t
+            FocusScreen(vm, fresh, onClose = { focusTask = null; focusAutoCapture = false; focusShared = null }, autoCapture = focusAutoCapture, sharedLevel = focusShared)
         }
     }
 }

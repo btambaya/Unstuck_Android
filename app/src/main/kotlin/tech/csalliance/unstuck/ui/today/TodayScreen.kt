@@ -95,6 +95,7 @@ fun TodayScreen(
     notifUnread: Int,
     onInbox: () -> Unit,
     inboxCount: Int,
+    onOpenShared: (SharedWithMe) -> Unit,
 ) {
     val c = UTheme.colors
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -178,7 +179,13 @@ fun TodayScreen(
         }
     }
     val displayRows = if (backlogActive) backlogRows else rows
-    val liveTask = remember(liveId, tasks) { liveId?.let { id -> tasks.firstOrNull { it.id == id } } }
+    // A live OWN task resolves from the store; a live SHARED-task focus (T3) isn't in
+    // my store, so synthesize a minimal display task from the session's shared marker
+    // so the running/paused card stays visible + resumable (tapping returns to it).
+    val liveTask = remember(liveId, tasks, live) {
+        liveId?.let { id -> tasks.firstOrNull { it.id == id } }
+            ?: live?.let { l -> l.sharedTitle?.let { title -> TaskItem(id = l.taskId, name = title, estimateMin = l.sessionEstimateMin, createdAt = "", updatedAt = "") } }
+    }
     // Judge "empty" from the UNFILTERED backlog (+ startNext), not backlogRows:
     // backlogRows has start-next/live subtracted, so a lone overdue task (which
     // becomes the start-next) would otherwise read as empty and hide the Backlog
@@ -326,7 +333,7 @@ fun TodayScreen(
                 // the Backlog view: tasks OTHERS shared with me, then tasks I delegated.
                 if (!backlogActive) {
                     if (sharedWithMe.isNotEmpty()) item(key = "shared-with-you") {
-                        SharedWithYouSection(vm, sharedWithMe, onToggle = { taskId, done -> vm.completeSharedTask(taskId, done) })
+                        SharedWithYouSection(vm, sharedWithMe, onToggle = { taskId, done -> vm.completeSharedTask(taskId, done) }, onOpen = onOpenShared)
                     }
                     if (delegatedRows.isNotEmpty()) item(key = "delegated") {
                         DelegatedSection(delegatedRows, assignedOut, onOpen)
@@ -522,11 +529,12 @@ private fun TaskRow(task: TaskItem, areaColor: Color, ageDays: Int? = null, shar
 
 /** "Shared with you" — the quiet-company section: tasks other people in your circle
  *  shared WITH you, at the top of Today. view = read-only company; partner + assign
- *  add a completion checkbox (either side can tick it). Port of shared-with-me-group.tsx
- *  add a completion checkbox. Partner rows also carry live co-focus (PartnerPresence:
- *  a "focusing now" pulse when the owner is focusing + a "Sit with them" toggle). */
+ *  add a completion checkbox (either side can tick it). Tapping a row OPENS a read-only
+ *  detail (T1) so the recipient can see what the task IS (steps, area, estimate, due),
+ *  not just a title + status chip. Port of shared-with-me-group.tsx. Partner rows also
+ *  carry live co-focus (PartnerPresence: a "focusing now" pulse + a "Sit with them"). */
 @Composable
-private fun SharedWithYouSection(vm: AppViewModel, items: List<SharedWithMe>, onToggle: (taskId: String, done: Boolean) -> Unit) {
+private fun SharedWithYouSection(vm: AppViewModel, items: List<SharedWithMe>, onToggle: (taskId: String, done: Boolean) -> Unit, onOpen: (SharedWithMe) -> Unit) {
     val c = UTheme.colors
     Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 2.dp)) {
@@ -537,7 +545,9 @@ private fun SharedWithYouSection(vm: AppViewModel, items: List<SharedWithMe>, on
             val done = s.done
             val canComplete = s.level.canComplete
             Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.primarySoft, RoundedCornerShape(12.dp)).padding(horizontal = 13.dp, vertical = 11.dp),
+                // Row opens the read-only detail; the checkbox (below) has its own
+                // clickable that consumes the tap, so ticking never opens the sheet.
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.primarySoft, RoundedCornerShape(12.dp)).clickable { onOpen(s) }.padding(horizontal = 13.dp, vertical = 11.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (canComplete) {

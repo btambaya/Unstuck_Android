@@ -34,6 +34,7 @@ import tech.csalliance.unstuck.core.model.LifeArea
 import tech.csalliance.unstuck.core.model.LiveSession
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.Session
+import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
@@ -303,6 +304,61 @@ class AppViewModelTest {
 
         val after = awaitTask("t1") { it.done && it.totalFocused == 300 }
         assertNotNull("completion stamped", after.completedAt)
+    }
+
+    // -----------------------------------------------------------------------
+    // Shared focus (T3, Option B): a recipient focuses a task shared WITH them.
+    // The task is NOT in their store, so the session carries a shared marker and
+    // finalize accrues onto the OWNER via log_shared_focus (a client-side no-op in
+    // this harness — no coordinator/network) INSTEAD of writing an own Session /
+    // totalFocused. These lock in the routing that guarantees we NEVER mint own-store
+    // rows for a task that isn't the recipient's.
+    // -----------------------------------------------------------------------
+
+    @Test fun startSharedFocus_partner_setsSharedMarkerAndMintsNoOwnTask() = runTest(dispatcher) {
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.startSharedFocus("owners-task", title = "Their brief", estimateMin = 45, level = ShareLevel.PARTNER)
+        advanceUntilIdle()
+
+        val live = awaitLiveSession { it?.taskId == "owners-task" }!!
+        assertEquals("Their brief", live.sharedTitle)
+        assertEquals("partner", live.sharedLevel)
+        assertEquals(45, live.sessionEstimateMin)
+        assertTrue("the shared task is the owner's — never materialized in my store", store.tasks().first().none { it.id == "owners-task" })
+    }
+
+    @Test fun startSharedFocus_view_isRejected() = runTest(dispatcher) {
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.startSharedFocus("owners-task", title = "Watching only", estimateMin = 25, level = ShareLevel.VIEW)
+        advanceUntilIdle()
+
+        // View is read-only company — no focus session starts.
+        awaitLiveSession { it == null }
+    }
+
+    @Test fun finishFocus_sharedSession_clearsLiveAndWritesNoOwnRows() = runTest(dispatcher) {
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        // A live shared session (as startSharedFocus would set), 5 min elapsed.
+        store.setLiveSession(
+            LiveSession(id = "sess1", taskId = "owners-task", sessionStart = nowMs - 300_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT, sharedTitle = "Their brief", sharedLevel = "partner"),
+        )
+        advanceUntilIdle()
+
+        vm.finishFocus(task("owners-task", name = "Their brief"), markDone = false)
+        advanceUntilIdle()
+
+        // Live session cleared + a recap surfaced with the shared title.
+        awaitLiveSession { it == null }
+        assertEquals("Their brief", vm.lastRecap.value?.taskName)
+        // Crucially: NO own Session row + NO own task row for the foreign task.
+        assertTrue("no own Session row for a foreign task", store.sessions().first().isEmpty())
+        assertTrue("no own task row for a foreign task", store.tasks().first().none { it.id == "owners-task" })
     }
 
     @Test fun startFocus_switchingTasksMidSession_finalizesPriorSession() = runTest(dispatcher) {

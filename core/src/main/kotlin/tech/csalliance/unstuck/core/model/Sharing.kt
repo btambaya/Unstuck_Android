@@ -95,6 +95,25 @@ data class SharedWithMe(
     val done: Boolean,   // every level projects the done state (v3)
 )
 
+/** Read-only detail for a task shared WITH me, from the shared_task_detail RPC
+ *  (migration 045). Recipients still can't read the raw `tasks` row (RLS); this
+ *  SECURITY DEFINER projection is the ONLY window, scoped to a share the caller holds
+ *  at any level. Lets the recipient OPEN the task and see what it is — never edit it. */
+data class SharedTaskDetail(
+    val taskId: String,
+    val ownerName: String,
+    val level: ShareLevel,
+    val title: String,
+    val done: Boolean,
+    val estimateMin: Int,
+    val totalFocused: Int,
+    val lifeArea: String?,
+    val tags: List<String>,
+    val objectives: List<Objective>,
+    val dueAt: String?,
+    val createdAt: String,
+)
+
 /** One outgoing share badge for my task row. Port of ShareBadge (the web keys these
  *  by taskId in a Record; each Android badge carries its taskId so a flat list groups). */
 data class ShareBadge(

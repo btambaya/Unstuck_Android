@@ -256,4 +256,13 @@ data class LiveSession(
     // Focusing a recurring OCCURRENCE: taskId above is the template (totalFocused
     // continuity); completing marks THIS occurrence's cal_block done. Device-local.
     val occurrenceBlockId: String? = null,
+    // Recipient's focus on a task shared WITH them (T3, Option B). The task is NOT in
+    // the recipient's own store, so a non-null [sharedTitle] MARKS this session shared:
+    // finish / cancel / displace accrue the time onto the OWNER's task via
+    // log_shared_focus instead of writing an own Session row / totalFocused, and the
+    // recap uses [sharedTitle]. [sharedLevel] is the ShareLevel wire ("partner"/"assign")
+    // — it gates the co-focus presence broadcast (partner appears as "focusing" to the
+    // owner). Device-local, backward-compatible defaults (own sessions leave them null).
+    val sharedTitle: String? = null,
+    val sharedLevel: String? = null,
 )

@@ -300,6 +300,15 @@ class SyncCoordinator(
         auth.currentUserId?.let { hydrator.hydrateCollections(it) }
     }
 
+    /** Push queued writes to the server NOW (outbox drain only, no hydrate). Used to
+     *  land a just-created task row before a task_share RPC that validates ownership
+     *  server-side — otherwise the share races the not-yet-flushed insert and the
+     *  server raises not_your_task (T2). No-op when signed out. */
+    suspend fun flushOutbox() {
+        val uid = auth.currentUserId ?: return
+        flusher.flush(uid) { auth.currentUserId }
+    }
+
     /** Manual best-effort sync (flush outbox → hydrate) for the periodic
      *  WorkManager job. No-op when signed out. */
     suspend fun syncNow() {

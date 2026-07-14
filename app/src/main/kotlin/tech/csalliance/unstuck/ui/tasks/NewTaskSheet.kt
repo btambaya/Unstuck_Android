@@ -61,7 +61,6 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.core.logic.findConflicts
@@ -386,21 +385,18 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
 
             // Coral accent once the form is valid (a name is entered); muted dark until then.
             UButton("Add task", kind = if (canSubmit) ButtonKind.CORAL else ButtonKind.DARK, enabled = canSubmit) {
+                // Pending share picks are handed to addTask, which applies them AFTER the
+                // task row lands on the server, IN THE SAME write coroutine as the upsert
+                // — so task_share can't race the not-yet-committed insert (not_your_task →
+                // silently dropped, the live T2 bug). Failures are logged, not swallowed.
                 val t = vm.addTask(
                     name = name, estimateMin = estimate, lifeArea = area, tags = tags.toList().ifEmpty { null },
                     firstPhysicalAction = null, recurrence = recurrence,
                     later = whenSel == "Later",
+                    shares = shareLevels.toMap(),
                 )
                 if (whenSel != "Later" && effectiveDate != null && pickedTime != null) {
                     vm.scheduleTask(t, effectiveDate, pickedTime!!)
-                }
-                // Pending share picks apply AFTER creation, in the VM's scope — it
-                // outlives this sheet, so dismissing immediately can't cancel the RPCs.
-                // Each is best-effort (matching ShareTaskSheet): a failed share must
-                // never block adding the task.
-                val picks = shareLevels.toMap()
-                if (picks.isNotEmpty()) vm.viewModelScope.launch {
-                    picks.forEach { (userId, level) -> runCatching { vm.shareTask(t.id, userId, level) } }
                 }
                 onDismiss()
             }

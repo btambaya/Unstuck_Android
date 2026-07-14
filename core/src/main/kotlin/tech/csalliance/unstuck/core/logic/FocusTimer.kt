@@ -37,6 +37,23 @@ object FocusTimer {
     fun displayedElapsedSec(live: LiveSession, now: Long): Int =
         elapsedSec(live, now) + (live.priorAccumulatedSec ?: 0)
 
+    /** Grace window PAST a shared session's estimate before extra elapsed is treated as
+     *  away-time (a backgrounded / orphaned session) and dropped — so a stale wall-clock
+     *  resume can't dump hours onto the OWNER's total_focused. Mirrors web's
+     *  SHARED_FOCUS_GRACE_SEC (lib/shared-focus.ts). */
+    const val SHARED_FOCUS_GRACE_SEC = 10 * 60
+
+    /** Cap a shared session's elapsed seconds before they're reflected onto the OWNER's
+     *  task. A recipient's timer is wall-clock (now − sessionStart), so a session left
+     *  running for hours would otherwise pour all of it onto the owner. Clamp to the
+     *  session estimate + a grace; the overflow is away-time, not focus. Returns 0 for
+     *  non-positive input. Pure — mirrors web's clampSharedElapsedSec. */
+    fun clampSharedElapsedSec(elapsedSec: Int, estimateMin: Int): Int {
+        if (elapsedSec <= 0) return 0
+        val est = if (estimateMin > 0) estimateMin else 25
+        return minOf(elapsedSec, est * 60 + SHARED_FOCUS_GRACE_SEC)
+    }
+
     /** `overrunGraceSec` is seconds, or Double.POSITIVE_INFINITY to never escalate. */
     fun deriveState(live: LiveSession, now: Long, overrunGraceSec: Double): FocusState {
         if (live.sessionStart == null) return FocusState.IDLE
@@ -87,6 +104,11 @@ object FocusTimer {
             overrunPromptFired = false,
             priorAccumulatedSec = priorAccumulatedSec ?: 0,
             occurrenceBlockId = occurrenceBlockId,
+            // A fresh (own) session always clears any prior shared marker so it can't
+            // leak from a displaced recipient-shared session. startSharedFocus re-applies
+            // it via copy() after this. resume() keeps it (a paused shared stays shared).
+            sharedTitle = null,
+            sharedLevel = null,
         )
     }
 

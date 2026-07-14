@@ -66,14 +66,23 @@ import tech.csalliance.unstuck.ui.sharing.rememberCoFocusPeers
 import tech.csalliance.unstuck.ui.tasks.SelectableChip
 
 @Composable
-fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCapture: Boolean = false) {
+fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCapture: Boolean = false, sharedLevel: ShareLevel? = null) {
     val c = UTheme.colors
     val live by vm.liveSession.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
     val shareBadges by vm.shareBadges.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    // Shared focus (T3): this is a task someone shared WITH me (not in my store). The
+    // session carries a shared marker, so finish/end/cancel route through the VM's
+    // shared path (accrue onto the owner via log_shared_focus) — the buttons below are
+    // unchanged. Captures reference own tasks/sessions, so they're hidden here to avoid
+    // orphaning a capture against a foreign task id.
+    val sharedFocus = sharedLevel != null
 
-    LaunchedEffect(task.id) { vm.startFocus(task) }
+    LaunchedEffect(task.id) {
+        if (sharedLevel != null) vm.startSharedFocus(task.id, task.name, task.estimateMin, sharedLevel)
+        else vm.startFocus(task)
+    }
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) { while (true) { nowMs = System.currentTimeMillis(); delay(1000) } }
 
@@ -116,7 +125,11 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
             onExtend = { min -> vm.extendFocus(min) },
             onKeepGoing = { /* sets no-re-nag in the controller; nothing to persist */ },
             onStop = { vm.finishFocus(task, markDone = false) },
-            onCapture = { text -> vm.saveCapture(task.id, vm.liveSession.value?.id, tech.csalliance.unstuck.core.model.CaptureTag.FOLLOW_UP, text) },
+            // Shared focus: the task + live session are the OWNER's — writing an own
+            // capture against either id would orphan it (foreign task id, and a shared
+            // live-session that's never written as a Session row → stuck outbox op). The
+            // visible capture affordances are already hidden here; disable this path too.
+            onCapture = { text -> if (!sharedFocus) vm.saveCapture(task.id, vm.liveSession.value?.id, tech.csalliance.unstuck.core.model.CaptureTag.FOLLOW_UP, text) },
             onCaptureResult = { result ->
                 captureToast = when (result) {
                     FocusCopilotController.CaptureResult.SAVED -> "Captured."
@@ -196,7 +209,11 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
     // when a partner is actually present. Key on the live session's taskId (the shared
     // task — the template for a recurring occurrence), matching what the recipient joins.
     val focusTaskId = l?.taskId ?: task.id
-    val partnerShared = shareBadges[focusTaskId].orEmpty().any { it.level == ShareLevel.PARTNER }
+    // Broadcast 'focusing' when I OWN a partner-shared task (badges) OR when I'm the
+    // RECIPIENT focusing a partner-shared task (the live session's shared marker). Both
+    // meet the other side on cofocus:<taskId>, so each sees the other as "focusing".
+    val sharedPartner = (l?.sharedLevel ?: sharedLevel?.wire) == ShareLevel.PARTNER.wire
+    val partnerShared = sharedPartner || shareBadges[focusTaskId].orEmpty().any { it.level == ShareLevel.PARTNER }
     val coFocusPeers = rememberCoFocusPeers(
         vm, focusTaskId, active = partnerShared && sessionStart != null, track = CoFocusState.FOCUSING,
     )
@@ -238,10 +255,10 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
                 // only when a recognizer is available; while capturing it tints coral and
                 // swaps to a filled mic so listening is unmistakable.
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.10f)).clickable(role = Role.Button) { showCapture = true }.padding(horizontal = 12.dp, vertical = 6.dp)) {
+                    if (!sharedFocus) Box(Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.10f)).clickable(role = Role.Button) { showCapture = true }.padding(horizontal = 12.dp, vertical = 6.dp)) {
                         Text("Capture", style = UFont.sans(12), color = Color.White.copy(alpha = 0.7f))
                     }
-                    if (copilot.captureAvailable) {
+                    if (!sharedFocus && copilot.captureAvailable) {
                         Box(
                             Modifier.size(32.dp).clip(RoundedCornerShape(999.dp))
                                 .background(if (copilot.capturing) c.coral else Color.White.copy(alpha = 0.10f))
@@ -387,13 +404,15 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
             dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmExit = false }) { Text("Stay", color = c.ink2) } },
             containerColor = c.surface,
         )
-        if (showCapture) CaptureSheet(vm, task, live?.id) { showCapture = false }
+        if (showCapture && !sharedFocus) CaptureSheet(vm, task, live?.id) { showCapture = false }
         if (showReflect) ReflectSheet(reflectElapsed) { showReflect = false; onClose() }
         if (showPauseReasons) {
             // Already paused; this records WHY (optional). When triggered by
             // "Save for later", we exit the focus screen after the reason.
             PauseReasons(
-                onPick = { reason -> vm.saveReasonLog(task.id, reason); showPauseReasons = false; if (exitAfterReason) { exitAfterReason = false; onClose() } },
+                // Shared focus: null the taskId so the pause-reason log never references
+                // the OWNER's foreign task (mirrors web nulling the shared taskId).
+                onPick = { reason -> vm.saveReasonLog(task.id.takeIf { !sharedFocus }, reason); showPauseReasons = false; if (exitAfterReason) { exitAfterReason = false; onClose() } },
                 onDismiss = { showPauseReasons = false; if (exitAfterReason) { exitAfterReason = false; onClose() } },
             )
         }

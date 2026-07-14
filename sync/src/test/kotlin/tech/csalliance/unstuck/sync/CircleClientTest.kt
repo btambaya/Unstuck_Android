@@ -22,6 +22,40 @@ class CircleClientTest {
         assertEquals("""{"p_task_id":"t1"}""", Json.encodeToString(TaskIdParam("t1")))
         assertEquals("""{"p_task_id":"t1","p_user":"u1","p_level":"partner"}""", Json.encodeToString(ShareParams("t1", "u1", "partner")))
         assertEquals("""{"p_task_id":"t1","p_done":true}""", Json.encodeToString(SetDoneParams("t1", true)))
+        // migration 045 shared_task_detail(p_task_id) + migration 046's 3-arg,
+        // per-session-idempotent log_shared_focus(p_task_id, p_actual_sec, p_session_id)
+        assertEquals("""{"p_task_id":"t1","p_actual_sec":900,"p_session_id":"s1"}""", Json.encodeToString(LogFocusParams("t1", 900, "s1")))
+    }
+
+    @Test fun `shared-task-detail row decodes the migration-045 columns incl objectives + tags`() {
+        val row = json.decodeFromString<SharedTaskDetailRow>(
+            """{"task_id":"t1","owner_name":"Grace","level":"partner","name":"Write brief","done":false,
+                "estimate_min":45,"total_focused":600,"life_area":"Work","priority":"high",
+                "tags":["deep","writing"],
+                "objectives":[{"text":"Outline","done":true},{"text":"Draft"}],
+                "due_at":"2026-07-20T09:00:00Z","created_at":"2026-07-14T00:00:00Z"}""",
+        )
+        assertEquals("t1", row.taskId)
+        assertEquals("Grace", row.ownerName)
+        assertEquals("partner", row.level)
+        assertEquals(45, row.estimateMin)
+        assertEquals(2, row.objectives?.size)
+        assertEquals("Outline", row.objectives?.first()?.text)
+        assertEquals(listOf("deep", "writing"), row.tags)
+    }
+
+    @Test fun `shared-task-detail row tolerates absent + explicit-null nullable columns`() {
+        // A task with no area / tags / steps / due: those columns come back null or absent.
+        val row = json.decodeFromString<SharedTaskDetailRow>(
+            """{"task_id":"t1","level":"view","name":"Simple","done":false,"estimate_min":25,
+                "total_focused":0,"life_area":null,"priority":null,"tags":null,"objectives":null,
+                "due_at":null,"created_at":"2026-07-14T00:00:00Z"}""",
+        )
+        assertEquals("t1", row.taskId)
+        assertNull(row.lifeArea)
+        assertNull(row.tags)
+        assertNull(row.objectives)
+        assertEquals("", row.ownerName ?: "")
     }
 
     @Test fun `invite body omits a null email so the no-email case sends an empty object`() {

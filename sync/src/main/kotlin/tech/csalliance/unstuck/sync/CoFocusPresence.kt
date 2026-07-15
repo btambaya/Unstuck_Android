@@ -3,6 +3,8 @@ package tech.csalliance.unstuck.sync
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.realtime.Presence
 import io.github.jan.supabase.realtime.RealtimeChannel
+import io.github.jan.supabase.realtime.broadcast
+import io.github.jan.supabase.realtime.broadcastFlow
 import io.github.jan.supabase.realtime.channel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
@@ -12,6 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
@@ -38,6 +41,15 @@ import tech.csalliance.unstuck.core.model.CoFocusTimer
 // full presenceState(), so a session keeps its own `present` map and applies each
 // diff. Peers exclude yourself. Idempotent + self-cleaning: close() untracks + tears
 // the channel down (Realtime.removeChannel), so nothing leaks past the screen.
+//
+// PRESENCE carries who's here + identity + the INITIAL focus timer. The MUTABLE
+// focus timer (pause / resume / extend) travels by BROADCAST, not a presence
+// re-track: Supabase Realtime presence does NOT propagate a metadata update to an
+// already-present key — a repeat track() sticks at the first payload on every
+// observer (verified against prod), so a partner never saw a pause. Broadcast is
+// reliable per event; the observer overlays the latest broadcast timer onto the
+// peer's presence session, and the focuser re-announces on a new peer join so
+// late joiners converge.
 
 /** Factory the coordinator exposes; opens per-task presence sessions with the
  *  current user's identity baked in. */
@@ -73,6 +85,10 @@ class CoFocusSession internal constructor(
     private val channel: RealtimeChannel = client.channel("cofocus:$taskId") { presence { key = myId } }
 
     private val present = LinkedHashMap<String, CoFocusPeer>()
+    // Latest live-timer BROADCAST per peer (userId → timer). Authoritative for the
+    // mutable timer (pause/resume/extend); overlays the presence session. See the
+    // file header for why a presence re-track can't carry this.
+    private val broadcastTimers = LinkedHashMap<String, CoFocusTimer>()
     private val _peers = MutableStateFlow<List<CoFocusPeer>>(emptyList())
     /** The OTHER participants present, focusing-first then longest-present. */
     val peers: StateFlow<List<CoFocusPeer>> = _peers.asStateFlow()
@@ -81,6 +97,8 @@ class CoFocusSession internal constructor(
     // The live focus-session timer to broadcast while FOCUSING (null when not focusing).
     @Volatile private var timer: CoFocusTimer? = initialTimer
     private var collectJob: Job? = null
+    private var broadcastJob: Job? = null
+    private var helloJob: Job? = null
     private var trackJob: Job? = null
     @Volatile private var closed = false
 
@@ -90,16 +108,41 @@ class CoFocusSession internal constructor(
         // initial state event arrives as `joins` for everyone already present.
         collectJob = channel.presenceChangeFlow()
             .onEach { action ->
-                action.leaves.keys.forEach { if (it != myId) present.remove(it) }
+                action.leaves.keys.forEach { if (it != myId) { present.remove(it); broadcastTimers.remove(it) } }
                 action.joins.forEach { (key, p) -> if (key != myId) decode(key, p)?.let { present[key] = it } }
-                _peers.value = present.values.sortedWith(PEER_ORDER)
+                emitPeers()
             }
+            .launchIn(scope)
+        // A focusing peer's live timer arrives by BROADCAST (reliable per event),
+        // NOT a presence re-track. Overlay it onto that peer + re-emit.
+        broadcastJob = channel.broadcastFlow<TimerWire>("timer")
+            .onEach { wire ->
+                val uid = wire.userId ?: return@onEach
+                if (uid == myId) return@onEach
+                val start = wire.sessionStartMs ?: return@onEach
+                broadcastTimers[uid] = CoFocusTimer(
+                    sessionStartMs = start,
+                    paused = wire.paused ?: false,
+                    pausedAtMs = wire.pausedAtMs,
+                    estimateMin = wire.estimateMin ?: 25,
+                )
+                emitPeers()
+            }
+            .launchIn(scope)
+        // A joining peer announces itself with `hello`; a focuser replies with its
+        // current timer so a LATE joiner converges — including an observe-only peer
+        // that never tracks presence (a presence-join re-announce can't see it).
+        helloJob = channel.broadcastFlow<HelloWire>("hello")
+            .onEach { wire -> if (wire.userId != myId) broadcastTimer() }
             .launchIn(scope)
         trackJob = scope.launch {
             // Positional `true` == blockUntilSubscribed: wait for SUBSCRIBED, then track
             // (the web tracks inside the subscribe 'SUBSCRIBED' callback).
             runCatching { channel.subscribe(true) }
                 .onFailure { println("[cofocus] subscribe failed: $it") }
+            // Announce ourselves so any focuser re-broadcasts its timer to us
+            // (works whether or not we track presence).
+            runCatching { channel.broadcast("hello", HelloWire(userId = myId)) }
             applyTrack()
         }
     }
@@ -131,9 +174,10 @@ class CoFocusSession internal constructor(
                     put("name", name)
                     put("state", t.wire)
                     put("sinceMs", sinceMs)
-                    // A focusing peer also carries its live session's timer so the other
-                    // side renders the SAME running/paused mm:ss (identical wire fields
-                    // on web + iOS + Android). Omitted for HERE / observe.
+                    // A focusing peer also carries its live session's INITIAL timer so a
+                    // fresh joiner renders the SAME running/paused mm:ss immediately
+                    // (identical wire fields on web + iOS + Android). Omitted for HERE /
+                    // observe. Subsequent pause/resume/extend travel by broadcast below.
                     if (t == CoFocusState.FOCUSING && tm != null) {
                         put("sessionStartMs", tm.sessionStartMs)
                         put("paused", tm.paused)
@@ -145,6 +189,38 @@ class CoFocusSession internal constructor(
                 channel.untrack()
             }
         }
+        broadcastTimer()
+    }
+
+    /** Broadcast the live focus timer (reliable per event) so an ALREADY-present peer
+     *  sees pause/resume/extend — which a presence re-track would silently drop.
+     *  No-op unless we're focusing with a timer. */
+    private suspend fun broadcastTimer() {
+        if (closed || track != CoFocusState.FOCUSING) return
+        val tm = timer ?: return
+        runCatching {
+            channel.broadcast(
+                "timer",
+                TimerWire(
+                    userId = myId,
+                    sessionStartMs = tm.sessionStartMs,
+                    paused = tm.paused,
+                    pausedAtMs = tm.pausedAtMs,
+                    estimateMin = tm.estimateMin,
+                ),
+            )
+        }
+    }
+
+    /** Emit the OTHER peers, overlaying each focusing peer's latest broadcast timer
+     *  (authoritative for pause/resume/extend) onto its presence session. */
+    private fun emitPeers() {
+        _peers.value = present.values
+            .map { peer ->
+                val bt = if (peer.state == CoFocusState.FOCUSING) broadcastTimers[peer.userId] else null
+                if (bt != null) peer.copy(timer = bt) else peer
+            }
+            .sortedWith(PEER_ORDER)
     }
 
     /** Leave: untrack + tear the channel down. Idempotent. */
@@ -152,7 +228,10 @@ class CoFocusSession internal constructor(
         if (closed) return
         closed = true
         collectJob?.cancel(); collectJob = null
+        broadcastJob?.cancel(); broadcastJob = null
+        helloJob?.cancel(); helloJob = null
         trackJob?.cancel(); trackJob = null
+        broadcastTimers.clear()
         _peers.value = emptyList()
         scope.launch {
             runCatching { channel.untrack() }
@@ -179,6 +258,25 @@ class CoFocusSession internal constructor(
         } else null
         return CoFocusPeer(userId, name, state, since, timer)
     }
+
+    /** The live-timer BROADCAST payload (event `timer`). Same fields as the presence
+     *  timer, plus `userId` so the observer keys it. All nullable/defaulted so the
+     *  receiver tolerates partial payloads AND kotlinx serializes the set fields even
+     *  with encodeDefaults off (the sender passes concrete values, only pausedAtMs is
+     *  omitted when null). Field names match web + iOS byte-for-byte. */
+    @Serializable
+    private data class TimerWire(
+        val userId: String? = null,
+        val sessionStartMs: Long? = null,
+        val paused: Boolean? = null,
+        val pausedAtMs: Long? = null,
+        val estimateMin: Int? = null,
+    )
+
+    /** The `hello` join-announcement payload — just who joined (a focuser replies
+     *  with its `timer`, so late joiners converge without a presence re-track). */
+    @Serializable
+    private data class HelloWire(val userId: String)
 
     private companion object {
         // Focusing peers first, then by longest-present (ascending join time).

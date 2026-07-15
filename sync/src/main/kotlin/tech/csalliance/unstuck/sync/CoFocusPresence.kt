@@ -15,12 +15,12 @@ import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
-import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonPrimitive
-import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import tech.csalliance.unstuck.core.model.CoFocusPeer
 import tech.csalliance.unstuck.core.model.CoFocusState
@@ -114,17 +114,21 @@ class CoFocusSession internal constructor(
             }
             .launchIn(scope)
         // A focusing peer's live timer arrives by BROADCAST (reliable per event),
-        // NOT a presence re-track. Overlay it onto that peer + re-emit.
-        broadcastJob = channel.broadcastFlow<TimerWire>("timer")
-            .onEach { wire ->
-                val uid = wire.userId ?: return@onEach
+        // NOT a presence re-track. Decoded as a raw JsonObject (not a typed class)
+        // so the epoch-ms fields tolerate a DECIMAL — iOS's source is a fractional
+        // Double (Date()*1000) that serializes as a JSON decimal, which a strict
+        // Long decode would reject and drop the whole timer. doubleOrNull?.toLong()
+        // accepts both an integer and a decimal. Overlay onto that peer + re-emit.
+        broadcastJob = channel.broadcastFlow<JsonObject>("timer")
+            .onEach { obj ->
+                val uid = obj["userId"]?.jsonPrimitive?.contentOrNull ?: return@onEach
                 if (uid == myId) return@onEach
-                val start = wire.sessionStartMs ?: return@onEach
+                val start = obj["sessionStartMs"]?.jsonPrimitive?.doubleOrNull?.toLong() ?: return@onEach
                 broadcastTimers[uid] = CoFocusTimer(
                     sessionStartMs = start,
-                    paused = wire.paused ?: false,
-                    pausedAtMs = wire.pausedAtMs,
-                    estimateMin = wire.estimateMin ?: 25,
+                    paused = obj["paused"]?.jsonPrimitive?.booleanOrNull ?: false,
+                    pausedAtMs = obj["pausedAtMs"]?.jsonPrimitive?.doubleOrNull?.toLong(),
+                    estimateMin = obj["estimateMin"]?.jsonPrimitive?.doubleOrNull?.toInt() ?: 25,
                 )
                 emitPeers()
             }
@@ -199,15 +203,17 @@ class CoFocusSession internal constructor(
         if (closed || track != CoFocusState.FOCUSING) return
         val tm = timer ?: return
         runCatching {
+            // Sent as a JsonObject with Long epoch-ms → integer literals on the wire
+            // (every platform parses those). Field names match web + iOS byte-for-byte.
             channel.broadcast(
                 "timer",
-                TimerWire(
-                    userId = myId,
-                    sessionStartMs = tm.sessionStartMs,
-                    paused = tm.paused,
-                    pausedAtMs = tm.pausedAtMs,
-                    estimateMin = tm.estimateMin,
-                ),
+                buildJsonObject {
+                    put("userId", myId)
+                    put("sessionStartMs", tm.sessionStartMs)
+                    put("paused", tm.paused)
+                    tm.pausedAtMs?.let { put("pausedAtMs", it) }
+                    put("estimateMin", tm.estimateMin)
+                },
             )
         }
     }
@@ -244,16 +250,19 @@ class CoFocusSession internal constructor(
         val userId = st["userId"]?.jsonPrimitive?.contentOrNull ?: key
         val name = st["name"]?.jsonPrimitive?.contentOrNull ?: "Someone"
         val state = CoFocusState.fromWire(st["state"]?.jsonPrimitive?.contentOrNull)
-        val since = st["sinceMs"]?.jsonPrimitive?.longOrNull ?: 0L
+        // Epoch-ms via doubleOrNull?.toLong() (not longOrNull) so an iOS peer's
+        // fractional-Double wire value (a JSON decimal) still decodes — a strict Long
+        // parse returns null and drops the timer. Same tolerance as the broadcast path.
+        val since = st["sinceMs"]?.jsonPrimitive?.doubleOrNull?.toLong() ?: 0L
         // A focusing peer carries its live-session timer (sessionStartMs present) so we can
         // render the shared mm:ss. Absent for HERE / observe, or a peer on an older build.
-        val startMs = st["sessionStartMs"]?.jsonPrimitive?.longOrNull
+        val startMs = st["sessionStartMs"]?.jsonPrimitive?.doubleOrNull?.toLong()
         val timer = if (state == CoFocusState.FOCUSING && startMs != null) {
             CoFocusTimer(
                 sessionStartMs = startMs,
                 paused = st["paused"]?.jsonPrimitive?.booleanOrNull ?: false,
-                pausedAtMs = st["pausedAtMs"]?.jsonPrimitive?.longOrNull,
-                estimateMin = st["estimateMin"]?.jsonPrimitive?.intOrNull ?: 25,
+                pausedAtMs = st["pausedAtMs"]?.jsonPrimitive?.doubleOrNull?.toLong(),
+                estimateMin = st["estimateMin"]?.jsonPrimitive?.doubleOrNull?.toInt() ?: 25,
             )
         } else null
         return CoFocusPeer(userId, name, state, since, timer)
@@ -264,15 +273,6 @@ class CoFocusSession internal constructor(
      *  receiver tolerates partial payloads AND kotlinx serializes the set fields even
      *  with encodeDefaults off (the sender passes concrete values, only pausedAtMs is
      *  omitted when null). Field names match web + iOS byte-for-byte. */
-    @Serializable
-    private data class TimerWire(
-        val userId: String? = null,
-        val sessionStartMs: Long? = null,
-        val paused: Boolean? = null,
-        val pausedAtMs: Long? = null,
-        val estimateMin: Int? = null,
-    )
-
     /** The `hello` join-announcement payload — just who joined (a focuser replies
      *  with its `timer`, so late joiners converge without a presence re-track). */
     @Serializable

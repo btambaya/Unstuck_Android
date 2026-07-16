@@ -180,7 +180,11 @@ fun MainScaffold(vm: AppViewModel) {
             val name = tasks.firstOrNull { it.id == live.taskId }?.name ?: live.sharedTitle ?: "Focus session"
             tech.csalliance.unstuck.surface.FocusTimerService.start(fgsContext, name, start, paused = live.paused)
             tech.csalliance.unstuck.surface.FocusTimerService.update(fgsContext, paused = live.paused, startMs = start)
-            if (live.paused) tech.csalliance.unstuck.surface.PausedCheckinScheduler.arm(fgsContext, name)
+            // A pause the PARTNER applied (one-true-shared-session) must not arm the
+            // paused check-in nag on THIS participant — they didn't step away.
+            if (live.paused && !tech.csalliance.unstuck.core.logic.remotePaused(live.paused, live.sharedSessionRev, live.sharedSessionAtMs, live.lastAppliedRev, live.lastAppliedAtMs)) {
+                tech.csalliance.unstuck.surface.PausedCheckinScheduler.arm(fgsContext, name)
+            }
         }
     }
     // Keyed on `tasks` too: on a COLD launch from a notification, Room hasn't emitted

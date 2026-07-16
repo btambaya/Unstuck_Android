@@ -38,6 +38,14 @@ import tech.csalliance.unstuck.core.model.SharedWithMe
 // can assert the exact snake_case param names + default-omission (kotlinx omits
 // null defaults — that's how circle-invite sends `{}` for the no-email case).
 
+/** Outcome of a log_shared_focus accrual — surfaced (not swallowed) because the
+ *  ledger is the EXCLUSIVE accrual path for partner-shared sessions.
+ *  LOGGED = RPC accepted (or deduped server-side); SKIPPED = nothing to log
+ *  (clamped ≤ 0); NOT_ALLOWED = the server refused the caller (share revoked
+ *  mid-session — terminal, never retried); FAILED = transient (offline / 5xx) —
+ *  the caller must queue a durable retry. */
+enum class SharedFocusLogResult { LOGGED, SKIPPED, NOT_ALLOWED, FAILED }
+
 // ── RPC param classes (snake_case wire names — must match the SQL signatures) ──
 @Serializable internal data class CodeParam(@SerialName("p_code") val code: String)
 @Serializable internal data class IdParam(@SerialName("p_id") val id: String)
@@ -265,13 +273,24 @@ class CircleClient(private val client: SupabaseClient) {
      *  session estimate + grace (clampSharedElapsedSec) so a stale wall-clock session
      *  can't dump hours onto the owner. [sessionId] is the live session's uuid: migration
      *  046's RPC is IDEMPOTENT per session id, so a re-fire (double finalize) no-ops
-     *  server-side. The RPC allows only the caller's PARTNER or ASSIGN share (raises
-     *  'not_allowed' for view) and no-ops for <= 0. Best-effort fire-and-forget accrual. */
-    suspend fun logSharedFocus(taskId: String, actualSec: Int, sessionId: String, estimateMin: Int) {
+     *  server-side. The RPC authorizes partner/assign shares + the task owner (047) and
+     *  raises 'not_allowed' otherwise. The result is SURFACED (one-true-shared-session
+     *  accrual is ledger-exclusive, so a swallowed failure would LOSE the minutes):
+     *  FAILED → the caller queues a durable retry (SharedFocusLedger); NOT_ALLOWED →
+     *  terminal (share revoked mid-session) — an owner falls back to the direct
+     *  totalFocused bump, a recipient drops it. */
+    suspend fun logSharedFocus(taskId: String, actualSec: Int, sessionId: String, estimateMin: Int): SharedFocusLogResult {
         val capped = FocusTimer.clampSharedElapsedSec(actualSec, estimateMin)
-        if (capped <= 0) return
-        runCatching { client.postgrest.rpc("log_shared_focus", LogFocusParams(taskId, capped, sessionId)) }
-            .onFailure { println("[shared-focus] log_shared_focus failed for $taskId (${capped}s): ${it.message}") }
+        if (capped <= 0) return SharedFocusLogResult.SKIPPED
+        return runCatching { client.postgrest.rpc("log_shared_focus", LogFocusParams(taskId, capped, sessionId)) }
+            .fold(
+                onSuccess = { SharedFocusLogResult.LOGGED },
+                onFailure = {
+                    println("[shared-focus] log_shared_focus failed for $taskId (${capped}s): ${it.message}")
+                    if (it.message?.contains("not_allowed") == true) SharedFocusLogResult.NOT_ALLOWED
+                    else SharedFocusLogResult.FAILED
+                },
+            )
     }
 
     /** All my outgoing shares, grouped by taskId → the row badges (mirrors the web's

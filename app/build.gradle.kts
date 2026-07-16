@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 69
-        versionName = "0.4.55"
+        versionCode = 70
+        versionName = "0.4.56"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.4.55 — Co-focus PAUSE now reliably reaches your partner: when you and a partner focus the same task and one of you pauses, the other now sees it as \"Paused\" with the timer frozen (resume/extend update live too) — even when your partner is on iPhone or the web. Fixes a cross-platform issue where the pause update was not reaching the other device. (Still a shared VIEW, not remote control — you each run your own session.) Earlier — v0.4.53: (1) partner co-focus shows the same live timer to both; (2) a task you ASSIGN is view-only for you. v0.4.52: NEW Sharing & Collaboration — add people (Settings -> People), share a task as View / Partner / Assign, see tasks shared with you, and co-focus live."
+    releaseNotes = "v0.4.56 — ONE SHARED TIMER for partner tasks: when you and a partner focus the same shared task, you now share ONE session — the same clock on both screens, and pause / resume / add-time / finish from either side applies to both (with a calm note showing who did it). Starting focus while your partner is already going JOINS their session mid-clock instead of starting a second timer. Focus minutes count once, no matter who finishes. Earlier — v0.4.55: co-focus pause reliably reaches your partner across iPhone/web/Android. v0.4.53: partner co-focus shared view; assigned tasks view-only. v0.4.52: Sharing & Collaboration."
 }
 
 dependencies {

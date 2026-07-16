@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.lifecycle.DefaultLifecycleObserver
 import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
+import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.surface.NotificationChannels
 import tech.csalliance.unstuck.surface.NotificationLog
 import tech.csalliance.unstuck.surface.ReminderScheduler
@@ -25,7 +26,14 @@ class UnstuckApp : Application() {
         // on foreground. The auth observer stays alive; resume hydrates first so a
         // change missed while backgrounded is still pulled.
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
-            override fun onStart(owner: LifecycleOwner) { graph.coordinator?.resumeRealtime() }
+            override fun onStart(owner: LifecycleOwner) {
+                graph.coordinator?.resumeRealtime()
+                // Drain pending log_shared_focus retries on every foreground (covers
+                // relaunch): a partner-shared session finalized OFFLINE queued its
+                // accrual — the ledger is the exclusive accrual path, so this drain is
+                // what eventually lands the minutes. Idempotent per sessionId.
+                graph.scope.launch { SharedFocusLedger.drain(graph) }
+            }
             override fun onStop(owner: LifecycleOwner) { graph.coordinator?.pauseRealtime() }
         })
     }

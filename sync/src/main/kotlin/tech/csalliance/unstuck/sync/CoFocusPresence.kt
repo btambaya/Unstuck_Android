@@ -8,12 +8,18 @@ import io.github.jan.supabase.realtime.broadcastFlow
 import io.github.jan.supabase.realtime.channel
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
@@ -22,6 +28,8 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import tech.csalliance.unstuck.core.logic.SharedSessionState
+import tech.csalliance.unstuck.core.logic.adoptable
 import tech.csalliance.unstuck.core.model.CoFocusPeer
 import tech.csalliance.unstuck.core.model.CoFocusState
 import tech.csalliance.unstuck.core.model.CoFocusTimer
@@ -67,7 +75,73 @@ class CoFocusPresence(
         val name = auth.currentName ?: "Someone"
         return CoFocusSession(client, scope, taskId, myId, name, track, timer)
     }
+
+    /** One-shot probe for a LIVE shared session on this task (join-or-mint's "join"):
+     *  join the channel observe-only, announce `hello` (a focuser replies with its full
+     *  state), wait up to [timeoutMs] for an ADOPTABLE `timer` message, close, return it
+     *  (null = nothing live → the caller mints). Old builds broadcast no sessionId, so
+     *  they never produce an adoptable message — mixed versions degrade to mint.
+     *  The hello ships a RANDOM id, not [auth]'s: a focuser only replies to a hello
+     *  from someone ELSE, so probing with our own uid would silence a same-user
+     *  other-device focuser and fork a second session (multi-device adoption). */
+    suspend fun probe(taskId: String, timeoutMs: Long = 1_500): SharedSessionState? {
+        val myId = auth.currentUserId ?: return null
+        val name = auth.currentName ?: "Someone"
+        val session = CoFocusSession(
+            client, scope, taskId, myId, name, initialTrack = null,
+            helloId = tech.csalliance.unstuck.core.logic.newUuid(),
+        )
+        return try {
+            withTimeoutOrNull(timeoutMs) {
+                session.controls.first { adoptable(it.state, System.currentTimeMillis()) }.state
+            }
+        } finally {
+            session.close()
+        }
+    }
 }
+
+/** Process-wide per-topic bookkeeping for co-focus channels. supabase-kt 3.0.3's
+ *  client keeps ONE dispatch entry per topic with put/remove OVERWRITE semantics:
+ *  `channel()` builds a NEW instance every call, subscribe() PUTs it over whatever
+ *  held the topic, and removeChannel() unsubscribes + REMOVES BY TOPIC — whichever
+ *  instance is registered. Two rules keep that safe with our multiple holders
+ *  (session-lifetime VM channel, probe, PartnerPresence rows):
+ *   1. open-after-close is SERIALIZED — a new subscribe on a topic awaits the
+ *      pending teardown (untrack + removeChannel) of the previous instance, so the
+ *      teardown's topic-keyed remove can't drop the new registration;
+ *   2. close-after-supersede is a NO-OP on the shared registration — an instance
+ *      that is no longer the topic's registered owner (another instance subscribed
+ *      after it) must NOT call removeChannel/untrack, or it would evict the LIVE
+ *      channel's dispatch entry and presence. */
+internal object CoFocusTopics {
+    private val lock = Any()
+    private val owners = HashMap<String, CoFocusSession>()
+    private val teardowns = HashMap<String, Job>()
+
+    /** Mark [s] the topic's registered instance (called right before subscribe). */
+    fun claim(topic: String, s: CoFocusSession) = synchronized(lock) { owners[topic] = s }
+
+    /** Is [s] still the topic's registered instance (nobody subscribed after it)? */
+    fun isOwner(topic: String, s: CoFocusSession) = synchronized(lock) { owners[topic] === s }
+
+    fun release(topic: String, s: CoFocusSession) {
+        synchronized(lock) { if (owners[topic] === s) owners.remove(topic) }
+    }
+
+    /** Record the in-flight teardown for [topic]; self-clears on completion. */
+    fun setTeardown(topic: String, job: Job) {
+        synchronized(lock) { teardowns[topic] = job }
+        job.invokeOnCompletion { synchronized(lock) { if (teardowns[topic] === job) teardowns.remove(topic) } }
+    }
+
+    fun pendingTeardown(topic: String): Job? = synchronized(lock) { teardowns[topic] }
+}
+
+/** A received full-state `timer` control (one-true-shared-session): who sent it (with
+ *  their presence display name when known) + the complete shared state. Only messages
+ *  that carry a `sessionId` become controls — an old build's timer stays display-only. */
+data class CoFocusControl(val userId: String, val name: String?, val state: SharedSessionState)
 
 /** One live subscription to a co-focus channel. Exposes the OTHER peers as a
  *  StateFlow; lets the recipient flip observe → here in place without a teardown. */
@@ -79,10 +153,15 @@ class CoFocusSession internal constructor(
     private val name: String,
     initialTrack: CoFocusState?,
     initialTimer: CoFocusTimer? = null,
+    // The id announced in our `hello`. Defaults to [myId]; a PROBE passes a random
+    // uuid so a focuser on ANOTHER DEVICE of the same user still answers (the hello
+    // responder ignores hellos from itself by id).
+    private val helloId: String = myId,
 ) {
     // Stable session-join timestamp so re-tracking (a state flip) doesn't reset it.
     private val sinceMs = System.currentTimeMillis()
-    private val channel: RealtimeChannel = client.channel("cofocus:$taskId") { presence { key = myId } }
+    private val topic = "cofocus:$taskId"
+    private val channel: RealtimeChannel = client.channel(topic) { presence { key = myId } }
 
     private val present = LinkedHashMap<String, CoFocusPeer>()
     // Latest live-timer BROADCAST per peer (userId → timer). Authoritative for the
@@ -93,9 +172,22 @@ class CoFocusSession internal constructor(
     /** The OTHER participants present, focusing-first then longest-present. */
     val peers: StateFlow<List<CoFocusPeer>> = _peers.asStateFlow()
 
+    // Full-state control messages received from peers (one-true-shared-session).
+    // replay=1 so a probe that attaches a beat after the hello reply still sees it.
+    private val _controls = MutableSharedFlow<CoFocusControl>(
+        replay = 1, extraBufferCapacity = 8, onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    /** Received `timer` controls carrying a sessionId — the session-lifetime owner
+     *  (AppViewModel) applies them via the pure sharedSessionStep reducer. */
+    val controls: SharedFlow<CoFocusControl> = _controls.asSharedFlow()
+
     @Volatile private var track: CoFocusState? = initialTrack
     // The live focus-session timer to broadcast while FOCUSING (null when not focusing).
     @Volatile private var timer: CoFocusTimer? = initialTimer
+    // The full shared-session state (one-true-shared-session). When set it supersedes
+    // [timer] as the broadcast payload (incl. hello re-announces), so late joiners get
+    // the sessionId + LWW cursor and can adopt / order controls.
+    @Volatile private var shared: SharedSessionState? = null
     private var collectJob: Job? = null
     private var broadcastJob: Job? = null
     private var helloJob: Job? = null
@@ -122,31 +214,53 @@ class CoFocusSession internal constructor(
         broadcastJob = channel.broadcastFlow<JsonObject>("timer")
             .onEach { obj ->
                 val uid = obj["userId"]?.jsonPrimitive?.contentOrNull ?: return@onEach
-                if (uid == myId) return@onEach
-                val start = obj["sessionStartMs"]?.jsonPrimitive?.doubleOrNull?.toLong() ?: return@onEach
-                broadcastTimers[uid] = CoFocusTimer(
-                    sessionStartMs = start,
-                    paused = obj["paused"]?.jsonPrimitive?.booleanOrNull ?: false,
-                    pausedAtMs = obj["pausedAtMs"]?.jsonPrimitive?.doubleOrNull?.toLong(),
-                    estimateMin = obj["estimateMin"]?.jsonPrimitive?.doubleOrNull?.toInt() ?: 25,
-                )
-                emitPeers()
+                val state = decodeSharedTimerMessage(obj)
+                if (uid != myId) {
+                    val timer = decodeCoFocusTimerMessage(obj)
+                    // Display overlay (unchanged from the shared-view era): overlay the
+                    // latest broadcast timer onto that peer's presence session. An `ended`
+                    // control isn't a running timer — DROP the overlay (a stale display
+                    // timer would keep ticking on a session that just finalized).
+                    if (state?.ended == true) {
+                        if (broadcastTimers.remove(uid) != null) emitPeers()
+                    } else if (timer != null) {
+                        broadcastTimers[uid] = timer
+                        emitPeers()
+                    }
+                }
+                // One-true-shared-session control: a message WITH a sessionId is the
+                // session's full shared state — surface it to the session-lifetime
+                // owner. Without one (an old build) it stays display-only above.
+                // userId == self is a control TOO (the same user's OTHER DEVICE — the
+                // LWW/echo cursors make our own echoes no-ops), it is only excluded
+                // from the peers display above.
+                if (state != null) _controls.tryEmit(CoFocusControl(uid, present[uid]?.name, state))
             }
             .launchIn(scope)
         // A joining peer announces itself with `hello`; a focuser replies with its
         // current timer so a LATE joiner converges — including an observe-only peer
         // that never tracks presence (a presence-join re-announce can't see it).
+        // Compared against [helloId], not myId: a probe's random hello id must be
+        // answered even by the same user's other device.
         helloJob = channel.broadcastFlow<HelloWire>("hello")
-            .onEach { wire -> if (wire.userId != myId) broadcastTimer() }
+            .onEach { wire -> if (wire.userId != helloId) broadcastTimer() }
             .launchIn(scope)
         trackJob = scope.launch {
+            // Serialize open-after-close on the SAME topic: the previous instance's
+            // teardown removes the topic's dispatch entry (keyed by topic, not
+            // instance) — subscribing before it completes would let that remove drop
+            // OUR fresh registration. Await it, then claim the topic. (join() is
+            // deliberately unwrapped: cancellation must abort, not fall through.)
+            CoFocusTopics.pendingTeardown(topic)?.join()
+            if (closed) return@launch
+            CoFocusTopics.claim(topic, this@CoFocusSession)
             // Positional `true` == blockUntilSubscribed: wait for SUBSCRIBED, then track
             // (the web tracks inside the subscribe 'SUBSCRIBED' callback).
             runCatching { channel.subscribe(true) }
                 .onFailure { println("[cofocus] subscribe failed: $it") }
             // Announce ourselves so any focuser re-broadcasts its timer to us
             // (works whether or not we track presence).
-            runCatching { channel.broadcast("hello", HelloWire(userId = myId)) }
+            runCatching { channel.broadcast("hello", HelloWire(userId = helloId)) }
             applyTrack()
         }
     }
@@ -165,6 +279,27 @@ class CoFocusSession internal constructor(
         if (closed || next == timer) return
         timer = next
         trackJob = scope.launch { applyTrack() }
+    }
+
+    /** Refresh the session's CURRENT shared state WITHOUT broadcasting — after applying
+     *  a remote control (re-announcing it would echo), and on channel open, so a later
+     *  `hello` reply carries the authoritative full state. Mirrors into [timer] so the
+     *  presence-carried initial render stays in step. */
+    fun setSharedCurrent(state: SharedSessionState?) {
+        shared = state
+        if (state != null) {
+            timer = CoFocusTimer(state.sessionStartMs, state.paused, state.pausedAtMs, state.estimateMin)
+        }
+    }
+
+    /** Broadcast the FULL shared-session state now (a local control, or the terminal
+     *  `ended`). Best-effort — a send failure is fine; peers converge via the next
+     *  hello re-announce, and the accrual ledger dedups finalize. Bypasses the
+     *  track==FOCUSING gate so `ended` still ships while tearing down. */
+    suspend fun broadcastShared(state: SharedSessionState) {
+        if (closed) return
+        setSharedCurrent(state)
+        runCatching { channel.broadcast("timer", sharedTimerJson(myId, state)) }
     }
 
     private suspend fun applyTrack() {
@@ -198,9 +333,15 @@ class CoFocusSession internal constructor(
 
     /** Broadcast the live focus timer (reliable per event) so an ALREADY-present peer
      *  sees pause/resume/extend — which a presence re-track would silently drop.
-     *  No-op unless we're focusing with a timer. */
+     *  No-op unless we're focusing with a timer. The full shared state (when set)
+     *  supersedes the bare timer so late joiners get the sessionId + LWW cursor. */
     private suspend fun broadcastTimer() {
         if (closed || track != CoFocusState.FOCUSING) return
+        val st = shared
+        if (st != null) {
+            runCatching { channel.broadcast("timer", sharedTimerJson(myId, st)) }
+            return
+        }
         val tm = timer ?: return
         runCatching {
             // Sent as a JsonObject with Long epoch-ms → integer literals on the wire
@@ -229,7 +370,20 @@ class CoFocusSession internal constructor(
             .sortedWith(PEER_ORDER)
     }
 
-    /** Leave: untrack + tear the channel down. Idempotent. */
+    /** The session's CURRENT shared snapshot (what a hello re-announce would carry) —
+     *  lets the session-lifetime owner answer join-or-mint WITHOUT a probe when it
+     *  already holds this topic (a probe would evict its dispatch registration). */
+    fun sharedCurrent(): SharedSessionState? = shared
+
+    /** The most recent control this channel received (the replay a late collector —
+     *  or the probe-less join-or-mint above — attaches to). */
+    fun latestControl(): CoFocusControl? = _controls.replayCache.lastOrNull()
+
+    /** Leave: untrack + tear the channel down. Idempotent. If ANOTHER instance has
+     *  since subscribed this topic (probe / row / VM overlap), the dispatch entry and
+     *  presence are THEIRS now — touching removeChannel/untrack here would evict the
+     *  live channel (topic-keyed remove), so a superseded instance only cancels its
+     *  jobs and lets its dead server-side join expire. */
     fun close() {
         if (closed) return
         closed = true
@@ -238,11 +392,16 @@ class CoFocusSession internal constructor(
         helloJob?.cancel(); helloJob = null
         trackJob?.cancel(); trackJob = null
         broadcastTimers.clear()
+        shared = null
         _peers.value = emptyList()
-        scope.launch {
+        if (!CoFocusTopics.isOwner(topic, this)) return
+        val teardown = scope.launch {
             runCatching { channel.untrack() }
             runCatching { channel.realtime.removeChannel(channel) }
+            CoFocusTopics.release(topic, this@CoFocusSession)
         }
+        // Registered synchronously so an open() issued right after close() awaits it.
+        CoFocusTopics.setTeardown(topic, teardown)
     }
 
     private fun decode(key: String, p: Presence): CoFocusPeer? {
@@ -283,4 +442,53 @@ class CoFocusSession internal constructor(
         val PEER_ORDER: Comparator<CoFocusPeer> =
             compareBy({ if (it.state == CoFocusState.FOCUSING) 0 else 1 }, { it.sinceMs })
     }
+}
+
+// ── one-true-shared-session wire codecs (event `timer`) — internal + pure so the
+// tolerance rules are unit-testable without a channel. All epoch-ms decode via
+// doubleOrNull?.toLong() (NOT longOrNull): iOS's fractional-Double wire values
+// serialize as JSON decimals that a strict Long parse would reject, dropping the
+// whole message. Missing NEW fields must degrade, never throw (old builds). ──
+
+/** Decode the display timer (the pre-v2 fields). Null when sessionStartMs is absent. */
+internal fun decodeCoFocusTimerMessage(obj: JsonObject): CoFocusTimer? {
+    val start = obj["sessionStartMs"]?.jsonPrimitive?.doubleOrNull?.toLong() ?: return null
+    return CoFocusTimer(
+        sessionStartMs = start,
+        paused = obj["paused"]?.jsonPrimitive?.booleanOrNull ?: false,
+        pausedAtMs = obj["pausedAtMs"]?.jsonPrimitive?.doubleOrNull?.toLong(),
+        estimateMin = obj["estimateMin"]?.jsonPrimitive?.doubleOrNull?.toInt() ?: 25,
+    )
+}
+
+/** Decode the FULL shared-session state. Null when the message has no `sessionId`
+ *  (an old build → display-only; never adopted or applied as a control). */
+internal fun decodeSharedTimerMessage(obj: JsonObject): SharedSessionState? {
+    val sessionId = obj["sessionId"]?.jsonPrimitive?.contentOrNull ?: return null
+    val start = obj["sessionStartMs"]?.jsonPrimitive?.doubleOrNull?.toLong() ?: return null
+    return SharedSessionState(
+        sessionId = sessionId,
+        sessionStartMs = start,
+        paused = obj["paused"]?.jsonPrimitive?.booleanOrNull ?: false,
+        pausedAtMs = obj["pausedAtMs"]?.jsonPrimitive?.doubleOrNull?.toLong(),
+        estimateMin = obj["estimateMin"]?.jsonPrimitive?.doubleOrNull?.toInt() ?: 25,
+        rev = obj["rev"]?.jsonPrimitive?.doubleOrNull?.toInt() ?: 0,
+        atMs = obj["atMs"]?.jsonPrimitive?.doubleOrNull?.toLong() ?: 0L,
+        ended = obj["ended"]?.jsonPrimitive?.booleanOrNull ?: false,
+    )
+}
+
+/** The v2 `timer` payload: the pre-v2 display fields PLUS sessionId/rev/atMs/ended.
+ *  Hand-built JsonObject (kotlinx default-omission gotcha) with whole-number epoch-ms;
+ *  field names match web + iOS byte-for-byte. Old builds ignore the new fields. */
+internal fun sharedTimerJson(myId: String, s: SharedSessionState): JsonObject = buildJsonObject {
+    put("userId", myId)
+    put("sessionStartMs", s.sessionStartMs)
+    put("paused", s.paused)
+    s.pausedAtMs?.let { put("pausedAtMs", it) }
+    put("estimateMin", s.estimateMin)
+    put("sessionId", s.sessionId)
+    put("rev", s.rev)
+    put("atMs", s.atMs)
+    put("ended", s.ended)
 }

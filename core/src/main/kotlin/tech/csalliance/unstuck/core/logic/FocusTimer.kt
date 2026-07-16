@@ -109,8 +109,52 @@ object FocusTimer {
             // it via copy() after this. resume() keeps it (a paused shared stays shared).
             sharedTitle = null,
             sharedLevel = null,
+            // A fresh MINT is rev-clean too: the co-focus broadcaster stamps rev 1 on the
+            // first announce. A displaced co-focus session's cursors must never leak in
+            // (they'd mis-classify this session as an in-flight shared one).
+            sharedSessionRev = null,
+            sharedSessionAtMs = null,
+            lastAppliedRev = null,
+            lastAppliedAtMs = null,
+            sharedSessionEndedBy = null,
         )
     }
+
+    /** ADOPT a live shared session announced by a peer (join-or-mint's "join",
+     *  one-true-shared-session): same sessionId + timestamps + estimate — NO new id
+     *  is minted, so both participants finalize the SAME session (the ledger dedups
+     *  on it). Keeps the caller's treatment; shared markers are cleared here and
+     *  re-applied by the recipient caller via copy() (same contract as start()).
+     *  Seeds BOTH cursor pairs at the adopted (rev, atMs) so only a STRICTLY newer
+     *  control re-applies, and `remotePaused` treats an adopted-paused state as
+     *  remote. [now] clamps a skew-ahead sessionStart (adoptable tolerates a peer
+     *  clock up to 2 min ahead) so the ring never renders a negative elapsed. */
+    fun adopt(
+        cur: LiveSession,
+        taskId: String,
+        state: SharedSessionState,
+        now: Long,
+        priorAccumulatedSec: Int? = null,
+        occurrenceBlockId: String? = null,
+    ): LiveSession = cur.copy(
+        id = state.sessionId,
+        taskId = taskId,
+        sessionStart = minOf(state.sessionStartMs, now),
+        paused = state.paused,
+        pausedAt = state.pausedAtMs,
+        sessionEstimateMin = if (state.estimateMin > 0) state.estimateMin else 25,
+        nudge80Fired = false,
+        overrunPromptFired = false,
+        priorAccumulatedSec = priorAccumulatedSec ?: 0,
+        occurrenceBlockId = occurrenceBlockId,
+        sharedTitle = null,
+        sharedLevel = null,
+        sharedSessionRev = state.rev,
+        sharedSessionAtMs = state.atMs,
+        lastAppliedRev = state.rev,
+        lastAppliedAtMs = state.atMs,
+        sharedSessionEndedBy = null,
+    )
 
     fun pause(cur: LiveSession, now: Long): LiveSession {
         if (cur.sessionStart == null) return cur

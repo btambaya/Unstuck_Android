@@ -48,7 +48,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.formatMMSS
-import tech.csalliance.unstuck.core.model.CoFocusState
+import tech.csalliance.unstuck.core.logic.remotePaused
 import tech.csalliance.unstuck.core.model.FocusState
 import tech.csalliance.unstuck.core.model.FocusTreatment
 import tech.csalliance.unstuck.core.model.ShareLevel
@@ -62,7 +62,6 @@ import tech.csalliance.unstuck.surface.FocusTimerService
 import tech.csalliance.unstuck.surface.PausedCheckinScheduler
 import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.sharing.CoFocusBar
-import tech.csalliance.unstuck.ui.sharing.rememberCoFocusPeers
 import tech.csalliance.unstuck.ui.tasks.SelectableChip
 
 @Composable
@@ -70,7 +69,6 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
     val c = UTheme.colors
     val live by vm.liveSession.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
-    val shareBadges by vm.shareBadges.collectAsStateWithLifecycle()
     val context = LocalContext.current
     // Shared focus (T3): this is a task someone shared WITH me (not in my store). The
     // session carries a shared marker, so finish/end/cancel route through the VM's
@@ -97,8 +95,15 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
     LaunchedEffect(live?.paused, sessionStart) {
         if (sessionStart != null) {
             FocusTimerService.update(context, paused = live?.paused == true, startMs = sessionStart)
-            if (live?.paused == true) PausedCheckinScheduler.arm(context, task.name)
-            else PausedCheckinScheduler.cancel(context)
+            val l0 = live
+            if (l0?.paused == true) {
+                // A pause the PARTNER applied (one-true-shared-session) must not nag
+                // THIS participant — they didn't step away. Local pauses stamp a newer
+                // local (rev, atMs) in the same write, so the blob classifies reliably.
+                if (!remotePaused(l0.paused, l0.sharedSessionRev, l0.sharedSessionAtMs, l0.lastAppliedRev, l0.lastAppliedAtMs)) PausedCheckinScheduler.arm(context, task.name)
+            } else {
+                PausedCheckinScheduler.cancel(context)
+            }
         }
     }
 
@@ -204,28 +209,13 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
     val graceSec = if (settings.focusOverrunMin <= 0) Double.POSITIVE_INFINITY else settings.focusOverrunMin * 60.0
     val state = if (l != null) FocusTimer.deriveState(l, nowMs, graceSec) else FocusState.IDLE
 
-    // --- M5 co-focus (owner side): while focusing a PARTNER-shared task, broadcast
-    // presence 'focusing' on cofocus:<taskId> and show a calm "X is here with you" pill
-    // when a partner is actually present. Key on the live session's taskId (the shared
-    // task — the template for a recurring occurrence), matching what the recipient joins.
-    val focusTaskId = l?.taskId ?: task.id
-    // Broadcast 'focusing' when I OWN a partner-shared task (badges) OR when I'm the
-    // RECIPIENT focusing a partner-shared task (the live session's shared marker). Both
-    // meet the other side on cofocus:<taskId>, so each sees the other as "focusing".
-    val sharedPartner = (l?.sharedLevel ?: sharedLevel?.wire) == ShareLevel.PARTNER.wire
-    val partnerShared = sharedPartner || shareBadges[focusTaskId].orEmpty().any { it.level == ShareLevel.PARTNER }
-    // Broadcast my live session's timer so a partner sees the SAME running/paused mm:ss.
-    // sessionStart is resume-adjusted; the value is stable while running (re-tracks only on
-    // pause / resume / extend), so this doesn't churn the channel every tick.
-    val coFocusTimer = l?.sessionStart?.let { start ->
-        tech.csalliance.unstuck.core.model.CoFocusTimer(
-            sessionStartMs = start, paused = l.paused, pausedAtMs = l.pausedAt, estimateMin = l.sessionEstimateMin,
-        )
-    }
-    val coFocusPeers = rememberCoFocusPeers(
-        vm, focusTaskId, active = partnerShared && sessionStart != null, track = CoFocusState.FOCUSING,
-        timer = coFocusTimer,
-    )
+    // --- Co-focus (one-true-shared-session): the SESSION-lifetime channel is owned by
+    // AppViewModel (keyed on the live session being a partner co-focus candidate), so
+    // controls flow both ways even off this screen. Reuse ITS peers here instead of
+    // opening a second channel on the same task (a duplicate track double-counted us).
+    val coFocusPeers by vm.coFocusPeers.collectAsStateWithLifecycle()
+    // Calm remote-control attribution ("Paused by Sam" / "Sam resumed") — never a modal.
+    val coFocusAttribution by vm.coFocusAttribution.collectAsStateWithLifecycle()
 
     // Copilot tick: feed ACCUMULATED FOCUS seconds (paused time excluded) only while
     // the session is actively running. Pausing/ending tears the copilot down so it
@@ -312,6 +302,14 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
             if (coFocusPeers.isNotEmpty()) {
                 Spacer(Modifier.height(6.dp))
                 CoFocusBar(coFocusPeers)
+            }
+            // Remote-control attribution ("Paused by Sam" / "Sam resumed") — a quiet
+            // line, not a modal; the shared session is one clock for both people.
+            coFocusAttribution?.let { line ->
+                Spacer(Modifier.height(6.dp))
+                Row(
+                    Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = 0.12f)).padding(horizontal = 12.dp, vertical = 5.dp),
+                ) { Text(line, style = UFont.sans(12, FontWeight.Medium), color = Color.White.copy(alpha = 0.9f)) }
             }
 
             // Always show the treatment switcher — including in Monk — so picking

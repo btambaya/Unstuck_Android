@@ -56,10 +56,22 @@ import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.sync.AssistantResult
 import tech.csalliance.unstuck.sync.ChatMessage
 import tech.csalliance.unstuck.core.logic.FocusTimer
+import tech.csalliance.unstuck.core.logic.SharedSessionState
+import tech.csalliance.unstuck.core.logic.adoptable
 import tech.csalliance.unstuck.core.logic.applyCompletion
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
+import tech.csalliance.unstuck.core.logic.canonicalElapsedSec
 import tech.csalliance.unstuck.core.logic.newUuid
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
+import tech.csalliance.unstuck.core.logic.sharedRevFloor
+import tech.csalliance.unstuck.core.logic.sharedSessionStep
+import tech.csalliance.unstuck.SharedFocusLedger
+import tech.csalliance.unstuck.sync.SharedFocusLogResult
+import tech.csalliance.unstuck.core.model.CoFocusPeer
+import tech.csalliance.unstuck.core.model.CoFocusState
+import tech.csalliance.unstuck.core.model.CoFocusTimer
+import tech.csalliance.unstuck.core.model.coFocusFirstName
+import tech.csalliance.unstuck.sync.CoFocusControl
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.Capture
@@ -547,6 +559,314 @@ class AppViewModel(
     ): tech.csalliance.unstuck.sync.CoFocusSession? =
         cofocus?.open(taskId, track, timer)
 
+    // --- One true shared session (partner co-focus v2, docs/shared-session-spec.md) ---
+    // The co-focus channel for a partner-shared LIVE session is owned HERE, keyed on
+    // the live-session flow — NOT on the focus screen's composition — so controls
+    // arrive (and ours ship) while the user is on Today or the screen is closed.
+    // Full-state snapshots, LWW by (rev, atMs) via the pure sharedSessionStep reducer.
+
+    /** The last co-focus fields we BROADCAST or APPLIED — the echo guard: a Room
+     *  re-emission whose fields match is never re-broadcast. */
+    private data class CoFocusFields(val sessionStartMs: Long, val paused: Boolean, val pausedAtMs: Long?, val estimateMin: Int)
+
+    private var coFocusSession: tech.csalliance.unstuck.sync.CoFocusSession? = null
+    private var coFocusChannelTaskId: String? = null
+    /** The signed-in user WHEN the channel opened — a live→null edge observed under a
+     *  DIFFERENT (or no) user is a sign-out / user-switch cache wipe, not a finish,
+     *  and must not broadcast a spurious `ended` to the partner. */
+    private var coFocusChannelUid: String? = null
+    private var coFocusPeersJob: Job? = null
+    private var coFocusControlsJob: Job? = null
+    private var coFocusLastSent: Pair<Int, CoFocusFields>? = null   // (rev, fields)
+    /** Session id whose remote `ended` we already applied — the teardown observer must
+     *  not re-broadcast ended for it (the ender's device already did). */
+    private var coFocusRemoteEndedSid: String? = null
+    /** The previous emission's candidate session — the `ended` edge detector. */
+    private var coFocusPrevLive: LiveSession? = null
+
+    /** Peers on the session-lifetime channel — FocusScreen renders these instead of
+     *  opening a SECOND channel on the same task (a duplicate track double-counted us). */
+    private val _coFocusPeers = MutableStateFlow<List<CoFocusPeer>>(emptyList())
+    val coFocusPeers: StateFlow<List<CoFocusPeer>> = _coFocusPeers.asStateFlow()
+
+    /** Calm attribution line for a REMOTE control ("Paused by Sam" / "Sam resumed") —
+     *  no modal interruptions. Cleared on local controls / session end. */
+    private val _coFocusAttribution = MutableStateFlow<String?>(null)
+    val coFocusAttribution: StateFlow<String?> = _coFocusAttribution.asStateFlow()
+
+    init {
+        viewModelScope.launch {
+            // Raw store flow (same reasoning as the session-signal observer): a cold
+            // start MID-session must see the restored session as its first observation.
+            combine(store.liveSession(), shareBadges) { live, badges -> live to badges }
+                .collect { (live, badges) -> onCoFocusLiveChanged(live, badges) }
+        }
+    }
+
+    /** Is this live session a partner co-focus candidate? Recipient partner sessions
+     *  carry the marker; owner sessions match an outgoing partner badge; rev stamps
+     *  bridge a cold start where the badges RPC hasn't resolved yet. */
+    private fun isPartnerCoFocus(live: LiveSession, badges: Map<String, List<ShareBadge>>): Boolean =
+        live.sessionStart != null && (
+            live.sharedLevel == ShareLevel.PARTNER.wire ||
+                badges[live.taskId].orEmpty().any { it.level == ShareLevel.PARTNER } ||
+                (live.sharedTitle == null && (live.sharedSessionRev != null || live.lastAppliedRev != null))
+            )
+
+    private fun sharedStateOf(live: LiveSession, rev: Int, atMs: Long, ended: Boolean = false): SharedSessionState? {
+        val id = live.id ?: return null
+        val start = live.sessionStart ?: return null
+        return SharedSessionState(id, start, live.paused, live.pausedAt, live.sessionEstimateMin, rev, atMs, ended)
+    }
+
+    private suspend fun onCoFocusLiveChanged(live: LiveSession?, badges: Map<String, List<ShareBadge>>) {
+        val prev = coFocusPrevLive
+        val candidate = live != null && live.sessionStart != null && isPartnerCoFocus(live, badges)
+        // A candidate session ENDED (finish / cancel / shade-End) or was DISPLACED →
+        // broadcast `ended` (rev+1, best-effort) so the partner finalizes too — unless
+        // the end CAME from the partner (their device already announced it), or the
+        // edge is a sign-out / user-switch CACHE WIPE (SyncCoordinator.clearAll →
+        // live→null looks like a finish but the session didn't end — broadcasting
+        // `ended` would finalize the partner's still-running session).
+        if (prev?.id != null && (live == null || live.id != prev.id)) {
+            val uidNow = currentUid()
+            val wipe = uidNow == null || (coFocusChannelUid != null && uidNow != coFocusChannelUid)
+            if (coFocusRemoteEndedSid == prev.id) {
+                coFocusRemoteEndedSid = null
+            } else if (!wipe) {
+                val rev = maxOf(prev.sharedSessionRev ?: 0, prev.lastAppliedRev ?: 0, coFocusLastSent?.first ?: 0) + 1
+                sharedStateOf(prev, rev, nowMs(), ended = true)?.let { st ->
+                    runCatching { coFocusSession?.broadcastShared(st) }
+                }
+            }
+            coFocusLastSent = null   // a NEW session on the same task starts a fresh rev line
+        }
+        if (!candidate) {
+            coFocusPrevLive = null
+            closeCoFocusChannel()
+            return
+        }
+        live!!
+        ensureCoFocusChannel(live)
+        val session = coFocusSession
+        if (session == null) {   // signed out / not configured — nothing to sync
+            coFocusPrevLive = null
+            return
+        }
+        val start = live.sessionStart
+        val id = live.id
+        if (start == null || id == null) { coFocusPrevLive = live; return }
+        val fields = CoFocusFields(start, live.paused, live.pausedAt, live.sessionEstimateMin)
+        val last = coFocusLastSent
+        val lastApplied = live.lastAppliedRev
+        if (last == null && lastApplied != null && (live.sharedSessionRev ?: 0) <= lastApplied) {
+            // An ADOPTED (or restored-from-disk) remote state we haven't changed: seed
+            // the echo guard + the hello re-announce snapshot, but don't announce — the
+            // focuser who owns this rev already broadcast it.
+            coFocusLastSent = lastApplied to fields
+            session.setSharedCurrent(SharedSessionState(id, start, live.paused, live.pausedAt, live.sessionEstimateMin, lastApplied, live.lastAppliedAtMs ?: 0L, ended = false))
+        } else if (last == null || last.second != fields) {
+            // A LOCAL state change (mint / pause / resume / extend): broadcast the FULL
+            // state at the next rev. Local controls pre-stamp sharedSessionRev AND
+            // sharedSessionAtMs in the same write (mutateLive / FocusCommands) — the
+            // wire carries THAT clock so the persisted floor matches what peers echo
+            // back (a re-announce of our own control must never read as newer). A
+            // mint / un-stamped path stamps both here and persists them (the
+            // re-emission is echo-guarded: fields unchanged).
+            val eff = maxOf(live.sharedSessionRev ?: 0, live.lastAppliedRev ?: 0)
+            val rev = if (eff > (last?.first ?: 0)) eff else eff + 1
+            val at = (if (rev == live.sharedSessionRev) live.sharedSessionAtMs else null) ?: nowMs()
+            if (rev != live.sharedSessionRev || at != live.sharedSessionAtMs) {
+                val cur = store.getLiveSession()
+                if (cur?.id == id) store.setLiveSession(cur.copy(sharedSessionRev = rev, sharedSessionAtMs = at))
+            }
+            coFocusLastSent = rev to fields
+            _coFocusAttribution.value = null   // acting locally clears the remote line
+            runCatching { session.broadcastShared(SharedSessionState(id, start, live.paused, live.pausedAt, live.sessionEstimateMin, rev, at, ended = false)) }
+        }
+        coFocusPrevLive = live
+    }
+
+    private fun ensureCoFocusChannel(live: LiveSession) {
+        if (coFocusSession != null && coFocusChannelTaskId == live.taskId) return
+        closeCoFocusChannel()
+        val timer = live.sessionStart?.let { CoFocusTimer(it, live.paused, live.pausedAt, live.sessionEstimateMin) }
+        val s = cofocus?.open(live.taskId, CoFocusState.FOCUSING, timer) ?: return
+        coFocusSession = s
+        coFocusChannelTaskId = live.taskId
+        coFocusChannelUid = currentUid()
+        coFocusLastSent = null
+        coFocusPeersJob = viewModelScope.launch { s.peers.collect { _coFocusPeers.value = it } }
+        coFocusControlsJob = viewModelScope.launch {
+            s.controls.collect { ctl -> runCatching { applyRemoteControl(ctl) } }
+        }
+    }
+
+    private fun closeCoFocusChannel() {
+        coFocusPeersJob?.cancel(); coFocusPeersJob = null
+        coFocusControlsJob?.cancel(); coFocusControlsJob = null
+        coFocusSession?.close(); coFocusSession = null
+        coFocusChannelTaskId = null
+        coFocusChannelUid = null
+        coFocusLastSent = null
+        _coFocusPeers.value = emptyList()
+        _coFocusAttribution.value = null
+    }
+
+    /** The VM can die (activity finished, process trim) while a shared session keeps
+     *  running — release the realtime channel instead of leaking it; the next VM
+     *  re-opens it off the live-session flow. */
+    override fun onCleared() {
+        closeCoFocusChannel()
+        super.onCleared()
+    }
+
+    /** Apply an incoming full-state control via the pure reducer: REPLACE the shared
+     *  fields (never bump our own rev), advance the LWW cursor, and drive the local
+     *  side effects (FGS notification, paused check-in, recap) — WITHOUT opening the
+     *  pause-reason sheet or arming the pause nag for a control the partner made. */
+    private suspend fun applyRemoteControl(ctl: CoFocusControl) {
+        val cur = store.getLiveSession() ?: return
+        val id = cur.id
+        val start = cur.sessionStart
+        if (id == null || start == null) return
+        // The floor is the newest (rev, atMs) PAIR this device knows — the local
+        // stamp vs the last applied remote, compared lexicographically. Mixing the
+        // max rev with only the applied atMs (the old floor) let a peer re-announce
+        // of OUR OWN control read as newer, and a rev-tie race SWAP the two sides.
+        val (floorRev, floorAt) = sharedRevFloor(cur.sharedSessionRev, cur.sharedSessionAtMs, cur.lastAppliedRev, cur.lastAppliedAtMs)
+        val local = SharedSessionState(
+            sessionId = id, sessionStartMs = start, paused = cur.paused, pausedAtMs = cur.pausedAt,
+            estimateMin = cur.sessionEstimateMin,
+            rev = floorRev,
+            atMs = floorAt,
+            ended = cur.sharedSessionEndedBy != null,
+        )
+        val step = sharedSessionStep(local, ctl.state)
+        if (!step.apply) return
+        val msg = ctl.state
+        val name = ctl.name?.let { coFocusFirstName(it) } ?: "Your partner"
+        if (msg.ended) { applyRemoteEnded(cur, msg, name); return }
+        // Echo guard BEFORE the write: the Room re-emission's fields will match.
+        coFocusLastSent = maxOf(msg.rev, coFocusLastSent?.first ?: 0) to
+            CoFocusFields(msg.sessionStartMs, msg.paused, msg.pausedAtMs, msg.estimateMin)
+        coFocusSession?.setSharedCurrent(msg)
+        store.setLiveSession(
+            cur.copy(
+                sessionStart = msg.sessionStartMs, paused = msg.paused, pausedAt = msg.pausedAtMs,
+                sessionEstimateMin = msg.estimateMin,
+                lastAppliedRev = msg.rev, lastAppliedAtMs = msg.atMs,
+            ),
+        )
+        val ctx = graph.appContext
+        when {
+            !cur.paused && msg.paused -> {
+                // Remote pause: freeze the FGS notification; deliberately do NOT arm the
+                // paused check-in (they stepped away, not you) or open the reason sheet.
+                tech.csalliance.unstuck.surface.FocusTimerService.update(ctx, paused = true)
+                _coFocusAttribution.value = "Paused by $name"
+            }
+            cur.paused && !msg.paused -> {
+                // Remote resume: rebase the chronometer at the shifted start.
+                tech.csalliance.unstuck.surface.FocusTimerService.update(ctx, paused = false, startMs = msg.sessionStartMs)
+                tech.csalliance.unstuck.surface.PausedCheckinScheduler.cancel(ctx)
+                setTransientAttribution("$name resumed")
+            }
+            msg.estimateMin != cur.sessionEstimateMin -> setTransientAttribution("$name extended the session")
+            msg.sessionStartMs != start && !msg.paused ->
+                tech.csalliance.unstuck.surface.FocusTimerService.update(ctx, paused = false, startMs = msg.sessionStartMs)
+        }
+    }
+
+    private fun setTransientAttribution(line: String) {
+        _coFocusAttribution.value = line
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(5_000)
+            if (_coFocusAttribution.value == line) _coFocusAttribution.value = null
+        }
+    }
+
+    /** A REMOTE `ended` finalizes this side too: accrue via the log_shared_focus
+     *  ledger (exactly-once per session id — both sides finalize the SAME id), keep
+     *  the owner's Session row for insights, fire NO session_end ping (the ender's
+     *  device already did), and show the recap with attribution.
+     *
+     *  Runs NonCancellable: this executes inside coFocusControlsJob's collect, and
+     *  setLiveSession(null) below flips co-focus candidacy → the live observer calls
+     *  closeCoFocusChannel() → coFocusControlsJob.cancel() — which would cancel THIS
+     *  coroutine mid-finalize (Session row, ledger accrual, FGS stop and the recap
+     *  could all be skipped at the next suspension point). */
+    private suspend fun applyRemoteEnded(cur: LiveSession, msg: SharedSessionState, name: String) = withContext(kotlinx.coroutines.NonCancellable) {
+        val sid = cur.id ?: return@withContext
+        coFocusRemoteEndedSid = sid                       // don't re-broadcast their end
+        sigState = sigState.copy(startedTask = null)      // suppress the session_end ping
+        // Mark locally-ended (blocks any late re-apply) before the suspending RPCs.
+        store.setLiveSession(cur.copy(sharedSessionEndedBy = name))
+        // Elapsed from the SHARED timestamps at the ender's clock — both sides write
+        // ~the same number; the ledger dedups whichever lands second.
+        val elapsed = canonicalElapsedSec(msg, msg.atMs)
+        val title = cur.sharedTitle ?: tasks.value.firstOrNull { it.id == cur.taskId }?.name ?: "Focus session"
+        store.setLiveSession(null)
+        if (cur.sharedTitle == null) {
+            // Owner: still writes its own Session row (insights; single writer — the
+            // shared session id), but the total accrues ONLY via the ledger below.
+            val prev = store.tasks().first().firstOrNull { it.id == cur.taskId }
+            if (prev != null) {
+                write?.upsertSession(Session(id = sid, taskId = prev.id, taskName = prev.name, estimateMin = cur.sessionEstimateMin, actualSec = elapsed, completedAt = isoNow()))
+                flushOutbox()
+            }
+        }
+        accrueSharedFocus(cur.taskId, elapsed, sid, msg.estimateMin, ownerFallback = cur.sharedTitle == null)
+        refreshShares()
+        val ctx = graph.appContext
+        tech.csalliance.unstuck.surface.FocusTimerService.stop(ctx)
+        tech.csalliance.unstuck.surface.PausedCheckinScheduler.cancel(ctx)
+        _coFocusAttribution.value = null
+        runCatching { graph.coordinator?.notifications?.sessionRecap(title, away = false) }
+        _lastRecap.value = RecapState(taskName = title, focusedSec = elapsed, at = nowMs(), endedBy = name)
+    }
+
+    /** Durable ledger accrual (the EXCLUSIVE total_focused path for partner-shared
+     *  sessions): a transient failure queues a persisted retry (drained on every
+     *  foreground — see SharedFocusLedger); a terminal NOT_ALLOWED (share revoked
+     *  mid-session) falls back to the durable direct bump when the task is OURS
+     *  ([ownerFallback]) so the minutes aren't lost either way. */
+    private suspend fun accrueSharedFocus(taskId: String, elapsedSec: Int, sessionId: String, estimateMin: Int, ownerFallback: Boolean) {
+        val r = runCatching {
+            SharedFocusLedger.logOrQueue(graph.settings, circleClient, taskId, elapsedSec, sessionId, estimateMin)
+        }.getOrElse { SharedFocusLogResult.FAILED }
+        if (r == SharedFocusLogResult.NOT_ALLOWED && ownerFallback) {
+            val t = store.tasks().first().firstOrNull { it.id == taskId } ?: return
+            val add = FocusTimer.clampSharedElapsedSec(elapsedSec, estimateMin)
+            if (add > 0) write?.upsertTask(t.copy(totalFocused = t.totalFocused + add, updatedAt = isoNow()))
+        }
+    }
+
+    /** Register a just-ADOPTED shared session with the session-signal reducer so no
+     *  session_start ping fires for it — only the MINTER announces (spec §5). */
+    private fun registerAdoptedSession(sid: String) {
+        sigState = sigState.copy(adoptedSid = sid)
+    }
+
+    /** Probe the co-focus channel for a live session to ADOPT before minting one
+     *  (join-or-mint). Owner side only probes when the task has an outgoing partner
+     *  badge; callers gate the recipient side on level == partner.
+     *
+     *  When the VM's session-lifetime channel ALREADY holds this task's topic, a
+     *  probe would open a SECOND instance on the same topic and EVICT the live one
+     *  (supabase-kt keys the dispatch map by topic — last-subscribed wins). Answer
+     *  join-or-mint from what the owned channel already knows instead: its current
+     *  shared snapshot, else the latest replayed control. */
+    private suspend fun probeCoFocusAdoption(taskId: String): SharedSessionState? {
+        val owned = coFocusSession
+        if (owned != null && coFocusChannelTaskId == taskId) {
+            val now = nowMs()
+            return listOfNotNull(owned.sharedCurrent(), owned.latestControl()?.state)
+                .firstOrNull { adoptable(it, now) }
+        }
+        return runCatching { cofocus?.probe(taskId) }.getOrNull()
+    }
+
     // --- in-app notification center: the log of shown notifications + an unread badge ---
     val notifications: StateFlow<List<tech.csalliance.unstuck.surface.NotificationLog.Entry>>
         get() = tech.csalliance.unstuck.surface.NotificationLog.items
@@ -592,7 +912,17 @@ class AppViewModel(
         if (occ != null) {
             val tpl = tasks.value.firstOrNull { it.id == occ.taskId }
             if (tpl != null) {
-                if (cur?.taskId == tpl.id && cur.occurrenceBlockId == occ.id) return@launchWrite
+                if (cur?.taskId == tpl.id) {
+                    // Re-entering the SAME template's live session keeps it exactly as
+                    // the non-occurrence path does — never re-probe/re-mint on re-entry
+                    // (a re-mint replaced THE shared session and broadcast a spurious
+                    // ended). If the occurrence rolled (e.g. past midnight) just
+                    // re-point the completion target at today's block.
+                    if (cur.sessionStart != null && cur.occurrenceBlockId != occ.id) {
+                        store.setLiveSession(cur.copy(occurrenceBlockId = occ.id))
+                    }
+                    return@launchWrite
+                }
                 // Displacing a DIFFERENT task's live session (own OR shared): finalize it
                 // first so its elapsed isn't silently discarded — same guard the
                 // non-occurrence path uses. Without this, starting a recurring occurrence
@@ -600,7 +930,19 @@ class AppViewModel(
                 // credited). Matches web, which finalizes all displacements.
                 if (cur != null && cur.sessionStart != null && cur.taskId != tpl.id) finalizeDisplaced(cur)
                 val base = cur ?: FocusTimer.empty
-                val live = FocusTimer.start(base, tpl.id, estimateMin = occ.durationMinutes, priorAccumulatedSec = tpl.totalFocused, now = nowMs(), occurrenceBlockId = occ.id)
+                // Join-or-mint (one-true-shared-session): a partner-shared template may
+                // already have a LIVE session (the partner started) — adopt it (same
+                // sessionId + clock) instead of minting a second one. Partner-shared
+                // sessions run on the SESSION clock (priorAccumulatedSec = 0, minted or
+                // adopted) so every device's ring shows the same number.
+                val partnerSharedOcc = shareBadges.value[tpl.id].orEmpty().any { it.level == ShareLevel.PARTNER }
+                val adoptedOcc = if (partnerSharedOcc) probeCoFocusAdoption(tpl.id) else null
+                val live = if (adoptedOcc != null) {
+                    registerAdoptedSession(adoptedOcc.sessionId)
+                    FocusTimer.adopt(base, tpl.id, adoptedOcc, now = nowMs(), priorAccumulatedSec = 0, occurrenceBlockId = occ.id)
+                } else {
+                    FocusTimer.start(base, tpl.id, estimateMin = occ.durationMinutes, priorAccumulatedSec = if (partnerSharedOcc) 0 else tpl.totalFocused, now = nowMs(), occurrenceBlockId = occ.id)
+                }
                 store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
                 return@launchWrite
             }
@@ -614,9 +956,22 @@ class AppViewModel(
         // time isn't silently discarded — same finalize as finishFocus(markDone=false).
         if (cur != null && cur.sessionStart != null && cur.taskId != task.id) finalizeDisplaced(cur)
         val base = cur ?: FocusTimer.empty
+        // Join-or-mint (one-true-shared-session): if a partner already runs THE
+        // session on this task, adopt it — same sessionId, same clock, no new session,
+        // and no session_start ping (only the minter announces). Partner-shared
+        // sessions run on the SESSION clock (priorAccumulatedSec = 0, minted or
+        // adopted, owner included) so every device's ring shows the same number.
+        val partnerShared = shareBadges.value[task.id].orEmpty().any { it.level == ShareLevel.PARTNER }
+        val adopted = if (partnerShared) probeCoFocusAdoption(task.id) else null
+        if (adopted != null) {
+            registerAdoptedSession(adopted.sessionId)
+            val live = FocusTimer.adopt(base, task.id, adopted, now = nowMs(), priorAccumulatedSec = 0)
+            store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
+            return@launchWrite
+        }
         // Seed prior focus so reopening after "End for now" continues from the
         // accumulated total instead of restarting the displayed timer at 0.
-        val live = FocusTimer.start(base, task.id, estimateMin = task.estimateMin, priorAccumulatedSec = task.totalFocused, now = nowMs())
+        val live = FocusTimer.start(base, task.id, estimateMin = task.estimateMin, priorAccumulatedSec = if (partnerShared) 0 else task.totalFocused, now = nowMs())
         store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
     }
 
@@ -633,10 +988,16 @@ class AppViewModel(
         // Replacing a different live session: finalize it first (own OR shared).
         if (cur != null && cur.sessionStart != null && cur.taskId != taskId) finalizeDisplaced(cur)
         val base = cur ?: FocusTimer.empty
+        // Join-or-mint (one-true-shared-session, partner level only): adopt the owner's
+        // live session when there is one — the same sessionId finalizes exactly once
+        // via the ledger regardless of who finishes.
+        val adopted = if (level == ShareLevel.PARTNER) probeCoFocusAdoption(taskId) else null
         // priorAccumulatedSec = 0: the recipient's session is standalone; the owner's
         // running total is reflected server-side via log_shared_focus on finish.
-        val live = FocusTimer.start(base, taskId, estimateMin = estimateMin, priorAccumulatedSec = 0, now = nowMs())
-            .copy(sharedTitle = title, sharedLevel = level.wire)
+        val live = (
+            if (adopted != null) FocusTimer.adopt(base, taskId, adopted, now = nowMs(), priorAccumulatedSec = 0)
+            else FocusTimer.start(base, taskId, estimateMin = estimateMin, priorAccumulatedSec = 0, now = nowMs())
+            ).copy(sharedTitle = title, sharedLevel = level.wire)
         store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
     }
 
@@ -652,22 +1013,34 @@ class AppViewModel(
             // replacement session after we return.
             val sid = cur.id ?: newUuid()
             store.setLiveSession(null)
-            runCatching { circleClient?.logSharedFocus(cur.taskId, elapsed, sid, cur.sessionEstimateMin) }
+            accrueSharedFocus(cur.taskId, elapsed, sid, cur.sessionEstimateMin, ownerFallback = false)
             refreshShares()
             return
         }
         val prev = store.tasks().first().firstOrNull { it.id == cur.taskId } ?: return
-        write?.upsertSession(Session(id = cur.id ?: newUuid(), taskId = prev.id, taskName = prev.name, estimateMin = prev.estimateMin, actualSec = elapsed, completedAt = isoNow()))
-        write?.upsertTask(prev.copy(totalFocused = prev.totalFocused + elapsed, updatedAt = isoNow()))
+        val sid = cur.id ?: newUuid()
+        write?.upsertSession(Session(id = sid, taskId = prev.id, taskName = prev.name, estimateMin = prev.estimateMin, actualSec = elapsed, completedAt = isoNow()))
+        if (shareBadges.value[prev.id].orEmpty().any { it.level == ShareLevel.PARTNER }) {
+            // One-true-shared-session accrual: a partner-shared task's total accrues
+            // EXCLUSIVELY via the ledger (exactly-once per session id — the partner may
+            // finalize the SAME session). Land the row writes first so the whole-row
+            // upsert can't clobber the server-side accrual, then log (durably: an
+            // offline failure queues a persisted retry; a revoked share falls back to
+            // the direct bump — see accrueSharedFocus).
+            flushOutbox()
+            accrueSharedFocus(prev.id, elapsed, sid, cur.sessionEstimateMin, ownerFallback = true)
+        } else {
+            write?.upsertTask(prev.copy(totalFocused = prev.totalFocused + elapsed, updatedAt = isoNow()))
+        }
     }
 
-    fun pauseFocus() = launchWrite { mutateLive { FocusTimer.pause(it, nowMs()) } }
-    fun resumeFocus() = launchWrite { mutateLive { FocusTimer.resume(it, nowMs()) } }
+    fun pauseFocus() = launchWrite { mutateLive(control = true) { FocusTimer.pause(it, nowMs()) } }
+    fun resumeFocus() = launchWrite { mutateLive(control = true) { FocusTimer.resume(it, nowMs()) } }
     fun setTreatment(t: FocusTreatment) = launchWrite {
         mutateLive { FocusTimer.setTreatment(it, t) }
         updateSettings { it.copy(treatment = t) }
     }
-    fun extendFocus(minutes: Int) = launchWrite { mutateLive { FocusTimer.extend(it, minutes) } }
+    fun extendFocus(minutes: Int) = launchWrite { mutateLive(control = true) { FocusTimer.extend(it, minutes) } }
 
     /**
      * End the focus session. Mirrors the web's two finish actions:
@@ -689,7 +1062,7 @@ class AppViewModel(
             // idempotency also guards, but this is cleaner). elapsed is snapshotted above.
             val sid = live.id ?: newUuid()
             store.setLiveSession(null)
-            runCatching { circleClient?.logSharedFocus(live.taskId, elapsed, sid, live.sessionEstimateMin) }
+            accrueSharedFocus(live.taskId, elapsed, sid, live.sessionEstimateMin, ownerFallback = false)
             if (markDone) {
                 runCatching { circleClient?.sharedTaskSetDone(live.taskId, true) }
                 circleClient?.notifyTaskDone(live.taskId)
@@ -707,21 +1080,41 @@ class AppViewModel(
         val occBlock = live.occurrenceBlockId?.let { id -> blocks.value.firstOrNull { it.id == id } }
             ?: occurrenceBlockFor(task.id, tasks.value, blocks.value)
         val realTask = occBlock?.let { b -> tasks.value.firstOrNull { it.id == b.taskId } } ?: task
+        // One-true-shared-session accrual (owner side): EVERY session on a partner-
+        // shared task accrues total_focused EXCLUSIVELY via the log_shared_focus ledger
+        // (exactly-once by session id — the partner finalizes the SAME id), so the
+        // direct += bump is SKIPPED here. The Session row (insights) is still written.
+        val partnerShared = shareBadges.value[realTask.id].orEmpty().any { it.level == ShareLevel.PARTNER }
+        val sid = live.id ?: newUuid()
         // Reuse the live-session id so captures taken during the session join back
         // to this Session row (the interruption histogram depends on it).
         write?.upsertSession(
-            Session(id = live.id ?: newUuid(), taskId = realTask.id, taskName = realTask.name, estimateMin = realTask.estimateMin, actualSec = elapsed, completedAt = isoNow()),
+            Session(id = sid, taskId = realTask.id, taskName = realTask.name, estimateMin = realTask.estimateMin, actualSec = elapsed, completedAt = isoNow()),
         )
         if (occBlock != null) {
-            write?.upsertTask(realTask.copy(totalFocused = realTask.totalFocused + elapsed, updatedAt = isoNow()))
+            if (!partnerShared) write?.upsertTask(realTask.copy(totalFocused = realTask.totalFocused + elapsed, updatedAt = isoNow()))
             if (markDone) write?.upsertCalBlock(occBlock.copy(done = true, skipped = false, completedAt = isoNow()))
         } else {
-            val focused = realTask.copy(totalFocused = realTask.totalFocused + elapsed, updatedAt = isoNow())
-            write?.upsertTask(
-                if (markDone) applyCompletion(focused.copy(done = true), prior = realTask, nowISO = isoNow()) else focused,
-            )
+            val focused =
+                if (partnerShared) realTask.copy(updatedAt = isoNow())   // total via the ledger
+                else realTask.copy(totalFocused = realTask.totalFocused + elapsed, updatedAt = isoNow())
+            if (markDone) {
+                write?.upsertTask(applyCompletion(focused.copy(done = true), prior = realTask, nowISO = isoNow()))
+            } else if (!partnerShared) {
+                write?.upsertTask(focused)
+            }
+            // partner-shared + end-for-now: no task write at all — nothing changed on
+            // the row; the total accrues server-side (realtime/hydrate brings it back).
         }
         store.setLiveSession(null)
+        if (partnerShared) {
+            // Land the row writes first (the whole-row upsert must not clobber the
+            // server-side accrual), then log DURABLY: the RPC clamps + dedups on
+            // session id; a transient failure queues a persisted retry and a revoked
+            // share falls back to the direct bump (accrueSharedFocus).
+            flushOutbox()
+            accrueSharedFocus(realTask.id, elapsed, sid, live.sessionEstimateMin, ownerFallback = true)
+        }
         // Completing a promoted shared-collection task from Focus must also flip the
         // shared item + notify members (same as toggleDone).
         if (markDone && occBlock == null && realTask.sourceCollectionId != null && realTask.sourceItemId != null) {
@@ -739,9 +1132,24 @@ class AppViewModel(
     val lastRecap: StateFlow<RecapState?> = _lastRecap
     fun dismissRecap() { _lastRecap.value = null }
 
-    private suspend fun mutateLive(transform: (LiveSession) -> LiveSession) {
+    private suspend fun mutateLive(control: Boolean = false, transform: (LiveSession) -> LiveSession) {
         val cur = store.getLiveSession() ?: return
-        store.setLiveSession(transform(cur))
+        var next = transform(cur)
+        // One-true-shared-session: a LOCAL control (pause/resume/extend) on a partner
+        // co-focus session stamps the next (rev, atMs) ATOMICALLY (same Room write),
+        // so a single consistent blob classifies local-vs-remote
+        // (core.logic.remotePaused) and the reducer floor carries this control's wall
+        // clock (core.logic.sharedRevFloor — without it a rev-tie race could swap the
+        // two sides, and a peer re-announce could flip a genuinely local pause to
+        // remote). The broadcaster ships exactly this (rev, atMs). setTreatment stays
+        // unstamped (local-only).
+        if (control && next != cur && isPartnerCoFocus(cur, shareBadges.value)) {
+            next = next.copy(
+                sharedSessionRev = maxOf(cur.sharedSessionRev ?: 0, cur.lastAppliedRev ?: 0) + 1,
+                sharedSessionAtMs = nowMs(),
+            )
+        }
+        store.setLiveSession(next)
     }
 
     // --- captures / reasons ---
@@ -1572,8 +1980,10 @@ data class ExportBundle(
     val lifeAreas: List<LifeArea>,
 )
 
-/** A just-finished focus session, surfaced as the Today recap card (B3). */
-data class RecapState(val taskName: String, val focusedSec: Int, val at: Long = 0L)
+/** A just-finished focus session, surfaced as the Today recap card (B3).
+ *  [endedBy] carries the partner's name when a REMOTE `ended` finalized a shared
+ *  session, so the card can attribute it calmly ("<name> ended the session"). */
+data class RecapState(val taskName: String, val focusedSec: Int, val at: Long = 0L, val endedBy: String? = null)
 
 /** The debounced inputs for the home-screen Start-Next widget recomputation. */
 private data class WidgetInputs(

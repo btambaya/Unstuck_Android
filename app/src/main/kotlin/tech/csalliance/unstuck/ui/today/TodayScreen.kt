@@ -268,7 +268,11 @@ fun TodayScreen(
                             SectionLabel("Just now", color = c.coralDeep)
                             Text("✕", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable { vm.dismissRecap() })
                         }
-                        Text("You did the thing.", style = UFont.serifItalic(22), color = c.ink, modifier = Modifier.padding(top = 4.dp))
+                        // A remote-ended shared session attributes calmly; own finishes celebrate.
+                        Text(
+                            r.endedBy?.let { "$it ended the session." } ?: "You did the thing.",
+                            style = UFont.serifItalic(22), color = c.ink, modifier = Modifier.padding(top = 4.dp),
+                        )
                         Text(
                             "${(r.focusedSec / 60).coerceAtLeast(1)} MIN FOCUSED · ${r.taskName}",
                             style = UFont.mono(11), color = c.ink2, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp),

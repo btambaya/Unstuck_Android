@@ -265,4 +265,24 @@ data class LiveSession(
     // owner). Device-local, backward-compatible defaults (own sessions leave them null).
     val sharedTitle: String? = null,
     val sharedLevel: String? = null,
+    // One true shared session (partner co-focus v2, docs/shared-session-spec.md).
+    // All optional + defaulted so old persisted blobs keep decoding.
+    //  [sharedSessionRev]/[sharedSessionAtMs] — newest (rev, wall clock) THIS device
+    //                        stamped on a LOCAL control (mint/pause/resume/extend).
+    //                        Stamped in the SAME write as the mutation so observers
+    //                        classify local-vs-remote from one consistent blob (see
+    //                        core.logic.remotePaused), and the reducer floor carries
+    //                        the local control's clock (core.logic.sharedRevFloor) —
+    //                        without it a rev-tie or a peer re-announce of our own
+    //                        control could out-order a genuinely local control.
+    //  [lastAppliedRev]/[lastAppliedAtMs] — the newest REMOTE control applied (the
+    //                        LWW cursor for the sharedSessionStep reducer).
+    //  [sharedSessionEndedBy] — display name of the partner whose remote `ended`
+    //                        finalized this session (blocks late re-applies while the
+    //                        finalize RPC runs; drives the recap attribution).
+    val sharedSessionRev: Int? = null,
+    val sharedSessionAtMs: Long? = null,
+    val lastAppliedRev: Int? = null,
+    val lastAppliedAtMs: Long? = null,
+    val sharedSessionEndedBy: String? = null,
 )

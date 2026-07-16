@@ -34,6 +34,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.core.logic.formatMMSS
@@ -153,12 +154,23 @@ private fun rememberSecondTicker(): Long {
 
 /** RECIPIENT: inline presence on a partner "shared with you" row. Shows a live
  *  "focusing now" pulse when the owner is present + a "Sit with them" toggle that
- *  joins presence as HERE (body-doubling). */
+ *  joins presence as HERE (body-doubling).
+ *
+ *  One-true-shared-session guard: when THIS task is the LIVE co-focus session, the
+ *  session-lifetime channel (AppViewModel) already holds topic `cofocus:<taskId>`.
+ *  supabase-kt keys its dispatch map by topic (last-subscribed instance wins), so a
+ *  second channel here would EVICT the VM's — silently killing remote controls.
+ *  This row reuses the VM's peers instead and suppresses its own channel; the "Sit
+ *  with them" toggle is moot then (you're IN the session, tracked as FOCUSING). */
 @Composable
 fun PartnerPresence(vm: AppViewModel, taskId: String, modifier: Modifier = Modifier) {
     val c = UTheme.colors
     var sitting by remember(taskId) { mutableStateOf(false) }
-    val peers = rememberCoFocusPeers(vm, taskId, active = true, track = if (sitting) CoFocusState.HERE else null)
+    val live by vm.liveSession.collectAsStateWithLifecycle()
+    val liveCoFocus = live?.taskId == taskId && live?.sessionStart != null
+    val vmPeers by vm.coFocusPeers.collectAsStateWithLifecycle()
+    val ownPeers = rememberCoFocusPeers(vm, taskId, active = !liveCoFocus, track = if (sitting) CoFocusState.HERE else null)
+    val peers = if (liveCoFocus) vmPeers else ownPeers
     val focusingPeer = peers.firstOrNull { it.state == CoFocusState.FOCUSING }
     val ownerFocusing = focusingPeer != null
 
@@ -174,24 +186,26 @@ fun PartnerPresence(vm: AppViewModel, taskId: String, modifier: Modifier = Modif
                 focusingPeer?.timer?.let { SharedTimer(it, onDark = false) }
             }
         }
-        Row(
-            Modifier
-                .clip(RoundedCornerShape(999.dp))
-                .background(if (sitting) c.primary else c.primarySoft)
-                .clickable(role = Role.Button) { sitting = !sitting }
-                .padding(horizontal = 10.dp, vertical = 3.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(5.dp),
-        ) {
-            Icon(
-                Icons.Filled.People, contentDescription = null,
-                tint = if (sitting) Color.White else c.primaryDeep, modifier = Modifier.size(12.dp),
-            )
-            Text(
-                if (sitting) "Sitting with them" else "Sit with them",
-                style = UFont.sans(11, FontWeight.Bold),
-                color = if (sitting) Color.White else c.primaryDeep,
-            )
+        if (!liveCoFocus) {
+            Row(
+                Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .background(if (sitting) c.primary else c.primarySoft)
+                    .clickable(role = Role.Button) { sitting = !sitting }
+                    .padding(horizontal = 10.dp, vertical = 3.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(5.dp),
+            ) {
+                Icon(
+                    Icons.Filled.People, contentDescription = null,
+                    tint = if (sitting) Color.White else c.primaryDeep, modifier = Modifier.size(12.dp),
+                )
+                Text(
+                    if (sitting) "Sitting with them" else "Sit with them",
+                    style = UFont.sans(11, FontWeight.Bold),
+                    color = if (sitting) Color.White else c.primaryDeep,
+                )
+            }
         }
     }
 }

@@ -165,6 +165,19 @@ class SettingsStore(context: Context) {
         p.edit().putStringSet("archivedCaptureIds", ids).apply()
     }
 
+    /** Pending log_shared_focus retries (a JSON array, encoded/decoded by
+     *  SharedFocusLedger). A partner-shared session's accrual is LEDGER-EXCLUSIVE,
+     *  so an offline finish must persist the record and drain later — otherwise the
+     *  minutes are silently lost. Idempotent server-side per sessionId, so keeping
+     *  a record too long is safe; losing one is not. */
+    fun loadPendingSharedFocusRaw(): String? = p.getString("pendingSharedFocus", null)
+
+    fun savePendingSharedFocusRaw(rawJson: String?) {
+        p.edit().apply {
+            if (rawJson == null) remove("pendingSharedFocus") else putString("pendingSharedFocus", rawJson)
+        }.apply()
+    }
+
     /** Remove per-user device-local content (reminder overrides + dismissed
      *  nudges + archived captures) on sign-out so a different account on this
      *  device starts clean. */
@@ -173,6 +186,9 @@ class SettingsStore(context: Context) {
             p.all.keys.filter { it.startsWith("reminder.override.") }.forEach { remove(it) }
             remove("dismissedNudges")
             remove("archivedCaptureIds")
+            // Pending shared-focus retries are the signed-out user's — a different
+            // account must not try (and fail) to accrue them.
+            remove("pendingSharedFocus")
         }.apply()
     }
 

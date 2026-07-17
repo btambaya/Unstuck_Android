@@ -95,39 +95,55 @@ fun canonicalElapsedSec(state: SharedSessionState, now: Long): Int {
  *  web + iOS (docs/shared-session-spec.md, "Offline & reconnect convergence"). */
 const val DIVERGENCE_SLACK_MS: Long = 3_000
 
-/** How a DIVERGED client (a local control's broadcast failed to deliver — see
- *  LiveSession.divergedOffline) must converge on the first same-session state it
- *  receives after reconnecting. Every outcome clears the diverged flag. */
+/** How a RECONCILING client (diverged-flagged, or merely rejoin-pending) must
+ *  converge on the first same-session state it receives after reconnecting.
+ *  Every outcome closes the reconciliation window. */
 sealed interface DivergenceResolution {
     /** The incoming state is ahead → adopt it wholesale (criterion 3: on regaining
      *  internet you get the timer that's THE MOST AHEAD). */
     data object Adopt : DivergenceResolution
     /** The LOCAL state is ahead → keep it and broadcast it at [rev] — a genuine
      *  convergence control the partner applies via normal LWW (criterion 4 needs no
-     *  special logic on the online side). */
+     *  special logic on the online side). Only ever produced for a FLAGGED
+     *  divergence (rejoin v2 rule 3). */
     data class KeepAndBroadcast(val rev: Int) : DivergenceResolution
-    /** Within slack — the clocks agree; fall back to plain (rev, atMs) LWW. */
+    /** Within slack — the clocks agree — or local-ahead WITHOUT the flag; fall
+     *  back to plain (rev, atMs) LWW. */
     data object Lww : DivergenceResolution
 }
 
-/** Most-ahead convergence for a DIVERGED receiver (pure; mirrored 1:1 on web + iOS).
- *  Compare the two states' canonical elapsed at the RECEIVER's clock [nowMs] — a
- *  paused side is frozen at its pause point, a running side keeps counting, so
- *  "most ahead" is exactly the tester's acceptance rule. Only meaningful for the
- *  SAME sessionId (the caller guards); `ended` stays TERMINAL throughout — but it
- *  is NOT this function's job: callers pre-filter ended before entering the
- *  divergence path, and the step reducer's terminal bypass finalizes it regardless
- *  of cursors. An ended incoming therefore returns Lww (parity with web/iOS —
- *  "resolveDivergence(ended) returns lww on ALL platforms", spec amendments).
- *  NEVER used by non-diverged receivers: live controls stay plain LWW (a stale
- *  running re-announce must not un-pause an online pause). */
-fun resolveDivergence(local: SharedSessionState, incoming: SharedSessionState, nowMs: Long): DivergenceResolution {
+/** Most-ahead convergence for a RECONCILING receiver (pure; mirrored 1:1 on
+ *  web + iOS). Compare the two states' canonical elapsed at the RECEIVER's clock
+ *  [nowMs] — a paused side is frozen at its pause point, a running side keeps
+ *  counting, so "most ahead" is exactly the tester's acceptance rule. Only
+ *  meaningful for the SAME sessionId (the caller guards); `ended` stays TERMINAL
+ *  throughout — but it is NOT this function's job: callers pre-filter ended before
+ *  entering the divergence path, and the step reducer's terminal bypass finalizes
+ *  it regardless of cursors. An ended incoming therefore returns Lww (parity with
+ *  web/iOS — "resolveDivergence(ended) returns lww on ALL platforms", spec
+ *  amendments). NEVER used by fully-live receivers: live controls stay plain LWW
+ *  (a stale running re-announce must not un-pause an online pause).
+ *
+ *  [flagged] — rejoin reconciliation v2 ASYMMETRY (spec §Rejoin reconciliation
+ *  v2, rule 3): a rejoining client may always ADOPT an ahead incoming state, but
+ *  may keep-and-broadcast its own ahead state ONLY when the outage was genuinely
+ *  DETECTED (LiveSession.divergedOffline — a failed send or an observed socket
+ *  drop). Un-flagged (rejoinPending-only) + local-ahead falls back to plain LWW,
+ *  so a trivial connection blip can never bulldoze the partner's genuine online
+ *  pause — while a detected outage still wins criteria 3/4. */
+fun resolveDivergence(
+    local: SharedSessionState,
+    incoming: SharedSessionState,
+    nowMs: Long,
+    flagged: Boolean,
+): DivergenceResolution {
     if (incoming.ended) return DivergenceResolution.Lww   // terminal stays terminal (the reducer owns it)
     val gapMs = (canonicalElapsedSec(incoming, nowMs) - canonicalElapsedSec(local, nowMs)) * 1000L
     return when {
         gapMs > DIVERGENCE_SLACK_MS -> DivergenceResolution.Adopt
         -gapMs > DIVERGENCE_SLACK_MS ->
-            DivergenceResolution.KeepAndBroadcast(maxOf(local.rev, incoming.rev) + 1)
+            if (flagged) DivergenceResolution.KeepAndBroadcast(maxOf(local.rev, incoming.rev) + 1)
+            else DivergenceResolution.Lww
         else -> DivergenceResolution.Lww
     }
 }

@@ -584,7 +584,19 @@ class AppViewModel(
     private var coFocusPeersJob: Job? = null
     private var coFocusControlsJob: Job? = null
     private var coFocusRejoinJob: Job? = null
+    private var coFocusSocketDropJob: Job? = null
     private var coFocusLastSent: Pair<Int, CoFocusFields>? = null   // (rev, fields)
+    /** Rejoin reconciliation v2 (spec §Rejoin reconciliation v2): TRANSIENT, per
+     *  channel. Armed on every rejoin signal and foreground re-exchange; cleared by
+     *  the first SAME-session state received (or the bounded grace concluding we're
+     *  alone). While pending: the automatic announces stay suppressed (rule 1 — no
+     *  rev-authoritative re-announce on a rejoin; our state is SUSPECT until the
+     *  first exchange), and the most-ahead gate in [applyRemoteControl] widens to
+     *  `divergedOffline || rejoinPending` — the undetected-socket-death window
+     *  (sends fire-and-forget "delivered", offline controls bump rev un-flagged, a
+     *  late DISCONNECT observation) reconciles on the first exchange, flag or no
+     *  flag. */
+    private var coFocusRejoinPending = false
     /** Session id whose remote `ended` we already applied — the teardown observer must
      *  not re-broadcast ended for it (the ender's device already did). */
     private var coFocusRemoteEndedSid: String? = null
@@ -685,10 +697,11 @@ class AppViewModel(
         val start = live.sessionStart
         val id = live.id
         if (start == null || id == null) { coFocusPrevLive = live; return }
-        // Mirror the persisted diverged flag into the channel's announce gate on EVERY
-        // observation (covers a channel opened mid-diverged after a process restart):
-        // while diverged, hello replies / re-tracks must not re-announce stale state.
-        session.setSuppressAnnounce(live.divergedOffline == true)
+        // Mirror the persisted diverged flag — OR the transient rejoin-pending window
+        // (rejoin v2 rule 2) — into the channel's announce gate on EVERY observation
+        // (covers a channel opened mid-diverged after a process restart): while
+        // either holds, hello replies / re-tracks must not re-announce suspect state.
+        session.setSuppressAnnounce(live.divergedOffline == true || coFocusRejoinPending)
         val fields = CoFocusFields(start, live.paused, live.pausedAt, live.sessionEstimateMin)
         val last = coFocusLastSent
         val lastApplied = live.lastAppliedRev
@@ -764,6 +777,7 @@ class AppViewModel(
         coFocusChannelTaskId = live.taskId
         coFocusChannelUid = currentUid()
         coFocusLastSent = null
+        coFocusRejoinPending = false   // per-channel transient (rejoin v2 rule 2)
         coFocusPeersJob = viewModelScope.launch { s.peers.collect { _coFocusPeers.value = it } }
         coFocusControlsJob = viewModelScope.launch {
             s.controls.collect { ctl -> runCatching { applyRemoteControl(ctl) } }
@@ -771,21 +785,32 @@ class AppViewModel(
         coFocusRejoinJob = viewModelScope.launch {
             // The SDK auto-rejoined the channel after a socket drop — hello was only
             // ever sent at the FIRST subscribe, so re-exchange now (spec: "Offline &
-            // reconnect convergence"). The foreground collector (init) is the
-            // belt-and-braces twin of this signal.
+            // reconnect convergence" + "Rejoin reconciliation v2": hello-ONLY). The
+            // foreground collector (init) is the belt-and-braces twin of this signal.
             s.rejoins.collect { runCatching { reExchangeCoFocus() } }
+        }
+        coFocusSocketDropJob = viewModelScope.launch {
+            // Undetected-drop belt (rejoin v2): the socket visibly left CONNECTED —
+            // mark the live partner-shared session diverged even though no control
+            // send failed (the silent-window sends were fire-and-forget "delivered").
+            s.socketDrops.collect { runCatching { onCoFocusSocketDropped() } }
         }
     }
 
-    /** Re-exchange the shared state after a channel rejoin / app foreground: re-send
-     *  `hello` (any focuser replies with its full state — the delivery gap was that
-     *  hello only fired once, at first subscribe), and — iff NOT diverged — re-announce
-     *  our current state IDEMPOTENTLY at the SAME (rev, atMs) cursor (peers treat a
-     *  replay as a no-op via LWW; per the rebind rule). A diverged client only ASKS —
-     *  with `diverged: true` on the wire so a focuser answers even while itself
-     *  diverged (spec amendments; the both-diverged deadlock breaker) — and arms the
-     *  grace fallback: announcing its stale state would fight the channel; the
-     *  partner's reply triggers most-ahead convergence in applyRemoteControl. */
+    /** Re-exchange after a channel rejoin / app foreground — HELLO-ONLY (rejoin
+     *  reconciliation v2, superseding the vc71 idempotent re-announce): a dead
+     *  socket goes unnoticed for up to ~2 heartbeats, sends in that window are
+     *  fire-and-forget "delivered", an offline control bumps rev UN-flagged — and
+     *  the old rejoin re-announce then imposed that stale state on the healthy
+     *  partner by rev authority (reproduced live: web rewound onto a frozen clock).
+     *  So every re-join sends ONLY `hello{diverged: <flag>}` (any focuser replies
+     *  with its full state; a diverged hello is answered even by a diverged
+     *  focuser — the deadlock breaker), arms [coFocusRejoinPending] so the FIRST
+     *  same-session reply reconciles most-ahead (flag or no flag), suppresses the
+     *  automatic announces while pending, and arms the bounded grace fallback.
+     *  The genuine FIRST subscribe still announces (mint/adopt needs it) — that
+     *  path is the live-observer broadcast + the channel's own subscribe hello,
+     *  not this method. */
     private suspend fun reExchangeCoFocus() {
         val session = coFocusSession ?: return
         val live = store.getLiveSession() ?: return
@@ -793,22 +818,15 @@ class AppViewModel(
         val id = live.id
         val start = live.sessionStart
         if (id == null || start == null || !isPartnerCoFocus(live, shareBadges.value)) return
-        val diverged = live.divergedOffline == true
-        session.sendHello(diverged = diverged)
-        if (diverged) {
-            // Peer-independent un-diverge (spec amendments): a fresh trigger
-            // (rejoin / foreground) restarts the bounded grace cycle.
-            coFocusGraceTries = 0
-            armDivergenceGrace()
-            return
-        }
-        val (rev, at) = sharedRevFloor(live.sharedSessionRev, live.sharedSessionAtMs, live.lastAppliedRev, live.lastAppliedAtMs)
-        if (rev <= 0) return   // nothing ever announced/applied on this session yet
-        // Delivery failure here does NOT mark divergence: a re-announce carries no new
-        // local state (the next rejoin/foreground simply re-exchanges again).
-        session.broadcastShared(
-            SharedSessionState(id, start, live.paused, live.pausedAt, live.sessionEstimateMin, rev, at, ended = false),
-        )
+        coFocusRejoinPending = true
+        session.setSuppressAnnounce(true)
+        session.sendHello(diverged = live.divergedOffline == true)
+        // Bounded grace (spec amendments + rejoin v2 rule 4): a fresh trigger
+        // (rejoin / foreground) restarts the cycle. For a DIVERGED session it is
+        // the peer-independent un-diverge; for a merely-PENDING one it bounds the
+        // pending window (a probe hello must not go unanswered forever — a fork).
+        coFocusGraceTries = 0
+        armDivergenceGrace()
     }
 
     /** Arm (or re-arm) the diverged re-exchange grace: on expiry with the session
@@ -822,46 +840,88 @@ class AppViewModel(
         }
     }
 
-    /** The diverged hello went unanswered for the grace window. A focusing peer in
-     *  presence HOLDS session state — re-hello and re-arm (≤3 tries; unilaterally
-     *  announcing would fight their state). Presence empty (or observers only, who
-     *  hold no session state) → we're ALONE: our state IS the session — clear the
-     *  flag and re-announce at the local floor (rev already monotonic). This is the
-     *  peer-independent un-diverge that covers the failed-MINT-broadcast case:
-     *  diverged from t=0, the session invisible to the partner — without it they
-     *  would mint a second session on the same task (fork + double accrual). */
+    /** The re-exchange hello went unanswered for the grace window. "ALONE" needs
+     *  PROOF (rejoin v2, rule 4): a presence map that hasn't SYNCED since the last
+     *  rejoin is stale pre-drop data — it counts as a focusing peer, never as
+     *  alone. A focusing peer (or an unsynced map) → re-hello and re-arm (≤3
+     *  tries; unilaterally announcing would fight their state). Presence SYNCED
+     *  and empty of focusers → we're genuinely alone: our state IS the session —
+     *  close the pending window, and if DIVERGED clear the flag and re-announce at
+     *  the local floor (rev already monotonic; the failed-MINT case — without it
+     *  the partner would mint a second session → fork + double accrual). A
+     *  PENDING-only session at the retry cap fails OPEN (pending cleared, announces
+     *  un-suppressed): its state was never suspect-by-evidence, and a suppressed
+     *  hello reply would hide the session from a probing partner — a fork. A
+     *  DIVERGED session at the cap stays diverged (the peer's next control or the
+     *  next re-exchange trigger resolves it). */
     private suspend fun onDivergenceGraceExpired() {
         val session = coFocusSession ?: return
         val live = store.getLiveSession() ?: return
-        if (live.taskId != coFocusChannelTaskId || live.divergedOffline != true) return
+        if (live.taskId != coFocusChannelTaskId) return
+        val diverged = live.divergedOffline == true
+        if (!diverged && !coFocusRejoinPending) return   // window already closed
         val id = live.id ?: return
         if (live.sessionStart == null) return
-        if (_coFocusPeers.value.any { it.state == CoFocusState.FOCUSING }) {
+        val unsynced = !session.presenceSyncedSinceRejoin()
+        if (unsynced || _coFocusPeers.value.any { it.state == CoFocusState.FOCUSING }) {
             if (coFocusGraceTries < DIVERGENCE_GRACE_MAX_TRIES) {
                 coFocusGraceTries += 1
-                session.sendHello(diverged = true)
+                session.sendHello(diverged = diverged)
                 armDivergenceGrace()
+                return
             }
-            // Cap reached: stay diverged and wait for the peer's next control or
-            // the next rejoin/foreground re-exchange (which resets the tries).
+            // Cap reached. Pending-only: fail open (see doc). Diverged: stay
+            // diverged — announces remain suppressed; the diverged-hello bypass
+            // still answers the partner, so no fork risk on this arm.
+            if (!diverged && coFocusRejoinPending) {
+                coFocusRejoinPending = false
+                session.setSuppressAnnounce(false)
+            }
             return
         }
         coFocusGraceTries = 0
+        coFocusRejoinPending = false
+        if (!diverged) {
+            // Merely pending and provably alone — nothing to converge with and
+            // nothing suspect to announce; just lift the suppression.
+            session.setSuppressAnnounce(false)
+            return
+        }
         val (rev, at) = sharedRevFloor(live.sharedSessionRev, live.sharedSessionAtMs, live.lastAppliedRev, live.lastAppliedAtMs)
         store.setLiveSession(live.copy(divergedOffline = null))
         session.setSuppressAnnounce(false)
         // Re-announce explicitly (rev > 0 whenever a control/mint ever stamped; a
         // never-stamped session simply re-emits through the now-unsuppressed
-        // broadcaster). A failed send re-marks the divergence inside the helper.
+        // broadcaster). The helper VERIFIES delivery: a failed catch-up send rolls
+        // the echo guard back and RE-MARKS the divergence (rejoin v2, rule 4).
         if (rev > 0) broadcastLocalAtFloor(id, live, rev, at)
+    }
+
+    /** Undetected-drop belt (rejoin v2, "socket-down alone marks divergence"): the
+     *  channel observed the socket LEAVING connected while a partner-shared session
+     *  is live — flag it diverged even though no control send failed. Criterion 3's
+     *  offline RUNNER (no local control at all) must not be rewound by the
+     *  partner's mid-outage pause on rejoin: the flag routes the first
+     *  post-reconnect exchange through most-ahead — with KeepAndBroadcast rights,
+     *  since this outage is DETECTED. Session-guarded like every co-focus path. */
+    private suspend fun onCoFocusSocketDropped() {
+        val live = store.getLiveSession() ?: return
+        if (live.taskId != coFocusChannelTaskId) return
+        if (live.id == null || live.sessionStart == null || !isPartnerCoFocus(live, shareBadges.value)) return
+        if (live.divergedOffline != true) {
+            store.setLiveSession(live.copy(divergedOffline = true))
+        }
+        coFocusSession?.setSuppressAnnounce(true)
     }
 
     private fun closeCoFocusChannel() {
         coFocusPeersJob?.cancel(); coFocusPeersJob = null
         coFocusControlsJob?.cancel(); coFocusControlsJob = null
         coFocusRejoinJob?.cancel(); coFocusRejoinJob = null
+        coFocusSocketDropJob?.cancel(); coFocusSocketDropJob = null
         coFocusGraceJob?.cancel(); coFocusGraceJob = null
         coFocusGraceTries = 0
+        coFocusRejoinPending = false
         coFocusSession?.close(); coFocusSession = null
         coFocusChannelTaskId = null
         coFocusChannelUid = null
@@ -883,13 +943,18 @@ class AppViewModel(
      *  side effects (FGS notification, paused check-in, recap) — WITHOUT opening the
      *  pause-reason sheet or arming the pause nag for a control the partner made.
      *
-     *  When THIS side is offline-DIVERGED (a control's broadcast failed to deliver),
-     *  the first same-session live state resolves by MOST-AHEAD convergence
+     *  When THIS side is offline-DIVERGED (a control's broadcast failed to deliver,
+     *  or the socket visibly dropped) OR rejoin-PENDING (rejoin v2: the first
+     *  exchange after ANY rejoin reconciles, flag or no flag), the first
+     *  same-session live state resolves by MOST-AHEAD convergence
      *  (core.logic.resolveDivergence) instead of plain LWW — the tester's acceptance
      *  rule: on regaining internet, everyone ends on the timer that's most ahead.
-     *  Non-diverged receivers are COMPLETELY unchanged: live controls stay plain LWW
-     *  (a stale running re-announce must never un-pause an online pause), and `ended`
-     *  stays terminal throughout.
+     *  The resolution is ASYMMETRIC (rejoin v2 rule 3): Adopt is always allowed,
+     *  but KeepAndBroadcast needs the genuine diverged FLAG — an un-flagged
+     *  local-ahead falls back to plain LWW, so a trivial blip can never bulldoze
+     *  the partner's genuine online pause. Fully-live receivers are COMPLETELY
+     *  unchanged: live controls stay plain LWW (a stale running re-announce must
+     *  never un-pause an online pause), and `ended` stays terminal throughout.
      *
      *  Internal (not private) purely as a test seam — production calls arrive only
      *  via the session-lifetime controls collector. */
@@ -912,29 +977,46 @@ class AppViewModel(
         )
         val msg = ctl.state
         val name = ctl.name?.let { coFocusFirstName(it) } ?: "Your partner"
-        // Offline-divergence convergence (spec, "Offline & reconnect"). Only for the
+        // The first SAME-session exchange closes the rejoin-pending window (rejoin
+        // v2 rule 2) — captured first so THIS control still reconciles through the
+        // widened gate below. Suppression lifts unless the diverged flag holds it.
+        val rejoinPending = coFocusRejoinPending
+        if (rejoinPending && msg.sessionId == id) {
+            coFocusRejoinPending = false
+            if (cur.divergedOffline != true) coFocusSession?.setSuppressAnnounce(false)
+        }
+        // Reconnect reconciliation (spec, "Offline & reconnect" + "Rejoin
+        // reconciliation v2"): diverged-flagged OR rejoin-pending. Only for the
         // SAME session, only while not locally ended, and never for an incoming
         // `ended` (terminal — the plain path below finalizes it regardless of clocks).
+        val flagged = cur.divergedOffline == true
         var lwwConverged = false
-        if (cur.divergedOffline == true && msg.sessionId == id && !local.ended && !msg.ended) {
-            when (val res = resolveDivergence(local, msg, nowMs())) {
+        if ((flagged || rejoinPending) && msg.sessionId == id && !local.ended && !msg.ended) {
+            when (val res = resolveDivergence(local, msg, nowMs(), flagged = flagged)) {
                 DivergenceResolution.Adopt -> {
                     // Incoming is most-ahead: adopt it WHOLESALE (clears the flag and
-                    // drives the FGS notification via the shared apply body).
+                    // drives the FGS notification via the shared apply body). Allowed
+                    // flag or no flag — adopting an ahead state never harms the peer.
                     applyIncomingShared(cur, msg, name)
                     return
                 }
                 is DivergenceResolution.KeepAndBroadcast -> {
+                    // Only reachable when FLAGGED (rejoin v2 rule 3): a detected
+                    // outage's ahead local state genuinely wins criteria 3/4.
                     keepDivergedLocalAndBroadcast(cur, res.rev)
                     return
                 }
                 DivergenceResolution.Lww -> {
-                    // Within slack — the clocks agree, so the re-exchange resolved the
-                    // divergence: drop the flag and let plain (rev, atMs) LWW below
-                    // decide whether the incoming applies.
-                    store.setLiveSession(cur.copy(divergedOffline = null))
-                    coFocusSession?.setSuppressAnnounce(false)
-                    lwwConverged = true
+                    // Within slack (or un-flagged local-ahead): plain (rev, atMs)
+                    // LWW below decides whether the incoming applies. A FLAGGED
+                    // divergence is resolved by the exchange — drop the flag; the
+                    // catch-up broadcast on LWW-reject is flag-only too (an
+                    // un-flagged rejoiner holds no proven-newer state to impose).
+                    if (flagged) {
+                        store.setLiveSession(cur.copy(divergedOffline = null))
+                        coFocusSession?.setSuppressAnnounce(false)
+                        lwwConverged = true
+                    }
                 }
             }
         }

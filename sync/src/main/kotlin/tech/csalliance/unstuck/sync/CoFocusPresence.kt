@@ -155,6 +155,15 @@ interface CoFocusChannel {
     val controls: SharedFlow<CoFocusControl>
     /** Channel re-joined after a socket drop — re-exchange on each emission. */
     val rejoins: SharedFlow<Unit>
+    /** The socket VISIBLY left CONNECTED (rejoin v2, undetected-drop belt): the
+     *  owner marks the live partner-shared session diverged even when no control
+     *  send ever failed — criterion 3's offline RUNNER must not be rewound by the
+     *  partner's mid-outage pause on rejoin. */
+    val socketDrops: SharedFlow<Unit>
+    /** Has ≥1 presence sync landed since the LAST rejoin (or observed drop)?
+     *  While false, the grace fallback must NOT conclude "alone" — an unsynced
+     *  presence map counts as a focusing peer (rejoin v2, rule 4). */
+    fun presenceSyncedSinceRejoin(): Boolean
     /** Broadcast the FULL shared state now; returns whether plausibly DELIVERED. */
     suspend fun broadcastShared(state: SharedSessionState): Boolean
     /** Re-announce ourselves with `hello`; [diverged] rides the wire so a focuser
@@ -219,8 +228,26 @@ class CoFocusSession internal constructor(
         extraBufferCapacity = 2, onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
     /** Channel re-joined after a socket drop — the session-lifetime owner re-exchanges
-     *  (hello + idempotent same-rev re-announce) on each emission. */
+     *  (hello-ONLY, rejoin v2) on each emission. */
     override val rejoins: SharedFlow<Unit> = _rejoins.asSharedFlow()
+
+    // The socket visibly transitioned off CONNECTED (rejoin v2, undetected-drop
+    // belt). Distinct from [rejoins]: this fires at the DROP edge, before any
+    // reconnect, so the owner can flag divergence while the outage is live.
+    private val _socketDrops = MutableSharedFlow<Unit>(
+        extraBufferCapacity = 2, onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+    /** The socket visibly left CONNECTED — the owner marks the live partner-shared
+     *  session diverged even without a failed control send. */
+    override val socketDrops: SharedFlow<Unit> = _socketDrops.asSharedFlow()
+
+    // Presence-sync tracking (rejoin v2, rule 4): true once ANY presence action
+    // (the initial `joins` state event or a diff) lands after the last rejoin —
+    // the VM channel always tracks FOCUSING, so even an ALONE client's own join
+    // produces one. Cleared at every drop/rejoin edge; while false the grace
+    // fallback treats presence as "focusing peer present" (bounded retry) instead
+    // of concluding "alone" off a stale pre-drop map.
+    @Volatile private var presenceSynced = false
 
     @Volatile private var track: CoFocusState? = initialTrack
     // The live focus-session timer to broadcast while FOCUSING (null when not focusing).
@@ -248,6 +275,7 @@ class CoFocusSession internal constructor(
         // initial state event arrives as `joins` for everyone already present.
         collectJob = channel.presenceChangeFlow()
             .onEach { action ->
+                presenceSynced = true   // a fresh sync landed (rejoin v2, rule 4)
                 action.leaves.keys.forEach { if (it != myId) { present.remove(it); broadcastTimers.remove(it) } }
                 action.joins.forEach { (key, p) -> if (key != myId) decode(key, p)?.let { present[key] = it } }
                 emitPeers()
@@ -307,10 +335,25 @@ class CoFocusSession internal constructor(
         // SDK's rejoinChannels() has re-sent the join by then) so the re-exchange
         // rides the fresh join, bounded so a failed rejoin can't wedge the signal.
         rejoinJob = scope.launch {
-            var wasConnected = false
+            var everConnected = false
+            var prevConnected = false
             channel.realtime.status.collect { st ->
-                if (st != Realtime.Status.CONNECTED) return@collect
-                if (wasConnected) {
+                if (st != Realtime.Status.CONNECTED) {
+                    if (prevConnected) {
+                        // Undetected-drop belt (rejoin v2): the socket VISIBLY left
+                        // CONNECTED (heartbeat timeout / receive error / explicit
+                        // disconnect). The pre-drop presence map is stale now, and
+                        // any state this side accrues until re-exchange is suspect
+                        // — signal the owner so it can flag divergence even though
+                        // no control send ever failed (the silent-window sends were
+                        // fire-and-forget "delivered").
+                        prevConnected = false
+                        presenceSynced = false
+                        _socketDrops.tryEmit(Unit)
+                    }
+                    return@collect
+                }
+                if (everConnected) {
                     // STALE-SUBSCRIBED guard: after a silent drop the channel's
                     // status StateFlow still holds the PRE-DROP `SUBSCRIBED` —
                     // rejoinChannels() only flips it to SUBSCRIBING a beat after
@@ -325,21 +368,26 @@ class CoFocusSession internal constructor(
                     withTimeoutOrNull(REJOIN_SUBSCRIBE_WAIT_MS) {
                         channel.status.first { it == RealtimeChannel.Status.SUBSCRIBED }
                     }
+                    // A rejoin resets the presence-sync marker (rejoin v2, rule 4):
+                    // "alone" may only be concluded from a map synced AFTER this
+                    // point. A fresh state event racing in just before is re-earned
+                    // within a beat (bounded grace retry absorbs the blink).
+                    presenceSynced = false
                     _rejoins.tryEmit(Unit)
                     if (!dipped) {
                         // The dip was never observed (missed via StateFlow
                         // conflation, or the signal fired on the stale value):
                         // re-signal once after a short delay so the re-exchange
                         // also rides the REAL fresh join. The re-exchange is
-                        // idempotent (hello + same-rev re-announce), so a
-                        // duplicate is harmless.
+                        // idempotent (hello-only), so a duplicate is harmless.
                         scope.launch {
                             delay(REJOIN_RETRY_DELAY_MS)
                             if (!closed) _rejoins.tryEmit(Unit)
                         }
                     }
                 }
-                wasConnected = true
+                everConnected = true
+                prevConnected = true
             }
         }
         trackJob = scope.launch {
@@ -531,6 +579,10 @@ class CoFocusSession internal constructor(
     /** The most recent control this channel received (the replay a late collector —
      *  or the probe-less join-or-mint above — attaches to). */
     override fun latestControl(): CoFocusControl? = _controls.replayCache.lastOrNull()
+
+    /** Whether ≥1 presence sync landed since the last rejoin/drop edge — the grace
+     *  fallback's "alone" evidence gate (rejoin v2, rule 4). */
+    override fun presenceSyncedSinceRejoin(): Boolean = presenceSynced
 
     /** Leave: untrack + tear the channel down. Idempotent. If ANOTHER instance has
      *  since subscribed this topic (probe / row / VM overlap), the dispatch entry and

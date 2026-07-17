@@ -981,6 +981,14 @@ class AppViewModelTest {
         private val _rejoins = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 2)
         override val rejoins: kotlinx.coroutines.flow.SharedFlow<Unit> get() = _rejoins
         suspend fun emitRejoin() { _rejoins.emit(Unit) }
+        private val _socketDrops = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 2)
+        override val socketDrops: kotlinx.coroutines.flow.SharedFlow<Unit> get() = _socketDrops
+        suspend fun emitSocketDrop() { _socketDrops.emit(Unit) }
+        /** Presence-sync marker (rejoin v2 rule 4). Defaults TRUE — the map is
+         *  trusted — so pre-v2 grace scenarios keep their shape; the race tests
+         *  flip it false to model a stale pre-drop map. */
+        @Volatile var presenceSynced: Boolean = true
+        override fun presenceSyncedSinceRejoin(): Boolean = presenceSynced
         override suspend fun broadcastShared(state: SharedSessionState): Boolean {
             current = state
             sentFlow.value = sentFlow.value + state
@@ -1096,7 +1104,135 @@ class AppViewModelTest {
         assertTrue("a diverged client only ASKS — no state announce on re-exchange", fake.sent.isEmpty())
     }
 
-    @Test fun reExchange_notDiverged_reannouncesIdempotentlyAtTheSameCursor() = runTest(dispatcher) {
+    @Test fun reExchange_rejoinIsHelloOnly_noStateReannounce_rejoinV2() = runTest(dispatcher) {
+        // Rejoin reconciliation v2 rule 1 (SUPERSEDES the vc71 idempotent
+        // re-announce, after the live-reproduced iOS↔web failure): a dead socket
+        // can go unnoticed for ~2 heartbeats — sends in that window are
+        // fire-and-forget "delivered" and an offline control bumps rev UN-flagged,
+        // so ANY rejoin-time state is suspect. The re-exchange sends ONLY hello,
+        // arms the pending window (announces suppressed), and lets the partner's
+        // reply reconcile most-ahead. The genuine FIRST announce (mint) still ships.
+        val fake = FakeCoFocusChannel()
+        val vm = vm(coFocus = { fake })
+        subscribeReads(vm, vm.tasks)
+        store.setLiveSession(partnerLive(startMs = nowMs - 100_000, rev = 4, atMs = nowMs - 100_000))
+        fake.sentFlow.first { it.size >= 1 }   // the first-subscribe mint announce
+        advanceUntilIdle()
+
+        fake.emitRejoin()
+        fake.hellosFlow.first { it.isNotEmpty() }
+
+        assertEquals("hello without the diverged flag", listOf(false), fake.hellos)
+        assertEquals("NO rev-authoritative state re-announce on a rejoin", 1, fake.sent.size)
+        assertEquals("announces suppressed while rejoin-pending", true, fake.suppressedFlow.value)
+    }
+
+    @Test fun rejoinPending_unflagged_incomingAheadAdopts_despiteLosingPlainLww() = runTest(dispatcher) {
+        // Rejoin v2 rule 2, the iOS↔web failure from the rejoiner's seat: my pause
+        // landed in the undetected-dead-socket window (rev bumped to 5, NO diverged
+        // flag), the partner ran on. Their reply after my rejoin is behind on rev
+        // but AHEAD on the clock — the widened gate (divergedOffline || pending)
+        // adopts it; plain LWW would have rejected it and my frozen clock would
+        // have stuck (then bulldozed them under the old re-announce).
+        val fake = FakeCoFocusChannel()
+        val vm = vm(coFocus = { fake })
+        subscribeReads(vm, vm.tasks)
+        store.setLiveSession(
+            partnerLive(startMs = nowMs - 600_000, paused = true, pausedAtMs = nowMs - 540_000, rev = 5, atMs = nowMs - 540_000),
+        )
+        fake.sentFlow.first { it.size >= 1 }
+        advanceUntilIdle()
+
+        fake.emitRejoin()
+        fake.hellosFlow.first { it.isNotEmpty() }   // pending armed; grace not yet expired
+
+        vm.applyRemoteControl(
+            CoFocusControl("partner-uid", "Sam", sharedState(startMs = nowMs - 600_000, rev = 3, atMs = nowMs - 1_000)),
+        )
+
+        val after = awaitLiveSession { it?.paused == false }!!
+        assertEquals("adopted wholesale — cursors follow the incoming", 3, after.lastAppliedRev)
+        assertEquals(3, after.sharedSessionRev)
+        assertNull("never flagged, never persisted", after.divergedOffline)
+        assertEquals("pending closed → announces un-suppressed", false, fake.suppressedFlow.value)
+    }
+
+    @Test fun rejoinPending_unflagged_localAhead_plainLww_partnerOnlinePauseSurvives() = runTest(dispatcher) {
+        // Rejoin v2 rule 3 (the standing guard): a trivial blip — no flag, nothing
+        // suspect locally — must NOT give my ahead running clock KeepAndBroadcast
+        // rights. The partner's GENUINE online pause (newer rev, clock frozen
+        // behind) wins by plain LWW and pauses me; no rev-max+1 convergence
+        // control ships against them.
+        val fake = FakeCoFocusChannel()
+        val vm = vm(coFocus = { fake })
+        subscribeReads(vm, vm.tasks)
+        store.setLiveSession(partnerLive(startMs = nowMs - 600_000, rev = 4, atMs = nowMs - 60_000))
+        fake.sentFlow.first { it.size >= 1 }
+        advanceUntilIdle()
+
+        fake.emitRejoin()
+        fake.hellosFlow.first { it.isNotEmpty() }
+
+        vm.applyRemoteControl(
+            CoFocusControl(
+                "partner-uid", "Sam",
+                sharedState(startMs = nowMs - 600_000, paused = true, pausedAtMs = nowMs - 540_000, rev = 9, atMs = nowMs - 540_000),
+            ),
+        )
+
+        val after = awaitLiveSession { it?.paused == true }!!
+        assertEquals("their pause applied via plain LWW", nowMs - 540_000, after.pausedAt)
+        assertEquals(9, after.lastAppliedRev)
+        assertTrue(
+            "no KeepAndBroadcast convergence control against the online pause",
+            fake.sent.none { it.rev >= 10 },
+        )
+        assertNull(after.divergedOffline)
+    }
+
+    @Test fun rejoinPending_clearedByFirstSameSessionState_gateNarrowsBack() = runTest(dispatcher) {
+        // Rejoin v2 rule 2, the window's END: the first same-session state closes
+        // pending — a LATER stale running re-announce (ahead on the clock, behind
+        // on rev) must fall back to plain LWW and bounce off the local pause, or
+        // the widened gate itself would become the next bulldozer.
+        val fake = FakeCoFocusChannel()
+        val vm = vm(coFocus = { fake })
+        subscribeReads(vm, vm.tasks)
+        store.setLiveSession(
+            partnerLive(startMs = nowMs - 600_000, paused = true, pausedAtMs = nowMs - 540_000, rev = 5, atMs = nowMs - 540_000),
+        )
+        fake.sentFlow.first { it.size >= 1 }
+        advanceUntilIdle()
+
+        fake.emitRejoin()
+        fake.hellosFlow.first { it.isNotEmpty() }
+
+        // First exchange: the partner echoes OUR pause back (same fields, same
+        // cursor — within slack, rejected by LWW). It still closes the window.
+        vm.applyRemoteControl(
+            CoFocusControl(
+                "partner-uid", "Sam",
+                sharedState(startMs = nowMs - 600_000, paused = true, pausedAtMs = nowMs - 540_000, rev = 5, atMs = nowMs - 540_000),
+            ),
+        )
+        assertEquals("first same-session exchange lifts the suppression", false, fake.suppressedFlow.value)
+
+        // Second: a stale running re-announce, far ahead on the clock. With the
+        // gate narrowed it must NOT adopt (nonDiverged_staleRunningReannounce's
+        // guarantee is restored the moment pending clears).
+        vm.applyRemoteControl(
+            CoFocusControl("partner-uid", "Sam", sharedState(startMs = nowMs - 600_000, rev = 3, atMs = nowMs - 1_000)),
+        )
+        advanceUntilIdle()
+
+        val after = store.getLiveSession()!!
+        assertTrue("the pause survives — the widened gate closed with the window", after.paused)
+        assertEquals(nowMs - 540_000, after.pausedAt)
+    }
+
+    @Test fun foregroundReExchange_armsRejoinPending_helloOnly() = runTest(dispatcher) {
+        // The foreground signal is the rejoin signal's belt-and-braces twin — v2
+        // makes it hello-only too, and it arms the same pending window.
         val fake = FakeCoFocusChannel()
         val vm = vm(coFocus = { fake })
         subscribeReads(vm, vm.tasks)
@@ -1104,14 +1240,88 @@ class AppViewModelTest {
         fake.sentFlow.first { it.size >= 1 }
         advanceUntilIdle()
 
-        fake.emitRejoin()
-        fake.sentFlow.first { it.size >= 2 }
+        graph.foregrounds.emit(Unit)
+        fake.hellosFlow.first { it.isNotEmpty() }
 
-        assertEquals("hello without the diverged flag", listOf(false), fake.hellos)
-        val re = fake.sent.last()
-        assertEquals("re-announce replays the SAME rev — a no-op for peers via LWW", 4, re.rev)
-        assertEquals(nowMs - 100_000, re.atMs)
-        assertFalse(re.ended)
+        assertEquals(listOf(false), fake.hellos)
+        assertEquals("no state re-announce on the foreground re-exchange", 1, fake.sent.size)
+        assertEquals("pending armed → announces suppressed", true, fake.suppressedFlow.value)
+    }
+
+    @Test fun socketDrop_marksLivePartnerSessionDiverged_withoutAnyFailedControl() = runTest(dispatcher) {
+        // Rejoin v2, undetected-drop belt ("socket-down alone marks divergence"):
+        // the channel observed the socket LEAVING connected — no control ever
+        // failed, but criterion 3's offline RUNNER must get KeepAndBroadcast
+        // rights, or the partner's mid-outage pause would rewind it on rejoin.
+        val fake = FakeCoFocusChannel()
+        val vm = vm(coFocus = { fake })
+        subscribeReads(vm, vm.tasks)
+        store.setLiveSession(partnerLive(startMs = nowMs - 100_000, rev = 4, atMs = nowMs - 100_000))
+        fake.sentFlow.first { it.size >= 1 }
+        advanceUntilIdle()
+        assertNull(store.getLiveSession()?.divergedOffline)
+
+        fake.emitSocketDrop()
+
+        val after = awaitLiveSession { it?.divergedOffline == true }!!
+        assertEquals("sid-1", after.id)
+        assertEquals("announces suppressed while diverged", true, fake.suppressedFlow.value)
+    }
+
+    @Test fun divergenceGrace_unsyncedPresence_neverConcludesAlone_reHellosBounded() = runTest(dispatcher) {
+        // Rejoin v2 rule 4 (the grace presence RACE): after a rejoin the presence
+        // map is stale pre-drop data until ≥1 sync lands — an empty-looking map
+        // must count as "focusing peer present" (bounded re-hello), never as
+        // "alone" (which would clear the flag and re-announce stale state at a
+        // peer the map simply hasn't shown yet).
+        val fake = FakeCoFocusChannel()
+        fake.presenceSynced = false
+        val vm = vm(coFocus = { fake })
+        subscribeReads(vm, vm.tasks)
+        store.setLiveSession(partnerLive(startMs = nowMs - 100_000, rev = 4, atMs = nowMs - 100_000, diverged = true))
+        fake.suppressedFlow.first { it == true }
+        advanceUntilIdle()
+
+        fake.emitRejoin()
+        // 1 re-exchange hello + 3 bounded grace re-hellos, exactly like the
+        // focusing-peer-present case — despite presence being EMPTY.
+        fake.hellosFlow.first { it.size >= 4 }
+        advanceUntilIdle()
+
+        assertEquals(listOf(true, true, true, true), fake.hellos)
+        assertTrue("never announced state off an unsynced map", fake.sent.isEmpty())
+        assertEquals("stays diverged past the cap", true, store.getLiveSession()?.divergedOffline)
+    }
+
+    @Test fun divergenceGrace_aloneCatchUp_failedSend_reMarksDivergence() = runTest(dispatcher) {
+        // Rejoin v2 rule 4, second half: the grace-alone catch-up broadcast must
+        // VERIFY delivery — a failed send re-marks the divergence (and rolls the
+        // echo guard back) so the next trigger retries instead of silently
+        // considering the session announced.
+        val fake = FakeCoFocusChannel()
+        fake.deliverResult = false
+        val vm = vm(coFocus = { fake })
+        subscribeReads(vm, vm.tasks)
+        store.setLiveSession(
+            partnerLive(
+                startMs = nowMs - 30_000, rev = 1, atMs = nowMs - 30_000,
+                appliedRev = null, appliedAtMs = null, diverged = true,
+            ),
+        )
+        fake.suppressedFlow.first { it == true }
+        advanceUntilIdle()
+
+        fake.emitRejoin()
+        // Grace expiry (virtual 5s): synced + alone → clear + catch-up… which FAILS.
+        // The alone-branch first WRITES the flag-clear, so awaiting the re-marked
+        // TRUE here observes the round-trip, not the seed value (the write lands on
+        // a real Room thread — advanceUntilIdle can't synchronize with it; a true
+        // suspension on the store flow can).
+        fake.sentFlow.first { l -> l.any { it.rev == 1 } }
+        val after = awaitLiveSession { it?.divergedOffline == true }
+
+        assertEquals("failed catch-up re-marked the divergence", true, after?.divergedOffline)
+        fake.suppressedFlow.first { it == true }   // suppression re-engaged
     }
 
     @Test fun divergenceGrace_focusingPeerPresent_reHellosBounded_staysDiverged() = runTest(dispatcher) {

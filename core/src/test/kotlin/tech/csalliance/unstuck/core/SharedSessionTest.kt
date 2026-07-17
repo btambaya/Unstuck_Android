@@ -248,7 +248,7 @@ class SharedSessionTest {
         // the same state is simply a no-op through the normal reducer.
         val local = state(startMs = t0 - 100_000, rev = 2, atMs = t0 - 100_000)
         val incoming = state(startMs = t0 - 100_000, rev = 2, atMs = t0 - 100_000)
-        assertEquals(DivergenceResolution.Lww, resolveDivergence(local, incoming, nowMs = t0))
+        assertEquals(DivergenceResolution.Lww, resolveDivergence(local, incoming, nowMs = t0, flagged = true))
         assertFalse(sharedSessionStep(local, incoming).apply)
     }
 
@@ -259,7 +259,7 @@ class SharedSessionTest {
         // pause out-revs it (the divergence path bypasses plain LWW by design).
         val local = state(startMs = t0 - 600_000, paused = true, pausedAtMs = t0 - 540_000, rev = 5, atMs = t0 - 540_000)
         val incoming = state(startMs = t0 - 600_000, rev = 3, atMs = t0 - 590_000)
-        assertEquals(DivergenceResolution.Adopt, resolveDivergence(local, incoming, nowMs = t0))
+        assertEquals(DivergenceResolution.Adopt, resolveDivergence(local, incoming, nowMs = t0, flagged = true))
     }
 
     @Test fun `criterion 3 flipped - I ran on while the partner's state is frozen behind - KEEP local and broadcast at max rev + 1`() {
@@ -268,10 +268,10 @@ class SharedSessionTest {
         // so the convergence control beats every rev either side has seen.
         val local = state(startMs = t0 - 600_000, rev = 4, atMs = t0 - 60_000)
         val incoming = state(startMs = t0 - 600_000, paused = true, pausedAtMs = t0 - 540_000, rev = 9, atMs = t0 - 540_000)
-        assertEquals(DivergenceResolution.KeepAndBroadcast(rev = 10), resolveDivergence(local, incoming, nowMs = t0))
+        assertEquals(DivergenceResolution.KeepAndBroadcast(rev = 10), resolveDivergence(local, incoming, nowMs = t0, flagged = true))
         // …and with the LOCAL side holding the higher rev, it still bumps past it.
         val incomingLowRev = incoming.copy(rev = 2)
-        assertEquals(DivergenceResolution.KeepAndBroadcast(rev = 5), resolveDivergence(local, incomingLowRev, nowMs = t0))
+        assertEquals(DivergenceResolution.KeepAndBroadcast(rev = 5), resolveDivergence(local, incomingLowRev, nowMs = t0, flagged = true))
     }
 
     @Test fun `criterion 4 - the convergence broadcast wins the partner's PLAIN LWW (no special logic online)`() {
@@ -280,7 +280,7 @@ class SharedSessionTest {
         // rev the partner holds, so the normal (rev, atMs) order applies it.
         val local = state(startMs = t0 - 600_000, rev = 4, atMs = t0 - 60_000)
         val partner = state(startMs = t0 - 600_000, paused = true, pausedAtMs = t0 - 540_000, rev = 9, atMs = t0 - 540_000)
-        val res = resolveDivergence(local, partner, nowMs = t0) as DivergenceResolution.KeepAndBroadcast
+        val res = resolveDivergence(local, partner, nowMs = t0, flagged = true) as DivergenceResolution.KeepAndBroadcast
         val convergence = local.copy(rev = res.rev, atMs = t0)
         assertTrue(res.rev > partner.rev)
         assertTrue(sharedSessionStep(partner, convergence).apply)
@@ -292,22 +292,65 @@ class SharedSessionTest {
         // Incoming exactly slack AHEAD (103s vs 100s) → within slack → LWW…
         assertEquals(
             DivergenceResolution.Lww,
-            resolveDivergence(local, state(startMs = t0 - 100_000 - slackSec * 1_000L), nowMs = t0),
+            resolveDivergence(local, state(startMs = t0 - 100_000 - slackSec * 1_000L), nowMs = t0, flagged = true),
         )
         // …one second beyond → genuinely ahead → adopt.
         assertEquals(
             DivergenceResolution.Adopt,
-            resolveDivergence(local, state(startMs = t0 - 100_000 - (slackSec + 1) * 1_000L), nowMs = t0),
+            resolveDivergence(local, state(startMs = t0 - 100_000 - (slackSec + 1) * 1_000L), nowMs = t0, flagged = true),
         )
         // Incoming exactly slack BEHIND → LWW; one second beyond → keep local.
         assertEquals(
             DivergenceResolution.Lww,
-            resolveDivergence(local, state(startMs = t0 - 100_000 + slackSec * 1_000L), nowMs = t0),
+            resolveDivergence(local, state(startMs = t0 - 100_000 + slackSec * 1_000L), nowMs = t0, flagged = true),
         )
         assertEquals(
             DivergenceResolution.KeepAndBroadcast(rev = 2),
-            resolveDivergence(local, state(startMs = t0 - 100_000 + (slackSec + 1) * 1_000L), nowMs = t0),
+            resolveDivergence(local, state(startMs = t0 - 100_000 + (slackSec + 1) * 1_000L), nowMs = t0, flagged = true),
         )
+    }
+
+    // --- Rejoin reconciliation v2 (spec §Rejoin reconciliation v2, rule 3):
+    // asymmetric most-ahead when UN-flagged (rejoinPending-only) — Adopt is always
+    // allowed, KeepAndBroadcast needs the genuine diverged flag. ---
+
+    @Test fun `rejoin v2 - a blip cannot bulldoze the partner's online pause - un-flagged local-ahead is plain LWW`() {
+        // THE live-reproduced failure class, from the rejoiner's seat: my socket
+        // died UNDETECTED (no flag), my running clock is ahead of the partner's
+        // genuine online pause (frozen behind). Un-flagged → NO KeepAndBroadcast
+        // rights — plain LWW decides, and the partner's pause (newer rev) applies:
+        // their online control survives my trivial blip.
+        val local = state(startMs = t0 - 600_000, rev = 4, atMs = t0 - 60_000)
+        val onlinePause = state(startMs = t0 - 600_000, paused = true, pausedAtMs = t0 - 540_000, rev = 9, atMs = t0 - 540_000)
+        assertEquals(DivergenceResolution.Lww, resolveDivergence(local, onlinePause, nowMs = t0, flagged = false))
+        assertTrue("the online pause wins the plain LWW fallback", sharedSessionStep(local, onlinePause).apply)
+    }
+
+    @Test fun `rejoin v2 - a FLAGGED outage keeps KeepAndBroadcast rights - criterion 3 still wins`() {
+        // Same clocks, but the outage was DETECTED (failed send / observed socket
+        // drop): the ahead local runner genuinely wins — keep + broadcast at
+        // max(local, incoming) + 1, exactly the vc71 behavior.
+        val local = state(startMs = t0 - 600_000, rev = 4, atMs = t0 - 60_000)
+        val staleBehind = state(startMs = t0 - 600_000, paused = true, pausedAtMs = t0 - 540_000, rev = 9, atMs = t0 - 540_000)
+        assertEquals(
+            DivergenceResolution.KeepAndBroadcast(rev = 10),
+            resolveDivergence(local, staleBehind, nowMs = t0, flagged = true),
+        )
+    }
+
+    @Test fun `rejoin v2 - an un-flagged rejoiner may still ADOPT an ahead incoming state`() {
+        // The asymmetry's other half: adopting the partner's ahead state harms
+        // nobody — allowed flag or no flag (my frozen offline pause at a bumped
+        // un-flagged rev must not out-rank their genuinely running clock).
+        val local = state(startMs = t0 - 600_000, paused = true, pausedAtMs = t0 - 540_000, rev = 5, atMs = t0 - 540_000)
+        val incoming = state(startMs = t0 - 600_000, rev = 3, atMs = t0 - 590_000)
+        assertEquals(DivergenceResolution.Adopt, resolveDivergence(local, incoming, nowMs = t0, flagged = false))
+    }
+
+    @Test fun `rejoin v2 - un-flagged within slack stays plain LWW (unchanged)`() {
+        val local = state(startMs = t0 - 100_000, rev = 2, atMs = t0 - 100_000)
+        val incoming = state(startMs = t0 - 101_000, rev = 3, atMs = t0 - 500)
+        assertEquals(DivergenceResolution.Lww, resolveDivergence(local, incoming, nowMs = t0, flagged = false))
     }
 
     @Test fun `resolveDivergence(ended) returns Lww on every platform - the reducer owns ended-terminality`() {
@@ -317,7 +360,7 @@ class SharedSessionTest {
         // is what finalizes it regardless of cursors (the ledger dedups the accrual).
         val local = state(startMs = t0 - 600_000, rev = 4, atMs = t0 - 60_000)
         val endedBehind = state(startMs = t0 - 600_000, paused = true, pausedAtMs = t0 - 540_000, rev = 2, atMs = t0 - 540_000, ended = true)
-        assertEquals(DivergenceResolution.Lww, resolveDivergence(local, endedBehind, nowMs = t0))
+        assertEquals(DivergenceResolution.Lww, resolveDivergence(local, endedBehind, nowMs = t0, flagged = true))
         // The plain reducer still applies the finish even though its (rev, atMs)
         // is far behind the local floor — ended is terminal THERE.
         assertTrue(sharedSessionStep(local, endedBehind).apply)

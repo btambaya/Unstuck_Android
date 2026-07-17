@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 71
-        versionName = "0.4.57"
+        versionCode = 72
+        versionName = "0.4.58"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.4.57 — Shared focus sessions now handle BAD INTERNET gracefully: lose connection mid-session and your timer keeps running (or pauses just for you); the moment either of you is back online, both devices sync to whichever timer is furthest ahead — no lost progress, no stuck clocks. Earlier — v0.4.56: one shared timer for partner tasks (pause/resume/finish from either side). v0.4.55: co-focus pause fixes across platforms."
+    releaseNotes = "v0.4.58 — Shared-timer reconnect fix (from your re-test): pausing on a phone with no internet no longer freezes your partner, your resume always reaches them once you are back online, and after any drop both devices settle on the furthest-ahead clock — a brief blip can no longer rewind or un-pause anyone. Earlier — v0.4.57: offline handling for shared sessions. v0.4.56: one shared timer for partner tasks."
 }
 
 dependencies {

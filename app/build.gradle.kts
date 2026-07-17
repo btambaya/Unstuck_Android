@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 70
-        versionName = "0.4.56"
+        versionCode = 71
+        versionName = "0.4.57"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.4.56 — ONE SHARED TIMER for partner tasks: when you and a partner focus the same shared task, you now share ONE session — the same clock on both screens, and pause / resume / add-time / finish from either side applies to both (with a calm note showing who did it). Starting focus while your partner is already going JOINS their session mid-clock instead of starting a second timer. Focus minutes count once, no matter who finishes. Earlier — v0.4.55: co-focus pause reliably reaches your partner across iPhone/web/Android. v0.4.53: partner co-focus shared view; assigned tasks view-only. v0.4.52: Sharing & Collaboration."
+    releaseNotes = "v0.4.57 — Shared focus sessions now handle BAD INTERNET gracefully: lose connection mid-session and your timer keeps running (or pauses just for you); the moment either of you is back online, both devices sync to whichever timer is furthest ahead — no lost progress, no stuck clocks. Earlier — v0.4.56: one shared timer for partner tasks (pause/resume/finish from either side). v0.4.55: co-focus pause fixes across platforms."
 }
 
 dependencies {

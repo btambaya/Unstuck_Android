@@ -89,6 +89,49 @@ fun canonicalElapsedSec(state: SharedSessionState, now: Long): Int {
     return ((end - state.sessionStartMs) / 1000L).coerceAtLeast(0L).toInt()
 }
 
+/** Slack on the offline-divergence elapsed comparison: within ±3s the two clocks
+ *  agree (ordinary skew / rounding) and plain (rev, atMs) LWW decides — only a gap
+ *  STRICTLY beyond the slack means one side genuinely ran ahead. Identical on
+ *  web + iOS (docs/shared-session-spec.md, "Offline & reconnect convergence"). */
+const val DIVERGENCE_SLACK_MS: Long = 3_000
+
+/** How a DIVERGED client (a local control's broadcast failed to deliver — see
+ *  LiveSession.divergedOffline) must converge on the first same-session state it
+ *  receives after reconnecting. Every outcome clears the diverged flag. */
+sealed interface DivergenceResolution {
+    /** The incoming state is ahead → adopt it wholesale (criterion 3: on regaining
+     *  internet you get the timer that's THE MOST AHEAD). */
+    data object Adopt : DivergenceResolution
+    /** The LOCAL state is ahead → keep it and broadcast it at [rev] — a genuine
+     *  convergence control the partner applies via normal LWW (criterion 4 needs no
+     *  special logic on the online side). */
+    data class KeepAndBroadcast(val rev: Int) : DivergenceResolution
+    /** Within slack — the clocks agree; fall back to plain (rev, atMs) LWW. */
+    data object Lww : DivergenceResolution
+}
+
+/** Most-ahead convergence for a DIVERGED receiver (pure; mirrored 1:1 on web + iOS).
+ *  Compare the two states' canonical elapsed at the RECEIVER's clock [nowMs] — a
+ *  paused side is frozen at its pause point, a running side keeps counting, so
+ *  "most ahead" is exactly the tester's acceptance rule. Only meaningful for the
+ *  SAME sessionId (the caller guards); `ended` stays TERMINAL throughout — but it
+ *  is NOT this function's job: callers pre-filter ended before entering the
+ *  divergence path, and the step reducer's terminal bypass finalizes it regardless
+ *  of cursors. An ended incoming therefore returns Lww (parity with web/iOS —
+ *  "resolveDivergence(ended) returns lww on ALL platforms", spec amendments).
+ *  NEVER used by non-diverged receivers: live controls stay plain LWW (a stale
+ *  running re-announce must not un-pause an online pause). */
+fun resolveDivergence(local: SharedSessionState, incoming: SharedSessionState, nowMs: Long): DivergenceResolution {
+    if (incoming.ended) return DivergenceResolution.Lww   // terminal stays terminal (the reducer owns it)
+    val gapMs = (canonicalElapsedSec(incoming, nowMs) - canonicalElapsedSec(local, nowMs)) * 1000L
+    return when {
+        gapMs > DIVERGENCE_SLACK_MS -> DivergenceResolution.Adopt
+        -gapMs > DIVERGENCE_SLACK_MS ->
+            DivergenceResolution.KeepAndBroadcast(maxOf(local.rev, incoming.rev) + 1)
+        else -> DivergenceResolution.Lww
+    }
+}
+
 /** Was the CURRENT pause applied from a REMOTE control (the partner paused), rather
  *  than a local tap? A local control stamps `sharedSessionRev` + `sharedSessionAtMs`
  *  past every applied cursor in the SAME write (AppViewModel.mutateLive /

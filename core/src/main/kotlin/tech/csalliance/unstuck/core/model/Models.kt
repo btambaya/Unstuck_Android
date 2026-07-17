@@ -285,4 +285,14 @@ data class LiveSession(
     val lastAppliedRev: Int? = null,
     val lastAppliedAtMs: Long? = null,
     val sharedSessionEndedBy: String? = null,
+    //  [divergedOffline] — a LOCAL control's broadcast could not be delivered (send
+    //                        failure / channel not joined / device offline): this
+    //                        side's shared state has DIVERGED from the channel. While
+    //                        set, the session-lifetime broadcaster suppresses its
+    //                        re-broadcasts (a diverged client must not fight the
+    //                        channel with stale state); the first same-session state
+    //                        received after reconnect resolves via most-ahead
+    //                        convergence (core.logic.resolveDivergence) and clears it.
+    //                        Optional + default null → old persisted blobs decode.
+    val divergedOffline: Boolean? = null,
 )

@@ -106,4 +106,23 @@ class CoFocusWireTest {
         assertNull(decodeSharedTimerMessage(broken))
         assertNull(decodeCoFocusTimerMessage(broken))
     }
+
+    // --- hello: the diverged flag (spec amendments — the both-diverged deadlock
+    // breaker: a diverged hello makes a focuser answer even while itself diverged) ---
+
+    @Test fun `helloJson carries diverged ONLY when true (old builds keep decoding {userId})`() {
+        assertEquals("""{"userId":"me"}""", helloJson("me", diverged = false).toString())
+        assertEquals("""{"userId":"me","diverged":true}""", helloJson("me", diverged = true).toString())
+    }
+
+    @Test fun `decodeHelloMessage round-trips and degrades on missing or malformed diverged`() {
+        assertEquals(HelloMessage("me", true), decodeHelloMessage(helloJson("me", diverged = true)))
+        assertEquals(HelloMessage("me", false), decodeHelloMessage(helloJson("me", diverged = false)))
+        // An old build's {userId}-only hello → diverged defaults false.
+        assertEquals(HelloMessage("u2", false), decodeHelloMessage(obj("""{"userId":"u2"}""")))
+        // Malformed diverged degrades, never throws.
+        assertEquals(HelloMessage("u2", false), decodeHelloMessage(obj("""{"userId":"u2","diverged":"nope"}""")))
+        // No userId → nothing to answer.
+        assertNull(decodeHelloMessage(obj("""{"diverged":true}""")))
+    }
 }

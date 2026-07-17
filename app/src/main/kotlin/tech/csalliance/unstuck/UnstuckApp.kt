@@ -33,6 +33,11 @@ class UnstuckApp : Application() {
                 // accrual — the ledger is the exclusive accrual path, so this drain is
                 // what eventually lands the minutes. Idempotent per sessionId.
                 graph.scope.launch { SharedFocusLedger.drain(graph) }
+                // Co-focus reconnect re-exchange, belt-and-braces alongside the
+                // realtime status flow: AppViewModel re-sends hello (+ an idempotent
+                // same-rev re-announce when not diverged) for a live partner-shared
+                // session on every foreground (docs/shared-session-spec.md).
+                graph.foregrounds.tryEmit(Unit)
             }
             override fun onStop(owner: LifecycleOwner) { graph.coordinator?.pauseRealtime() }
         })

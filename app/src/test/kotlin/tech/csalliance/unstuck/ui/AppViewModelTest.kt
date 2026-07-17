@@ -24,6 +24,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import tech.csalliance.unstuck.AppGraph
+import tech.csalliance.unstuck.core.logic.SharedSessionState
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
@@ -42,6 +43,7 @@ import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.OutboxEntity
 import tech.csalliance.unstuck.data.db.Tables
 import tech.csalliance.unstuck.data.db.UnstuckDatabase
+import tech.csalliance.unstuck.sync.CoFocusControl
 import tech.csalliance.unstuck.sync.WriteThrough
 
 /**
@@ -99,6 +101,16 @@ class AppViewModelTest {
         // internal nowMillis seam is :sync-private and only stamps outbox createdAt,
         // which these tests never assert on, so the default clock is fine.)
         write = WriteThrough(graph.store)
+        // The remote-resume side effect cancels the paused check-in via
+        // WorkManager.getInstance — in prod the manifest initializer has run;
+        // under Robolectric we initialize it once (runCatching: the singleton may
+        // survive across tests sharing a sandbox, and re-initialize throws).
+        runCatching {
+            androidx.work.WorkManager.initialize(
+                ApplicationProvider.getApplicationContext(),
+                androidx.work.Configuration.Builder().build(),
+            )
+        }
     }
 
     @After fun teardown() {
@@ -111,12 +123,15 @@ class AppViewModelTest {
         Dispatchers.resetMain()
     }
 
-    private fun vm(): AppViewModel = AppViewModel(
+    private fun vm(
+        coFocus: ((String) -> tech.csalliance.unstuck.sync.CoFocusChannel?)? = null,
+    ): AppViewModel = AppViewModel(
         graph = graph,
         writeOverride = write,
         currentUidProvider = { uid },
         currentNameProvider = { displayName },
         nowProvider = { nowMs },
+        coFocusChannelFactory = coFocus,
     )
 
     /**
@@ -737,5 +752,425 @@ class AppViewModelTest {
         awaitNoBlock("b1")
         assertNotNull("an unrelated block survives", loadBlock("b2"))
         awaitCaptures { l -> l.none { it.id == "cap1" } }
+    }
+
+    // -----------------------------------------------------------------------
+    // One-true-shared-session: offline & reconnect convergence
+    // (docs/shared-session-spec.md — applyRemoteControl's divergence path)
+    // -----------------------------------------------------------------------
+
+    /** A live PARTNER co-focus session blob (recipient-style markers + rev cursors),
+     *  as restored after focusing a partner-shared task. */
+    private fun partnerLive(
+        startMs: Long,
+        paused: Boolean = false,
+        pausedAtMs: Long? = null,
+        rev: Int = 4,
+        atMs: Long = nowMs - 60_000,
+        appliedRev: Int? = 3,
+        appliedAtMs: Long? = nowMs - 120_000,
+        diverged: Boolean? = null,
+    ) = LiveSession(
+        id = "sid-1", taskId = "owners-task", sessionStart = startMs, paused = paused, pausedAt = pausedAtMs,
+        sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT,
+        sharedTitle = "Their brief", sharedLevel = "partner",
+        sharedSessionRev = rev, sharedSessionAtMs = atMs,
+        lastAppliedRev = appliedRev, lastAppliedAtMs = appliedAtMs,
+        divergedOffline = diverged,
+    )
+
+    private fun sharedState(
+        startMs: Long,
+        paused: Boolean = false,
+        pausedAtMs: Long? = null,
+        rev: Int,
+        atMs: Long,
+        ended: Boolean = false,
+    ) = SharedSessionState("sid-1", startMs, paused, pausedAtMs, 25, rev, atMs, ended)
+
+    private fun startedServices(): List<android.content.Intent> {
+        val shadow = org.robolectric.Shadows.shadowOf(
+            ApplicationProvider.getApplicationContext<android.app.Application>(),
+        )
+        return generateSequence { shadow.nextStartedService }.toList()
+    }
+
+    @Test fun applyRemoteControl_nonDiverged_staleRunningReannounce_cannotUnpause() = runTest(dispatcher) {
+        // REGRESSION (spec: "the elapsed comparison NEVER applies to live controls"):
+        // a NON-diverged local pause must not be un-paused by a stale running
+        // re-announce (a hello replay of the partner's pre-pause state), even though
+        // the running state's elapsed is far ahead of the frozen pause. Plain LWW
+        // rejects it — divergence convergence must not leak into the live path.
+        val vm = vm()
+        store.setLiveSession(
+            partnerLive(startMs = nowMs - 600_000, paused = true, pausedAtMs = nowMs - 540_000, rev = 5, atMs = nowMs - 540_000),
+        )
+        advanceUntilIdle()
+
+        vm.applyRemoteControl(
+            CoFocusControl("partner-uid", "Sam", sharedState(startMs = nowMs - 600_000, rev = 5, atMs = nowMs - 590_000)),
+        )
+        advanceUntilIdle()
+
+        val after = store.getLiveSession()!!
+        assertTrue("the non-diverged pause survives the stale running re-announce", after.paused)
+        assertEquals(nowMs - 540_000, after.pausedAt)
+        assertEquals("the LWW cursor did not advance", 3, after.lastAppliedRev)
+        assertNull(after.divergedOffline)
+    }
+
+    @Test fun applyRemoteControl_diverged_incomingAhead_adoptsWholesaleAndDrivesFgs() = runTest(dispatcher) {
+        // Criteria 2+3: I paused OFFLINE (frozen at 60s, diverged — the pause
+        // broadcast never delivered); the partner ran on to 600s. Their re-announce
+        // is most-ahead → adopt it WHOLESALE (even though my pause out-revs it),
+        // clear the flag, and drive the FGS notification back to running.
+        val vm = vm()
+        store.setLiveSession(
+            partnerLive(
+                startMs = nowMs - 600_000, paused = true, pausedAtMs = nowMs - 540_000,
+                rev = 5, atMs = nowMs - 540_000, diverged = true,
+            ),
+        )
+        advanceUntilIdle()
+        startedServices()   // drain anything recorded so far
+
+        val incoming = sharedState(startMs = nowMs - 600_000, rev = 3, atMs = nowMs - 1_000)
+        vm.applyRemoteControl(CoFocusControl("partner-uid", "Sam", incoming))
+        advanceUntilIdle()
+
+        val after = store.getLiveSession()!!
+        assertFalse("adopted the running most-ahead state", after.paused)
+        assertNull(after.pausedAt)
+        assertEquals(nowMs - 600_000, after.sessionStart)
+        assertEquals("cursor = the adopted control", 3, after.lastAppliedRev)
+        assertEquals(nowMs - 1_000, after.lastAppliedAtMs)
+        // Amendment "Adopt fixes the cursors": the LOCAL stamp pair follows too —
+        // the diverged side's INFLATED rev 5 (offline bumps nobody ever saw) must
+        // not out-floor the partner's post-convergence controls.
+        assertEquals(3, after.sharedSessionRev)
+        assertEquals(nowMs - 1_000, after.sharedSessionAtMs)
+        assertNull("divergence resolved", after.divergedOffline)
+        // Task 6: the convergence drove the FGS notification through the normal
+        // remote-control side-effect path (resume → update(paused=false, startMs)).
+        val svc = startedServices().firstOrNull {
+            it.component?.className == tech.csalliance.unstuck.surface.FocusTimerService::class.java.name
+        }
+        assertNotNull("FocusTimerService got the adopted running state", svc)
+        assertEquals(false, svc!!.getBooleanExtra("paused", true))
+        assertEquals(nowMs - 600_000, svc.getLongExtra("start", -1))
+    }
+
+    @Test fun applyRemoteControl_diverged_localAhead_keepsLocalAndStampsConvergenceRev() = runTest(dispatcher) {
+        // Criterion 3 flipped (and 4, from the partner's seat): my diverged side ran
+        // to 600s; the incoming state is a stale pause frozen at 60s — even carrying
+        // a HIGHER rev (plain LWW would have paused me). Local is most-ahead → keep
+        // it, clear the flag, and stamp rev = max(local, incoming) + 1 so the
+        // convergence control beats every rev either side has seen.
+        val vm = vm()
+        store.setLiveSession(
+            partnerLive(startMs = nowMs - 600_000, rev = 4, atMs = nowMs - 60_000, diverged = true),
+        )
+        advanceUntilIdle()
+
+        val incoming = sharedState(
+            startMs = nowMs - 600_000, paused = true, pausedAtMs = nowMs - 540_000, rev = 9, atMs = nowMs - 540_000,
+        )
+        vm.applyRemoteControl(CoFocusControl("partner-uid", "Sam", incoming))
+        advanceUntilIdle()
+
+        val after = store.getLiveSession()!!
+        assertFalse("the most-ahead local running state is kept", after.paused)
+        assertEquals(nowMs - 600_000, after.sessionStart)
+        assertEquals("convergence rev = max(4, 9) + 1", 10, after.sharedSessionRev)
+        assertEquals(nowMs, after.sharedSessionAtMs)
+        assertEquals("the applied cursor is untouched (nothing was applied)", 3, after.lastAppliedRev)
+        assertNull("divergence resolved", after.divergedOffline)
+    }
+
+    @Test fun applyRemoteControl_diverged_withinSlack_clearsFlagAndFallsBackToLww() = runTest(dispatcher) {
+        // Clocks within slack → the re-exchange resolved the divergence; ordering is
+        // decided by plain (rev, atMs) LWW. A NEWER incoming applies…
+        val vm = vm()
+        store.setLiveSession(
+            partnerLive(startMs = nowMs - 100_000, rev = 2, atMs = nowMs - 50_000, appliedRev = 1, diverged = true),
+        )
+        advanceUntilIdle()
+
+        vm.applyRemoteControl(
+            CoFocusControl("partner-uid", "Sam", sharedState(startMs = nowMs - 102_000, rev = 3, atMs = nowMs - 500)),
+        )
+        advanceUntilIdle()
+
+        val applied = store.getLiveSession()!!
+        assertEquals("the newer in-slack control applied via plain LWW", nowMs - 102_000, applied.sessionStart)
+        assertEquals(3, applied.lastAppliedRev)
+        assertNull("divergence resolved", applied.divergedOffline)
+
+        // …while an OLDER incoming does NOT apply — but still clears the flag.
+        store.setLiveSession(
+            partnerLive(startMs = nowMs - 100_000, rev = 5, atMs = nowMs - 1_000, appliedRev = 3, diverged = true),
+        )
+        advanceUntilIdle()
+        vm.applyRemoteControl(
+            CoFocusControl("partner-uid", "Sam", sharedState(startMs = nowMs - 101_000, rev = 4, atMs = nowMs - 90_000)),
+        )
+        advanceUntilIdle()
+
+        val kept = store.getLiveSession()!!
+        assertEquals("the older in-slack control is a no-op", nowMs - 100_000, kept.sessionStart)
+        assertEquals(3, kept.lastAppliedRev)
+        assertNull("…but the divergence flag still clears", kept.divergedOffline)
+    }
+
+    @Test fun applyRemoteControl_diverged_adoptedRemotePause_lowersCursorsAndClassifiesRemote() = runTest(dispatcher) {
+        // Amendment "Adopt fixes the cursors": my diverged side ran only 60s (rev
+        // INFLATED to 5 by offline bumps nobody saw); the partner paused long ago,
+        // frozen at 600s — most-ahead → adopt WHOLESALE. The adopted cursor pairs
+        // must BE the incoming (rev 3, its atMs): remotePaused ties equal pairs to
+        // REMOTE, so the pause nag / paused check-in can never arm on this side for
+        // the PARTNER's pause — and the inflated local rev must not out-floor the
+        // partner's post-convergence controls.
+        val vm = vm()
+        store.setLiveSession(
+            partnerLive(startMs = nowMs - 60_000, rev = 5, atMs = nowMs - 10_000, diverged = true),
+        )
+        advanceUntilIdle()
+
+        val incoming = sharedState(
+            startMs = nowMs - 700_000, paused = true, pausedAtMs = nowMs - 100_000, rev = 3, atMs = nowMs - 99_000,
+        )
+        vm.applyRemoteControl(CoFocusControl("partner-uid", "Sam", incoming))
+        advanceUntilIdle()
+
+        val after = store.getLiveSession()!!
+        assertTrue("adopted the frozen-ahead remote pause", after.paused)
+        assertEquals(nowMs - 100_000, after.pausedAt)
+        assertEquals("local stamp lowered to the adopted control", 3, after.sharedSessionRev)
+        assertEquals(nowMs - 99_000, after.sharedSessionAtMs)
+        assertEquals(3, after.lastAppliedRev)
+        assertEquals(nowMs - 99_000, after.lastAppliedAtMs)
+        assertNull(after.divergedOffline)
+        assertTrue(
+            "an ADOPTED remote pause classifies as remote — the pause nag must not arm",
+            tech.csalliance.unstuck.core.logic.remotePaused(
+                after.paused, after.sharedSessionRev, after.sharedSessionAtMs,
+                after.lastAppliedRev, after.lastAppliedAtMs,
+            ),
+        )
+    }
+
+    // -----------------------------------------------------------------------
+    // Offline convergence, channel-visible half (spec amendments 2026-07-17):
+    // echo-guard integrity, diverged hello, grace fallback — driven through a
+    // fake CoFocusChannel injected via the additive factory seam.
+    // -----------------------------------------------------------------------
+
+    private class FakeCoFocusChannel : tech.csalliance.unstuck.sync.CoFocusChannel {
+        val sentFlow = kotlinx.coroutines.flow.MutableStateFlow<List<SharedSessionState>>(emptyList())
+        val sent: List<SharedSessionState> get() = sentFlow.value
+        val hellosFlow = kotlinx.coroutines.flow.MutableStateFlow<List<Boolean>>(emptyList())
+        val hellos: List<Boolean> get() = hellosFlow.value
+        val suppressedFlow = kotlinx.coroutines.flow.MutableStateFlow<Boolean?>(null)
+        @Volatile var deliverResult: Boolean = true
+        private var current: SharedSessionState? = null
+        private val _peers = kotlinx.coroutines.flow.MutableStateFlow<List<tech.csalliance.unstuck.core.model.CoFocusPeer>>(emptyList())
+        override val peers: StateFlow<List<tech.csalliance.unstuck.core.model.CoFocusPeer>> get() = _peers
+        fun setPeers(peers: List<tech.csalliance.unstuck.core.model.CoFocusPeer>) { _peers.value = peers }
+        private val _controls = kotlinx.coroutines.flow.MutableSharedFlow<CoFocusControl>(replay = 1, extraBufferCapacity = 8)
+        override val controls: kotlinx.coroutines.flow.SharedFlow<CoFocusControl> get() = _controls
+        private val _rejoins = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(extraBufferCapacity = 2)
+        override val rejoins: kotlinx.coroutines.flow.SharedFlow<Unit> get() = _rejoins
+        suspend fun emitRejoin() { _rejoins.emit(Unit) }
+        override suspend fun broadcastShared(state: SharedSessionState): Boolean {
+            current = state
+            sentFlow.value = sentFlow.value + state
+            return deliverResult
+        }
+        override suspend fun sendHello(diverged: Boolean) { hellosFlow.value = hellosFlow.value + diverged }
+        override suspend fun nudgeSocket() {}
+        override fun setSuppressAnnounce(suppress: Boolean) { suppressedFlow.value = suppress }
+        override fun setSharedCurrent(state: SharedSessionState?) { current = state }
+        override fun sharedCurrent(): SharedSessionState? = current
+        override fun latestControl(): CoFocusControl? = null
+        override fun close() {}
+    }
+
+    @Test fun echoGuard_rolledBackOnFailedSend_offlineExtendStillReachesThePartner() = runTest(dispatcher) {
+        // THE finding-1 regression: the echo guard was stamped BEFORE the delivery
+        // check and never rolled back, so after a failed EXTEND broadcast the
+        // post-convergence catch-up was swallowed as an "echo" — an extend doesn't
+        // move elapsed → always within slack → Lww arm → the offline extend was
+        // permanently lost. Now: guard rolls back on !delivered, and the Lww arm
+        // explicitly re-broadcasts the winning local state at the floor cursor.
+        val fake = FakeCoFocusChannel()
+        val vm = vm(coFocus = { fake })
+        subscribeReads(vm, vm.tasks)
+        store.setLiveSession(partnerLive(startMs = nowMs - 100_000, rev = 4, atMs = nowMs - 100_000))
+        // First observation announces rev 4 (delivered) and seeds the echo guard.
+        fake.sentFlow.first { it.size >= 1 }
+        advanceUntilIdle()
+
+        // The send path goes dark; the user EXTENDS offline (25 → 45, stamped in
+        // the same write, exactly as mutateLive / FocusCommands do).
+        fake.deliverResult = false
+        val live = store.getLiveSession()!!
+        store.setLiveSession(live.copy(sessionEstimateMin = 45, sharedSessionRev = 5, sharedSessionAtMs = nowMs - 50_000))
+        awaitLiveSession { it?.divergedOffline == true }   // the failed rev-5 broadcast marked divergence
+        advanceUntilIdle()
+        val attemptsBeforeConvergence = fake.sent.size
+
+        // Reconnect: the partner's harmless re-announce arrives — same elapsed
+        // (within slack) and an OLDER cursor (they never saw the extend).
+        fake.deliverResult = true
+        vm.applyRemoteControl(
+            CoFocusControl("partner-uid", "Sam", sharedState(startMs = nowMs - 100_000, rev = 4, atMs = nowMs - 100_000)),
+        )
+        advanceUntilIdle()
+
+        val after = awaitLiveSession { it?.divergedOffline == null }!!
+        assertEquals("the offline extend survives the convergence", 45, after.sessionEstimateMin)
+        // …and the catch-up broadcast actually SHIPPED it at the local floor cursor
+        // (the poisoned guard used to swallow exactly this re-emission).
+        val catchUp = fake.sent.drop(attemptsBeforeConvergence)
+        assertTrue(
+            "the extend reached the channel after convergence: $catchUp",
+            catchUp.any { it.rev == 5 && it.estimateMin == 45 && !it.ended },
+        )
+    }
+
+    @Test fun keepAndBroadcast_failedSend_reMarksDivergence_nextResolutionStillBroadcasts() = runTest(dispatcher) {
+        // Finding-1's KeepAndBroadcast half: a FAILED convergence send must roll the
+        // echo guard back and RE-MARK the divergence, so the next same-session state
+        // resolves again and the convergence control still ships.
+        val fake = FakeCoFocusChannel()
+        fake.deliverResult = false
+        val vm = vm(coFocus = { fake })
+        subscribeReads(vm, vm.tasks)
+        store.setLiveSession(partnerLive(startMs = nowMs - 600_000, rev = 4, atMs = nowMs - 60_000, diverged = true))
+        fake.suppressedFlow.first { it == true }
+        advanceUntilIdle()
+
+        // Incoming stale pause frozen at 60s — my diverged runner (600s) is ahead.
+        val incoming = sharedState(
+            startMs = nowMs - 600_000, paused = true, pausedAtMs = nowMs - 540_000, rev = 9, atMs = nowMs - 540_000,
+        )
+        vm.applyRemoteControl(CoFocusControl("partner-uid", "Sam", incoming))
+        advanceUntilIdle()
+
+        assertTrue("the convergence control was attempted at max+1", fake.sent.any { it.rev == 10 })
+        val reDiverged = awaitLiveSession { it?.divergedOffline == true }!!
+        assertEquals("the local stamp keeps the convergence rev", 10, reDiverged.sharedSessionRev)
+        assertEquals("suppression re-engaged", true, fake.suppressedFlow.value)
+
+        // Delivery restored; the partner's state re-arrives on the next exchange.
+        fake.deliverResult = true
+        vm.applyRemoteControl(CoFocusControl("partner-uid", "Sam", incoming.copy(atMs = incoming.atMs + 1)))
+        advanceUntilIdle()
+
+        val after = awaitLiveSession { it?.divergedOffline == null }!!
+        assertFalse("the most-ahead local running state is kept", after.paused)
+        assertTrue(
+            "the retried convergence control shipped past every seen rev",
+            fake.sent.any { it.rev == 11 && !it.paused && !it.ended },
+        )
+    }
+
+    @Test fun reExchange_whileDiverged_sendsDivergedHelloAndSuppressesTheStateAnnounce() = runTest(dispatcher) {
+        // Finding 2 (VM half): a diverged client's re-exchange ASKS with
+        // `diverged: true` on the wire (so a focuser answers even while itself
+        // diverged — the both-diverged deadlock breaker) and does NOT announce its
+        // own stale state.
+        val fake = FakeCoFocusChannel()
+        val vm = vm(coFocus = { fake })
+        subscribeReads(vm, vm.tasks)
+        store.setLiveSession(partnerLive(startMs = nowMs - 100_000, rev = 4, atMs = nowMs - 100_000, diverged = true))
+        fake.suppressedFlow.first { it == true }
+        advanceUntilIdle()
+
+        fake.emitRejoin()
+        // Await the hello itself (not advanceUntilIdle — that would fast-forward
+        // the 5s grace, whose alone-fallback legitimately announces later).
+        fake.hellosFlow.first { it.isNotEmpty() }
+
+        assertEquals("hello carried the diverged flag", listOf(true), fake.hellos)
+        assertTrue("a diverged client only ASKS — no state announce on re-exchange", fake.sent.isEmpty())
+    }
+
+    @Test fun reExchange_notDiverged_reannouncesIdempotentlyAtTheSameCursor() = runTest(dispatcher) {
+        val fake = FakeCoFocusChannel()
+        val vm = vm(coFocus = { fake })
+        subscribeReads(vm, vm.tasks)
+        store.setLiveSession(partnerLive(startMs = nowMs - 100_000, rev = 4, atMs = nowMs - 100_000))
+        fake.sentFlow.first { it.size >= 1 }
+        advanceUntilIdle()
+
+        fake.emitRejoin()
+        fake.sentFlow.first { it.size >= 2 }
+
+        assertEquals("hello without the diverged flag", listOf(false), fake.hellos)
+        val re = fake.sent.last()
+        assertEquals("re-announce replays the SAME rev — a no-op for peers via LWW", 4, re.rev)
+        assertEquals(nowMs - 100_000, re.atMs)
+        assertFalse(re.ended)
+    }
+
+    @Test fun divergenceGrace_focusingPeerPresent_reHellosBounded_staysDiverged() = runTest(dispatcher) {
+        // Finding 3: the diverged hello goes unanswered but a FOCUSING peer is
+        // visibly present — they hold session state, so re-ask (bounded ≤3) rather
+        // than unilaterally re-announcing against it; past the cap, stay diverged
+        // (their next control or the next re-exchange trigger resolves it).
+        val fake = FakeCoFocusChannel()
+        fake.setPeers(
+            listOf(tech.csalliance.unstuck.core.model.CoFocusPeer("partner-uid", "Sam", tech.csalliance.unstuck.core.model.CoFocusState.FOCUSING, sinceMs = 0L)),
+        )
+        val vm = vm(coFocus = { fake })
+        subscribeReads(vm, vm.tasks)
+        store.setLiveSession(partnerLive(startMs = nowMs - 100_000, rev = 4, atMs = nowMs - 100_000, diverged = true))
+        fake.suppressedFlow.first { it == true }
+        vm.coFocusPeers.first { it.isNotEmpty() }   // the focusing peer is visible to the VM
+        advanceUntilIdle()
+
+        fake.emitRejoin()
+        // 1 re-exchange hello + 3 bounded grace re-hellos (virtual 5s cycles run
+        // while this await suspends); past the cap no further hello can arrive.
+        fake.hellosFlow.first { it.size >= 4 }
+
+        assertEquals(
+            "1 re-exchange hello + 3 bounded grace re-hellos, all diverged",
+            listOf(true, true, true, true), fake.hellos,
+        )
+        assertTrue("never announced state against the focusing peer", fake.sent.isEmpty())
+        assertEquals("stays diverged past the cap", true, store.getLiveSession()?.divergedOffline)
+    }
+
+    @Test fun divergenceGrace_aloneInPresence_clearsFlagAndReannounces_theFailedMintCase() = runTest(dispatcher) {
+        // Finding 3, the alone half — covers the failed-MINT broadcast: diverged
+        // from t=0, the session INVISIBLE to the partner (fork + double-accrual
+        // risk). Presence is empty at grace expiry → nobody holds newer state:
+        // clear the flag and re-announce at the local floor.
+        val fake = FakeCoFocusChannel()
+        val vm = vm(coFocus = { fake })
+        subscribeReads(vm, vm.tasks)
+        store.setLiveSession(
+            partnerLive(
+                startMs = nowMs - 30_000, rev = 1, atMs = nowMs - 30_000,
+                appliedRev = null, appliedAtMs = null, diverged = true,
+            ),
+        )
+        fake.suppressedFlow.first { it == true }
+        advanceUntilIdle()
+
+        fake.emitRejoin()
+        // hello (diverged) → 5s grace (virtual, auto-advanced while this await
+        // suspends) → the alone fallback clears the flag and re-announces.
+        val after = awaitLiveSession { it != null && it.divergedOffline == null }!!
+        fake.sentFlow.first { l -> l.any { it.rev == 1 } }
+
+        assertNull("un-diverged without any peer involvement", after.divergedOffline)
+        assertEquals(false, fake.suppressedFlow.value)
+        assertTrue(
+            "the mint finally reached the channel at its stamped floor cursor",
+            fake.sent.any { it.rev == 1 && it.sessionId == "sid-1" && !it.ended },
+        )
     }
 }

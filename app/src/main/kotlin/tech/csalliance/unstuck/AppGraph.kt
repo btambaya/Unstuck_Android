@@ -44,6 +44,15 @@ class AppGraph(
      *  the session observer reads the token's `amr`: a "recovery" session routes to
      *  set-new-password; magic-link / OAuth sign in normally. One-shot. */
     val pendingRecoveryProbe = MutableStateFlow(false)
+    /** Fires on every app FOREGROUND (UnstuckApp's ProcessLifecycle onStart). The
+     *  co-focus reconnect re-exchange listens here as belt-and-braces alongside the
+     *  realtime status flow: after a doze/backgrounded socket death the SDK can take
+     *  up to a heartbeat (~15s) to notice, and a send in that window silently
+     *  vanishes — the foreground hello/re-announce closes the gap sooner. */
+    val foregrounds = kotlinx.coroutines.flow.MutableSharedFlow<Unit>(
+        extraBufferCapacity = 1,
+        onBufferOverflow = kotlinx.coroutines.channels.BufferOverflow.DROP_OLDEST,
+    )
     // A test may supply an in-memory store; production builds the file-backed DB.
     val db: UnstuckDatabase? = if (storeOverride == null) UnstuckDatabase.build(context.applicationContext) else null
     val store: LocalStore = storeOverride ?: LocalStore(db!!)

@@ -55,6 +55,7 @@ import tech.csalliance.unstuck.AppGraph
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.sync.AssistantResult
 import tech.csalliance.unstuck.sync.ChatMessage
+import tech.csalliance.unstuck.core.logic.DivergenceResolution
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.SharedSessionState
 import tech.csalliance.unstuck.core.logic.adoptable
@@ -63,6 +64,7 @@ import tech.csalliance.unstuck.core.logic.bumpMoveCount
 import tech.csalliance.unstuck.core.logic.canonicalElapsedSec
 import tech.csalliance.unstuck.core.logic.newUuid
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
+import tech.csalliance.unstuck.core.logic.resolveDivergence
 import tech.csalliance.unstuck.core.logic.sharedRevFloor
 import tech.csalliance.unstuck.core.logic.sharedSessionStep
 import tech.csalliance.unstuck.SharedFocusLedger
@@ -116,6 +118,10 @@ class AppViewModel(
     private val currentUidProvider: (() -> String?)? = null,
     private val currentNameProvider: (() -> String?)? = null,
     private val nowProvider: (() -> Long)? = null,
+    // Fake co-focus channel factory: when set, the session-lifetime channel comes
+    // from here instead of cofocus.open() — the offline/reconnect convergence
+    // tests observe broadcasts/hellos without a Supabase client. Null in prod.
+    private val coFocusChannelFactory: ((taskId: String) -> tech.csalliance.unstuck.sync.CoFocusChannel?)? = null,
 ) : ViewModel() {
 
     private val store = graph.store
@@ -569,7 +575,7 @@ class AppViewModel(
      *  re-emission whose fields match is never re-broadcast. */
     private data class CoFocusFields(val sessionStartMs: Long, val paused: Boolean, val pausedAtMs: Long?, val estimateMin: Int)
 
-    private var coFocusSession: tech.csalliance.unstuck.sync.CoFocusSession? = null
+    private var coFocusSession: tech.csalliance.unstuck.sync.CoFocusChannel? = null
     private var coFocusChannelTaskId: String? = null
     /** The signed-in user WHEN the channel opened — a live→null edge observed under a
      *  DIFFERENT (or no) user is a sign-out / user-switch cache wipe, not a finish,
@@ -577,12 +583,22 @@ class AppViewModel(
     private var coFocusChannelUid: String? = null
     private var coFocusPeersJob: Job? = null
     private var coFocusControlsJob: Job? = null
+    private var coFocusRejoinJob: Job? = null
     private var coFocusLastSent: Pair<Int, CoFocusFields>? = null   // (rev, fields)
     /** Session id whose remote `ended` we already applied — the teardown observer must
      *  not re-broadcast ended for it (the ender's device already did). */
     private var coFocusRemoteEndedSid: String? = null
     /** The previous emission's candidate session — the `ended` edge detector. */
     private var coFocusPrevLive: LiveSession? = null
+    /** Diverged re-exchange grace (spec amendments): after a diverged hello, wait
+     *  ~5s for a same-session answer. On expiry: a focusing peer is present →
+     *  re-hello + re-arm (≤ [DIVERGENCE_GRACE_MAX_TRIES]); presence empty → we're
+     *  ALONE, nobody holds newer state — clear the flag and re-announce. The
+     *  peer-independent un-diverge: without it a failed MINT broadcast leaves the
+     *  session diverged from t=0 and invisible to the partner forever (they mint
+     *  their own → fork + double accrual). */
+    private var coFocusGraceJob: Job? = null
+    private var coFocusGraceTries = 0
 
     /** Peers on the session-lifetime channel — FocusScreen renders these instead of
      *  opening a SECOND channel on the same task (a duplicate track double-counted us). */
@@ -600,6 +616,19 @@ class AppViewModel(
             // start MID-session must see the restored session as its first observation.
             combine(store.liveSession(), shareBadges) { live, badges -> live to badges }
                 .collect { (live, badges) -> onCoFocusLiveChanged(live, badges) }
+        }
+        viewModelScope.launch {
+            // Belt-and-braces reconnect signal (docs/shared-session-spec.md, "Offline
+            // & reconnect"): on every app FOREGROUND re-exchange the shared state —
+            // a socket that died while backgrounded can take the SDK a heartbeat
+            // (~15s) to notice, and a send in that window silently vanishes. The
+            // nudge (best-effort) pokes the wire first: a broken socket fails the
+            // write → the SDK reconnects → the rejoins signal re-exchanges again
+            // over the FRESH join (the retry-after-next-CONNECTED-edge path).
+            graph.foregrounds.collect {
+                runCatching { coFocusSession?.nudgeSocket() }
+                runCatching { reExchangeCoFocus() }
+            }
         }
     }
 
@@ -656,6 +685,10 @@ class AppViewModel(
         val start = live.sessionStart
         val id = live.id
         if (start == null || id == null) { coFocusPrevLive = live; return }
+        // Mirror the persisted diverged flag into the channel's announce gate on EVERY
+        // observation (covers a channel opened mid-diverged after a process restart):
+        // while diverged, hello replies / re-tracks must not re-announce stale state.
+        session.setSuppressAnnounce(live.divergedOffline == true)
         val fields = CoFocusFields(start, live.paused, live.pausedAt, live.sessionEstimateMin)
         val last = coFocusLastSent
         val lastApplied = live.lastAppliedRev
@@ -666,6 +699,17 @@ class AppViewModel(
             coFocusLastSent = lastApplied to fields
             session.setSharedCurrent(SharedSessionState(id, start, live.paused, live.pausedAt, live.sessionEstimateMin, lastApplied, live.lastAppliedAtMs ?: 0L, ended = false))
         } else if (last == null || last.second != fields) {
+            if (live.divergedOffline == true) {
+                // DIVERGED: the local-change broadcaster is SUPPRESSED (spec, "Offline
+                // & reconnect") — offline controls keep applying locally (mutateLive /
+                // FocusCommands still stamp rev+atMs), but nothing ships until the
+                // first same-session state after reconnect resolves the divergence in
+                // applyRemoteControl. coFocusLastSent is deliberately left stale so
+                // the post-convergence re-emission can catch up the partner when the
+                // resolution itself didn't broadcast (the plain-LWW outcome).
+                coFocusPrevLive = live
+                return
+            }
             // A LOCAL state change (mint / pause / resume / extend): broadcast the FULL
             // state at the next rev. Local controls pre-stamp sharedSessionRev AND
             // sharedSessionAtMs in the same write (mutateLive / FocusCommands) — the
@@ -682,7 +726,26 @@ class AppViewModel(
             }
             coFocusLastSent = rev to fields
             _coFocusAttribution.value = null   // acting locally clears the remote line
-            runCatching { session.broadcastShared(SharedSessionState(id, start, live.paused, live.pausedAt, live.sessionEstimateMin, rev, at, ended = false)) }
+            val delivered = session.broadcastShared(SharedSessionState(id, start, live.paused, live.pausedAt, live.sessionEstimateMin, rev, at, ended = false))
+            if (!delivered) {
+                // Delivery failed (send error / socket down / channel not joined):
+                // this side has DIVERGED from the channel. Persist the flag (it must
+                // survive process death) and gate the automatic re-announces; the
+                // local session itself is untouched — offline behavior is unchanged
+                // (criteria 1–2: the timer runs / pauses locally as normal).
+                // ROLL THE ECHO GUARD BACK (spec amendments, echo-guard integrity):
+                // the channel never saw this state — leaving the guard claiming it
+                // did would swallow the post-convergence catch-up re-emission as an
+                // "echo" (an offline EXTEND would be permanently lost: estimate
+                // changes don't move elapsed → within slack → Lww arm → re-emit
+                // suppressed by the poisoned guard).
+                coFocusLastSent = last
+                val curNow = store.getLiveSession()
+                if (curNow?.id == id && curNow.divergedOffline != true) {
+                    store.setLiveSession(curNow.copy(divergedOffline = true))
+                }
+                session.setSuppressAnnounce(true)
+            }
         }
         coFocusPrevLive = live
     }
@@ -690,8 +753,13 @@ class AppViewModel(
     private fun ensureCoFocusChannel(live: LiveSession) {
         if (coFocusSession != null && coFocusChannelTaskId == live.taskId) return
         closeCoFocusChannel()
-        val timer = live.sessionStart?.let { CoFocusTimer(it, live.paused, live.pausedAt, live.sessionEstimateMin) }
-        val s = cofocus?.open(live.taskId, CoFocusState.FOCUSING, timer) ?: return
+        val s: tech.csalliance.unstuck.sync.CoFocusChannel? = if (coFocusChannelFactory != null) {
+            coFocusChannelFactory.invoke(live.taskId)
+        } else {
+            val timer = live.sessionStart?.let { CoFocusTimer(it, live.paused, live.pausedAt, live.sessionEstimateMin) }
+            cofocus?.open(live.taskId, CoFocusState.FOCUSING, timer)
+        }
+        if (s == null) return
         coFocusSession = s
         coFocusChannelTaskId = live.taskId
         coFocusChannelUid = currentUid()
@@ -700,11 +768,100 @@ class AppViewModel(
         coFocusControlsJob = viewModelScope.launch {
             s.controls.collect { ctl -> runCatching { applyRemoteControl(ctl) } }
         }
+        coFocusRejoinJob = viewModelScope.launch {
+            // The SDK auto-rejoined the channel after a socket drop — hello was only
+            // ever sent at the FIRST subscribe, so re-exchange now (spec: "Offline &
+            // reconnect convergence"). The foreground collector (init) is the
+            // belt-and-braces twin of this signal.
+            s.rejoins.collect { runCatching { reExchangeCoFocus() } }
+        }
+    }
+
+    /** Re-exchange the shared state after a channel rejoin / app foreground: re-send
+     *  `hello` (any focuser replies with its full state — the delivery gap was that
+     *  hello only fired once, at first subscribe), and — iff NOT diverged — re-announce
+     *  our current state IDEMPOTENTLY at the SAME (rev, atMs) cursor (peers treat a
+     *  replay as a no-op via LWW; per the rebind rule). A diverged client only ASKS —
+     *  with `diverged: true` on the wire so a focuser answers even while itself
+     *  diverged (spec amendments; the both-diverged deadlock breaker) — and arms the
+     *  grace fallback: announcing its stale state would fight the channel; the
+     *  partner's reply triggers most-ahead convergence in applyRemoteControl. */
+    private suspend fun reExchangeCoFocus() {
+        val session = coFocusSession ?: return
+        val live = store.getLiveSession() ?: return
+        if (live.taskId != coFocusChannelTaskId) return
+        val id = live.id
+        val start = live.sessionStart
+        if (id == null || start == null || !isPartnerCoFocus(live, shareBadges.value)) return
+        val diverged = live.divergedOffline == true
+        session.sendHello(diverged = diverged)
+        if (diverged) {
+            // Peer-independent un-diverge (spec amendments): a fresh trigger
+            // (rejoin / foreground) restarts the bounded grace cycle.
+            coFocusGraceTries = 0
+            armDivergenceGrace()
+            return
+        }
+        val (rev, at) = sharedRevFloor(live.sharedSessionRev, live.sharedSessionAtMs, live.lastAppliedRev, live.lastAppliedAtMs)
+        if (rev <= 0) return   // nothing ever announced/applied on this session yet
+        // Delivery failure here does NOT mark divergence: a re-announce carries no new
+        // local state (the next rejoin/foreground simply re-exchanges again).
+        session.broadcastShared(
+            SharedSessionState(id, start, live.paused, live.pausedAt, live.sessionEstimateMin, rev, at, ended = false),
+        )
+    }
+
+    /** Arm (or re-arm) the diverged re-exchange grace: on expiry with the session
+     *  still diverged, either re-ask a visibly-focusing peer (bounded) or conclude
+     *  we're alone and un-diverge unilaterally. See [onDivergenceGraceExpired]. */
+    private fun armDivergenceGrace() {
+        coFocusGraceJob?.cancel()
+        coFocusGraceJob = viewModelScope.launch {
+            kotlinx.coroutines.delay(DIVERGENCE_REEXCHANGE_GRACE_MS)
+            runCatching { onDivergenceGraceExpired() }
+        }
+    }
+
+    /** The diverged hello went unanswered for the grace window. A focusing peer in
+     *  presence HOLDS session state — re-hello and re-arm (≤3 tries; unilaterally
+     *  announcing would fight their state). Presence empty (or observers only, who
+     *  hold no session state) → we're ALONE: our state IS the session — clear the
+     *  flag and re-announce at the local floor (rev already monotonic). This is the
+     *  peer-independent un-diverge that covers the failed-MINT-broadcast case:
+     *  diverged from t=0, the session invisible to the partner — without it they
+     *  would mint a second session on the same task (fork + double accrual). */
+    private suspend fun onDivergenceGraceExpired() {
+        val session = coFocusSession ?: return
+        val live = store.getLiveSession() ?: return
+        if (live.taskId != coFocusChannelTaskId || live.divergedOffline != true) return
+        val id = live.id ?: return
+        if (live.sessionStart == null) return
+        if (_coFocusPeers.value.any { it.state == CoFocusState.FOCUSING }) {
+            if (coFocusGraceTries < DIVERGENCE_GRACE_MAX_TRIES) {
+                coFocusGraceTries += 1
+                session.sendHello(diverged = true)
+                armDivergenceGrace()
+            }
+            // Cap reached: stay diverged and wait for the peer's next control or
+            // the next rejoin/foreground re-exchange (which resets the tries).
+            return
+        }
+        coFocusGraceTries = 0
+        val (rev, at) = sharedRevFloor(live.sharedSessionRev, live.sharedSessionAtMs, live.lastAppliedRev, live.lastAppliedAtMs)
+        store.setLiveSession(live.copy(divergedOffline = null))
+        session.setSuppressAnnounce(false)
+        // Re-announce explicitly (rev > 0 whenever a control/mint ever stamped; a
+        // never-stamped session simply re-emits through the now-unsuppressed
+        // broadcaster). A failed send re-marks the divergence inside the helper.
+        if (rev > 0) broadcastLocalAtFloor(id, live, rev, at)
     }
 
     private fun closeCoFocusChannel() {
         coFocusPeersJob?.cancel(); coFocusPeersJob = null
         coFocusControlsJob?.cancel(); coFocusControlsJob = null
+        coFocusRejoinJob?.cancel(); coFocusRejoinJob = null
+        coFocusGraceJob?.cancel(); coFocusGraceJob = null
+        coFocusGraceTries = 0
         coFocusSession?.close(); coFocusSession = null
         coFocusChannelTaskId = null
         coFocusChannelUid = null
@@ -724,8 +881,19 @@ class AppViewModel(
     /** Apply an incoming full-state control via the pure reducer: REPLACE the shared
      *  fields (never bump our own rev), advance the LWW cursor, and drive the local
      *  side effects (FGS notification, paused check-in, recap) — WITHOUT opening the
-     *  pause-reason sheet or arming the pause nag for a control the partner made. */
-    private suspend fun applyRemoteControl(ctl: CoFocusControl) {
+     *  pause-reason sheet or arming the pause nag for a control the partner made.
+     *
+     *  When THIS side is offline-DIVERGED (a control's broadcast failed to deliver),
+     *  the first same-session live state resolves by MOST-AHEAD convergence
+     *  (core.logic.resolveDivergence) instead of plain LWW — the tester's acceptance
+     *  rule: on regaining internet, everyone ends on the timer that's most ahead.
+     *  Non-diverged receivers are COMPLETELY unchanged: live controls stay plain LWW
+     *  (a stale running re-announce must never un-pause an online pause), and `ended`
+     *  stays terminal throughout.
+     *
+     *  Internal (not private) purely as a test seam — production calls arrive only
+     *  via the session-lifetime controls collector. */
+    internal suspend fun applyRemoteControl(ctl: CoFocusControl) {
         val cur = store.getLiveSession() ?: return
         val id = cur.id
         val start = cur.sessionStart
@@ -742,20 +910,103 @@ class AppViewModel(
             atMs = floorAt,
             ended = cur.sharedSessionEndedBy != null,
         )
-        val step = sharedSessionStep(local, ctl.state)
-        if (!step.apply) return
         val msg = ctl.state
         val name = ctl.name?.let { coFocusFirstName(it) } ?: "Your partner"
+        // Offline-divergence convergence (spec, "Offline & reconnect"). Only for the
+        // SAME session, only while not locally ended, and never for an incoming
+        // `ended` (terminal — the plain path below finalizes it regardless of clocks).
+        var lwwConverged = false
+        if (cur.divergedOffline == true && msg.sessionId == id && !local.ended && !msg.ended) {
+            when (val res = resolveDivergence(local, msg, nowMs())) {
+                DivergenceResolution.Adopt -> {
+                    // Incoming is most-ahead: adopt it WHOLESALE (clears the flag and
+                    // drives the FGS notification via the shared apply body).
+                    applyIncomingShared(cur, msg, name)
+                    return
+                }
+                is DivergenceResolution.KeepAndBroadcast -> {
+                    keepDivergedLocalAndBroadcast(cur, res.rev)
+                    return
+                }
+                DivergenceResolution.Lww -> {
+                    // Within slack — the clocks agree, so the re-exchange resolved the
+                    // divergence: drop the flag and let plain (rev, atMs) LWW below
+                    // decide whether the incoming applies.
+                    store.setLiveSession(cur.copy(divergedOffline = null))
+                    coFocusSession?.setSuppressAnnounce(false)
+                    lwwConverged = true
+                }
+            }
+        }
+        val step = sharedSessionStep(local, msg)
+        if (!step.apply) {
+            // Post-convergence catch-up (spec amendments, echo-guard integrity):
+            // the divergence resolved within slack and the incoming LOST plain LWW
+            // — our local state is the channel's newest, so broadcast it
+            // EXPLICITLY at the local floor cursor (an idempotent replay for a
+            // peer that already has it; THE catch-up for one that never did).
+            // Relying on the flag-clear re-emission alone was fragile: an echo
+            // guard poisoned by a failed send silently swallowed it, and the
+            // offline control (e.g. an EXTEND) never reached the partner.
+            if (lwwConverged) broadcastLocalAtFloor(id, cur, floorRev, floorAt)
+            return
+        }
         if (msg.ended) { applyRemoteEnded(cur, msg, name); return }
+        applyIncomingShared(cur, msg, name)
+    }
+
+    /** Broadcast the LOCAL state at its floor cursor — the within-slack convergence
+     *  catch-up and the diverged-and-alone grace re-announce. Sets the echo guard
+     *  BEFORE the send (the Room re-emission's fields match → no duplicate), and on
+     *  a failed send rolls the guard back AND re-marks the divergence (the channel
+     *  never saw the state; the next trigger retries). */
+    private suspend fun broadcastLocalAtFloor(id: String, cur: LiveSession, rev: Int, at: Long) {
+        val start = cur.sessionStart ?: return
+        val session = coFocusSession ?: return
+        val prevSent = coFocusLastSent
+        coFocusLastSent = maxOf(rev, prevSent?.first ?: 0) to
+            CoFocusFields(start, cur.paused, cur.pausedAt, cur.sessionEstimateMin)
+        val delivered = session.broadcastShared(
+            SharedSessionState(id, start, cur.paused, cur.pausedAt, cur.sessionEstimateMin, rev, at, ended = false),
+        )
+        if (!delivered) {
+            coFocusLastSent = prevSent
+            val curNow = store.getLiveSession()
+            if (curNow?.id == id && curNow.divergedOffline != true) {
+                store.setLiveSession(curNow.copy(divergedOffline = true))
+            }
+            session.setSuppressAnnounce(true)
+        }
+    }
+
+    /** REPLACE the local session's shared fields with an APPLIED incoming snapshot and
+     *  drive the side effects (FGS notification / paused check-in / attribution) —
+     *  shared by the plain LWW apply and the divergence Adopt arm, so converging to
+     *  an adopted running/paused state updates the FGS notification through the same
+     *  code as any remote control. Always clears [LiveSession.divergedOffline]: an
+     *  applied same-session state means this side has re-exchanged with the channel. */
+    private suspend fun applyIncomingShared(cur: LiveSession, msg: SharedSessionState, name: String) {
+        val start = cur.sessionStart
         // Echo guard BEFORE the write: the Room re-emission's fields will match.
         coFocusLastSent = maxOf(msg.rev, coFocusLastSent?.first ?: 0) to
             CoFocusFields(msg.sessionStartMs, msg.paused, msg.pausedAtMs, msg.estimateMin)
         coFocusSession?.setSharedCurrent(msg)
+        coFocusSession?.setSuppressAnnounce(false)
         store.setLiveSession(
             cur.copy(
                 sessionStart = msg.sessionStartMs, paused = msg.paused, pausedAt = msg.pausedAtMs,
                 sessionEstimateMin = msg.estimateMin,
+                // Cursor coherence (spec amendments, "Adopt fixes the cursors"): the
+                // LOCAL stamp pair follows the applied control too — on the Adopt arm
+                // a diverged client's INFLATED local rev (offline bumps nobody saw)
+                // must not out-floor the partner's post-convergence controls, and an
+                // adopted REMOTE pause must classify as remote (remotePaused ties the
+                // equal pairs to REMOTE) so the pause nag / paused check-in can never
+                // arm for the partner's pause. On the plain-LWW path the incoming won
+                // the floor, so this only ever moves the pair forward.
+                sharedSessionRev = msg.rev, sharedSessionAtMs = msg.atMs,
                 lastAppliedRev = msg.rev, lastAppliedAtMs = msg.atMs,
+                divergedOffline = null,
             ),
         )
         val ctx = graph.appContext
@@ -775,6 +1026,37 @@ class AppViewModel(
             msg.estimateMin != cur.sessionEstimateMin -> setTransientAttribution("$name extended the session")
             msg.sessionStartMs != start && !msg.paused ->
                 tech.csalliance.unstuck.surface.FocusTimerService.update(ctx, paused = false, startMs = msg.sessionStartMs)
+        }
+    }
+
+    /** Divergence resolution, LOCAL-AHEAD arm: keep the local state, clear the flag,
+     *  and broadcast it at rev = max(local, incoming) + 1 — a GENUINE convergence
+     *  control the partner applies via its normal LWW (criterion 4: the online side
+     *  needs no special logic). A failed convergence send re-marks the divergence;
+     *  the next rejoin/foreground re-exchange retries. */
+    private suspend fun keepDivergedLocalAndBroadcast(cur: LiveSession, rev: Int) {
+        val id = cur.id ?: return
+        val start = cur.sessionStart ?: return
+        val at = nowMs()
+        // Echo guard BEFORE the write (the Room re-emission's fields match).
+        val prevSent = coFocusLastSent
+        coFocusLastSent = rev to CoFocusFields(start, cur.paused, cur.pausedAt, cur.sessionEstimateMin)
+        store.setLiveSession(cur.copy(sharedSessionRev = rev, sharedSessionAtMs = at, divergedOffline = null))
+        val session = coFocusSession ?: return
+        session.setSuppressAnnounce(false)
+        val delivered = session.broadcastShared(
+            SharedSessionState(id, start, cur.paused, cur.pausedAt, cur.sessionEstimateMin, rev, at, ended = false),
+        )
+        if (!delivered) {
+            // Echo-guard integrity (spec amendments): the channel never saw the
+            // convergence control — roll the guard back so the NEXT resolution's
+            // catch-up isn't swallowed as an "echo", and re-mark the divergence.
+            coFocusLastSent = prevSent
+            val curNow = store.getLiveSession()
+            if (curNow?.id == id && curNow.divergedOffline != true) {
+                store.setLiveSession(curNow.copy(divergedOffline = true))
+            }
+            session.setSuppressAnnounce(true)
         }
     }
 
@@ -1962,6 +2244,12 @@ class AppViewModel(
         private val ISO: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
         private val EXPORT_JSON = Json { prettyPrint = true; encodeDefaults = true }
+        // Offline convergence (docs/shared-session-spec.md, amendments): how long a
+        // DIVERGED client waits after its hello for a same-session answer before the
+        // grace fallback fires, and how many re-hellos it sends while a focusing
+        // peer is visibly present. Values shared 1:1 with web + iOS.
+        private const val DIVERGENCE_REEXCHANGE_GRACE_MS = 5_000L
+        private const val DIVERGENCE_GRACE_MAX_TRIES = 3
     }
 }
 

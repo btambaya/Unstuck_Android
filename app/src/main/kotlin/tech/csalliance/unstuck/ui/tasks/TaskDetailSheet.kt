@@ -62,6 +62,8 @@ import tech.csalliance.unstuck.ui.sharing.ShareTaskSheet
 import tech.csalliance.unstuck.ui.components.RecurrenceEditor
 import tech.csalliance.unstuck.ui.components.TagPicker
 import tech.csalliance.unstuck.ui.components.areaColorFor
+import tech.csalliance.unstuck.ui.tour.TourAnchorIds
+import tech.csalliance.unstuck.ui.tour.tourAnchor
 
 /** Full-screen task detail — editable (name / first action / estimate / area /
  *  repeat / tags), with session history and capture management. */
@@ -149,7 +151,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                 modifier = Modifier.padding(top = 6.dp),
             ) { if (it.isNotBlank() && it != task.name) vm.updateTask(editTarget.copy(name = it)) }
 
-            Box(Modifier.fillMaxWidth().padding(top = 14.dp).clip(RoundedCornerShape(14.dp)).background(c.bg2).padding(horizontal = 16.dp, vertical = 14.dp)) {
+            Box(Modifier.fillMaxWidth().padding(top = 14.dp).tourAnchor(TourAnchorIds.FIRST_ACTION).clip(RoundedCornerShape(14.dp)).background(c.bg2).padding(horizontal = 16.dp, vertical = 14.dp)) {
                 Column {
                     SectionLabel("First physical action", color = c.coral)
                     EditableText(

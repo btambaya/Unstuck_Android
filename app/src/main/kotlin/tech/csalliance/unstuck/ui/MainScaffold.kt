@@ -61,6 +61,11 @@ import tech.csalliance.unstuck.core.logic.taskForBlock
 import tech.csalliance.unstuck.ui.tasks.TaskDetailScreen
 import tech.csalliance.unstuck.ui.tasks.TasksScreen
 import tech.csalliance.unstuck.ui.today.TodayScreen
+import tech.csalliance.unstuck.core.logic.isTemplate
+import tech.csalliance.unstuck.ui.tour.TourAnchorIds
+import tech.csalliance.unstuck.ui.tour.TourHost
+import tech.csalliance.unstuck.ui.tour.TourNav
+import tech.csalliance.unstuck.ui.tour.tourAnchor
 
 private val NAV = listOf(
     NavSpec("today", "Today", Icons.Outlined.Schedule),
@@ -260,7 +265,12 @@ fun MainScaffold(vm: AppViewModel) {
                     "lists" -> CollectionsScreen(vm, onOpen = { push(Route.Collection(it)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
                 }
             }
-            BottomNavBar(NAV, tab, onSelect = { tab = it; stack.clear() }, onFab = { newTaskPrefill = null; showNewTask = true }, modifier = Modifier.navigationBarsPadding())
+            BottomNavBar(
+                NAV, tab, onSelect = { tab = it; stack.clear() }, onFab = { newTaskPrefill = null; showNewTask = true },
+                modifier = Modifier.navigationBarsPadding(),
+                // Tour anchor: the first-action step's empty-account fallback.
+                fabModifier = Modifier.tourAnchor(TourAnchorIds.NEW_TASK),
+            )
         }
 
         // Floating assistant/feedback bubble — sits above tab content (declared after
@@ -273,6 +283,7 @@ fun MainScaffold(vm: AppViewModel) {
                 Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 16.dp, bottom = 74.dp)
                     .size(50.dp).shadow(8.dp, CircleShape).clip(CircleShape).background(c.surface)
                     .border(1.dp, c.line, CircleShape)
+                    .tourAnchor(TourAnchorIds.ASSISTANT_LAUNCH)
                     .clickable { sheet = if (BuildConfig.ASSISTANT_ENABLED) Sheet.Assistant else Sheet.Feedback },
                 contentAlignment = Alignment.Center,
             ) {
@@ -362,5 +373,54 @@ fun MainScaffold(vm: AppViewModel) {
             val fresh = if (focusShared != null) t else tasks.firstOrNull { it.id == t.id } ?: t
             FocusScreen(vm, fresh, onClose = { focusTask = null; focusAutoCapture = false; focusShared = null }, autoCapture = focusAutoCapture, sharedLevel = focusShared)
         }
+
+        // ── Guided tour — mounted LAST so its spotlight + panel overlay every
+        // screen (tabs, pushed routes, even the Focus takeover). Its nav
+        // closures drive the same tab/stack/sheet state as the real chrome.
+        // Modal sheets/dialogs live in their own windows and can still cover
+        // the panel briefly (e.g. the assistant step's opened sheet) — the
+        // panel is right there when they dismiss.
+        TourHost(
+            vm,
+            currentTab = tab,
+            overlayActive = stack.isNotEmpty() || sheetOpen || focusTask != null || sharedDetail != null,
+            nav = TourNav(
+                resetToTab = { t ->
+                    // Leaving the focus overlay keeps a live session running, so
+                    // clearing it here is non-destructive.
+                    stack.clear(); sheet = null; showNewTask = false; newTaskPrefill = null
+                    sharedDetail = null; focusTask = null; focusAutoCapture = false; focusShared = null
+                    tab = t
+                },
+                openTaskDetail = { id ->
+                    stack.clear(); sheet = null; showNewTask = false; sharedDetail = null
+                    focusTask = null; focusAutoCapture = false; focusShared = null
+                    tab = "tasks"; push(Route.Detail(id))
+                },
+                openInbox = {
+                    stack.clear(); sheet = null; showNewTask = false; sharedDetail = null
+                    focusTask = null; focusAutoCapture = false; focusShared = null
+                    tab = "today"; push(Route.Inbox)
+                },
+                openInsights = {
+                    stack.clear(); sheet = null; showNewTask = false; sharedDetail = null
+                    focusTask = null; focusAutoCapture = false; focusShared = null
+                    push(Route.Insights(false))
+                },
+                openSettingsSection = { s ->
+                    stack.clear(); sheet = null; showNewTask = false; sharedDetail = null
+                    focusTask = null; focusAutoCapture = false; focusShared = null
+                    // Hub first, then the section — popping back lands somewhere sane.
+                    push(Route.Settings); push(Route.SettingsSub(s))
+                },
+                openAssistant = { sheet = Sheet.Assistant },
+                // A real task for the first-action step ("existing detail
+                // mechanics"): prefer an open, non-template task; empty account →
+                // null (the step's New-task FAB fallback anchor takes over).
+                firstTaskId = {
+                    (tasks.firstOrNull { !it.done && !isTemplate(it) } ?: tasks.firstOrNull { !isTemplate(it) })?.id
+                },
+            ),
+        )
     }
 }

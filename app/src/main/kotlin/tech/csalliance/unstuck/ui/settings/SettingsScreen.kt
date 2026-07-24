@@ -70,6 +70,9 @@ import tech.csalliance.unstuck.design.component.ButtonKind
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.ui.tour.TourAnchorIds
+import tech.csalliance.unstuck.ui.tour.TourEvents
+import tech.csalliance.unstuck.ui.tour.tourAnchor
 
 enum class SettingsSection(val title: String, val eyebrow: String) {
     ACCOUNT("Your account.", "SETTINGS · ACCOUNT"),
@@ -137,16 +140,22 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
                         vm.updateSettings { it.copy(reminderLeadMin = v.toIntOrNull() ?: 0) }
                         runCatching { tech.csalliance.unstuck.surface.ReminderScheduler.reschedule(context.applicationContext as tech.csalliance.unstuck.UnstuckApp) }
                     }
-                    SegRow("Notifications", listOf("Calm", "Balanced", "Coach"), s.notificationLevel.label) { v ->
-                        vm.updateSettings { it.copy(notificationLevel = tech.csalliance.unstuck.NotificationLevel.fromLabel(v)) }
-                        runCatching { tech.csalliance.unstuck.surface.ReminderScheduler.reschedule(context.applicationContext as tech.csalliance.unstuck.UnstuckApp) }
+                    // tourAnchor: the guided tour's "You set how present it is"
+                    // step rings this notification-presence block (Android's
+                    // Calm/Balanced/Coach control lives here, not on a
+                    // dedicated Notifications screen).
+                    Column(Modifier.tourAnchor(TourAnchorIds.NOTIF_BODY)) {
+                        SegRow("Notifications", listOf("Calm", "Balanced", "Coach"), s.notificationLevel.label) { v ->
+                            vm.updateSettings { it.copy(notificationLevel = tech.csalliance.unstuck.NotificationLevel.fromLabel(v)) }
+                            runCatching { tech.csalliance.unstuck.surface.ReminderScheduler.reschedule(context.applicationContext as tech.csalliance.unstuck.UnstuckApp) }
+                        }
+                        Text(
+                            s.notificationLevel.blurb,
+                            style = UFont.sans(12, FontWeight.Normal),
+                            color = c.ink2,
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                        )
                     }
-                    Text(
-                        s.notificationLevel.blurb,
-                        style = UFont.sans(12, FontWeight.Normal),
-                        color = c.ink2,
-                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
-                    )
                     ToggleRow("Hide right rail while focusing", s.focusCollapseRail) { v -> vm.updateSettings { it.copy(focusCollapseRail = v) } }
                     ToggleRow("Soft exit", s.focusSoftExit) { v -> vm.updateSettings { it.copy(focusSoftExit = v) } }
                     ToggleRow("Pause reasons", s.focusPauseReasons) { v -> vm.updateSettings { it.copy(focusPauseReasons = v) } }
@@ -238,6 +247,12 @@ private fun AccountContent(vm: AppViewModel) {
         SettingRow("Display name", vm.currentName ?: "Set a name") { showName = true }
         SettingRow("Signed in", vm.currentEmail ?: "—")   // static info — no tap
         SettingRow(if (vm.hasPassword) "Change password" else "Add a password", "Update your sign-in password") { showPassword = true }
+        // Guided tour re-entry for EVERY account (the auto-offer only arms for
+        // accounts that onboard after the tour shipped). TourHost routes this
+        // through resumeDecision: a paused/unfinished run offers the resume
+        // card at its saved step; a finished (or fresh) tour resets to the
+        // welcome card.
+        SettingRow("Product tour", "Resume or replay the guided tour") { TourEvents.requestRestart() }
         SettingRow("Export everything", "One-shot JSON snapshot") { exporter.launch("unstuck-export.json") }
         SettingRow("Delete my account", "Permanently removes your data") { showDelete = true }
         SettingRow("Sign out", "End this session", last = true) { vm.signOut() }

@@ -58,6 +58,11 @@ class MainActivity : ComponentActivity() {
                             // settings to a different account on this device.
                             tech.csalliance.unstuck.surface.NotificationLog.clear(this@MainActivity)
                             graph.settings.clearUserContent()
+                            // Guided-tour state is per-account: the next account must
+                            // not inherit this one's paused run / done flag (ambush,
+                            // or an eaten one-time offer). Their own onboarding
+                            // re-arms `eligible`.
+                            tech.csalliance.unstuck.ui.tour.TourStateStore(this@MainActivity).clear()
                         }
                         else -> {}
                     }

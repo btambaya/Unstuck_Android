@@ -78,6 +78,8 @@ import tech.csalliance.unstuck.design.theme.UnstuckColors
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.sharing.PartnerPresence
+import tech.csalliance.unstuck.ui.tour.TourAnchorIds
+import tech.csalliance.unstuck.ui.tour.tourAnchor
 import tech.csalliance.unstuck.ui.components.areaColorFor
 import tech.csalliance.unstuck.ui.components.dateEyebrow
 import tech.csalliance.unstuck.ui.components.greeting
@@ -233,7 +235,9 @@ fun TodayScreen(
         }
         // ── Scrolling content: the Start-Next banner first, then the filter pills
         //    (which stick to the top as you scroll), then the list. ──────────────────
-        LazyColumn(Modifier.fillMaxWidth().weight(1f)) {
+        // tourAnchor: the guided tour's last-resort Today target (empty account
+        // → no hero, no backlog pointer — ring the list area instead).
+        LazyColumn(Modifier.fillMaxWidth().weight(1f).tourAnchor(TourAnchorIds.TODAY_LIST)) {
             if (!notifsEnabled) {
                 item {
                     Row(
@@ -384,7 +388,7 @@ private fun heroBrush(c: UnstuckColors): Brush =
 private fun StartNextHero(task: TaskItem, onStart: () -> Unit, onPickAnother: () -> Unit) {
     val c = UTheme.colors
     Column(Modifier.padding(horizontal = 18.dp).padding(top = 20.dp)) {
-        Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(heroBrush(c)).padding(18.dp)) {
+        Box(Modifier.fillMaxWidth().tourAnchor(TourAnchorIds.START_NEXT).clip(RoundedCornerShape(24.dp)).background(heroBrush(c)).padding(18.dp)) {
             Column {
                 Row(Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = if (c.isDark) 0.12f else 0.7f)).padding(horizontal = 9.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Icon(Icons.Filled.Bolt, contentDescription = null, tint = c.primaryDeep, modifier = Modifier.size(11.dp))
@@ -399,7 +403,10 @@ private fun StartNextHero(task: TaskItem, onStart: () -> Unit, onPickAnother: ()
                 Text(task.firstPhysicalAction?.takeIf { it.isNotBlank() } ?: task.name, style = UFont.sans(21, FontWeight.Bold), color = c.ink, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp))
                 Text("${task.estimateMin} min", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 6.dp))
                 Row(Modifier.padding(top = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    UButton("Focus", kind = ButtonKind.CORAL, fill = false, leadingIcon = Icons.Filled.PlayArrow, onClick = onStart)
+                    // tourAnchor: the begin-focus affordance — the tour's focus +
+                    // capture steps ring THIS (never the focus screen, which
+                    // would mint a real session on entry).
+                    UButton("Focus", kind = ButtonKind.CORAL, fill = false, leadingIcon = Icons.Filled.PlayArrow, modifier = Modifier.tourAnchor(TourAnchorIds.FOCUS_BEGIN), onClick = onStart)
                     Text("Pick another", style = UFont.sans(13, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(onClick = onPickAnother).padding(horizontal = 10.dp, vertical = 8.dp))
                 }
             }
@@ -414,7 +421,7 @@ private fun BacklogPointerHero(count: Int, onOpenBacklog: () -> Unit) {
     val c = UTheme.colors
     Column(Modifier.padding(horizontal = 18.dp).padding(top = 20.dp)) {
         Column(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(heroBrush(c))
+            Modifier.fillMaxWidth().tourAnchor(TourAnchorIds.BACKLOG_POINTER).clip(RoundedCornerShape(24.dp)).background(heroBrush(c))
                 .clickable(onClick = onOpenBacklog).padding(18.dp),
         ) {
             SectionLabel("Nothing scheduled today", color = c.primaryDeep)

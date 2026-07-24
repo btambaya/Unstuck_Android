@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 72
-        versionName = "0.4.58"
+        versionCode = 73
+        versionName = "0.4.59"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.4.58 — Shared-timer reconnect fix (from your re-test): pausing on a phone with no internet no longer freezes your partner, your resume always reaches them once you are back online, and after any drop both devices settle on the furthest-ahead clock — a brief blip can no longer rewind or un-pause anyone. Earlier — v0.4.57: offline handling for shared sessions. v0.4.56: one shared timer for partner tasks."
+    releaseNotes = "v0.4.59 — NEW: a guided tour of Unstuck. On your first run (or anytime from Settings → Account → Product tour) a calm two-minute walkthrough shows you the core loop — Today, the first physical action, Focus, and the Assistant — by highlighting the real screens, never a slideshow. Choose the 3-minute essentials or the full tour, read or LISTEN (a warm narrated voice), and ask questions right in the tour — answered by the assistant, about Unstuck only. Pause anytime; it resumes where you stopped. Earlier — v0.4.58: shared-timer reconnect fixes. v0.4.56: one shared timer for partner tasks."
 }
 
 dependencies {

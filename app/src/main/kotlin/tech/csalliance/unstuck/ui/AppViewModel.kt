@@ -1852,6 +1852,14 @@ class AppViewModel(
     val onboarded: Boolean get() = graph.onboarded
 
     fun completeOnboarding(struggles: List<String>, areas: List<String> = emptyList()) = launchWrite {
+        // Arm the ONE-TIME guided-tour auto-offer (next Today arrival) FIRST —
+        // nothing after it depends on the server, and arming after the network
+        // write below could delay it past TourHost's mount (a lost/late offer).
+        // Only accounts that complete onboarding AFTER this ships get it —
+        // existing accounts reach the tour via Settings → Account → Product tour.
+        runCatching {
+            tech.csalliance.unstuck.ui.tour.TourStateStore(graph.appContext).patch { it.copy(eligible = true) }
+        }
         // Seed the user's PICKED areas (or canonical defaults if they picked none).
         // Single source of seeding — onboarding no longer also writes areas itself,
         // so we don't double-seed (picked + defaults).
@@ -2198,6 +2206,23 @@ class AppViewModel(
                     }
                 }
             }
+        }
+    }
+
+    /** One tour-mode Q&A round-trip through the SAME assistant transport.
+     *  `context.tour = {step, title}` flags the server's product-tour mode
+     *  (no tools, product-Q&A only — enforced server-side). Any tool_calls in
+     *  the reply are IGNORED (the tour only ever speaks); returns the text
+     *  reply, or null on any error → the caller answers from canned TOUR_QA. */
+    suspend fun tourAsk(messages: List<ChatMessage>, stepId: String, stepTitle: String): String? {
+        val a = assistant ?: return null
+        val context = buildJsonObject {
+            (buildAssistantContext() as? JsonObject)?.forEach { (k, v) -> put(k, v) }
+            putJsonObject("tour") { put("step", stepId); put("title", stepTitle) }
+        }
+        return when (val r = a.ask(messages, context)) {
+            is AssistantResult.Ok -> r.reply.content?.trim()?.takeIf { it.isNotEmpty() }
+            is AssistantResult.Err -> null
         }
     }
 

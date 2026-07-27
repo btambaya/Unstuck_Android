@@ -125,14 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.4.60 — Tour polish from your feedback: the spoken voice now shows LIVE captions of exactly what it says; "Tell me more" is read aloud too; while the tour runs you can only interact with what it is showing you (no more wandering off mid-tour); Pause now asks first and leaves a small "Resume tour" chip on screen so you can pick up exactly where you stopped; and the Focus step shows a proper demo of the focus screen. Earlier — v0.4.59: the guided tour. v0.4.58: shared-timer reconnect fixes."
-}
-
-dependencies {
-    implementation(project(":core"))
-    implementation(project(":design"))
-    implementation(project(":data"))
-    implementation(project(":sync"))
+    releaseNotes = "v0.4.60 — Tour polish from your feedback: the spoken voice now shows LIVE captions of exactly what it says; Tell-me-more is read aloud too; while the tour runs you can only interact with what it is showing you (no more wandering off mid-tour); Pause now asks first and leaves a small Resume-tour chip on screen so you can pick up exactly where you stopped; and the Focus step shows a proper demo of the focus screen. Earlier — v0.4.59: the guided tour. v0.4.58: shared-timer reconnect fixes."))
 
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.serialization.json)

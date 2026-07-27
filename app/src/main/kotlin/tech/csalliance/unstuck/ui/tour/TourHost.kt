@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.ime
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBars
@@ -23,6 +24,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -37,8 +39,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -67,9 +72,10 @@ import tech.csalliance.unstuck.ui.settings.SettingsSection
 //    Existing accounts are never ambushed.
 //  • TourEvents.requestRestart() — Settings → Account → "Product tour".
 //
-// FOCUS DEVIATION (contract): FocusScreen mints a real session in a
-// LaunchedEffect on entry, so the focus + capture steps NEVER navigate there —
-// they stay on Today and ring the hero's begin-focus affordance.
+// FOCUS STEPS (round 2): FocusScreen mints a real session in a LaunchedEffect
+// on entry, so the focus + capture steps NEVER navigate there — the tour
+// renders its own DEMO focus surface (TourDemoFocus.kt) over the scrim and
+// spotlights targets INSIDE it (ring / capture hint). Zero sessions.
 
 /** How the tour drives the real scaffold — MainScaffold hands these in as
  *  closures over its own tab/stack/sheet state. */
@@ -144,6 +150,17 @@ fun TourHost(
     /** A pushed route / sheet / focus overlay is up — the auto-shown welcome
      *  and resume cards wait for a quiet Today (never ambush mid-task). */
     overlayActive: Boolean,
+    /** LIVE settings-surface state (the nav stack contains Settings) — the
+     *  settings steps' lockdown exemption follows THIS, not the step id: the
+     *  surface is interactive while open; the moment the user closes it
+     *  mid-step the lockdown re-applies (panel still reachable — never a
+     *  full-app unlock). */
+    settingsSurfaceOpen: Boolean,
+    /** The Focus takeover is up ABOVE the anchored surface (same window,
+     *  never tour-driven — e.g. a notification deep link or a partner-started
+     *  shared session). While RUNNING the spotlight degrades to the whisper
+     *  scrim + ONE full-screen blocker so no stale hole leaks into it. */
+    focusOverlayActive: Boolean,
     nav: TourNav,
 ) {
     val context = LocalContext.current
@@ -171,6 +188,16 @@ fun TourHost(
     // The welcome card was soft-dismissed by the back gesture once already —
     // the quiet-Today loop re-offers it ONCE; a second back declines for good.
     var welcomeSoftDismissed by remember { mutableStateOf(false) }
+    // The PAUSED resume card was surfaced (or back-dismissed) once already
+    // this process — the dormant loop's resurface is ONE-SHOT (mirror of
+    // welcomeSoftDismissed), so back-dismissing the card never re-pops it.
+    var pausedResurfaced by remember { mutableStateOf(false) }
+    // Round-2 #5: the inline footer pause-confirm is armed (Pause tap or back
+    // gesture). Reset on every step (re)presentation.
+    var pauseConfirmArmed by remember { mutableStateOf(false) }
+    // Bumped when the "Resume tour" chip is ✕-dismissed so the dormant
+    // snapshot below re-reads the store.
+    var chipEpoch by remember { mutableIntStateOf(0) }
     // Bumped on ON_START while RUNNING: MainScaffold's ON_STOP reset clears
     // tab/stack/sheets (deliberately — do not skip it) while the tour keeps
     // its phase, so on foreground the panel would narrate the old step over
@@ -191,7 +218,8 @@ fun TourHost(
     // ── persistence-mirroring actions (web saveTour patch parity) ──────────
     fun begin(m: TourMode) {
         mode = m; index = 0; assistantOpenedForStep = null
-        store.patch { it.copy(mode = m, started = true, index = 0, paused = false) }
+        // chipDismissed resets: a FRESH run re-earns its resume chip.
+        store.patch { it.copy(mode = m, started = true, index = 0, paused = false, chipDismissed = false) }
         phase = TourPhase.RUNNING
     }
     fun advance() {
@@ -207,7 +235,11 @@ fun TourHost(
         index = (index - 1).coerceAtLeast(0)
         store.patch { it.copy(index = index) }
     }
+    // Confirmed pause (round-2 #5): the tour hides preserving progress, and
+    // the floating "Resume tour" chip (DISMISSED branch below) takes over as
+    // the primary re-entry.
     fun pause() {
+        pauseConfirmArmed = false
         store.patch { it.copy(paused = true, index = index, mode = mode) }
         phase = TourPhase.DISMISSED
     }
@@ -228,7 +260,7 @@ fun TourHost(
         mediaMode = m
         store.patch { it.copy(mediaMode = m) }
         if (running) {
-            if (m == TourMediaMode.LISTEN) audio.load(step.id, autoPlay = true, speed = speed)
+            if (m == TourMediaMode.LISTEN) audio.load(step.id, step.narration, autoPlay = true, speed = speed)
             else audio.release()   // Read = clean stop + reset (web parity)
         }
     }
@@ -278,18 +310,23 @@ fun TourHost(
     // effect cancels whenever phase/tab/overlay change): surfaces the one-time
     // WELCOME (completeOnboarding arms `eligible` in an async write that may
     // land after this host mounted, or a back-gesture soft-dismissed the card)
-    // AND a PAUSED run's resume card (otherwise a paused tour is unreachable
-    // until process death). Delay-first, so a just-paused / just-dismissed
-    // card never bounces straight back. begin/decline/finish persist
-    // started/done, flipping the store to HIDDEN, so those can never re-fire.
+    // AND a PAUSED run's resume card. The card is the SECONDARY re-entry:
+    // while the "Resume tour" chip is visible dormantResurface stays null (the
+    // modal must never fight the chip every 5s — only a ✕-dismissed chip
+    // unlocks it), and it's ONE-SHOT per process (pausedResurfaced, mirroring
+    // welcomeSoftDismissed) so back-dismissing it never re-pops. Delay-first,
+    // so a just-paused / just-dismissed card never bounces straight back.
+    // begin/decline/finish persist started/done, flipping the store to HIDDEN,
+    // so those can never re-fire.
     LaunchedEffect(phase, currentTab, overlayActive) {
         if (phase != TourPhase.DISMISSED || currentTab != "today" || overlayActive) return@LaunchedEffect
         while (true) {
             delay(5_000)
             val s = store.load()
-            when (dormantResurface(s)) {
+            when (dormantResurface(s, pausedResurfaced)) {
                 TourEntryPhase.WELCOME -> { phase = TourPhase.WELCOME; return@LaunchedEffect }
                 TourEntryPhase.PAUSED -> {
+                    pausedResurfaced = true   // one-shot per process
                     mode = s.mode ?: TourMode.ESSENTIAL
                     index = s.index.coerceIn(0, stepsForMode(s.mode ?: TourMode.ESSENTIAL).lastIndex)
                     phase = TourPhase.PAUSED
@@ -306,6 +343,7 @@ fun TourHost(
     // MainScaffold's ON_STOP reset put the app back on Today while the tour
     // kept RUNNING on its step.
     LaunchedEffect(running, step.id, mode, navEpoch) {
+        pauseConfirmArmed = false   // a (re)presented step starts un-armed
         if (!running) {
             audio.release()   // pausing/exiting stops narration immediately
             return@LaunchedEffect
@@ -315,7 +353,7 @@ fun TourHost(
         tourNavigate(step, nav)
         store.patch { it.copy(started = true, mode = mode, mediaMode = mediaMode, index = index) }
         // Auto-play each NEW step in Listen mode; Read never touches audio.
-        if (mediaMode == TourMediaMode.LISTEN) audio.load(step.id, autoPlay = true, speed = speed)
+        if (mediaMode == TourMediaMode.LISTEN) audio.load(step.id, step.narration, autoPlay = true, speed = speed)
         else audio.release()
     }
 
@@ -330,12 +368,19 @@ fun TourHost(
     // The auto-shown cards wait for a quiet Today; explicit opens show anywhere.
     val cardGate = explicit || (currentTab == "today" && !overlayActive)
 
-    // Back gesture: running → pause preserving progress; welcome → SOFT
-    // dismiss (phase only, store untouched, so `eligible` survives and the
-    // quiet-Today loop re-offers ONCE — a second back declines permanently;
-    // the explicit "Not now" action stays permanent either way); resume card →
-    // dismiss for now (stays paused, the quiet-Today loop / next launch offer again).
-    BackHandler(enabled = running) { pause() }
+    // Back gesture: running → the inline PAUSE CONFIRM (round-2 #5 — never
+    // straight to the app: the first back arms the footer confirm, a second
+    // back confirms the pause); welcome → SOFT dismiss (phase only, store
+    // untouched, so `eligible` survives and the quiet-Today loop re-offers
+    // ONCE — a second back declines permanently; the explicit "Not now"
+    // action stays permanent either way); resume card → dismiss for now
+    // (stays paused, the chip + quiet-Today loop / next launch offer again).
+    BackHandler(enabled = running) {
+        when (tourBackWhileRunning(pauseConfirmArmed)) {
+            TourBackAction.ARM_PAUSE_CONFIRM -> pauseConfirmArmed = true
+            TourBackAction.CONFIRM_PAUSE -> pause()
+        }
+    }
     BackHandler(enabled = phase == TourPhase.WELCOME && cardGate) {
         if (welcomeSoftDismissed) {
             declineWelcome()
@@ -345,7 +390,13 @@ fun TourHost(
             phase = TourPhase.DISMISSED
         }
     }
-    BackHandler(enabled = phase == TourPhase.PAUSED && cardGate) { explicit = false; phase = TourPhase.DISMISSED }
+    BackHandler(enabled = phase == TourPhase.PAUSED && cardGate) {
+        // Back-dismissing the resume card consumes the process's one-shot
+        // resurface too — the chip (or Settings / next launch) takes over.
+        explicit = false
+        pausedResurfaced = true
+        phase = TourPhase.DISMISSED
+    }
 
     when (phase) {
         TourPhase.WELCOME -> if (cardGate) {
@@ -366,7 +417,8 @@ fun TourHost(
                 },
                 onStartOver = {
                     index = 0
-                    store.patch { it.copy(index = 0, paused = false) }
+                    // chipDismissed resets: a FRESH run re-earns its resume chip.
+                    store.patch { it.copy(index = 0, paused = false, chipDismissed = false) }
                     phase = TourPhase.RUNNING
                 },
                 onNotNow = {
@@ -376,11 +428,30 @@ fun TourHost(
             )
         }
         TourPhase.RUNNING -> {
-            val targetRect = TourAnchors.resolve(step.target, step.fallbacks)
+            // The per-frame input policy: LIVE settings exemption + display-only
+            // cutouts (interactive only on the assistant/reentry steps) + the
+            // belt — a Focus takeover above the anchored surface degrades the
+            // spotlight to the whisper scrim + ONE full-screen blocker (no
+            // stale hole; only the panel stays interactive).
+            val lockdown = tourLockdownPolicy(step, settingsOpen = settingsSurfaceOpen, overlayAboveTour = focusOverlayActive)
+            val targetRect = if (lockdown.degradeToFullBlocker) null else TourAnchors.resolve(step.target, step.fallbacks)
             BoxWithConstraints(Modifier.fillMaxSize()) {
                 val density = LocalDensity.current
                 val screenH = constraints.maxHeight.toFloat()
-                TourSpotlight(targetRect, reduceMotion = settings.reduceMotion)
+                // Round-2 #6: the focus/capture steps present the tour's own
+                // DEMO focus surface (zero sessions, zero navigation) under
+                // the spotlight/panel; its ring + capture hint register the
+                // step's spotlight anchors.
+                if (tourStepShowsDemoFocus(step)) TourDemoFocus()
+                // Round-2 #4: the dim panels consume input on all but a
+                // LIVE-open settings surface; the cut-out passes touches only
+                // on the assistant/reentry steps (display-only elsewhere).
+                TourSpotlight(
+                    targetRect,
+                    reduceMotion = settings.reduceMotion,
+                    consumeInput = lockdown.consumeInput,
+                    cutoutInteractive = lockdown.cutoutInteractive,
+                )
 
                 // ── Non-negotiable #1: dock OPPOSITE the target, hard-capped to
                 // the space outside the ring MINUS the dock-side insets (the
@@ -440,13 +511,89 @@ fun TourHost(
                         onPrimary = ::primaryAction,
                         onSkip = ::advance,
                         onBack = ::backStep,
-                        onPause = ::pause,
+                        pauseConfirmArmed = pauseConfirmArmed,
+                        onRequestPause = { pauseConfirmArmed = true },
+                        onConfirmPause = ::pause,
+                        onKeepGoing = { pauseConfirmArmed = false },
                         onExit = ::exit,
                     )
                 }
             }
         }
-        TourPhase.DISMISSED, TourPhase.DONE -> Unit
+        TourPhase.DISMISSED -> {
+            // Round-2 #5: the floating "Resume tour" chip — the PRIMARY
+            // re-entry to an unfinished run (a confirmed pause, or a run
+            // STRANDED by process death mid-run: at boot started && !paused &&
+            // !done && !chipDismissed shows the chip, and a tap resumes at the
+            // saved index). Shown across screens (deliberately NOT gated on a
+            // quiet Today) until it's ✕-dismissed for good. The quiet-Today
+            // resume-card loop above is the SECONDARY resurface — suppressed
+            // while this chip shows, one-shot after its ✕.
+            val chipState = remember(chipEpoch) { store.load() }
+            if (showResumeChip(chipState)) {
+                TourResumeChip(
+                    onResume = {
+                        val m = chipState.mode ?: TourMode.ESSENTIAL
+                        mode = m
+                        index = chipState.index.coerceIn(0, stepsForMode(m).lastIndex)
+                        assistantOpenedForStep = null
+                        store.patch { it.copy(paused = false) }
+                        phase = TourPhase.RUNNING
+                    },
+                    onDismissForever = {
+                        store.patch { it.copy(chipDismissed = true) }
+                        chipEpoch += 1
+                    },
+                )
+            }
+        }
+        TourPhase.DONE -> Unit
+    }
+}
+
+/* ============================================================
+ * Resume chip — a small floating pill (orbit mark + ✕), docked
+ * bottom-corner across screens while a paused run has progress.
+ * Tap = resume at the saved step; ✕ = gone for good (the
+ * Settings → Account → Product tour path remains).
+ * ============================================================ */
+@Composable
+private fun TourResumeChip(onResume: () -> Unit, onDismissForever: () -> Unit) {
+    val c = UTheme.colors
+    Box(
+        Modifier.fillMaxSize().navigationBarsPadding().padding(start = 16.dp, bottom = 74.dp),
+        contentAlignment = Alignment.BottomStart,
+    ) {
+        Row(
+            Modifier
+                .shadow(10.dp, RoundedCornerShape(999.dp))
+                .clip(RoundedCornerShape(999.dp))
+                .background(c.bg)
+                .border(1.dp, c.line, RoundedCornerShape(999.dp))
+                .padding(end = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Row(
+                Modifier
+                    .clip(RoundedCornerShape(999.dp))
+                    .clickable(onClick = onResume)
+                    .semantics { contentDescription = "Resume tour" }
+                    .padding(start = 10.dp, top = 8.dp, bottom = 8.dp, end = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(7.dp),
+            ) {
+                Box(Modifier.size(22.dp).clip(CircleShape).background(c.primarySoft), contentAlignment = Alignment.Center) {
+                    Orbit(size = 14)
+                }
+                Text("Resume tour", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
+            }
+            Box(
+                Modifier.size(30.dp).clip(CircleShape).clickable(onClick = onDismissForever),
+                contentAlignment = Alignment.Center,
+            ) {
+                Icon(Icons.Filled.Close, contentDescription = "Dismiss resume chip", tint = c.ink3, modifier = Modifier.size(13.dp))
+            }
+        }
     }
 }
 
@@ -468,8 +615,9 @@ private fun TourWelcomeCard(
                 Orbit(size = 26)
             }
             Text("Welcome to Unstuck", style = UFont.serifItalic(30), color = c.ink, modifier = Modifier.padding(top = 16.dp))
+            // Round-2 #1 copy — no more two-minute vs 3–5-min contradiction.
             Text(
-                "A two-minute look at how Unstuck helps you begin, stay with it, and come back — nothing to configure. How would you like to explore?",
+                TOUR_WELCOME_INTRO,
                 style = UFont.sans(14).copy(lineHeight = 22.sp), color = c.ink2, modifier = Modifier.padding(top = 8.dp),
             )
             Column(Modifier.padding(top = 22.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -494,6 +642,12 @@ private fun TourWelcomeCard(
                 Spacer(Modifier.weight(1f))
                 TourMediaToggle(mediaMode, onMediaMode)
             }
+            // Round-2 #1: quiet footer — the tour is always recoverable.
+            Text(
+                TOUR_WELCOME_FOOTER,
+                style = UFont.sans(11).copy(lineHeight = 16.sp), color = c.ink4,
+                modifier = Modifier.padding(top = 12.dp),
+            )
         }
     }
 }

@@ -384,6 +384,14 @@ fun MainScaffold(vm: AppViewModel) {
             vm,
             currentTab = tab,
             overlayActive = stack.isNotEmpty() || sheetOpen || focusTask != null || sharedDetail != null,
+            // LIVE opened-surface state for the settings steps' lockdown
+            // exemption: interactive only while a Settings route is actually
+            // on the stack — closing it mid-step re-applies the lockdown.
+            settingsSurfaceOpen = stack.any { it is Route.Settings || it is Route.SettingsSub },
+            // The Focus takeover renders in THIS window above the anchored
+            // surface (and is never tour-driven) — while it's up the running
+            // spotlight degrades to a full-screen blocker (no stale hole).
+            focusOverlayActive = focusTask != null,
             nav = TourNav(
                 resetToTab = { t ->
                     // Leaving the focus overlay keeps a live session running, so

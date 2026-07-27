@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 73
-        versionName = "0.4.59"
+        versionCode = 74
+        versionName = "0.4.60"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.4.59 — NEW: a guided tour of Unstuck. On your first run (or anytime from Settings → Account → Product tour) a calm two-minute walkthrough shows you the core loop — Today, the first physical action, Focus, and the Assistant — by highlighting the real screens, never a slideshow. Choose the 3-minute essentials or the full tour, read or LISTEN (a warm narrated voice), and ask questions right in the tour — answered by the assistant, about Unstuck only. Pause anytime; it resumes where you stopped. Earlier — v0.4.58: shared-timer reconnect fixes. v0.4.56: one shared timer for partner tasks."
+    releaseNotes = "v0.4.60 — Tour polish from your feedback: the spoken voice now shows LIVE captions of exactly what it says; "Tell me more" is read aloud too; while the tour runs you can only interact with what it is showing you (no more wandering off mid-tour); Pause now asks first and leaves a small "Resume tour" chip on screen so you can pick up exactly where you stopped; and the Focus step shows a proper demo of the focus screen. Earlier — v0.4.59: the guided tour. v0.4.58: shared-timer reconnect fixes."
 }
 
 dependencies {

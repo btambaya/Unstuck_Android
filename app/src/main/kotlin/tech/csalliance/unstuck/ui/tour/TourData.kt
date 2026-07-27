@@ -10,12 +10,12 @@ import kotlinx.coroutines.flow.asSharedFlow
 // (ids, stages, titles, body, narration, more, TOUR_QA), with the Android view
 // mapping from docs/tour-mobile-spec.md.
 //
-// DELIBERATE DEVIATION (focus steps): the web tour navigates to /focus in its
-// idle "Begin focus" state. Android's FocusScreen mounts WITH a task and
-// starts a session in a LaunchedEffect (vm.startFocus) — there is no idle,
-// no-session focus surface, and the tour must NEVER mint a real session. So
-// the focus + capture steps stay on Today and spotlight the begin-focus
-// affordance (the Start-Next hero's Focus button) instead of a focus ring.
+// FOCUS STEPS (round 2, all platforms): Android's FocusScreen mounts WITH a
+// task and starts a session in a LaunchedEffect (vm.startFocus) — there is no
+// idle, no-session focus surface, and the tour must NEVER mint a real session.
+// The focus + capture steps therefore show a DEMO focus surface rendered by
+// the tour itself (TourDemoFocus.kt) — visually faithful, zero sessions, zero
+// navigation — and spotlight targets INSIDE the demo (ring / capture hint).
 //
 // This file is deliberately Compose-free (pure data + SharedPreferences +
 // shared-flow events) so the step list and phase rules stay unit-testable.
@@ -40,11 +40,33 @@ object TourAnchorIds {
     const val FIRST_ACTION = "first-action"
     const val NEW_TASK = "new-task"
     const val ASSISTANT_LAUNCH = "assistant-launch"
-    /** The Today begin-focus affordance (the hero's Focus button) — stands in
-     *  for the web's focus-ring anchor (see the focus deviation above). */
+    /** LEGACY (round 1): the Today begin-focus affordance. Still registered by
+     *  the hero's Focus button but no step targets it any more — the focus +
+     *  capture steps spotlight the DEMO surface anchors below (round 2). */
     const val FOCUS_BEGIN = "focus-begin"
     const val NOTIF_BODY = "notif-body"
+    /** Round-2 demo focus surface (TourDemoFocus.kt) — anchors INSIDE the demo. */
+    const val DEMO_FOCUS_RING = "demo-focus-ring"
+    const val DEMO_CAPTURE_HINT = "demo-capture-hint"
 }
+
+/* ============================================================
+ * Round-2 copy (binding on ALL platforms — web/iOS mirror these).
+ * ============================================================ */
+/** Welcome intro — kills the old two-minute vs 3–5-min contradiction. */
+const val TOUR_WELCOME_INTRO =
+    "A quick look at how Unstuck helps you begin, stay with it, and come back — about three minutes for the essentials."
+
+/** Quiet welcome-card footer line. */
+const val TOUR_WELCOME_FOOTER =
+    "Pause anytime — pick it back up from Settings → Account → Product tour."
+
+/** Inline pause-confirm (footer of the running panel). */
+const val TOUR_PAUSE_CONFIRM_TITLE = "Pause the tour? Your progress is saved."
+
+/** The pause confirm also names the Settings path (round-2 #5). */
+const val TOUR_PAUSE_SETTINGS_PATH =
+    "Pick it back up anytime from Settings → Account → Product tour."
 
 /* ============================================================
  * STEP DATA — copy ported verbatim from the web tour-data.ts.
@@ -115,11 +137,10 @@ val ESSENTIAL_STEPS: List<TourStep> = listOf(
         primary = "Open the Assistant", onShow = TourSideEffect.OPEN_ASSISTANT,
     ),
     TourStep(
-        // Focus deviation (see file header): Android has no idle focus surface,
-        // so this stays on Today and rings the begin-focus affordance.
+        // Round 2: the tour renders its own DEMO focus surface (see header) and
+        // spotlights the demo's mid-progress ring. Never the real focus screen.
         id = "focus", stage = "Focus", view = TourView.FOCUS,
-        target = TourAnchorIds.FOCUS_BEGIN,
-        fallbacks = listOf(TourAnchorIds.START_NEXT, TourAnchorIds.BACKLOG_POINTER, TourAnchorIds.TODAY_LIST),
+        target = TourAnchorIds.DEMO_FOCUS_RING,
         title = "Focus, and the Ring",
         body = "A session counts upward against your estimate; the screen color follows the state. Calm while you work, warm coral if you run over. No alarms — returning is always supported.",
         narration = "When you start a session you enter Focus. The ring counts upward against your estimate, and the whole screen’s colour follows the state — calm while you work, a warm coral if you run past the estimate. Never an alarm. This is where execution actually happens.",
@@ -128,8 +149,7 @@ val ESSENTIAL_STEPS: List<TourStep> = listOf(
     ),
     TourStep(
         id = "capture", stage = "Focus", view = TourView.FOCUS,
-        target = TourAnchorIds.FOCUS_BEGIN,
-        fallbacks = listOf(TourAnchorIds.START_NEXT, TourAnchorIds.BACKLOG_POINTER, TourAnchorIds.TODAY_LIST),
+        target = TourAnchorIds.DEMO_CAPTURE_HINT,
         title = "Capture without leaving",
         body = "A stray thought mid-session? Press C or tap the mic and it’s saved — “add washing liquid to Groceries” — linked to this session, without breaking your focus.",
         narration = "While focusing, thoughts will surface. Don’t chase them. Press C, or tap the microphone, and Unstuck saves it — say, add washing liquid to groceries — linked to this session. You stay in focus; the thought is safe.",
@@ -268,6 +288,9 @@ data class TourState(
     val mediaMode: TourMediaMode = TourMediaMode.READ,
     val speed: Float = 1f,
     val index: Int = 0,
+    /** Round-2 #5: the floating "Resume tour" chip was ✕-dismissed — gone for
+     *  good (the Settings → Account → Product tour path remains). */
+    val chipDismissed: Boolean = false,
 )
 
 class TourStateStore(context: Context) {
@@ -282,6 +305,7 @@ class TourStateStore(context: Context) {
         mediaMode = p.getString("mediaMode", null)?.let { runCatching { TourMediaMode.valueOf(it) }.getOrNull() } ?: TourMediaMode.READ,
         speed = p.getFloat("speed", 1f),
         index = p.getInt("index", 0),
+        chipDismissed = p.getBoolean("chipDismissed", false),
     )
 
     fun save(s: TourState) {
@@ -294,6 +318,7 @@ class TourStateStore(context: Context) {
             .putString("mediaMode", s.mediaMode.name)
             .putFloat("speed", s.speed)
             .putInt("index", s.index)
+            .putBoolean("chipDismissed", s.chipDismissed)
             .apply()
     }
 
@@ -356,12 +381,16 @@ fun resumeDecision(state: TourState): ResumeDecision =
 
 /** What the DORMANT (dismissed) quiet-Today re-check may surface: the one-time
  *  welcome (completeOnboarding's async `eligible` arming, or a soft-dismissed
- *  welcome card) — or a PAUSED run's resume card, so a paused tour is
- *  reachable again without waiting for process death. Null = stay dormant. */
-fun dormantResurface(state: TourState): TourEntryPhase? =
+ *  welcome card) — or a PAUSED run's resume card. The card is the SECONDARY
+ *  re-entry to a paused run: while the "Resume tour" chip is visible it stays
+ *  away entirely (the modal must never fight the chip every 5s), and it fires
+ *  at most ONCE per process ([pausedResurfaced], mirroring welcomeSoftDismissed)
+ *  so back-dismissing it can't re-pop forever. Null = stay dormant. */
+fun dormantResurface(state: TourState, pausedResurfaced: Boolean = false): TourEntryPhase? =
     when (initialPhase(state)) {
         TourEntryPhase.WELCOME -> TourEntryPhase.WELCOME
-        TourEntryPhase.PAUSED -> TourEntryPhase.PAUSED
+        TourEntryPhase.PAUSED ->
+            if (showResumeChip(state) || pausedResurfaced) null else TourEntryPhase.PAUSED
         TourEntryPhase.HIDDEN -> null
     }
 
@@ -465,3 +494,85 @@ fun nextTourSpeed(speed: Float): Float =
 
 /** Step id → bundled raw resource name ("first-action" → "tour_first_action"). */
 fun tourAudioResName(stepId: String): String = "tour_" + stepId.replace('-', '_')
+
+/** Tell-me-more clip resource name ("first-action" → "tour_first_action_more"). */
+fun tourMoreAudioResName(stepId: String): String = tourAudioResName(stepId) + "_more"
+
+/* ============================================================
+ * Round-2 rules (pure, unit-tested; semantics mirrored 1:1 on
+ * web + iOS — see docs/tour-mobile-spec.md "Feedback round 2").
+ * ============================================================ */
+
+/**
+ * #4 Spotlight-only lockdown: while the tour runs, ONLY the spotlighted
+ * element (the scrim cut-out, where interactive — see [tourCutoutInteractive])
+ * and the tour panel are interactive — the dim scrim panels swallow taps AND
+ * scrolls. EXCEPTION — LIVE, not per-step: a step that OPENED a surface as its
+ * subject keeps that surface interactive only while it is actually open:
+ *  • the assistant step's sheet renders in its OWN window ABOVE the blockers,
+ *    so it stays interactive regardless — the scrim keeps consuming input
+ *    beneath it (same as the reentry step);
+ *  • settings-view steps pass the live "settings surface still open" state
+ *    (the nav stack contains Settings) — open → no blockers, the surface stays
+ *    interactive; the moment the user closes it mid-step the lockdown
+ *    re-applies (the tour panel stays reachable above the blockers — never a
+ *    full-app unlock).
+ */
+fun tourScrimConsumesInput(step: TourStep, settingsOpen: Boolean): Boolean =
+    !(step.view == TourView.SETTINGS && settingsOpen)
+
+/** Cutout policy (cross-platform decision): the scrim cut-out is INTERACTIVE
+ *  only on the assistant/reentry steps — their cutout is the assistant bubble,
+ *  and tapping it opens a sheet in its own window. Every other step's cutout
+ *  is DISPLAY-ONLY: the ring highlights the element but a blocker covers the
+ *  cut-out region too, so the today/finish hero can never mint a real focus
+ *  session and a stale hole can never leak taps into a focus takeover. */
+fun tourCutoutInteractive(step: TourStep): Boolean =
+    step.target == TourAnchorIds.ASSISTANT_LAUNCH
+
+/** The RUNNING branch's input policy for one frame. [degradeToFullBlocker] is
+ *  the belt: MainScaffold reports the Focus takeover (an overlay in the tour's
+ *  own window ABOVE the anchored surface — never tour-driven), and the
+ *  spotlight degrades to the whisper scrim + ONE full-screen blocker (no ring,
+ *  no cut-out — only the tour panel stays interactive). */
+data class TourLockdownPolicy(
+    val consumeInput: Boolean,
+    val cutoutInteractive: Boolean,
+    val degradeToFullBlocker: Boolean,
+)
+
+fun tourLockdownPolicy(step: TourStep, settingsOpen: Boolean, overlayAboveTour: Boolean): TourLockdownPolicy =
+    if (overlayAboveTour) {
+        TourLockdownPolicy(consumeInput = true, cutoutInteractive = false, degradeToFullBlocker = true)
+    } else {
+        TourLockdownPolicy(
+            consumeInput = tourScrimConsumesInput(step, settingsOpen),
+            cutoutInteractive = tourCutoutInteractive(step),
+            degradeToFullBlocker = false,
+        )
+    }
+
+/** #6: the focus + capture steps present the tour's own DEMO focus surface
+ *  (under the panel/spotlight, over the scrim) — never the real one. */
+fun tourStepShowsDemoFocus(step: TourStep): Boolean = step.view == TourView.FOCUS
+
+/** #5: what the back gesture does while the tour is RUNNING — it always
+ *  routes to the pause confirm, never to the app: the first back ARMS the
+ *  inline footer confirm; a second back (confirm still up) confirms the
+ *  pause. "Keep going" disarms. */
+enum class TourBackAction { ARM_PAUSE_CONFIRM, CONFIRM_PAUSE }
+
+fun tourBackWhileRunning(confirmArmed: Boolean): TourBackAction =
+    if (confirmArmed) TourBackAction.CONFIRM_PAUSE else TourBackAction.ARM_PAUSE_CONFIRM
+
+/** #5: the floating "Resume tour" chip — the PRIMARY re-entry to an unfinished
+ *  run, rendered by TourHost across screens (not gated on a quiet Today) while
+ *  there's a run with progress to return to and the chip wasn't ✕-dismissed.
+ *  Covers BOTH a confirmed pause AND a run STRANDED by process death mid-run
+ *  (started, not paused, not done — at boot the chip shows and a tap resumes
+ *  at the saved index). A LIVE run can never show it: the chip renders only in
+ *  the host's DISMISSED phase, never in RUNNING/PAUSED. The quiet-Today
+ *  resume-card resurface is the SECONDARY path, suppressed while the chip is
+ *  visible (see dormantResurface). */
+fun showResumeChip(state: TourState): Boolean =
+    state.started && !state.done && state.mode != null && !state.chipDismissed

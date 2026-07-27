@@ -1,5 +1,6 @@
 package tech.csalliance.unstuck.ui.tour
 
+import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -65,12 +66,41 @@ class TourLogicTest {
     }
 
     @Test
-    fun focusStepsRingTheBeginAffordanceWithTodayFallbacks() {
-        for (id in listOf("focus", "capture")) {
-            val s = ESSENTIAL_STEPS.first { it.id == id }
-            assertEquals(TourAnchorIds.FOCUS_BEGIN, s.target)
-            assertEquals(listOf(TourAnchorIds.START_NEXT, TourAnchorIds.BACKLOG_POINTER, TourAnchorIds.TODAY_LIST), s.fallbacks)
-        }
+    fun focusStepsSpotlightTheDemoSurfaceAnchors() {
+        // Round-2 #6: the focus/capture steps target anchors INSIDE the
+        // tour-rendered demo focus surface — the old begin-focus targeting
+        // (FOCUS_BEGIN + Today fallbacks) is gone.
+        val focus = ESSENTIAL_STEPS.first { it.id == "focus" }
+        assertEquals(TourAnchorIds.DEMO_FOCUS_RING, focus.target)
+        assertEquals(emptyList<String>(), focus.fallbacks)
+        val capture = ESSENTIAL_STEPS.first { it.id == "capture" }
+        assertEquals(TourAnchorIds.DEMO_CAPTURE_HINT, capture.target)
+        assertEquals(emptyList<String>(), capture.fallbacks)
+        // No step targets the legacy begin-focus anchor any more.
+        assertTrue((FULL_STEPS + ESSENTIAL_STEPS).none { it.target == TourAnchorIds.FOCUS_BEGIN })
+    }
+
+    @Test
+    fun onlyFocusStepsShowTheDemoFocusSurface() {
+        assertEquals(
+            listOf("focus", "capture"),
+            ESSENTIAL_STEPS.filter { tourStepShowsDemoFocus(it) }.map { it.id },
+        )
+        assertEquals(
+            listOf("focus"),
+            FULL_STEPS.filter { tourStepShowsDemoFocus(it) }.map { it.id },   // FULL has no capture step
+        )
+    }
+
+    @Test
+    fun demoFocusSessionIsMidProgress() {
+        // 18:24 into a 40-minute estimate (spec round-2 #6).
+        assertEquals(18 * 60 + 24, TOUR_DEMO_ELAPSED_SEC)
+        assertEquals(40, TOUR_DEMO_ESTIMATE_MIN)
+        assertEquals(1104f / 2400f, tourDemoProgress(), 1e-6f)
+        assertTrue(tourDemoProgress() in 0.3f..0.7f)   // visibly mid-progress
+        assertTrue(TOUR_DEMO_TASK_TITLE.isNotBlank())
+        assertTrue(TOUR_DEMO_FIRST_ACTION.isNotBlank())
     }
 
     @Test
@@ -233,9 +263,21 @@ class TourLogicTest {
     fun dormantRecheckSurfacesWelcomeAndPaused() {
         // The quiet-Today loop may surface the one-time welcome…
         assertEquals(TourEntryPhase.WELCOME, dormantResurface(TourState(eligible = true)))
-        // …and a paused run's resume card (a paused tour must not be
-        // unreachable until process death).
-        assertEquals(TourEntryPhase.PAUSED, dormantResurface(TourState(started = true, paused = true, mode = TourMode.ESSENTIAL)))
+        val paused = TourState(started = true, paused = true, mode = TourMode.ESSENTIAL)
+        // …but a paused run's MODAL stays dormant while the resume CHIP is
+        // visible — the chip is the primary re-entry, and the card must never
+        // fight it every 5s.
+        assertNull(dormantResurface(paused))
+        // The card becomes the SECONDARY path only after the chip's ✕…
+        assertEquals(TourEntryPhase.PAUSED, dormantResurface(paused.copy(chipDismissed = true)))
+        // …and it's ONE-SHOT per process (mirror welcomeSoftDismissed): once
+        // surfaced or back-dismissed it never re-pops.
+        assertNull(dormantResurface(paused.copy(chipDismissed = true), pausedResurfaced = true))
+        // The welcome resurface is untouched by the paused one-shot flag.
+        assertEquals(TourEntryPhase.WELCOME, dormantResurface(TourState(eligible = true), pausedResurfaced = true))
+        // A STRANDED run (process death mid-run) stays dormant here too — the
+        // chip is its re-entry, never the modal.
+        assertNull(dormantResurface(TourState(started = true, mode = TourMode.ESSENTIAL, index = 3)))
         // Everything else stays dormant.
         assertNull(dormantResurface(TourState()))
         assertNull(dormantResurface(TourState(started = true)))
@@ -516,5 +558,269 @@ class TourLogicTest {
             assertTrue("no raw resource wired for ${s.id}", tourAudioRes(s.id) != 0)
         }
         assertEquals(0, tourAudioRes("nope"))
+    }
+
+    /* ── round-2 #3: Tell-me-more clips ─────────────────────────────────── */
+
+    @Test
+    fun everyStepWithMoreTextHasABundledMoreClip() {
+        // Exactly the steps carrying `more` text have a more clip; the rest
+        // resolve to 0 (the section expands silently — never a crash).
+        for (s in (FULL_STEPS + ESSENTIAL_STEPS).distinctBy { it.id }) {
+            if (s.more != null) {
+                assertTrue("no more-clip wired for ${s.id}", tourMoreAudioRes(s.id) != 0)
+            } else {
+                assertEquals("unexpected more-clip for ${s.id}", 0, tourMoreAudioRes(s.id))
+            }
+        }
+        assertEquals(0, tourMoreAudioRes("nope"))
+    }
+
+    @Test
+    fun moreAudioResourceNaming() {
+        assertEquals("tour_first_action_more", tourMoreAudioResName("first-action"))
+        assertEquals("tour_welcome_more", tourMoreAudioResName("welcome"))
+    }
+
+    /* ── round-2 #1: copy ───────────────────────────────────────────────── */
+
+    @Test
+    fun welcomeCopyKillsTheDurationContradiction() {
+        assertEquals(
+            "A quick look at how Unstuck helps you begin, stay with it, and come back — about three minutes for the essentials.",
+            TOUR_WELCOME_INTRO,
+        )
+        assertFalse(TOUR_WELCOME_INTRO.contains("two-minute"))
+        assertEquals(
+            "Pause anytime — pick it back up from Settings → Account → Product tour.",
+            TOUR_WELCOME_FOOTER,
+        )
+    }
+
+    @Test
+    fun pauseConfirmNamesTheSettingsPath() {
+        assertEquals("Pause the tour? Your progress is saved.", TOUR_PAUSE_CONFIRM_TITLE)
+        assertTrue(TOUR_PAUSE_SETTINGS_PATH.contains("Settings → Account → Product tour"))
+    }
+
+    /* ── round-2 #2: live captions (sentence split + char-weighted spans) ── */
+
+    @Test
+    fun splitSentencesMatchesWebSemantics() {
+        assertEquals(listOf("One.", "Two!", "Three?"), splitTourSentences("One. Two! Three?"))
+        assertEquals(listOf("First sentence.", "and then"), splitTourSentences("First sentence. and then"))
+        assertEquals(listOf("Just the one."), splitTourSentences("Just the one."))
+        assertEquals(emptyList<String>(), splitTourSentences(""))
+        assertEquals(emptyList<String>(), splitTourSentences("   "))
+        // Closing quotes stay with their sentence.
+        assertEquals(
+            listOf("He said “open the document.”", "Then he began."),
+            splitTourSentences("He said “open the document.” Then he began."),
+        )
+    }
+
+    @Test
+    fun splitSentencesFoldsStrayFragments() {
+        // A sub-4-char fragment merges into the previous sentence (web parity).
+        val out = splitTourSentences("A full sentence. ok")
+        assertEquals(1, out.size)
+        assertTrue(out[0].endsWith("ok"))
+    }
+
+    @Test
+    fun realNarrationSplitsAndCoversTheText() {
+        for (s in ESSENTIAL_STEPS) {
+            val sentences = splitTourSentences(s.narration)
+            assertTrue("narration of ${s.id} should split", sentences.size >= 2)
+            // Nothing is lost: every sentence appears in the source text.
+            for (sent in sentences) assertTrue(s.narration.contains(sent.trim().take(20)))
+        }
+    }
+
+    @Test
+    fun sentenceSpansAreCharWeightedAndContiguous() {
+        // "Aaaaaaa." (8 chars) + "Bbb." (4 chars) → windows [0, 2/3) and [2/3, 1]:
+        // the longer sentence owns proportionally more of the clip.
+        val spans = tourSentenceSpans("Aaaaaaa. Bbb.")
+        assertEquals(2, spans.size)
+        assertEquals(0f, spans[0].start, 1e-6f)
+        assertEquals(2f / 3f, spans[0].end, 1e-6f)
+        assertEquals(2f / 3f, spans[1].start, 1e-6f)
+        assertEquals(1f, spans[1].end, 1e-6f)
+    }
+
+    @Test
+    fun captionPickerFollowsProgress() {
+        val spans = tourSentenceSpans("Aaaaaaa. Bbb.")
+        assertEquals("Aaaaaaa.", tourCaptionAt(spans, 0f))
+        assertEquals("Aaaaaaa.", tourCaptionAt(spans, 0.5f))
+        assertEquals("Bbb.", tourCaptionAt(spans, 0.7f))
+        assertEquals("Bbb.", tourCaptionAt(spans, 1f))       // finished → last sentence
+        assertEquals("Bbb.", tourCaptionAt(spans, 1.7f))     // overshoot clamps
+        assertEquals("Aaaaaaa.", tourCaptionAt(spans, -0.5f))  // undershoot clamps
+        assertNull(tourCaptionAt(emptyList(), 0.5f))
+    }
+
+    /* ── round-2 #4: spotlight-only lockdown ────────────────────────────── */
+
+    @Test
+    fun scrimConsumesInputWithLiveOpenedSurfaceExemption() {
+        fun step(id: String) = FULL_STEPS.first { it.id == id }
+        // Targeted + no-target steps: lockdown regardless of the settings state.
+        for (id in listOf("today", "first-action", "focus", "reentry", "welcome", "calendar", "captures")) {
+            assertTrue(tourScrimConsumesInput(step(id), settingsOpen = false))
+            assertTrue(tourScrimConsumesInput(step(id), settingsOpen = true))
+        }
+        assertTrue(tourScrimConsumesInput(ESSENTIAL_STEPS.first { it.id == "capture" }, settingsOpen = false))
+        // The assistant step CONSUMES input: its sheet renders in its OWN
+        // window ABOVE the blockers, so it stays interactive while open —
+        // same as the reentry step; the app beneath stays locked.
+        assertTrue(tourScrimConsumesInput(step("assistant"), settingsOpen = false))
+        assertTrue(tourScrimConsumesInput(step("assistant"), settingsOpen = true))
+        // Settings steps: the exemption is LIVE, not per-step — interactive
+        // only while the surface is actually open (nav stack contains
+        // Settings); closing it mid-step re-applies the lockdown.
+        assertFalse(tourScrimConsumesInput(step("notifications"), settingsOpen = true))
+        assertFalse(tourScrimConsumesInput(step("personalization"), settingsOpen = true))
+        assertTrue(tourScrimConsumesInput(step("notifications"), settingsOpen = false))
+        assertTrue(tourScrimConsumesInput(step("personalization"), settingsOpen = false))
+    }
+
+    @Test
+    fun cutoutIsInteractiveOnlyOnAssistantAndReentrySteps() {
+        // Cross-platform cutout policy: ONLY the two bubble-targeting steps
+        // keep a touch-through cut-out (the bubble opens an own-window sheet).
+        assertEquals(
+            setOf("assistant", "reentry"),
+            (FULL_STEPS + ESSENTIAL_STEPS).filter { tourCutoutInteractive(it) }.map { it.id }.toSet(),
+        )
+        // Display-only everywhere else — the hero-targeting today/finish steps
+        // can no longer mint a real focus session through the spotlight hole.
+        assertFalse(tourCutoutInteractive(ESSENTIAL_STEPS.first { it.id == "today" }))
+        assertFalse(tourCutoutInteractive(ESSENTIAL_STEPS.first { it.id == "finish" }))
+        assertFalse(tourCutoutInteractive(ESSENTIAL_STEPS.first { it.id == "focus" }))
+        assertFalse(tourCutoutInteractive(ESSENTIAL_STEPS.first { it.id == "first-action" }))
+    }
+
+    @Test
+    fun lockdownPolicyDegradesToTheFullBlockerUnderAFocusTakeover() {
+        val today = ESSENTIAL_STEPS.first { it.id == "today" }
+        val assistant = ESSENTIAL_STEPS.first { it.id == "assistant" }
+        val notifications = ESSENTIAL_STEPS.first { it.id == "notifications" }
+        // Normal frames follow the per-step rules — no degrade.
+        assertEquals(
+            TourLockdownPolicy(consumeInput = true, cutoutInteractive = false, degradeToFullBlocker = false),
+            tourLockdownPolicy(today, settingsOpen = false, overlayAboveTour = false),
+        )
+        assertEquals(
+            TourLockdownPolicy(consumeInput = true, cutoutInteractive = true, degradeToFullBlocker = false),
+            tourLockdownPolicy(assistant, settingsOpen = false, overlayAboveTour = false),
+        )
+        assertEquals(
+            TourLockdownPolicy(consumeInput = false, cutoutInteractive = false, degradeToFullBlocker = false),
+            tourLockdownPolicy(notifications, settingsOpen = true, overlayAboveTour = false),
+        )
+        // A Focus takeover above the anchored surface: EVERY step degrades to
+        // the whisper scrim + one full-screen blocker — no stale hole can leak
+        // taps into the takeover; only the panel stays interactive.
+        for (s in FULL_STEPS + ESSENTIAL_STEPS) {
+            assertEquals(
+                TourLockdownPolicy(consumeInput = true, cutoutInteractive = false, degradeToFullBlocker = true),
+                tourLockdownPolicy(s, settingsOpen = true, overlayAboveTour = true),
+            )
+        }
+    }
+
+    @Test
+    fun blockerRectsSurroundTheCutout() {
+        val cut = androidx.compose.ui.geometry.Rect(100f, 200f, 300f, 400f)
+        val rects = tourBlockerRects(cut, screenW = 1000f, screenH = 2000f)
+        assertEquals(4, rects.size)
+        val (above, left, right, below) = rects
+        assertEquals(androidx.compose.ui.geometry.Rect(0f, 0f, 1000f, 200f), above)
+        assertEquals(androidx.compose.ui.geometry.Rect(0f, 200f, 100f, 400f), left)
+        assertEquals(androidx.compose.ui.geometry.Rect(300f, 200f, 1000f, 400f), right)
+        assertEquals(androidx.compose.ui.geometry.Rect(0f, 400f, 1000f, 2000f), below)
+        // Full coverage outside the cut-out; the cut-out itself stays open.
+        assertTrue(rects.none { it.overlaps(androidx.compose.ui.geometry.Rect(101f, 201f, 299f, 399f)) })
+    }
+
+    @Test
+    fun noTargetBlocksTheWholeScreen() {
+        val rects = tourBlockerRects(null, screenW = 1000f, screenH = 2000f)
+        assertEquals(listOf(androidx.compose.ui.geometry.Rect(0f, 0f, 1000f, 2000f)), rects)
+    }
+
+    @Test
+    fun blockerRectsClampOffscreenCutoutsAndDropSlivers() {
+        // A cut-out flush with the left edge → no zero-width left sliver.
+        val flush = tourBlockerRects(androidx.compose.ui.geometry.Rect(-10f, 200f, 300f, 400f), 1000f, 2000f)
+        assertEquals(3, flush.size)
+        // A cut-out spanning the whole screen → nothing to block.
+        assertEquals(0, tourBlockerRects(androidx.compose.ui.geometry.Rect(-5f, -5f, 1005f, 2005f), 1000f, 2000f).size)
+        // Degenerate screen → no blockers (never a crash).
+        assertEquals(0, tourBlockerRects(null, 0f, 0f).size)
+    }
+
+    /* ── round-2 #5: pause confirm + resume chip ────────────────────────── */
+
+    @Test
+    fun backWhileRunningArmsThenConfirms() {
+        // First back arms the inline confirm — never straight to the app…
+        assertEquals(TourBackAction.ARM_PAUSE_CONFIRM, tourBackWhileRunning(confirmArmed = false))
+        // …a second back (confirm up) confirms the pause.
+        assertEquals(TourBackAction.CONFIRM_PAUSE, tourBackWhileRunning(confirmArmed = true))
+    }
+
+    @Test
+    fun resumeChipShowsForPausedAndStrandedRuns() {
+        val paused = TourState(started = true, paused = true, mode = TourMode.ESSENTIAL, index = 3)
+        assertTrue(showResumeChip(paused))
+        // A run STRANDED by process death mid-run (started, not paused, not
+        // done) is chip-eligible at boot — tap resumes at the saved index.
+        // (The chip renders only in the host's DISMISSED phase, so a LIVE
+        // RUNNING tour can never show it.)
+        assertTrue(showResumeChip(TourState(started = true, mode = TourMode.ESSENTIAL, index = 3)))
+        // ✕-dismissed → gone for good.
+        assertFalse(showResumeChip(paused.copy(chipDismissed = true)))
+        assertFalse(showResumeChip(TourState(started = true, mode = TourMode.ESSENTIAL, chipDismissed = true)))
+        // Finished tour → no chip.
+        assertFalse(showResumeChip(paused.copy(done = true)))
+        // A soft-dismissed welcome (never started) → no chip.
+        assertFalse(showResumeChip(TourState(eligible = true)))
+        // No real run to resume (no mode / never started) → no chip.
+        assertFalse(showResumeChip(TourState(paused = true)))
+        assertFalse(showResumeChip(TourState(started = true, paused = true, mode = null)))
+    }
+
+    /* ── Tell-me-more → narration hand-back (#4) ────────────────────────── */
+
+    @Test
+    fun handbackNeverRewindsOffStaleMoreProgress() {
+        // The MORE clip finished (the shared progress hit ≥1) but the
+        // NARRATION didn't: the hand-back resumes mid-position — never an
+        // auto-rewind restart from 0:00.
+        assertFalse(tourNarrationShouldRewind(moreActive = false, narrationFinished = false))
+        // While the more clip is the active clip the narration never rewinds.
+        assertFalse(tourNarrationShouldRewind(moreActive = true, narrationFinished = true))
+        assertFalse(tourNarrationShouldRewind(moreActive = true, narrationFinished = false))
+        // Only a genuinely finished narration replays from the top.
+        assertTrue(tourNarrationShouldRewind(moreActive = false, narrationFinished = true))
+    }
+
+    /* ── pause-confirm footer priority (#7) ─────────────────────────────── */
+
+    @Test
+    fun pauseConfirmFloorsThePanelHeightCap() {
+        // At the 150dp collapse floor the ARMED confirm raises the cap so its
+        // buttons + Settings-path line never clip…
+        assertEquals(TOUR_PAUSE_CONFIRM_MIN_PANEL_HEIGHT, tourPanelMaxHeight(150.dp, pauseConfirmArmed = true))
+        // …a roomy cap is untouched…
+        assertEquals(600.dp, tourPanelMaxHeight(600.dp, pauseConfirmArmed = true))
+        // …and the un-armed footer keeps the host's geometric cap exactly.
+        assertEquals(150.dp, tourPanelMaxHeight(150.dp, pauseConfirmArmed = false))
+        // The floor comfortably clears header (~50dp) + dividers + the
+        // confirm footer's intrinsic (~125dp) with font-scale slack.
+        assertTrue(TOUR_PAUSE_CONFIRM_MIN_PANEL_HEIGHT >= 240.dp)
     }
 }

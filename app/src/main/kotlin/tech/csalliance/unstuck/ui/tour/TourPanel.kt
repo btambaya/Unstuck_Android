@@ -123,7 +123,13 @@ fun TourPanel(
     onPrimary: () -> Unit,
     onSkip: () -> Unit,
     onBack: () -> Unit,
-    onPause: () -> Unit,
+    /** Round-2 #5: the footer shows an inline pause CONFIRM (never an instant
+     *  pause). Pause-tap and the back gesture ARM it; [onConfirmPause] pauses
+     *  for real; [onKeepGoing] disarms. */
+    pauseConfirmArmed: Boolean,
+    onRequestPause: () -> Unit,
+    onConfirmPause: () -> Unit,
+    onKeepGoing: () -> Unit,
     onExit: () -> Unit,
 ) {
     val c = UTheme.colors
@@ -161,7 +167,11 @@ fun TourPanel(
         Modifier
             .widthIn(max = 420.dp)
             .fillMaxWidth()
-            .heightIn(max = maxHeight)
+            // Round-2 #5 confirm priority: while the pause confirm is armed the
+            // cap is floored so the confirm's buttons + Settings line NEVER
+            // clip at the 150dp collapse floor — the weighted body gives way
+            // instead (it scrolls; the unweighted footer measures before it).
+            .heightIn(max = tourPanelMaxHeight(maxHeight, pauseConfirmArmed))
             .onGloballyPositioned { if (!collapsed) onExpandedHeight(it.size.height) }
             .shadow(18.dp, RoundedCornerShape(18.dp))
             .clip(RoundedCornerShape(18.dp))
@@ -307,7 +317,18 @@ fun TourPanel(
                 // Secondary link row.
                 Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     TourMiniLink(if (asking) "Hide questions" else "Ask a question") { asking = !asking }
-                    if (step.more != null) TourMiniLink(if (showMore) "Less" else "Tell me more") { showMore = !showMore }
+                    // Round-2 #3: in Listen mode, expanding Tell-me-more pauses
+                    // the narration and plays the step's more clip (captioned);
+                    // collapsing stops the clip and the narration picks back up.
+                    // Read mode is unchanged (text only).
+                    if (step.more != null) TourMiniLink(if (showMore) "Less" else "Tell me more") {
+                        val expanding = !showMore
+                        showMore = expanding
+                        if (mediaMode == TourMediaMode.LISTEN) {
+                            if (expanding) audio.startMore(step.id, step.more, speed)
+                            else audio.stopMore()
+                        }
+                    }
                     if (stepHasAudio) {
                         TourMiniLink(if (mediaMode == TourMediaMode.LISTEN) "Read instead" else "Listen") {
                             onMediaMode(if (mediaMode == TourMediaMode.LISTEN) TourMediaMode.READ else TourMediaMode.LISTEN)
@@ -317,28 +338,53 @@ fun TourPanel(
             }
         }
 
-        // ── Footer controls ────────────────────────────────────────────────
+        // ── Footer controls (or the inline pause confirm — round-2 #5) ─────
         Box(Modifier.fillMaxWidth().padding(top = 8.dp).height(1.dp).background(c.line))
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(2.dp),
-        ) {
-            TourGhostLink("Pause", onPause)
-            TourGhostLink("Skip", onSkip)
-            Spacer(Modifier.weight(1f))
-            if (index > 0) TourGhostLink("Back", onBack)
+        if (pauseConfirmArmed) {
+            Column(Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 10.dp)) {
+                Text(TOUR_PAUSE_CONFIRM_TITLE, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
+                Row(
+                    Modifier.padding(top = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Box(
+                        Modifier.clip(RoundedCornerShape(999.dp)).background(c.ink)
+                            .clickable(onClick = onConfirmPause)
+                            .padding(horizontal = 16.dp, vertical = 9.dp),
+                    ) { Text("Pause", style = UFont.sans(13, FontWeight.SemiBold), color = c.bg) }
+                    Box(
+                        Modifier.clip(RoundedCornerShape(999.dp)).background(c.surface)
+                            .border(1.dp, c.line2, RoundedCornerShape(999.dp))
+                            .clickable(onClick = onKeepGoing)
+                            .padding(horizontal = 14.dp, vertical = 9.dp),
+                    ) { Text("Keep going", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink) }
+                }
+                // The confirm also names the Settings path (spec round-2 #5).
+                Text(TOUR_PAUSE_SETTINGS_PATH, style = UFont.sans(11).copy(lineHeight = 16.sp), color = c.ink4, modifier = Modifier.padding(top = 8.dp))
+            }
+        } else {
             Row(
-                Modifier
-                    .clip(RoundedCornerShape(999.dp))
-                    .background(c.ink)
-                    .clickable(onClick = onPrimary)
-                    .padding(horizontal = 16.dp, vertical = 9.dp),
+                Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 10.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(7.dp),
+                horizontalArrangement = Arrangement.spacedBy(2.dp),
             ) {
-                Text(primaryLabel, style = UFont.sans(13, FontWeight.SemiBold), color = c.bg)
-                if (index < total - 1) Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = c.bg, modifier = Modifier.size(13.dp))
+                TourGhostLink("Pause", onRequestPause)
+                TourGhostLink("Skip", onSkip)
+                Spacer(Modifier.weight(1f))
+                if (index > 0) TourGhostLink("Back", onBack)
+                Row(
+                    Modifier
+                        .clip(RoundedCornerShape(999.dp))
+                        .background(c.ink)
+                        .clickable(onClick = onPrimary)
+                        .padding(horizontal = 16.dp, vertical = 9.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(7.dp),
+                ) {
+                    Text(primaryLabel, style = UFont.sans(13, FontWeight.SemiBold), color = c.bg)
+                    if (index < total - 1) Icon(Icons.AutoMirrored.Filled.ArrowForward, contentDescription = null, tint = c.bg, modifier = Modifier.size(13.dp))
+                }
             }
         }
     }
@@ -367,7 +413,8 @@ private fun ThinkingBubble() {
 
 /* ============================================================
  * Listen bar — play/pause · replay · progress · speed, then the
- * captions note + "Voice · Cherry" (web BarShell parity).
+ * LIVE caption (the sentence being spoken right now — round-2
+ * #2, narration and Tell-me-more clips alike) + "Voice · Cherry".
  * ============================================================ */
 @Composable
 private fun TourListenBar(audio: TourAudioController, speed: Float, onCycleSpeed: () -> Unit) {
@@ -404,10 +451,17 @@ private fun TourListenBar(audio: TourAudioController, speed: Float, onCycleSpeed
                     .semantics { contentDescription = "Narration speed" },
             ) { Text("${formatTourSpeed(speed)}×", style = UFont.sans(11, FontWeight.Bold), color = c.ink2) }
         }
-        Row(Modifier.padding(top = 7.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-            Text("CAPTIONS", style = UFont.mono(9).copy(letterSpacing = 0.8.sp), color = c.ink3)
-            Text("· always on", style = UFont.sans(11), color = c.ink4)
-            Spacer(Modifier.weight(1f))
+        Row(Modifier.padding(top = 7.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            // Live caption — subtitle-style. TWO lines with a FIXED reserved
+            // height (minLines == maxLines): long sentences get a second line
+            // before the ellipsis, and the panel never grows/shrinks as the
+            // spoken sentence changes.
+            Text(
+                audio.caption ?: "",
+                style = UFont.sans(11).copy(lineHeight = 15.sp), color = c.ink2,
+                minLines = 2, maxLines = 2, overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
             Text("Voice · $TOUR_AUDIO_VOICE", style = UFont.sans(10, FontWeight.SemiBold), color = c.ink3)
         }
     }
@@ -416,6 +470,19 @@ private fun TourListenBar(audio: TourAudioController, speed: Float, onCycleSpeed
 /** "1×" not "1.0×" (web parity for whole speeds). */
 fun formatTourSpeed(speed: Float): String =
     if (speed % 1f == 0f) speed.toInt().toString() else speed.toString().trimEnd('0').trimEnd('.')
+
+/** Round-2 #5 confirm priority: the panel's height floor while the pause
+ *  confirm is armed — comfortably fits header + title + the confirm's buttons
+ *  + the Settings-path line (with font-scale slack). */
+val TOUR_PAUSE_CONFIRM_MIN_PANEL_HEIGHT: Dp = 280.dp
+
+/** The panel's effective height cap: the host's dock-side geometric cap,
+ *  floored while the pause confirm is armed so the confirm never clips at the
+ *  150dp collapse floor. (heightIn can't exceed the parent's incoming
+ *  constraints, so the floor is still screen-safe; a transient ring overlap
+ *  during the confirm beats clipped actions.) Pure — unit-tested. */
+fun tourPanelMaxHeight(cap: Dp, pauseConfirmArmed: Boolean): Dp =
+    if (pauseConfirmArmed) maxOf(cap, TOUR_PAUSE_CONFIRM_MIN_PANEL_HEIGHT) else cap
 
 /* ============================================================
  * Shared shells for the welcome + paused cards.

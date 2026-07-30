@@ -523,12 +523,15 @@ fun tourScrimConsumesInput(step: TourStep, settingsOpen: Boolean): Boolean =
 
 /** Cutout policy (cross-platform decision): the scrim cut-out is INTERACTIVE
  *  only on the assistant/reentry steps — their cutout is the assistant bubble,
- *  and tapping it opens a sheet in its own window. Every other step's cutout
- *  is DISPLAY-ONLY: the ring highlights the element but a blocker covers the
- *  cut-out region too, so the today/finish hero can never mint a real focus
- *  session and a stale hole can never leak taps into a focus takeover. */
+ *  and tapping it opens a sheet in its own window — and on the CAPTURE step,
+ *  whose cutout is the DEMO surface's capture cluster: taps there land INSIDE
+ *  the tour's own demo (whose root swallows input), so nothing real is ever
+ *  reachable — the pill only opens the DEMO capture sheet. Every other step's
+ *  cutout is DISPLAY-ONLY: the ring highlights the element but a blocker
+ *  covers the cut-out region too, so the today/finish hero can never mint a
+ *  real focus session and a stale hole can never leak taps into a takeover. */
 fun tourCutoutInteractive(step: TourStep): Boolean =
-    step.target == TourAnchorIds.ASSISTANT_LAUNCH
+    step.target == TourAnchorIds.ASSISTANT_LAUNCH || tourDemoCapturePillEnabled(step)
 
 /** The RUNNING branch's input policy for one frame. [degradeToFullBlocker] is
  *  the belt: MainScaffold reports the Focus takeover (an overlay in the tour's
@@ -556,14 +559,35 @@ fun tourLockdownPolicy(step: TourStep, settingsOpen: Boolean, overlayAboveTour: 
  *  (under the panel/spotlight, over the scrim) — never the real one. */
 fun tourStepShowsDemoFocus(step: TourStep): Boolean = step.view == TourView.FOCUS
 
-/** #5: what the back gesture does while the tour is RUNNING — it always
- *  routes to the pause confirm, never to the app: the first back ARMS the
- *  inline footer confirm; a second back (confirm still up) confirms the
- *  pause. "Keep going" disarms. */
-enum class TourBackAction { ARM_PAUSE_CONFIRM, CONFIRM_PAUSE }
+/* ── Round-3: the DEMO capture sheet ─────────────────────────────────────
+ * On the capture step the demo surface's Capture pill is LIVE: tapping it
+ * opens a DEMO capture sheet rendered by the tour itself (TourDemoFocus.kt)
+ * — visually faithful to the real focus CaptureSheet, but persisting NOTHING.
+ * The host tracks WHICH step presentation opened it (the assistantOpenedForStep
+ * pattern), so visibility derives closed on any step change or pause/exit. */
 
-fun tourBackWhileRunning(confirmArmed: Boolean): TourBackAction =
-    if (confirmArmed) TourBackAction.CONFIRM_PAUSE else TourBackAction.ARM_PAUSE_CONFIRM
+/** The demo Capture pill is tappable ONLY on the capture step — on the focus
+ *  step the same demo surface stays fully inert. */
+fun tourDemoCapturePillEnabled(step: TourStep): Boolean = step.id == "capture"
+
+/** Whether the DEMO capture sheet is presented this frame: it was opened FOR
+ *  this exact step, the tour is still RUNNING, and the step still carries the
+ *  live pill. A step change, pause, or exit all derive it closed. */
+fun tourDemoSheetVisible(openedForStep: String?, step: TourStep, running: Boolean): Boolean =
+    running && openedForStep == step.id && tourDemoCapturePillEnabled(step)
+
+/** #5: what the back gesture does while the tour is RUNNING. The DEMO capture
+ *  sheet is the topmost modal, so it intercepts FIRST — back closes ONLY the
+ *  sheet, never the tour. Otherwise back always routes to the pause confirm,
+ *  never to the app: the first back ARMS the inline footer confirm; a second
+ *  back (confirm still up) confirms the pause. "Keep going" disarms. */
+enum class TourBackAction { CLOSE_DEMO_SHEET, ARM_PAUSE_CONFIRM, CONFIRM_PAUSE }
+
+fun tourBackWhileRunning(confirmArmed: Boolean, demoSheetOpen: Boolean = false): TourBackAction = when {
+    demoSheetOpen -> TourBackAction.CLOSE_DEMO_SHEET
+    confirmArmed -> TourBackAction.CONFIRM_PAUSE
+    else -> TourBackAction.ARM_PAUSE_CONFIRM
+}
 
 /** #5: the floating "Resume tour" chip — the PRIMARY re-entry to an unfinished
  *  run, rendered by TourHost across screens (not gated on a quiet Today) while

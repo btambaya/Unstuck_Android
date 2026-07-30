@@ -195,6 +195,14 @@ fun TourHost(
     // Round-2 #5: the inline footer pause-confirm is armed (Pause tap or back
     // gesture). Reset on every step (re)presentation.
     var pauseConfirmArmed by remember { mutableStateOf(false) }
+    // Round-3: WHICH step presentation opened the DEMO capture sheet (the
+    // assistantOpenedForStep pattern) — visibility derives from it via
+    // tourDemoSheetVisible, so a step change / pause / exit closes the sheet
+    // structurally; the step effect below also clears it explicitly so a
+    // RETURN to the capture step never resurrects a stale sheet.
+    var demoSheetForStep by remember { mutableStateOf<String?>(null) }
+    // Bumped on each demo save — TourDemoFocus flashes "Saved — demo".
+    var demoSavedEpoch by remember { mutableIntStateOf(0) }
     // Bumped when the "Resume tour" chip is ✕-dismissed so the dormant
     // snapshot below re-reads the store.
     var chipEpoch by remember { mutableIntStateOf(0) }
@@ -344,6 +352,7 @@ fun TourHost(
     // kept RUNNING on its step.
     LaunchedEffect(running, step.id, mode, navEpoch) {
         pauseConfirmArmed = false   // a (re)presented step starts un-armed
+        demoSheetForStep = null     // any step (re)presentation / pause / exit closes the demo sheet
         if (!running) {
             audio.release()   // pausing/exiting stops narration immediately
             return@LaunchedEffect
@@ -376,7 +385,9 @@ fun TourHost(
     // action stays permanent either way); resume card → dismiss for now
     // (stays paused, the chip + quiet-Today loop / next launch offer again).
     BackHandler(enabled = running) {
-        when (tourBackWhileRunning(pauseConfirmArmed)) {
+        // The DEMO capture sheet is the topmost modal — back closes ONLY it.
+        when (tourBackWhileRunning(pauseConfirmArmed, demoSheetOpen = tourDemoSheetVisible(demoSheetForStep, step, running))) {
+            TourBackAction.CLOSE_DEMO_SHEET -> demoSheetForStep = null
             TourBackAction.ARM_PAUSE_CONFIRM -> pauseConfirmArmed = true
             TourBackAction.CONFIRM_PAUSE -> pause()
         }
@@ -441,8 +452,17 @@ fun TourHost(
                 // Round-2 #6: the focus/capture steps present the tour's own
                 // DEMO focus surface (zero sessions, zero navigation) under
                 // the spotlight/panel; its ring + capture hint register the
-                // step's spotlight anchors.
-                if (tourStepShowsDemoFocus(step)) TourDemoFocus()
+                // step's spotlight anchors. Round-3: on the capture step the
+                // pill is LIVE (the step's cutout is interactive — the tap
+                // falls through the spotlight hole INTO the demo, whose root
+                // swallows everything else) and opens the DEMO capture sheet.
+                if (tourStepShowsDemoFocus(step)) {
+                    TourDemoFocus(
+                        capturePillEnabled = tourDemoCapturePillEnabled(step),
+                        onCapturePill = { demoSheetForStep = step.id },
+                        savedEpoch = demoSavedEpoch,
+                    )
+                }
                 // Round-2 #4: the dim panels consume input on all but a
                 // LIVE-open settings surface; the cut-out passes touches only
                 // on the assistant/reentry steps (display-only elsewhere).
@@ -516,6 +536,20 @@ fun TourHost(
                         onConfirmPause = ::pause,
                         onKeepGoing = { pauseConfirmArmed = false },
                         onExit = ::exit,
+                    )
+                }
+
+                // Round-3: the DEMO capture sheet — the TOPMOST layer of the
+                // running tour (above the blockers AND the panel: a modal
+                // moment within the tour's own composition, never a real
+                // ModalBottomSheet). It carries its own imePadding so it rides
+                // above the keyboard — the overlay stays un-padded by design —
+                // and never touches askFocused. Saving persists NOTHING: it
+                // bumps the demo's "Saved — demo" flash and closes.
+                if (tourDemoSheetVisible(demoSheetForStep, step, running)) {
+                    TourDemoCaptureSheet(
+                        onSave = { demoSavedEpoch += 1; demoSheetForStep = null },
+                        onDismiss = { demoSheetForStep = null },
                     )
                 }
             }

@@ -687,11 +687,14 @@ class TourLogicTest {
     }
 
     @Test
-    fun cutoutIsInteractiveOnlyOnAssistantAndReentrySteps() {
-        // Cross-platform cutout policy: ONLY the two bubble-targeting steps
-        // keep a touch-through cut-out (the bubble opens an own-window sheet).
+    fun cutoutIsInteractiveOnlyOnAssistantReentryAndCaptureSteps() {
+        // Cross-platform cutout policy: the two bubble-targeting steps keep a
+        // touch-through cut-out (the bubble opens an own-window sheet), and —
+        // round 3 — so does the capture step: its cutout is the DEMO surface's
+        // capture cluster, where taps land inside the tour's own demo (whose
+        // root swallows input), so nothing real is ever reachable.
         assertEquals(
-            setOf("assistant", "reentry"),
+            setOf("assistant", "reentry", "capture"),
             (FULL_STEPS + ESSENTIAL_STEPS).filter { tourCutoutInteractive(it) }.map { it.id }.toSet(),
         )
         // Display-only everywhere else — the hero-targeting today/finish steps
@@ -791,6 +794,64 @@ class TourLogicTest {
         // No real run to resume (no mode / never started) → no chip.
         assertFalse(showResumeChip(TourState(paused = true)))
         assertFalse(showResumeChip(TourState(started = true, paused = true, mode = null)))
+    }
+
+    /* ── round-3: the DEMO capture sheet ────────────────────────────────── */
+
+    @Test
+    fun demoCapturePillIsLiveOnlyOnTheCaptureStep() {
+        // The pill opens the DEMO sheet ONLY on the capture step — on every
+        // other step (including focus, which shows the SAME demo surface) it
+        // stays inert.
+        assertEquals(
+            listOf("capture"),
+            (FULL_STEPS + ESSENTIAL_STEPS).filter { tourDemoCapturePillEnabled(it) }.map { it.id },
+        )
+        assertFalse(tourDemoCapturePillEnabled(ESSENTIAL_STEPS.first { it.id == "focus" }))
+    }
+
+    @Test
+    fun pillTapOpensTheSheetOnlyWhileRunningOnCapture() {
+        val capture = ESSENTIAL_STEPS.first { it.id == "capture" }
+        // Closed until the pill records the presenting step…
+        assertFalse(tourDemoSheetVisible(openedForStep = null, step = capture, running = true))
+        // …then a pill tap (openedForStep = the capture step) shows it.
+        assertTrue(tourDemoSheetVisible(openedForStep = "capture", step = capture, running = true))
+        // Pause / exit (tour no longer running) closes it.
+        assertFalse(tourDemoSheetVisible(openedForStep = "capture", step = capture, running = false))
+    }
+
+    @Test
+    fun stepChangeClosesTheDemoSheet() {
+        val focus = ESSENTIAL_STEPS.first { it.id == "focus" }
+        val reentry = ESSENTIAL_STEPS.first { it.id == "reentry" }
+        // Advancing (or stepping back) off the capture step derives it closed…
+        assertFalse(tourDemoSheetVisible(openedForStep = "capture", step = reentry, running = true))
+        assertFalse(tourDemoSheetVisible(openedForStep = "capture", step = focus, running = true))
+        // …and no non-capture step can ever present it, even with a matching id.
+        assertFalse(tourDemoSheetVisible(openedForStep = "reentry", step = reentry, running = true))
+    }
+
+    @Test
+    fun saveClosesTheSheetWithoutPersisting() {
+        // The host's save handler ONLY clears openedForStep (plus the demo
+        // "Saved — demo" flash) — TourDemoCaptureSheet has no store / view-model
+        // / network access by construction, so there is nothing TO persist.
+        val capture = ESSENTIAL_STEPS.first { it.id == "capture" }
+        assertTrue(tourDemoSheetVisible(openedForStep = "capture", step = capture, running = true))
+        val afterSave: String? = null   // onSave → demoSheetForStep = null
+        assertFalse(tourDemoSheetVisible(openedForStep = afterSave, step = capture, running = true))
+    }
+
+    @Test
+    fun backClosesTheDemoSheetNotTheTour() {
+        // Sheet open: back closes ONLY the sheet — never arms/confirms a pause.
+        assertEquals(TourBackAction.CLOSE_DEMO_SHEET, tourBackWhileRunning(confirmArmed = false, demoSheetOpen = true))
+        // Even an armed pause-confirm yields — the sheet is the topmost modal.
+        assertEquals(TourBackAction.CLOSE_DEMO_SHEET, tourBackWhileRunning(confirmArmed = true, demoSheetOpen = true))
+        // Sheet closed: the round-2 arm → confirm semantics are untouched.
+        assertEquals(TourBackAction.ARM_PAUSE_CONFIRM, tourBackWhileRunning(confirmArmed = false, demoSheetOpen = false))
+        assertEquals(TourBackAction.CONFIRM_PAUSE, tourBackWhileRunning(confirmArmed = true, demoSheetOpen = false))
     }
 
     /* ── Tell-me-more → narration hand-back (#4) ────────────────────────── */

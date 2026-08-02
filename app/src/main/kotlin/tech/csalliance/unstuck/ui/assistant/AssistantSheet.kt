@@ -200,9 +200,10 @@ private fun AssistantChat(vm: AppViewModel) {
                         .padding(horizontal = 12.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    // AI-sparkles on brand coral — matches the launcher bubble (AI marker),
-                    // white glyph. The in-bar dictation mic below keeps its mic glyph.
-                    Icon(Icons.Filled.AutoAwesome, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
+                    // Voice glyph on the Talk pill — sparkles mark the AI LAUNCHER;
+                    // Talk keeps a mic so the voice affordance reads (matches the
+                    // iOS Talk pill's waveform and web's Talk button).
+                    Icon(Icons.Filled.Mic, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
                     Text("Talk", style = UFont.sans(12, FontWeight.SemiBold), color = Color.White)
                 }
             } else { Box(Modifier) }

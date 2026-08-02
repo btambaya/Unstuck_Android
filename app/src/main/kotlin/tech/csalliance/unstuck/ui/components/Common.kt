@@ -151,6 +151,12 @@ fun dateEyebrow(nowMs: Long): String {
     return "$day · $h12:${"%02d".format(m)} $period"
 }
 
+/** First name for the Today greeting: the first whitespace-separated word of the
+ *  user's display name ("Maya Chen" → "Maya"); EXACTLY "Unstuck" when unset, so the
+ *  header reads "Good evening,\nUnstuck." — mirroring the web greeting fallback. */
+fun greetingName(displayName: String?): String =
+    displayName?.trim()?.split(' ', '\t', '\n')?.firstOrNull { it.isNotBlank() } ?: "Unstuck"
+
 /** "Good morning," / "Good afternoon," / "Good evening," by local hour. */
 fun greeting(nowMs: Long): String {
     val h = java.time.Instant.ofEpochMilli(nowMs).atZone(java.time.ZoneId.systemDefault()).hour

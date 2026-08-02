@@ -12,6 +12,8 @@ import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
@@ -26,7 +28,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import tech.csalliance.unstuck.core.model.CaptureTag
 import tech.csalliance.unstuck.core.model.TaskItem
@@ -50,10 +54,29 @@ fun CaptureSheet(vm: AppViewModel, task: TaskItem, sessionId: String?, onDismiss
     // Serializable enum; String saves directly).
     var text by rememberSaveable { mutableStateOf("") }
     var tag by rememberSaveable { mutableStateOf(CaptureTag.FOLLOW_UP) }
+    val focusManager = LocalFocusManager.current
+    // Shared by the Save button AND the field's IME Done. Guarded so an empty
+    // capture is never silently discarded. Resolve the session id at SAVE time:
+    // on a freshly started session the `live` row can still be null when the
+    // sheet opened (so the passed-in sessionId is null), which would orphan the
+    // capture from the Session the interruption histogram keys on.
+    fun save() {
+        if (text.isBlank()) return
+        val sid = sessionId ?: vm.liveSession.value?.id
+        vm.saveCapture(task.id, sid, tag, text.trim())
+        onDismiss()
+    }
     ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = SheetScrim, dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } }) {
         Column(Modifier.fillMaxWidth().imePadding().padding(horizontal = 22.dp).padding(bottom = 26.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Text("CAPTURE · STAYS ATTACHED", style = UFont.mono(11, FontWeight.Medium), color = c.ink3)
-            BasicTextField(value = text, onValueChange = { text = it }, textStyle = UFont.sans(19, FontWeight.Medium).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp), decorationBox = { inner -> if (text.isEmpty()) Text("What just popped up?", style = UFont.sans(19, FontWeight.Medium), color = c.ink4); inner() })
+            BasicTextField(
+                value = text, onValueChange = { text = it }, textStyle = UFont.sans(19, FontWeight.Medium).copy(color = c.ink),
+                singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                // Done = Save when there's text; otherwise just drop the keyboard.
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { if (text.isNotBlank()) save() else focusManager.clearFocus() }),
+                decorationBox = { inner -> if (text.isEmpty()) Text("What just popped up?", style = UFont.sans(19, FontWeight.Medium), color = c.ink4); inner() },
+            )
             Row(horizontalArrangement = Arrangement.spacedBy(5.dp)) {
                 TAGS.forEach { (t, label) ->
                     val sel = tag == t
@@ -74,16 +97,7 @@ fun CaptureSheet(vm: AppViewModel, task: TaskItem, sessionId: String?, onDismiss
             Box(Modifier.padding(top = 4.dp)) {
                 // Disabled while empty + guarded so tapping Save never dismisses without
                 // saving (an empty capture was silently discarded before).
-                tech.csalliance.unstuck.design.component.UButton("Save", kind = tech.csalliance.unstuck.design.component.ButtonKind.DARK, fill = false, enabled = text.isNotBlank()) {
-                    if (text.isBlank()) return@UButton
-                    // Resolve the session id at SAVE time: on a freshly started session the
-                    // `live` row can still be null when the sheet opened (so the passed-in
-                    // sessionId is null), which would orphan the capture from the Session the
-                    // interruption histogram keys on. Fall back to the now-current live id.
-                    val sid = sessionId ?: vm.liveSession.value?.id
-                    vm.saveCapture(task.id, sid, tag, text.trim())
-                    onDismiss()
-                }
+                tech.csalliance.unstuck.design.component.UButton("Save", kind = tech.csalliance.unstuck.design.component.ButtonKind.DARK, fill = false, enabled = text.isNotBlank()) { save() }
             }
         }
     }

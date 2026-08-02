@@ -83,6 +83,7 @@ import tech.csalliance.unstuck.ui.tour.tourAnchor
 import tech.csalliance.unstuck.ui.components.areaColorFor
 import tech.csalliance.unstuck.ui.components.dateEyebrow
 import tech.csalliance.unstuck.ui.components.greeting
+import tech.csalliance.unstuck.ui.components.greetingName
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -120,6 +121,9 @@ fun TodayScreen(
     val sharedWithMe by vm.sharedWithMe.collectAsStateWithLifecycle()
     val shareBadges by vm.shareBadges.collectAsStateWithLifecycle()
     val assignedOut by vm.assignedOut.collectAsStateWithLifecycle()
+    // Display name (Settings → Account source) — reactive so the greeting fills in
+    // the moment auth hydration lands rather than staying on the fallback.
+    val displayName by vm.currentNameState.collectAsStateWithLifecycle()
     // Refresh ~once a minute so the date eyebrow, "today" task filtering and
     // "completed today" roll over at midnight on a screen left open (was captured
     // once at composition → stuck on yesterday until something else recomposed).
@@ -222,7 +226,9 @@ fun TodayScreen(
         }
         Column(Modifier.padding(horizontal = 18.dp)) {
             SectionLabel(dateEyebrow(now), color = c.primaryDeep)
-            Text("${greeting(now)}\nUnstuck.", style = UFont.serifItalic(28), color = c.ink, modifier = Modifier.padding(top = 6.dp, bottom = 6.dp))
+            // Greet by first name — display name from the same source Settings → Account
+            // reads (reactive, so it fills in once auth hydrates); "Unstuck." when unset.
+            Text("${greeting(now)}\n${greetingName(displayName)}.", style = UFont.serifItalic(28), color = c.ink, modifier = Modifier.padding(top = 6.dp, bottom = 6.dp))
             Row(
                 Modifier.padding(top = 2.dp, bottom = 4.dp).clip(RoundedCornerShape(999.dp)).background(c.bg2).clickable(onClick = onInsights).padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),

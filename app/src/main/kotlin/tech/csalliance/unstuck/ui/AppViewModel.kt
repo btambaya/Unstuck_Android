@@ -212,6 +212,25 @@ class AppViewModel(
             .stateIn(viewModelScope, SharingStarted.Eagerly, null)
     }
 
+    /** Manual pulse for [currentNameState] — fired after a Settings rename so the
+     *  greeting updates immediately (belt-and-braces beside the sessionStatus tick). */
+    private val _nameRefresh = MutableSharedFlow<Unit>(
+        extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST,
+    )
+
+    /** Reactive display name — the SAME source Settings → Account reads
+     *  (auth user metadata display_name/full_name via [currentName], with its
+     *  email-local fallback), re-resolved on every auth session change so it
+     *  fills in after cold-start hydration / sign-in and updates on rename.
+     *  Null while signed out (the Today greeting then falls back to "Unstuck."). */
+    val currentNameState: StateFlow<String?> = run {
+        val sessionTicks: kotlinx.coroutines.flow.Flow<Unit> =
+            graph.provider?.client?.auth?.sessionStatus?.map { } ?: kotlinx.coroutines.flow.emptyFlow()
+        merge(sessionTicks, _nameRefresh)
+            .map { currentName }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, currentName)
+    }
+
     // --- helpers ---
 
     fun nowMs(): Long = nowProvider?.invoke() ?: System.currentTimeMillis()
@@ -2324,7 +2343,10 @@ class AppViewModel(
     suspend fun changePassword(password: String): AuthOutcome =
         auth?.changePassword(password) ?: AuthOutcome.Error("Not configured")
     suspend fun updateDisplayName(name: String): AuthOutcome =
-        auth?.updateDisplayName(name) ?: AuthOutcome.Error("Not configured")
+        (auth?.updateDisplayName(name) ?: AuthOutcome.Error("Not configured"))
+            // Nudge the reactive name so the Today greeting/avatar refresh at once
+            // (supabase-kt re-emits sessionStatus on updateUser, but don't rely on it).
+            .also { if (it is AuthOutcome.Ok) _nameRefresh.tryEmit(Unit) }
     // Route through the coordinator so the delete ALSO unregisters this device's push
     // token (+ always signs out even if the server invoke timed out post-deletion).
     // Falls back to AuthService when no coordinator is wired.

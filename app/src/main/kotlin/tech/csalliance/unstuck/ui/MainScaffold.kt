@@ -29,12 +29,12 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
-import androidx.compose.material.icons.outlined.ChatBubbleOutline
+import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material3.Icon
 import tech.csalliance.unstuck.BuildConfig
 import androidx.lifecycle.Lifecycle
@@ -279,15 +279,16 @@ fun MainScaffold(vm: AppViewModel) {
         // Opens the dual-purpose surface (Assistant chat + Feedback). Gated by the
         // build flags so it's a one-flip for a public build.
         if ((BuildConfig.ASSISTANT_ENABLED || BuildConfig.FEEDBACK_ENABLED) && stack.isEmpty() && !sheetOpen && focusTask == null && tab != "calendar") {
+            // Brand-coral circle + white AI-sparkles glyph — the cross-platform AI marker
+            // (iOS "sparkles" / Material "auto_awesome"), same coral as the Focus button.
             Box(
                 Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 16.dp, bottom = 74.dp)
-                    .size(50.dp).shadow(8.dp, CircleShape).clip(CircleShape).background(c.surface)
-                    .border(1.dp, c.line, CircleShape)
+                    .size(50.dp).shadow(8.dp, CircleShape).clip(CircleShape).background(c.coral)
                     .tourAnchor(TourAnchorIds.ASSISTANT_LAUNCH)
                     .clickable { sheet = if (BuildConfig.ASSISTANT_ENABLED) Sheet.Assistant else Sheet.Feedback },
                 contentAlignment = Alignment.Center,
             ) {
-                Icon(Icons.Outlined.ChatBubbleOutline, contentDescription = "Assistant", tint = c.coral, modifier = Modifier.size(22.dp))
+                Icon(Icons.Filled.AutoAwesome, contentDescription = "Assistant", tint = Color.White, modifier = Modifier.size(22.dp))
             }
         }
 

@@ -17,6 +17,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.PlayArrow
@@ -35,8 +37,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -271,16 +276,18 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
 
     if (showEstimate) {
         var v by remember { mutableStateOf(task.estimateMin.toString()) }
+        fun saveEstimate() { v.toIntOrNull()?.takeIf { it > 0 }?.let { vm.updateTask(editTarget.copy(estimateMin = it)) }; showEstimate = false }
         AlertDialog(
             onDismissRequest = { showEstimate = false },
             title = { Text("Estimate (minutes)", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
             text = {
                 androidx.compose.material3.OutlinedTextField(
                     value = v, onValueChange = { s -> v = s.filter { it.isDigit() }.take(4) }, singleLine = true,
-                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { saveEstimate() }),
                 )
             },
-            confirmButton = { TextButton(onClick = { v.toIntOrNull()?.takeIf { it > 0 }?.let { vm.updateTask(editTarget.copy(estimateMin = it)) }; showEstimate = false }) { Text("Save", color = c.primaryDeep) } },
+            confirmButton = { TextButton(onClick = { saveEstimate() }) { Text("Save", color = c.primaryDeep) } },
             dismissButton = { TextButton(onClick = { showEstimate = false }) { Text("Cancel", color = c.ink2) } },
             containerColor = c.surface,
         )
@@ -316,6 +323,10 @@ private fun EditableText(
             BasicTextField(
                 value = draft, onValueChange = { draft = it }, textStyle = style.copy(color = c.ink),
                 cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f),
+                // Single-value editor: IME Done = the ✓ commit. Kept multi-line so a long
+                // name still wraps; Done (not Enter/newline) is the only way it closes.
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { onCommit(draft.trim()); editing = false }),
             )
             Text("✓", style = UFont.sans(18), color = c.green, modifier = Modifier.clickable { onCommit(draft.trim()); editing = false }.padding(4.dp))
             Text("✕", style = UFont.sans(18), color = c.ink3, modifier = Modifier.clickable { draft = value; editing = false }.padding(4.dp))
@@ -352,6 +363,7 @@ private fun CaptureRow(cap: Capture, now: Long, onPromote: () -> Unit, onDiscard
 @Composable
 private fun AddCaptureRow(onAdd: (CaptureTag, String) -> Unit) {
     val c = UTheme.colors
+    val focusManager = LocalFocusManager.current
     var body by remember { mutableStateOf("") }
     var tag by remember { mutableStateOf(CaptureTag.FOLLOW_UP) }
     val tags = listOf(
@@ -365,6 +377,9 @@ private fun AddCaptureRow(onAdd: (CaptureTag, String) -> Unit) {
             BasicTextField(
                 value = body, onValueChange = { body = it }, textStyle = UFont.sans(14).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink),
                 modifier = Modifier.weight(1f),
+                // Done = the Add button when there's text; otherwise just drop the keyboard.
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { if (body.isNotBlank()) { onAdd(tag, body.trim()); body = "" } else focusManager.clearFocus() }),
                 decorationBox = { inner -> if (body.isEmpty()) Text("Capture a thought…", style = UFont.sans(14), color = c.ink3); inner() },
             )
             if (body.isNotBlank()) {

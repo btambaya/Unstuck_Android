@@ -34,6 +34,10 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.password
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.ui.focus.FocusDirection
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -43,7 +47,9 @@ import androidx.compose.ui.unit.dp
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 
-/** M3 outlined text field with a notched floating label (radius 6dp). */
+/** M3 outlined text field with a notched floating label (radius 6dp).
+ *  IME navigation: [imeAction] = Next moves focus to the next field below;
+ *  Done fires [onDone] (the form's submit) or, when null, just clears focus. */
 @Composable
 fun MdField(
     value: String,
@@ -52,8 +58,11 @@ fun MdField(
     modifier: Modifier = Modifier,
     password: Boolean = false,
     keyboardType: KeyboardType = KeyboardType.Text,
+    imeAction: ImeAction = ImeAction.Default,
+    onDone: (() -> Unit)? = null,
 ) {
     val c = UTheme.colors
+    val focusManager = LocalFocusManager.current
     Box(modifier.fillMaxWidth()) {
         Box(
             Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).border(1.dp, c.line2, RoundedCornerShape(6.dp))
@@ -66,7 +75,11 @@ fun MdField(
                 singleLine = true,
                 cursorBrush = SolidColor(c.ink),
                 visualTransformation = if (password) PasswordVisualTransformation() else VisualTransformation.None,
-                keyboardOptions = KeyboardOptions(keyboardType = if (password) KeyboardType.Password else keyboardType),
+                keyboardOptions = KeyboardOptions(keyboardType = if (password) KeyboardType.Password else keyboardType, imeAction = imeAction),
+                keyboardActions = KeyboardActions(
+                    onNext = { focusManager.moveFocus(FocusDirection.Down) },
+                    onDone = { onDone?.invoke() ?: focusManager.clearFocus() },
+                ),
                 modifier = Modifier.fillMaxWidth().semantics {
                     // The floating label is a disconnected sibling node; name the field here
                     // so TalkBack doesn't announce an anonymous "Edit box".

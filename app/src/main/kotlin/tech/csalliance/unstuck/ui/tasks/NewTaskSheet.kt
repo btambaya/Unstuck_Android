@@ -51,6 +51,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -213,6 +214,26 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     }
     val conflicts = if (effectiveDate != null && pickedTime != null) findConflicts(effectiveDate, pickedTime!!, estimate, blocks) else emptyList()
     val canSubmit = name.isNotBlank()
+    val focusManager = LocalFocusManager.current
+
+    // Shared by the "Add task" button AND the name field's IME Done.
+    // Pending share picks are handed to addTask, which applies them AFTER the
+    // task row lands on the server, IN THE SAME write coroutine as the upsert
+    // — so task_share can't race the not-yet-committed insert (not_your_task →
+    // silently dropped, the live T2 bug). Failures are logged, not swallowed.
+    fun submit() {
+        if (!canSubmit) return
+        val t = vm.addTask(
+            name = name, estimateMin = estimate, lifeArea = area, tags = tags.toList().ifEmpty { null },
+            firstPhysicalAction = null, recurrence = recurrence,
+            later = whenSel == "Later",
+            shares = shareLevels.toMap(),
+        )
+        if (whenSel != "Later" && effectiveDate != null && pickedTime != null) {
+            vm.scheduleTask(t, effectiveDate, pickedTime!!)
+        }
+        onDismiss()
+    }
 
     ModalBottomSheet(
         onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = SheetScrim,
@@ -233,7 +254,14 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
 
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 Text("What's on your mind?", style = tech.csalliance.unstuck.design.theme.UFont.serif(22), color = c.ink)
-                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("What's the next thing on your mind?") }, singleLine = true, modifier = Modifier.fillMaxWidth())
+                OutlinedTextField(
+                    value = name, onValueChange = { name = it }, label = { Text("What's the next thing on your mind?") },
+                    singleLine = true, modifier = Modifier.fillMaxWidth(),
+                    // The only free-text field in the main flow → Done = the form's
+                    // primary action once valid; otherwise just drop the keyboard.
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { if (canSubmit) submit() else focusManager.clearFocus() }),
+                )
             }
 
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
@@ -384,22 +412,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
             }
 
             // Coral accent once the form is valid (a name is entered); muted dark until then.
-            UButton("Add task", kind = if (canSubmit) ButtonKind.CORAL else ButtonKind.DARK, enabled = canSubmit) {
-                // Pending share picks are handed to addTask, which applies them AFTER the
-                // task row lands on the server, IN THE SAME write coroutine as the upsert
-                // — so task_share can't race the not-yet-committed insert (not_your_task →
-                // silently dropped, the live T2 bug). Failures are logged, not swallowed.
-                val t = vm.addTask(
-                    name = name, estimateMin = estimate, lifeArea = area, tags = tags.toList().ifEmpty { null },
-                    firstPhysicalAction = null, recurrence = recurrence,
-                    later = whenSel == "Later",
-                    shares = shareLevels.toMap(),
-                )
-                if (whenSel != "Later" && effectiveDate != null && pickedTime != null) {
-                    vm.scheduleTask(t, effectiveDate, pickedTime!!)
-                }
-                onDismiss()
-            }
+            UButton("Add task", kind = if (canSubmit) ButtonKind.CORAL else ButtonKind.DARK, enabled = canSubmit) { submit() }
         }
     }
 
@@ -445,16 +458,18 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
 
     if (showEstimate) {
         var v by rememberSaveable { mutableStateOf(estimate.toString()) }
+        fun saveEstimate() { v.toIntOrNull()?.takeIf { it > 0 }?.let { estimate = it }; showEstimate = false }
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { showEstimate = false },
             title = { Text("Estimate (minutes)") },
             text = {
                 OutlinedTextField(
                     value = v, onValueChange = { s -> v = s.filter { it.isDigit() }.take(4) }, singleLine = true,
-                    keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(keyboardType = androidx.compose.ui.text.input.KeyboardType.Number),
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number, imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { saveEstimate() }),
                 )
             },
-            confirmButton = { TextButton(onClick = { v.toIntOrNull()?.takeIf { it > 0 }?.let { estimate = it }; showEstimate = false }) { Text("Save") } },
+            confirmButton = { TextButton(onClick = { saveEstimate() }) { Text("Save") } },
             dismissButton = { TextButton(onClick = { showEstimate = false }) { Text("Cancel") } },
             containerColor = c.surface,
         )

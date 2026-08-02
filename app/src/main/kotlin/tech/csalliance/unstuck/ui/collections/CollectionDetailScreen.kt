@@ -136,7 +136,13 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
                 ColorChip(color, box = 30, dot = 9)
                 if (editingTitle && owner) {
-                    BasicTextField(value = titleDraft, onValueChange = { titleDraft = it }, textStyle = UFont.serifItalic(26).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
+                    BasicTextField(
+                        value = titleDraft, onValueChange = { titleDraft = it }, textStyle = UFont.serifItalic(26).copy(color = c.ink),
+                        singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f),
+                        // IME Done = the ✓ commit (single-field rename form).
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { vm.renameCollection(col, titleDraft); editingTitle = false }),
+                    )
                     Text("✓", style = UFont.sans(18), color = c.green, modifier = Modifier.clickable { vm.renameCollection(col, titleDraft); editingTitle = false }.padding(4.dp))
                 } else {
                     Text(
@@ -296,7 +302,13 @@ private fun CollItemRow(
         Column(Modifier.weight(1f)) {
             if (editing && !readOnly) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    BasicTextField(value = draft, onValueChange = { draft = it }, textStyle = UFont.sans(14).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
+                    BasicTextField(
+                        value = draft, onValueChange = { draft = it }, textStyle = UFont.sans(14).copy(color = c.ink),
+                        singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f),
+                        // IME Done = the ✓ commit (single-field edit form).
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { vm.updateCollectionItemBody(col, item.id, draft); editing = false }),
+                    )
                     Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable { vm.updateCollectionItemBody(col, item.id, draft); editing = false }.padding(2.dp))
                 }
             } else {

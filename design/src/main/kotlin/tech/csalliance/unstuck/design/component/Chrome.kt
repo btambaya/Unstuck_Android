@@ -107,6 +107,8 @@ fun BottomNavBar(
     onSelect: (String) -> Unit,
     onFab: () -> Unit,
     modifier: Modifier = Modifier,
+    /** Extra modifier on the FAB itself (e.g. the guided tour's anchor). */
+    fabModifier: Modifier = Modifier,
 ) {
     val c = UTheme.colors
     Box(modifier.fillMaxWidth()) {
@@ -126,7 +128,7 @@ fun BottomNavBar(
         // 0.5px top divider
         Box(Modifier.fillMaxWidth().height(1.dp).background(c.line).align(Alignment.TopCenter))
         // Floating FAB, centered, lifted above the bar.
-        CoralFab(onFab, Modifier.align(Alignment.TopCenter).offset(y = (-28).dp))
+        CoralFab(onFab, Modifier.align(Alignment.TopCenter).offset(y = (-28).dp).then(fabModifier))
     }
 }
 

@@ -89,6 +89,9 @@ enum class SharedFocusLogResult { LOGGED, SKIPPED, NOT_ALLOWED, FAILED }
     val level: String = "view",
 )
 
+// completed_at only arrives once migration 049 widens the tasks_shared_with_me
+// projection — nullable WITH a default so an older server (key absent) and a
+// migrated one that sends an explicit null both decode. Read-only column.
 @Serializable internal data class SharedWithMeRow(
     @SerialName("share_id") val shareId: String,
     @SerialName("task_id") val taskId: String,
@@ -96,6 +99,7 @@ enum class SharedFocusLogResult { LOGGED, SKIPPED, NOT_ALLOWED, FAILED }
     val level: String = "view",
     val title: String = "",
     val done: Boolean? = null,
+    @SerialName("completed_at") val completedAt: String? = null,
 )
 
 @Serializable internal data class BadgeRow(
@@ -234,7 +238,7 @@ class CircleClient(private val client: SupabaseClient) {
      *  task rows are RLS-forbidden). Degrades to empty on error. */
     suspend fun tasksSharedWithMe(): List<SharedWithMe> = runCatching {
         client.postgrest.rpc("tasks_shared_with_me").decodeList<SharedWithMeRow>().map {
-            SharedWithMe(it.shareId, it.taskId, it.ownerName, ShareLevel.fromWire(it.level), it.title, it.done == true)
+            SharedWithMe(it.shareId, it.taskId, it.ownerName, ShareLevel.fromWire(it.level), it.title, it.done == true, it.completedAt)
         }
     }.getOrDefault(emptyList())
 

@@ -40,8 +40,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.daysSinceCreated
 import tech.csalliance.unstuck.core.logic.overdueOccurrenceLabel
+import tech.csalliance.unstuck.core.logic.ShareViewMode
+import tech.csalliance.unstuck.core.logic.visibleShares
 import tech.csalliance.unstuck.core.logic.visibleTasks
 import tech.csalliance.unstuck.core.time.Clock
+import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.model.TaskListView
 import tech.csalliance.unstuck.design.component.AppBar
@@ -52,6 +55,7 @@ import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.components.areaColorFor
+import tech.csalliance.unstuck.ui.sharing.SharedWithYouSection
 
 // Tab order mirrors the web TaskListPane: Backlog first (the triage stack),
 // then All / Today / Upcoming / Later / Completed. Default is Today.
@@ -67,6 +71,7 @@ fun TasksScreen(
     onClearArea: () -> Unit,
     onAreaPick: (String?) -> Unit,
     onOpen: (TaskItem) -> Unit,
+    onOpenShared: (SharedWithMe) -> Unit,
     onSearch: () -> Unit,
     onMenu: () -> Unit,
     onAvatar: () -> Unit,
@@ -78,6 +83,9 @@ fun TasksScreen(
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
+    // "Shared with you" — tasks OTHERS shared with me. They sit on my own list views
+    // (web parity: task-list-pane mounts the group on All / Today / Completed only).
+    val sharedWithMe by vm.sharedWithMe.collectAsStateWithLifecycle()
     // Saveable so the selected tab + tag filter survive rotation / process death
     // (TaskListView is a Serializable enum). String? saves directly.
     var view by rememberSaveable { mutableStateOf(TaskListView.TODAY) }
@@ -92,6 +100,18 @@ fun TasksScreen(
     // the whole list every frame — only when an input that affects bucketing changes.
     val list = remember(view, tasks, blocks, nowState, activeArea, activeTag) {
         visibleTasks(view, tasks, blocks, nowState, activeArea = if (view == TaskListView.TODAY) null else activeArea, activeTag = activeTag, slipMode = false)
+    }
+    // A completed shared task moves like any other completed task: gone from Today,
+    // today's win still shown in All, and it collects under Completed from then on
+    // (Ahmad, 2026-08-02). Null on the tabs the web doesn't mount the group on.
+    val shareMode = when (view) {
+        TaskListView.TODAY -> ShareViewMode.TODAY
+        TaskListView.ALL -> ShareViewMode.ALL
+        TaskListView.COMPLETED -> ShareViewMode.COMPLETED
+        else -> null
+    }
+    val sharedVisible = remember(sharedWithMe, shareMode, nowState) {
+        shareMode?.let { visibleShares(sharedWithMe, it, nowState) } ?: emptyList()
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -143,6 +163,15 @@ fun TasksScreen(
             }
         }
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
+            // "Quiet company" above my own rows — the Completed tab is where a finished
+            // share ends up, so the group renders there too (header says so).
+            if (shareMode != null && sharedVisible.isNotEmpty()) item(key = "shared-with-you") {
+                SharedWithYouSection(
+                    vm, sharedVisible, shareMode,
+                    onToggle = { taskId, done -> vm.completeSharedTask(taskId, done) },
+                    onOpen = onOpenShared,
+                )
+            }
             if (list.isEmpty()) {
                 item { Text("No ${view.label.lowercase()} tasks.", style = UFont.sans(14), color = c.ink3, modifier = Modifier.padding(vertical = 32.dp)) }
             } else {

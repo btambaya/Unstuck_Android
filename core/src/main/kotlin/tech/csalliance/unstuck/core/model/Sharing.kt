@@ -93,6 +93,13 @@ data class SharedWithMe(
     val level: ShareLevel,
     val title: String,
     val done: Boolean,   // every level projects the done state (v3)
+    /** ISO completion time, when the projection provides one. OPTIONAL: the
+     *  tasks_shared_with_me RPC only gains completed_at in migration 049, so a
+     *  client talking to an older server sees null here. READ-only — a default
+     *  is safe (nothing serializes this model back to the wire). Drives
+     *  [tech.csalliance.unstuck.core.logic.shareVisibleIn]: with no timestamp a
+     *  completed share simply leaves the active lists. */
+    val completedAt: String? = null,
 )
 
 /** Read-only detail for a task shared WITH me, from the shared_task_detail RPC

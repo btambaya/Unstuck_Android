@@ -22,7 +22,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Bolt
-import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.PlayArrow
@@ -54,9 +53,11 @@ import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.daysSinceCreated
 import tech.csalliance.unstuck.core.logic.formatMMSS
 import tech.csalliance.unstuck.core.logic.isCompletedToday
+import tech.csalliance.unstuck.core.logic.ShareViewMode
 import tech.csalliance.unstuck.core.logic.isTemplate
 import tech.csalliance.unstuck.core.logic.pickTodayHero
 import tech.csalliance.unstuck.core.logic.projectOccurrences
+import tech.csalliance.unstuck.core.logic.visibleShares
 import tech.csalliance.unstuck.core.logic.visibleTasks
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.model.LiveSession
@@ -65,7 +66,6 @@ import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.model.TaskListView
-import tech.csalliance.unstuck.core.model.shareStatusLabel
 import tech.csalliance.unstuck.design.color.oklch
 import tech.csalliance.unstuck.design.component.AreaDotColor
 import tech.csalliance.unstuck.design.component.ButtonKind
@@ -77,7 +77,7 @@ import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UnstuckColors
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
-import tech.csalliance.unstuck.ui.sharing.PartnerPresence
+import tech.csalliance.unstuck.ui.sharing.SharedWithYouSection
 import tech.csalliance.unstuck.ui.tour.TourAnchorIds
 import tech.csalliance.unstuck.ui.tour.tourAnchor
 import tech.csalliance.unstuck.ui.components.areaColorFor
@@ -175,6 +175,11 @@ fun TodayScreen(
     val backlogRows = remember(backlogAll, startNext, liveId, assignedOut) {
         backlogAll.filter { it.id != startNext?.id && it.id != liveId && it.id !in assignedOut }
     }
+    // "Shared with you" on Today follows the SAME rule as my own tasks: a completed
+    // share leaves this list immediately (it lives under Tasks → Completed from then
+    // on) instead of sitting here struck-through forever. Ports visibleShares(…,
+    // 'today') from shared-task-visibility.ts.
+    val sharedVisible = remember(sharedWithMe, now) { visibleShares(sharedWithMe, ShareViewMode.TODAY, now) }
     // Delegated group: MY tasks handed off at 'assign'. A completed hand-off lingers
     // today (a quiet "done ✓"), then ages out — mirrors delegated-group.tsx.
     val delegatedRows = remember(tasks, assignedOut, areaFilter, now) {
@@ -198,7 +203,7 @@ fun TodayScreen(
     // toggle. A genuinely empty account still has no todayAll/backlogAll/startNext.
     // "Company" (tasks shared WITH me) also counts as content, so a user whose only
     // rows are shared-with-you still sees them instead of the all-clear empty hero.
-    val empty = todayAll.isEmpty() && live == null && backlogAll.isEmpty() && startNext == null && sharedWithMe.isEmpty() && delegatedRows.isEmpty()
+    val empty = todayAll.isEmpty() && live == null && backlogAll.isEmpty() && startNext == null && sharedVisible.isEmpty() && delegatedRows.isEmpty()
     val weekMin = remember(sessions, now) {
         sessions.filter { (now - (it.completedAtMs() ?: 0)) in 0..(7L * 86_400_000) }.sumOf { it.actualSec } / 60
     }
@@ -346,8 +351,8 @@ fun TodayScreen(
                 // Sharing groups sit at the top of the Today list (web parity), not in
                 // the Backlog view: tasks OTHERS shared with me, then tasks I delegated.
                 if (!backlogActive) {
-                    if (sharedWithMe.isNotEmpty()) item(key = "shared-with-you") {
-                        SharedWithYouSection(vm, sharedWithMe, onToggle = { taskId, done -> vm.completeSharedTask(taskId, done) }, onOpen = onOpenShared)
+                    if (sharedVisible.isNotEmpty()) item(key = "shared-with-you") {
+                        SharedWithYouSection(vm, sharedVisible, ShareViewMode.TODAY, onToggle = { taskId, done -> vm.completeSharedTask(taskId, done) }, onOpen = onOpenShared, modifier = Modifier.padding(horizontal = 18.dp))
                     }
                     if (delegatedRows.isNotEmpty()) item(key = "delegated") {
                         DelegatedSection(delegatedRows, assignedOut, onOpen)
@@ -541,60 +546,6 @@ private fun TaskRow(task: TaskItem, areaColor: Color, ageDays: Int? = null, shar
             }
         }
         Text("${task.estimateMin}m", style = UFont.mono(11), color = c.ink3)
-    }
-}
-
-/** "Shared with you" — the quiet-company section: tasks other people in your circle
- *  shared WITH you, at the top of Today. view = read-only company; partner + assign
- *  add a completion checkbox (either side can tick it). Tapping a row OPENS a read-only
- *  detail (T1) so the recipient can see what the task IS (steps, area, estimate, due),
- *  not just a title + status chip. Port of shared-with-me-group.tsx. Partner rows also
- *  carry live co-focus (PartnerPresence: a "focusing now" pulse + a "Sit with them"). */
-@Composable
-private fun SharedWithYouSection(vm: AppViewModel, items: List<SharedWithMe>, onToggle: (taskId: String, done: Boolean) -> Unit, onOpen: (SharedWithMe) -> Unit) {
-    val c = UTheme.colors
-    Column(Modifier.fillMaxWidth().padding(horizontal = 18.dp).padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 2.dp)) {
-            Icon(Icons.Filled.Person, contentDescription = null, tint = c.ink3, modifier = Modifier.size(12.dp))
-            SectionLabel("Shared with you")
-        }
-        items.forEach { s ->
-            val done = s.done
-            val canComplete = s.level.canComplete
-            Row(
-                // Row opens the read-only detail; the checkbox (below) has its own
-                // clickable that consumes the tap, so ticking never opens the sheet.
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.primarySoft, RoundedCornerShape(12.dp)).clickable { onOpen(s) }.padding(horizontal = 13.dp, vertical = 11.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                if (canComplete) {
-                    Box(
-                        Modifier.size(18.dp).clip(RoundedCornerShape(6.dp)).background(if (done) c.green else Color.Transparent)
-                            .border(if (done) 0.dp else 1.5.dp, if (done) Color.Transparent else c.line2, RoundedCornerShape(6.dp))
-                            .clickable { onToggle(s.taskId, !done) },
-                        contentAlignment = Alignment.Center,
-                    ) { if (done) Icon(Icons.Filled.Check, contentDescription = "Mark done", tint = Color.White, modifier = Modifier.size(12.dp)) }
-                } else {
-                    Box(Modifier.size(18.dp))   // spacer keeps view-only rows title-aligned
-                }
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        s.title, style = UFont.sans(14, FontWeight.Medium),
-                        color = if (done) c.ink3 else c.ink,
-                        textDecoration = if (done) TextDecoration.LineThrough else null,
-                        maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-                    )
-                    Text("from ${s.ownerName.substringBefore('@')}", style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 2.dp))
-                    // Partner rows: live co-focus — "focusing now" + "Sit with them".
-                    if (s.level == ShareLevel.PARTNER && !done) {
-                        PartnerPresence(vm, s.taskId, modifier = Modifier.padding(top = 6.dp))
-                    }
-                }
-                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 9.dp, vertical = 2.dp)) {
-                    Text(shareStatusLabel(s.level, done), style = UFont.sans(10, FontWeight.Bold), color = c.primaryDeep)
-                }
-            }
-        }
     }
 }
 

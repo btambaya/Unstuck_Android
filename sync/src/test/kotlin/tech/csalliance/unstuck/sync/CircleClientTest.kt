@@ -90,4 +90,16 @@ class CircleClientTest {
         assertEquals("Write", r.title)
         assertNull(r.done)
     }
+
+    // completed_at only exists once migration 049 widens the projection: an older
+    // server omits the key entirely, a migrated one may send an explicit null, and
+    // a completed row sends the timestamp. All three must decode.
+    @Test fun `shared-with-me row tolerates absent, null and present completed_at`() {
+        val absent = json.decodeFromString<SharedWithMeRow>("""{"share_id":"s1","task_id":"t1","done":true}""")
+        assertNull(absent.completedAt)
+        val explicitNull = json.decodeFromString<SharedWithMeRow>("""{"share_id":"s1","task_id":"t1","done":true,"completed_at":null}""")
+        assertNull(explicitNull.completedAt)
+        val present = json.decodeFromString<SharedWithMeRow>("""{"share_id":"s1","task_id":"t1","done":true,"completed_at":"2026-08-02T09:30:00Z"}""")
+        assertEquals("2026-08-02T09:30:00Z", present.completedAt)
+    }
 }

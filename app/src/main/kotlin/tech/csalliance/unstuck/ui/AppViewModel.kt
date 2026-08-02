@@ -162,12 +162,25 @@ class AppViewModel(
         extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
 
+    /** taskId → the ISO time I ticked a shared task done on THIS device. The
+     *  tasks_shared_with_me projection only carries completed_at from migration 049,
+     *  so without this a share I just completed would drop straight out of "All"
+     *  instead of lingering as today's win. Overlaid ONLY onto rows the server
+     *  already reports as done, so a failed write can never fake a completion.
+     *  Mirrors the optimistic stamp in the web useSharedWithMe.setDone. */
+    private val _sharedCompletedAt = MutableStateFlow<Map<String, String>>(emptyMap())
+
     /** Tasks other people have shared WITH me — the "Shared with you" group. Read via
      *  the tasks_shared_with_me projection (raw task rows are RLS-forbidden). */
     val sharedWithMe: StateFlow<List<SharedWithMe>> =
         merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
             .onStart { emit(Unit) }
             .map { graph.coordinator?.circle?.tasksSharedWithMe() ?: emptyList() }
+            .combine(_sharedCompletedAt) { rows, stamps ->
+                if (stamps.isEmpty()) rows else rows.map { s ->
+                    if (s.done && s.completedAt == null) s.copy(completedAt = stamps[s.taskId]) else s
+                }
+            }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** My outgoing shares grouped by taskId → the row badges (mirrors the web
@@ -1447,6 +1460,9 @@ class AppViewModel(
             store.setLiveSession(null)
             accrueSharedFocus(live.taskId, elapsed, sid, live.sessionEstimateMin, ownerFallback = false)
             if (markDone) {
+                // Same optimistic completion stamp as completeSharedTask, so finishing a
+                // SHARED focus also moves the row out of the active lists right away.
+                _sharedCompletedAt.value = _sharedCompletedAt.value + (live.taskId to isoNow())
                 runCatching { circleClient?.sharedTaskSetDone(live.taskId, true) }
                 circleClient?.notifyTaskDone(live.taskId)
             }
@@ -1800,8 +1816,13 @@ class AppViewModel(
         circleClient?.sharedTaskDetail(taskId)
 
     /** Complete/uncomplete a task shared WITH me — partner OR assign only (the RPC
-     *  rejects view). Pings the owner on completion (best-effort), then refetches. */
+     *  rejects view). Pings the owner on completion (best-effort), then refetches.
+     *  Stamps [_sharedCompletedAt] so the row moves like any other completed task the
+     *  instant it's ticked — gone from Today, still today's win in All, permanently in
+     *  Completed — even against a server whose projection has no completed_at yet. */
     fun completeSharedTask(taskId: String, done: Boolean) = launchWrite {
+        _sharedCompletedAt.value =
+            if (done) _sharedCompletedAt.value + (taskId to isoNow()) else _sharedCompletedAt.value - taskId
         runCatching { circleClient?.sharedTaskSetDone(taskId, done) }
         if (done) circleClient?.notifyTaskDone(taskId)
         refreshShares()

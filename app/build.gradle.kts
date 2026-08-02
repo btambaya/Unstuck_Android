@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 75
-        versionName = "0.4.61"
+        versionCode = 76
+        versionName = "0.4.62"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.4.61 — Tour: the highlighted Capture pill in the focus demo is now tappable and opens a demo capture sheet (type freely — nothing is saved), matching what the narration invites. Earlier — v0.4.60: live captions, spotlight-only lockdown, pause confirm + resume chip, demo focus screen."
+    releaseNotes = "v0.4.62 — From your feedback: the app now greets you by your name; the assistant button is the AI sparkles icon in the proper coral; and the keyboard Next/Done buttons move you through every form field by field. Earlier — v0.4.61: tappable demo capture in the tour."
 }
 
 dependencies {

@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 77
-        versionName = "0.4.63"
+        versionCode = 78
+        versionName = "0.4.64"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.4.63 — Completed shared tasks now move like all your other tasks: ticking one off clears it from Today, keeps it visible in All for the rest of the day, and files it under Tasks - Completed, where the Shared with you group now also appears."
+    releaseNotes = "v0.4.64 — Assistant redesign: one endless conversation with day markers, a live NEXT / USABLE / PAUSED strip you can tap, tappable suggestions built from your real tasks and lists, a tick-list of exactly what it changed with Undo, a daily check-in, and it can now prepare a task share that only goes out when you confirm. Feedback moved to Settings - Account, and you can switch the AI Assistant off entirely in Settings - Interface."
 }
 
 dependencies {

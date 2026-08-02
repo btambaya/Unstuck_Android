@@ -47,6 +47,7 @@ import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.design.component.BottomNavBar
 import tech.csalliance.unstuck.design.component.NavSpec
 import tech.csalliance.unstuck.design.theme.UTheme
+import tech.csalliance.unstuck.ui.assistant.AssistantDestination
 import tech.csalliance.unstuck.ui.calendar.CalendarScreen
 import tech.csalliance.unstuck.ui.collections.CollectionDetailScreen
 import tech.csalliance.unstuck.ui.collections.CollectionsScreen
@@ -86,10 +87,11 @@ private sealed interface Route {
     data object Inbox : Route
 }
 
+// Feedback is no longer a sheet here: it moved to Settings -> Account -> Send
+// feedback (web parity), so the bubble is a pure assistant surface.
 private sealed interface Sheet {
     data object Avatar : Sheet
     data object Areas : Sheet
-    data object Feedback : Sheet
     data object Assistant : Sheet
 }
 
@@ -138,6 +140,13 @@ fun MainScaffold(vm: AppViewModel) {
 
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
+    // Privacy §21 kill-switch (Settings → Interface → AI Assistant): when the
+    // user turns AI off there is NO launcher, NO sheet, and no voice — and an
+    // open-assistant request from anywhere else (e.g. the tour) is ignored.
+    // The published privacy policy promises this on every platform.
+    val settings by vm.settings.collectAsStateWithLifecycle()
+    val assistantAllowed = BuildConfig.ASSISTANT_ENABLED && settings.assistantEnabled
+    LaunchedEffect(assistantAllowed) { if (!assistantAllowed && sheet == Sheet.Assistant) sheet = null }
     val notifUnread by vm.notifUnread.collectAsStateWithLifecycle()
     val inboxCaptures by vm.inboxCaptures.collectAsStateWithLifecycle()
     fun push(r: Route) = stack.add(r)
@@ -278,14 +287,14 @@ fun MainScaffold(vm: AppViewModel) {
         // never covers a modal. Bottom-end, lifted above the nav bar to clear the FAB.
         // Opens the dual-purpose surface (Assistant chat + Feedback). Gated by the
         // build flags so it's a one-flip for a public build.
-        if ((BuildConfig.ASSISTANT_ENABLED || BuildConfig.FEEDBACK_ENABLED) && stack.isEmpty() && !sheetOpen && focusTask == null && tab != "calendar") {
+        if (assistantAllowed && stack.isEmpty() && !sheetOpen && focusTask == null && tab != "calendar") {
             // Brand-coral circle + white AI-sparkles glyph — the cross-platform AI marker
             // (iOS "sparkles" / Material "auto_awesome"), same coral as the Focus button.
             Box(
                 Modifier.align(Alignment.BottomEnd).navigationBarsPadding().padding(end = 16.dp, bottom = 74.dp)
                     .size(50.dp).shadow(8.dp, CircleShape).clip(CircleShape).background(c.coral)
                     .tourAnchor(TourAnchorIds.ASSISTANT_LAUNCH)
-                    .clickable { sheet = if (BuildConfig.ASSISTANT_ENABLED) Sheet.Assistant else Sheet.Feedback },
+                    .clickable { sheet = Sheet.Assistant },
                 contentAlignment = Alignment.Center,
             ) {
                 Icon(Icons.Filled.AutoAwesome, contentDescription = "Assistant", tint = Color.White, modifier = Modifier.size(22.dp))
@@ -355,11 +364,22 @@ fun MainScaffold(vm: AppViewModel) {
                 onPick = { area -> activeArea = area; tab = "tasks"; stack.clear(); sheet = null },
                 onDismiss = { sheet = null },
             )
-            Sheet.Feedback -> tech.csalliance.unstuck.ui.feedback.FeedbackSheet(
-                vm, currentScreen = tab, onDismiss = { sheet = null },
-            )
             Sheet.Assistant -> tech.csalliance.unstuck.ui.assistant.AssistantSheet(
-                vm, currentScreen = tab, onDismiss = { sheet = null },
+                vm,
+                // The context strip's pieces are real jumps: NEXT -> Tasks,
+                // USABLE -> Calendar, PAUSED -> the live focus session (Focus is
+                // an overlay here, not a tab, so it resolves through the task).
+                onNavigate = { dest ->
+                    when (dest) {
+                        AssistantDestination.TASKS -> { tab = "tasks"; stack.clear() }
+                        AssistantDestination.CALENDAR -> { tab = "calendar"; stack.clear() }
+                        AssistantDestination.FOCUS ->
+                            vm.liveSession.value?.taskId
+                                ?.let { id -> tasks.firstOrNull { it.id == id } }
+                                ?.let { focusTask = it }
+                    }
+                },
+                onDismiss = { sheet = null },
             )
             null -> {}
         }
@@ -422,7 +442,8 @@ fun MainScaffold(vm: AppViewModel) {
                     // Hub first, then the section — popping back lands somewhere sane.
                     push(Route.Settings); push(Route.SettingsSub(s))
                 },
-                openAssistant = { sheet = Sheet.Assistant },
+                // Privacy kill-switch: an open-assistant request is IGNORED when AI is off.
+                openAssistant = { if (assistantAllowed) sheet = Sheet.Assistant },
                 // A real task for the first-action step ("existing detail
                 // mechanics"): prefer an open, non-template task; empty account →
                 // null (the step's New-task FAB fallback anchor takes over).

@@ -72,6 +72,14 @@ data class SettingsState(
     // Hands-free Focus Copilot (Phase 1, on-device, no LLM):
     val focusCopilotSpeak: Boolean = true, // spoken progress coach during a block (speak-only)
     val focusCopilotVoice: Boolean = false, // also LISTEN for a hands-free reply (mic) — opt-in
+    /**
+     * AI Assistant kill-switch (Settings → Interface → AI Assistant). The published
+     * privacy policy promises this on every platform: turning it off unmounts the
+     * assistant launcher and ignores open-assistant events, so nothing is ever sent
+     * to the AI provider. Device-local (mirrors web's `use-assistant-enabled`), and
+     * DEFAULT ON — an existing install must not silently lose the assistant.
+     */
+    val assistantEnabled: Boolean = true,
 ) {
     /** density + larger-type folded into one sp multiplier (web parity). */
     val fontScale: Float
@@ -110,6 +118,7 @@ class SettingsStore(context: Context) {
         notificationLevel = enumOf(p.getString("notificationLevel", null), NotificationLevel.BALANCED),
         focusCopilotSpeak = p.getBoolean("focusCopilotSpeak", true),
         focusCopilotVoice = p.getBoolean("focusCopilotVoice", false),
+        assistantEnabled = p.getBoolean("assistantEnabled", true),
     )
 
     fun save(s: SettingsState) {
@@ -135,6 +144,7 @@ class SettingsStore(context: Context) {
             .putString("notificationLevel", s.notificationLevel.name)
             .putBoolean("focusCopilotSpeak", s.focusCopilotSpeak)
             .putBoolean("focusCopilotVoice", s.focusCopilotVoice)
+            .putBoolean("assistantEnabled", s.assistantEnabled)
             .apply()
     }
 

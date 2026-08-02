@@ -9,7 +9,9 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -19,18 +21,21 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Send
+import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.outlined.VolumeOff
 import androidx.compose.material.icons.outlined.VolumeUp
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
@@ -40,6 +45,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -49,6 +55,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
@@ -59,64 +66,54 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tech.csalliance.unstuck.core.logic.Receipt
+import tech.csalliance.unstuck.core.logic.assistantDayLabel
+import tech.csalliance.unstuck.core.logic.shouldCheckIn
+import tech.csalliance.unstuck.core.time.Clock
+import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.component.SheetHandle
 import tech.csalliance.unstuck.design.component.SheetScrim
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.sync.ChatMessage
 import tech.csalliance.unstuck.ui.AppViewModel
-import tech.csalliance.unstuck.ui.feedback.FeedbackForm
 
 /**
- * The bubble's dual-purpose surface: an **Assistant** chat (agentic — brain-dump
- * to manage your schedule, with on-device voice) + the existing **Feedback** form,
- * switched by a top toggle. The chat drives AppViewModel.assistantTurn (which calls
- * the qwen edge fn + executes tool calls locally). `currentScreen` is the tab.
+ * The assistant "cockpit" (redesign 2026-08-02, port of
+ * components/assistant/assistant-bubble.tsx): a header with the ask-Unstuck
+ * eyebrow, a live tappable context strip (NEXT / USABLE / PAUSED), ONE endless
+ * thread with day dividers + deterministic action receipts, and a dynamic,
+ * data-driven suggestion card that the sheet opens onto.
+ *
+ * There is no "new chat" — the conversation continues forever (⋯ still offers a
+ * deliberate "Clear conversation"). Feedback moved to Settings → Send feedback.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AssistantSheet(vm: AppViewModel, currentScreen: String?, onDismiss: () -> Unit) {
+fun AssistantSheet(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit, onDismiss: () -> Unit) {
     val c = UTheme.colors
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    var tab by remember { mutableStateOf(Tab.ASSISTANT) }
-
     ModalBottomSheet(
         onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = SheetScrim,
         dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } },
     ) {
-        // Top toggle: Assistant | Feedback.
-        Row(
-            Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 4.dp),
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            ToggleChip("Assistant", tab == Tab.ASSISTANT) { tab = Tab.ASSISTANT }
-            ToggleChip("Feedback", tab == Tab.FEEDBACK) { tab = Tab.FEEDBACK }
-        }
-        when (tab) {
-            Tab.ASSISTANT -> AssistantChat(vm)
-            Tab.FEEDBACK -> FeedbackForm(vm, currentScreen, onDone = onDismiss)
-        }
+        AssistantChat(vm, onNavigate = { onNavigate(it); onDismiss() })
     }
 }
 
-private enum class Tab { ASSISTANT, FEEDBACK }
-
-@Composable
-private fun ToggleChip(label: String, selected: Boolean, onClick: () -> Unit) {
-    val c = UTheme.colors
-    Box(
-        // selectable (not clickable) so TalkBack announces "selected, tab" state.
-        Modifier.clip(RoundedCornerShape(999.dp)).background(if (selected) c.ink else c.bg2)
-            .selectable(selected = selected, role = Role.Tab, onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-    ) { Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = if (selected) c.bg else c.ink2) }
+/** One rendered row of the endless thread. */
+private sealed interface ThreadRow {
+    data class Divider(val label: String) : ThreadRow
+    data class Bubble(val msg: ChatMessage) : ThreadRow
+    data class ReceiptItem(val messageId: String, val index: Int, val receipt: Receipt) : ThreadRow
 }
 
 @Composable
-private fun AssistantChat(vm: AppViewModel) {
+private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit) {
     val c = UTheme.colors
     val context = LocalContext.current
     val voice = rememberVoiceController()
@@ -127,35 +124,87 @@ private fun AssistantChat(vm: AppViewModel) {
     val messages = vm.assistantHistory
     val sending by vm.assistantSending.collectAsStateWithLifecycle()
     val errorCode by vm.assistantError.collectAsStateWithLifecycle()
-    // Saveable so a half-typed brain-dump + the speaker toggle survive rotation.
-    // (`listening` is transient — a config change tears down the recognizer anyway.)
+    val pendingShares by vm.pendingShares.collectAsStateWithLifecycle()
+
+    // Coarse clock for the day dividers + the context strip: a sheet left open
+    // across midnight must roll "Today" over rather than freeze.
+    var nowMs by remember { mutableLongStateOf(vm.nowMs()) }
+    LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(60_000); nowMs = vm.nowMs() } }
+    val ctx = rememberAssistantContext(vm, nowMs)
+
     var input by rememberSaveable { mutableStateOf("") }
     var listening by remember { mutableStateOf(false) }
     var speakReplies by rememberSaveable { mutableStateOf(false) }
     var note by remember { mutableStateOf<String?>(null) }
+    var menuOpen by remember { mutableStateOf(false) }
+    var sharingId by remember { mutableStateOf<String?>(null) }
+    // The suggestion card sits at the thread tail until the user engages this
+    // visit; the ✦ button re-summons it.
+    var showChips by rememberSaveable { mutableStateOf(true) }
     val listState = rememberLazyListState()
 
-    // Carry each message's index in the append-only history so the LazyColumn can key
-    // on a STABLE id (messages are appended, never reordered) — without that, a
-    // streaming turn reuses the wrong row's animation/state as content fills in.
-    val shown = messages.withIndex()
-        .filter { (it.value.role == "user" || it.value.role == "assistant") && !it.value.content.isNullOrBlank() }
-    LaunchedEffect(shown.size, sending) {
-        // Scroll to the genuine last index; only reach one-past-end while the
-        // "Thinking…" row is showing, so a tall final reply isn't clipped.
-        if (shown.isNotEmpty()) listState.animateScrollToItem(if (sending) shown.size else shown.lastIndex)
+    val display = messages.filter {
+        (it.role == "user" || it.role == "assistant") && !it.content.isNullOrBlank()
     }
-    // Speak replies as turns complete. Replies can land after a dismissal (the
-    // turn outlives the sheet) — only an open sheet collects + speaks.
-    LaunchedEffect(Unit) {
-        vm.assistantReplies.collect { if (speakReplies) voice.speak(it) }
+    val hasHistory = display.isNotEmpty()
+
+    // Flatten to rows so day dividers and receipts are first-class list items
+    // (a divider must not scroll as part of the bubble above it).
+    val rows = remember(display, nowMs) {
+        buildList {
+            var lastLabel: String? = null
+            display.forEach { m ->
+                val label = assistantDayLabel(m.at, nowMs)
+                if (label != null && label != lastLabel) { add(ThreadRow.Divider(label)); lastLabel = label }
+                add(ThreadRow.Bubble(m))
+                m.receipts?.forEachIndexed { i, r -> add(ThreadRow.ReceiptItem(m.id.orEmpty(), i, r)) }
+            }
+        }
     }
 
-    fun send(text: String) {
+    // One-tap revert of the LAST turn's changes (only while still undoable —
+    // receipts flip to `undone` as they're used).
+    val lastUndoable = display.lastOrNull { m -> m.receipts?.any { it.undo != null && !it.undone } == true }
+    val undoAllCount = lastUndoable?.receipts?.count { it.undo != null && !it.undone } ?: 0
+
+    // Daily check-in: once per day, and ONLY when the sheet opens onto an
+    // existing conversation (a fresh account gets the full hero instead). A send
+    // mid-visit must never summon it retroactively, so this runs once, on open.
+    LaunchedEffect(Unit) {
+        if (!vm.assistantHistory.any { it.role == "user" }) return@LaunchedEffect
+        val today = Clock.dateIso(vm.nowMs())
+        if (shouldCheckIn(vm.lastCheckinDay(), today)) {
+            vm.markCheckinDay(today)
+            vm.appendLocalAssistant(ctx.checkinLine)
+        }
+    }
+
+    // Ahmad (2026-08-02): opening the assistant should show ONLY the
+    // suggestions — history starts off-screen above. The chips item is at least
+    // a full viewport tall, so aligning its top with the viewport top hides
+    // everything before it; scrolling up reveals the history.
+    val thinkingCount = if (sending) 1 else 0
+    val chipsIndex = rows.size + thinkingCount + pendingShares.size
+    LaunchedEffect(rows.size, sending, showChips, pendingShares) {
+        val unresolved = pendingShares.indexOfLast { it.outcome == null }
+        when {
+            // A staged share is the thing that needs an answer — go to it.
+            unresolved >= 0 -> listState.animateScrollToItem(rows.size + thinkingCount + unresolved)
+            showChips -> listState.scrollToItem(chipsIndex)
+            chipsIndex > 0 -> listState.animateScrollToItem(chipsIndex - 1)
+        }
+    }
+
+    // Speak replies as turns complete. Replies can land after a dismissal (the
+    // turn outlives the sheet) — only an open sheet collects + speaks.
+    LaunchedEffect(Unit) { vm.assistantReplies.collect { if (speakReplies) voice.speak(it) } }
+
+    fun ask(text: String) {
         val t = text.trim()
         if (t.isEmpty() || sending) return
         input = ""
         note = null
+        showChips = false
         vm.sendAssistant(t)
     }
 
@@ -167,7 +216,7 @@ private fun AssistantChat(vm: AppViewModel) {
             onFinal = { input = it },
             onDone = {
                 listening = false
-                if (input.isNotBlank()) send(input)
+                if (input.isNotBlank()) ask(input)
             },
         )
     }
@@ -184,11 +233,15 @@ private fun AssistantChat(vm: AppViewModel) {
     if (voiceOpen) VoiceModeScreen(vm) { voiceOpen = false }
 
     Column(Modifier.fillMaxWidth().fillMaxHeight(0.86f).imePadding()) {
-        // Header: a "Talk" entry into full voice mode (when configured) + "New chat".
+        // ── Header: title + eyebrow, Talk, ⋯ ─────────────────────────────────
         Row(
-            Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 2.dp),
-            horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically,
+            Modifier.fillMaxWidth().padding(start = 22.dp, end = 12.dp, top = 2.dp, bottom = 6.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            Column(Modifier.weight(1f)) {
+                Text("Assistant", style = UFont.sans(15, FontWeight.SemiBold), color = c.ink)
+                SectionLabel("Ask Unstuck to handle it", modifier = Modifier.padding(top = 1.dp))
+            }
             if (vm.voiceConfigured()) {
                 Row(
                     Modifier.clip(RoundedCornerShape(999.dp)).background(c.coral)
@@ -205,34 +258,88 @@ private fun AssistantChat(vm: AppViewModel) {
                     Icon(Icons.Filled.Mic, contentDescription = null, tint = Color.White, modifier = Modifier.size(15.dp))
                     Text("Talk", style = UFont.sans(12, FontWeight.SemiBold), color = Color.White)
                 }
-            } else { Box(Modifier) }
-            if (shown.isNotEmpty()) {
-                Text(
-                    "New chat", style = UFont.sans(12, FontWeight.Medium), color = c.ink3,
-                    modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(role = Role.Button) { vm.clearAssistant() }.minimumInteractiveComponentSize().padding(horizontal = 8.dp, vertical = 4.dp),
-                )
+            }
+            if (hasHistory) {
+                Box {
+                    RoundIcon(
+                        icon = Icons.Filled.MoreHoriz, tint = c.ink3, bg = Color.Transparent,
+                        label = "Conversation options",
+                    ) { menuOpen = true }
+                    DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Clear conversation", style = UFont.sans(13), color = c.coralDeep) },
+                            onClick = { menuOpen = false; showChips = true; vm.clearAssistant() },
+                        )
+                    }
+                }
             }
         }
-        // Messages (or empty hint).
-        if (shown.isEmpty() && !sending) {
-            Column(Modifier.weight(1f).fillMaxWidth().padding(horizontal = 22.dp), verticalArrangement = Arrangement.Center) {
-                Text("Brain-dump it.", style = UFont.serifItalic(24), color = c.ink)
-                Text(
-                    "Tell me what's on your plate and I'll sort it — \"add a dentist appt next Tue 3pm\", " +
-                        "\"move my report to tomorrow morning\", \"what should I start?\". Type or tap the mic.",
-                    style = UFont.sans(13), color = c.ink3, modifier = Modifier.padding(top = 8.dp),
-                )
+
+        // ── Live context strip — pinned, in BOTH modes ───────────────────────
+        ContextStrip(ctx, onNavigate)
+
+        if (!hasHistory && !sending) {
+            // Brand-new conversation — the full "first page".
+            LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+                item {
+                    AssistantHome(
+                        ctx, onAsk = ::ask,
+                        undoAllCount = undoAllCount,
+                        onUndoAll = { undoAll(vm, lastUndoable) },
+                    )
+                }
             }
         } else {
-            LazyColumn(
-                state = listState,
-                modifier = Modifier.weight(1f).fillMaxWidth().padding(horizontal = 16.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-            ) {
-                items(shown, key = { it.index }) { (_, m) ->
-                    MessageBubble(text = m.content!!, fromUser = m.role == "user")
+            // The ONE endless thread: history above (day dividers + receipts),
+            // the suggestion card as the newest thing at the tail.
+            BoxWithConstraints(Modifier.weight(1f).fillMaxWidth()) {
+                val viewportHeight = maxHeight
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxWidth(),
+                    contentPadding = PaddingValues(horizontal = 16.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    items(
+                        count = rows.size,
+                        key = { i ->
+                            when (val r = rows[i]) {
+                                is ThreadRow.Divider -> "div:$i:${r.label}"
+                                is ThreadRow.Bubble -> "msg:${r.msg.id ?: i}"
+                                is ThreadRow.ReceiptItem -> "rcpt:${r.messageId}:${r.index}"
+                            }
+                        },
+                    ) { i ->
+                        when (val r = rows[i]) {
+                            is ThreadRow.Divider -> DayDivider(r.label)
+                            is ThreadRow.Bubble -> MessageBubble(r.msg)
+                            is ThreadRow.ReceiptItem -> ReceiptCard(r) { vm.undoAssistantReceipt(r.messageId, r.index) }
+                        }
+                    }
+                    if (sending) item(key = "thinking") { ThinkingRow() }
+                    items(count = pendingShares.size, key = { i -> "share:${pendingShares[i].id}" }) { i ->
+                        val p = pendingShares[i]
+                        ShareConfirmCard(
+                            pending = p,
+                            busy = sharingId == p.id && p.outcome == null,
+                            onConfirm = { sharingId = p.id; vm.confirmPendingShare(p.id) },
+                            onDismiss = { vm.dismissPendingShare(p.id) },
+                        )
+                    }
+                    if (showChips && !sending) {
+                        item(key = "chips") {
+                            AssistantHome(
+                                ctx, onAsk = ::ask, compact = true,
+                                undoAllCount = undoAllCount,
+                                onUndoAll = { undoAll(vm, lastUndoable) },
+                                // At least a full viewport tall, so opening the
+                                // sheet parks this card at the top with the whole
+                                // conversation above the fold.
+                                modifier = Modifier.heightIn(min = viewportHeight),
+                            )
+                        }
+                    }
                 }
-                if (sending) item { ThinkingRow() }
             }
         }
 
@@ -246,11 +353,17 @@ private fun AssistantChat(vm: AppViewModel) {
             )
         }
 
-        // Input bar: text + speaker toggle + mic + send.
+        // ── Input bar: ✦ re-summon + text + speaker + mic + send ─────────────
         Row(
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 10.dp),
             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
         ) {
+            if (hasHistory && !showChips) {
+                RoundIcon(
+                    icon = Icons.Filled.AutoAwesome, tint = c.ink2, bg = c.bg2,
+                    label = "Show suggestions",
+                ) { showChips = true }
+            }
             Box(
                 Modifier.weight(1f).clip(RoundedCornerShape(22.dp)).background(c.bg2).padding(horizontal = 16.dp, vertical = 12.dp),
             ) {
@@ -261,10 +374,15 @@ private fun AssistantChat(vm: AppViewModel) {
                     onValueChange = { input = it; if (it.isNotEmpty()) { note = null; vm.clearAssistantError() } },
                     textStyle = UFont.sans(15).copy(color = c.ink), cursorBrush = SolidColor(c.ink),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-                    keyboardActions = KeyboardActions(onSend = { send(input) }),
+                    keyboardActions = KeyboardActions(onSend = { ask(input) }),
                     modifier = Modifier.fillMaxWidth(),
                     decorationBox = { inner ->
-                        if (input.isEmpty()) Text(if (listening) "Listening…" else "Message…", style = UFont.sans(15), color = c.ink3)
+                        if (input.isEmpty()) {
+                            Text(
+                                if (listening) "Listening…" else "Ask Unstuck to handle something…",
+                                style = UFont.sans(15), color = c.ink3,
+                            )
+                        }
                         inner()
                     },
                 )
@@ -287,22 +405,77 @@ private fun AssistantChat(vm: AppViewModel) {
                 tint = if (input.isBlank() || sending) c.ink4 else Color.White,
                 bg = if (input.isBlank() || sending) c.bg2 else c.coral,
                 label = "Send",
-            ) { send(input) }
+            ) { ask(input) }
         }
     }
 }
 
+/** Revert every still-undoable receipt on the last turn that made changes.
+ *  Walks BACKWARDS so earlier indices stay valid as receipts flip to `undone`. */
+private fun undoAll(vm: AppViewModel, msg: ChatMessage?) {
+    val id = msg?.id ?: return
+    val receipts = msg.receipts ?: return
+    for (i in receipts.indices.reversed()) {
+        val r = receipts[i]
+        if (r.undo != null && !r.undone) vm.undoAssistantReceipt(id, i)
+    }
+}
+
 @Composable
-private fun MessageBubble(text: String, fromUser: Boolean) {
+private fun DayDivider(label: String) {
+    Box(Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 2.dp), contentAlignment = Alignment.Center) {
+        SectionLabel(label)
+    }
+}
+
+@Composable
+private fun MessageBubble(m: ChatMessage) {
     val c = UTheme.colors
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (fromUser) Arrangement.End else Arrangement.Start) {
+    val fromUser = m.role == "user"
+    Row(
+        Modifier.fillMaxWidth(),
+        horizontalArrangement = if (fromUser) Arrangement.End else Arrangement.Start,
+    ) {
         Box(
             Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(16.dp))
                 .background(if (fromUser) c.coral else c.surface)
                 .then(if (fromUser) Modifier else Modifier.border(1.dp, c.line, RoundedCornerShape(16.dp)))
                 .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
-            Text(text, style = UFont.sans(15), color = if (fromUser) Color.White else c.ink)
+            // A locally-injected turn (the daily check-in) is marked ✦ so it
+            // never reads as something the model said.
+            Text(
+                (if (m.local) "✦ " else "") + m.content.orEmpty(),
+                style = UFont.sans(15), color = if (fromUser) Color.White else c.ink,
+            )
+        }
+    }
+}
+
+/** A deterministic ✓ card for one thing the agent actually did. */
+@Composable
+private fun ReceiptCard(row: ThreadRow.ReceiptItem, onUndo: () -> Unit) {
+    val c = UTheme.colors
+    val r = row.receipt
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface)
+            .border(1.dp, c.line, RoundedCornerShape(12.dp))
+            .padding(horizontal = 11.dp, vertical = 7.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Icon(Icons.Filled.Check, contentDescription = null, tint = c.green, modifier = Modifier.size(14.dp))
+        Text(
+            r.label, style = UFont.sans(12), color = c.ink2, modifier = Modifier.weight(1f),
+            textDecoration = if (r.undone) TextDecoration.LineThrough else null,
+        )
+        when {
+            r.undone -> Text("undone", style = UFont.sans(11), color = c.ink3)
+            r.undo != null -> Text(
+                "Undo", style = UFont.sans(12, FontWeight.SemiBold), color = c.coralDeep,
+                modifier = Modifier.clip(RoundedCornerShape(999.dp))
+                    .clickable(role = Role.Button, onClick = onUndo)
+                    .minimumInteractiveComponentSize().padding(horizontal = 6.dp, vertical = 2.dp),
+            )
         }
     }
 }
@@ -311,7 +484,10 @@ private fun MessageBubble(text: String, fromUser: Boolean) {
 private fun ThinkingRow() {
     val c = UTheme.colors
     // Polite live region so TalkBack announces that a reply is in progress.
-    Row(Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite }, horizontalArrangement = Arrangement.Start) {
+    Row(
+        Modifier.fillMaxWidth().semantics { liveRegion = LiveRegionMode.Polite },
+        horizontalArrangement = Arrangement.Start,
+    ) {
         Box(
             Modifier.clip(RoundedCornerShape(16.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(16.dp))
                 .padding(horizontal = 14.dp, vertical = 10.dp),
@@ -321,7 +497,7 @@ private fun ThinkingRow() {
 
 @Composable
 private fun RoundIcon(
-    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    icon: ImageVector,
     tint: Color, bg: Color,
     label: String, stateDesc: String? = null, role: Role = Role.Button,
     onClick: () -> Unit,
@@ -340,11 +516,13 @@ private fun RoundIcon(
     ) { Icon(icon, contentDescription = null, tint = tint, modifier = Modifier.size(20.dp)) }
 }
 
-private fun friendlyError(code: String): String = when (code) {
+internal fun friendlyError(code: String): String = when (code) {
     "not_configured" -> "The assistant isn't set up yet."
     "network" -> "Couldn't reach the assistant — check your connection."
     "timeout" -> "That took too long — try again."
     "upstream" -> "The assistant had a hiccup. Try again."
     "unauthorized" -> "Please sign in to use the assistant."
+    "rate_limited" -> "You've asked a lot just now — give it a minute."
+    "payload_too_large" -> "That was too much to send at once — try a shorter message."
     else -> "Something went wrong. Try again."
 }

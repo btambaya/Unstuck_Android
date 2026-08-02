@@ -10,6 +10,8 @@ import io.ktor.http.contentType
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import tech.csalliance.unstuck.core.logic.AssistantWindowTurn
+import tech.csalliance.unstuck.core.logic.Receipt
 
 // AssistantClient — transport for the in-app agent. Calls the stateless
 // `assistant` edge function (a qwen proxy that owns the system prompt + tool
@@ -18,15 +20,31 @@ import kotlinx.serialization.json.JsonElement
 // its own offline-first methods, appends the results, and re-invokes until the
 // assistant returns a plain text reply. Messages use the OpenAI chat shape.
 
-/** One message in the OpenAI-style conversation (user | assistant | tool). */
+/** One message in the OpenAI-style conversation (user | assistant | tool).
+ *
+ *  This type is BOTH the display/persistence record and the source of the wire
+ *  payload. The trailing fields are CLIENT-ONLY: they drive the endless thread
+ *  (day dividers, receipts, the local check-in) and are stripped in [ask] — the
+ *  edge function forwards messages verbatim to an OpenAI-compatible upstream, so
+ *  an unknown per-message field must never leak. Mirrors the web ChatMessage +
+ *  its `wire` map in lib/assistant/client.ts. */
 @Serializable
 data class ChatMessage(
-    val role: String,
+    override val role: String,
     val content: String? = null,
     @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null,
     @SerialName("tool_call_id") val toolCallId: String? = null,
     val name: String? = null,
-)
+    /** Stable client-side id so the thread keys on identity, not list position. */
+    val id: String? = null,
+    /** Epoch ms the turn landed — drives the day dividers. */
+    val at: Long? = null,
+    /** Deterministic action receipts attached to the closing assistant turn. */
+    val receipts: List<Receipt>? = null,
+    /** Locally-injected display turn (the daily check-in) — NEVER part of the
+     *  model window; purely visual history. */
+    override val local: Boolean = false,
+) : AssistantWindowTurn
 
 /** A tool call the model wants run. id/type are required so they always
  *  round-trip back to qwen on the next turn (kotlinx omits default-valued
@@ -50,9 +68,23 @@ data class AssistantReply(
     @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null,
 )
 
+/** The EXACT shape the model expects — the client-only fields on [ChatMessage]
+ *  (id / at / receipts / local) are not part of it. */
+@Serializable
+internal data class WireMessage(
+    val role: String,
+    val content: String? = null,
+    @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null,
+    @SerialName("tool_call_id") val toolCallId: String? = null,
+    val name: String? = null,
+)
+
+internal fun ChatMessage.toWire(): WireMessage =
+    WireMessage(role = role, content = content, toolCalls = toolCalls, toolCallId = toolCallId, name = name)
+
 @Serializable
 private data class AssistantRequest(
-    val messages: List<ChatMessage>,
+    val messages: List<WireMessage>,
     val context: JsonElement,
 )
 
@@ -72,6 +104,9 @@ sealed interface AssistantResult {
 class AssistantClient(private val client: SupabaseClient) {
 
     suspend fun ask(messages: List<ChatMessage>, context: JsonElement): AssistantResult {
+        // Narrow to the wire shape: the display-only fields (id/at/receipts/local)
+        // are ours, and the edge function forwards messages verbatim upstream.
+        val wire = messages.map { it.toWire() }
         // One retry on a thrown error (transient network / cold-start timeout).
         var last: Throwable? = null
         repeat(2) { attempt ->
@@ -79,7 +114,7 @@ class AssistantClient(private val client: SupabaseClient) {
                 val resp: AssistantResponse = client.functions.invoke("assistant") {
                     method = HttpMethod.Post
                     contentType(ContentType.Application.Json)
-                    setBody(AssistantRequest(messages, context))
+                    setBody(AssistantRequest(wire, context))
                 }.body()
                 when {
                     resp.error != null -> AssistantResult.Err(resp.error)

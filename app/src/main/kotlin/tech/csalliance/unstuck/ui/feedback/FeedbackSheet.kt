@@ -66,8 +66,10 @@ fun FeedbackSheet(vm: AppViewModel, currentScreen: String?, onDismiss: () -> Uni
     }
 }
 
-/** The feedback composer content (no sheet wrapper) — reused inside the
- *  assistant surface's "Feedback" tab. Calls [onDone] after the thanks lands. */
+/** The feedback composer content (no sheet wrapper). Reached from Settings →
+ *  Account → "Send feedback": it used to be a tab inside the assistant sheet,
+ *  but the bubble is a pure assistant surface now (web parity).
+ *  Calls [onDone] after the thanks lands. */
 @Composable
 fun FeedbackForm(vm: AppViewModel, currentScreen: String?, onDone: () -> Unit) {
     val c = UTheme.colors

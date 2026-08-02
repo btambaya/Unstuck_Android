@@ -70,6 +70,7 @@ import tech.csalliance.unstuck.design.component.ButtonKind
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.ui.feedback.FeedbackSheet
 import tech.csalliance.unstuck.ui.tour.TourAnchorIds
 import tech.csalliance.unstuck.ui.tour.TourEvents
 import tech.csalliance.unstuck.ui.tour.tourAnchor
@@ -192,6 +193,11 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
                     SegRow("Theme", listOf("system", "light", "dark"), s.theme.name.lowercase()) { v ->
                         vm.updateSettings { it.copy(theme = ThemePref.valueOf(v.uppercase())) }
                     }
+                    // The AI Assistant kill-switch the privacy policy promises
+                    // ("Settings → Interface → AI Assistant. Turn it off entirely").
+                    // Same slot as web (directly under Theme); off unmounts the
+                    // launcher so nothing reaches the AI provider.
+                    ToggleRow("AI Assistant", s.assistantEnabled) { v -> vm.updateSettings { it.copy(assistantEnabled = v) } }
                     SegRow("Accent", listOf("indigo", "rose", "forest"), accentKey(s.accent)) { v ->
                         vm.updateSettings { it.copy(accent = accentFromKey(v)) }
                     }
@@ -234,6 +240,10 @@ private fun AccountContent(vm: AppViewModel) {
     var showName by remember { mutableStateOf(false) }
     var showPassword by remember { mutableStateOf(false) }
     var showDelete by remember { mutableStateOf(false) }
+    // Feedback used to be a tab inside the assistant sheet; it lives here now so
+    // it isn't gated behind (or lost with) the AI Assistant. Self-contained —
+    // the composer sheet is opened from this row alone.
+    var feedbackOpen by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<String?>(null) }
     var msgErr by remember { mutableStateOf(false) }   // render failures in red, not success-green
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
@@ -253,11 +263,14 @@ private fun AccountContent(vm: AppViewModel) {
         // card at its saved step; a finished (or fresh) tour resets to the
         // welcome card.
         SettingRow("Product tour", "Resume or replay the guided tour") { TourEvents.requestRestart() }
+        SettingRow("Send feedback", "Bugs, ideas, anything — straight to the team.") { feedbackOpen = true }
         SettingRow("Export everything", "One-shot JSON snapshot") { exporter.launch("unstuck-export.json") }
         SettingRow("Delete my account", "Permanently removes your data") { showDelete = true }
         SettingRow("Sign out", "End this session", last = true) { vm.signOut() }
     }
     msg?.let { Text(it, style = UFont.sans(12), color = if (msgErr) c.red else c.green, modifier = Modifier.padding(top = 10.dp)) }
+
+    if (feedbackOpen) FeedbackSheet(vm, currentScreen = "settings", onDismiss = { feedbackOpen = false })
 
     if (showName) FieldDialog("Display name", "Your name", initial = vm.currentName ?: "", onSave = { showName = false; scope.launch { val r = vm.updateDisplayName(it); msgErr = r is AuthOutcome.Error; msg = if (r is AuthOutcome.Error) r.message else "Name updated." } }, onDismiss = { showName = false })
     if (showPassword) PasswordDialog(

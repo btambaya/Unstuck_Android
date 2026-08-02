@@ -55,7 +55,19 @@ import tech.csalliance.unstuck.AppGraph
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.sync.AssistantResult
 import tech.csalliance.unstuck.sync.ChatMessage
+import tech.csalliance.unstuck.sync.ToolCall
 import tech.csalliance.unstuck.core.logic.DivergenceResolution
+import tech.csalliance.unstuck.core.logic.PendingShare
+import tech.csalliance.unstuck.core.logic.Receipt
+import tech.csalliance.unstuck.core.logic.ReceiptArgs
+import tech.csalliance.unstuck.core.logic.ReceiptUndoPlan
+import tech.csalliance.unstuck.core.logic.ShareCandidate
+import tech.csalliance.unstuck.core.logic.ShareOutcome
+import tech.csalliance.unstuck.core.logic.assistantModelWindow
+import tech.csalliance.unstuck.core.logic.assistantPersistWindow
+import tech.csalliance.unstuck.core.logic.deriveReceipt
+import tech.csalliance.unstuck.core.logic.planReceiptUndo
+import tech.csalliance.unstuck.core.logic.resolveShareRequest
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.SharedSessionState
 import tech.csalliance.unstuck.core.logic.adoptable
@@ -79,6 +91,7 @@ import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.CaptureTag
 import tech.csalliance.unstuck.core.model.CircleMember
+import tech.csalliance.unstuck.core.model.CircleStatus
 import tech.csalliance.unstuck.core.model.FocusTreatment
 import tech.csalliance.unstuck.core.model.CollectionItem
 import tech.csalliance.unstuck.core.model.ItemCollection
@@ -1815,6 +1828,41 @@ class AppViewModel(
     suspend fun sharedTaskDetail(taskId: String): tech.csalliance.unstuck.core.model.SharedTaskDetail? =
         circleClient?.sharedTaskDetail(taskId)
 
+    // --- assistant-staged shares (the ONE agent action that reaches another
+    // person, so it never runs on the model's say-so) ---
+
+    /** Share requests the agent PREPARED. The panel renders a confirm card for
+     *  each; nothing leaves this device until the user taps "Share it". */
+    private val _pendingShares = MutableStateFlow<List<PendingShare>>(emptyList())
+    val pendingShares: StateFlow<List<PendingShare>> = _pendingShares.asStateFlow()
+
+    /** Trusted-circle members who can actually receive a share — ACTIVE only
+     *  (a pending invite has no user id to share to). */
+    private fun shareCandidates(): List<ShareCandidate> = circle.value
+        .filter { it.status == CircleStatus.ACTIVE && !it.memberUserId.isNullOrBlank() }
+        .map { ShareCandidate(it.memberUserId!!, it.memberName ?: it.relationshipLabel ?: "Someone") }
+
+    /** Perform a staged share — ONLY ever called from the confirm card's tap.
+     *  Runs the same task_share RPC + share-notify ping the share sheet uses. */
+    fun confirmPendingShare(id: String) = launchWrite {
+        val p = _pendingShares.value.firstOrNull { it.id == id && it.outcome == null } ?: return@launchWrite
+        val ok = runCatching { circleClient?.taskShare(p.taskId, p.recipientUserId, p.level) }.isSuccess
+        if (ok) {
+            runCatching { circleClient?.notifyTaskShare(p.taskId, p.recipientUserId) }
+            refreshShares()
+        }
+        _pendingShares.value = _pendingShares.value.map {
+            if (it.id == id) it.copy(outcome = if (ok) ShareOutcome.SHARED else ShareOutcome.FAILED) else it
+        }
+    }
+
+    /** "Not now" — resolves the card WITHOUT calling the RPC. */
+    fun dismissPendingShare(id: String) {
+        _pendingShares.value = _pendingShares.value.map {
+            if (it.id == id) it.copy(outcome = ShareOutcome.DISMISSED) else it
+        }
+    }
+
     /** Complete/uncomplete a task shared WITH me — partner OR assign only (the RPC
      *  rejects view). Pings the owner on completion (best-effort), then refetches.
      *  Stamps [_sharedCompletedAt] so the row moves like any other completed task the
@@ -2048,14 +2096,71 @@ class AppViewModel(
         }
     }
 
+    // ONE endless thread (redesign 2026-08-02): DISPLAY history persists long
+    // (200 turns, receipts + local check-ins included) while the MODEL window
+    // stays short (40, aligned to a user turn) — see assistantModelWindow. The
+    // old code capped BOTH at 40 via the persist path only, so the in-session
+    // wire payload actually grew unbounded; the window is now applied per ask.
     private fun persistAssistant() {
         runCatching {
-            val window = assistantHistory.takeLast(40).dropWhile { it.role != "user" }
+            val window = assistantPersistWindow(assistantHistory.toList())
             assistantPrefs.edit().putString("history", Json.encodeToString(window)).apply()
         }
     }
 
-    /** Clear the assistant conversation (a "new chat" + the sign-out scrub). */
+    /** Stamp a fresh turn with its identity + landing time (day dividers). */
+    private fun turn(
+        role: String,
+        content: String? = null,
+        toolCalls: List<ToolCall>? = null,
+        toolCallId: String? = null,
+        name: String? = null,
+        local: Boolean = false,
+    ) = ChatMessage(
+        role = role, content = content, toolCalls = toolCalls, toolCallId = toolCallId,
+        name = name, id = newUuid(), at = nowMs(), local = local,
+    )
+
+    /** Inject a LOCAL display-only assistant turn (the daily check-in). Never
+     *  enters the model window; persists like any other display turn. */
+    fun appendLocalAssistant(content: String) {
+        if (content.isBlank()) return
+        assistantHistory.add(turn("assistant", content = content, local = true))
+        persistAssistant()
+    }
+
+    /** "YYYY-MM-DD" of the last daily check-in on this device (null = never). */
+    fun lastCheckinDay(): String? = runCatching { assistantPrefs.getString("checkin", null) }.getOrNull()
+
+    fun markCheckinDay(dayIso: String) {
+        runCatching { assistantPrefs.edit().putString("checkin", dayIso).apply() }
+    }
+
+    /** Undo one receipt on a persisted assistant turn; flips `undone` so the
+     *  button doesn't come back. No-op when the receipt is gone//already used or
+     *  its target no longer exists (then the label stays actionable-looking
+     *  rather than lying about a revert that didn't happen). */
+    fun undoAssistantReceipt(messageId: String, index: Int) {
+        val mi = assistantHistory.indexOfFirst { it.id == messageId }
+        if (mi < 0) return
+        val msg = assistantHistory[mi]
+        val existing = msg.receipts ?: return
+        val receipt = existing.getOrNull(index) ?: return
+        if (receipt.undone) return
+        val undo = receipt.undo ?: return
+        val plan = planReceiptUndo(undo, tasks.value, isoNow()) ?: return
+        when (plan) {
+            is ReceiptUndoPlan.Remove -> deleteTask(plan.taskId)
+            is ReceiptUndoPlan.Restore -> updateTask(plan.task)
+        }
+        val receipts = existing.mapIndexed { i, r -> if (i == index) r.copy(undone = true) else r }
+        assistantHistory[mi] = msg.copy(receipts = receipts)
+        persistAssistant()
+    }
+
+    /** Clear the conversation — the ⋯ menu's "Clear conversation" and the
+     *  sign-out scrub. (There is no "new chat": the thread is endless, so this
+     *  is a deliberate erase, not a way to start a second conversation.) */
     fun clearAssistant() {
         assistantEpoch++
         assistantJob?.cancel()
@@ -2063,6 +2168,9 @@ class AppViewModel(
         _assistantSending.value = false
         _assistantError.value = null
         assistantHistory.clear()
+        // Staged-but-unconfirmed shares belong to the conversation that proposed
+        // them; they must not outlive it (nor leak to the next account).
+        _pendingShares.value = emptyList()
         runCatching { assistantPrefs.edit().clear().apply() }
     }
 
@@ -2077,7 +2185,7 @@ class AppViewModel(
         if (_assistantSending.value) return
         _assistantSending.value = true
         _assistantError.value = null
-        assistantHistory.add(ChatMessage(role = "user", content = userText))
+        assistantHistory.add(turn("user", content = userText))
         persistAssistant()
         assistantJob = viewModelScope.launch {
             try {
@@ -2098,35 +2206,62 @@ class AppViewModel(
         // optimistic write), so a later tool call can reference them by id.
         val newTasks = HashMap<String, TaskItem>()
         val newLists = HashMap<String, ItemCollection>()
+        // Deterministic receipts for everything this turn actually changed —
+        // derived from the tool name + args + the executor's own result string,
+        // never from the model's prose. Attached to the CLOSING assistant turn.
+        val receipts = mutableListOf<Receipt>()
         var iterations = 0
         while (iterations < 5) {
             iterations++
-            when (val r = a.ask(history, buildAssistantContext())) {
+            // Only the trimmed, user-aligned, local-free window ever goes over
+            // the wire — the on-screen thread is far longer than what we send.
+            when (val r = a.ask(assistantModelWindow(history), buildAssistantContext())) {
                 is AssistantResult.Err -> return AssistantTurn.Error(r.code)
                 is AssistantResult.Ok -> {
                     val reply = r.reply
                     // history IS assistantHistory (a Compose SnapshotStateList). a.ask()
                     // suspends on network and may resume on a worker thread, so every
                     // mutation here must hop to Main (immediate = free when already on Main).
-                    withContext(Dispatchers.Main.immediate) {
-                        history.add(ChatMessage(role = "assistant", content = reply.content, toolCalls = reply.toolCalls))
-                    }
                     val calls = reply.toolCalls
-                    if (calls.isNullOrEmpty()) {
-                        return AssistantTurn.Reply(reply.content?.trim().orEmpty().ifEmpty { "Done." })
+                    val closing = calls.isNullOrEmpty()
+                    val text = if (closing) reply.content?.trim().orEmpty().ifEmpty { "Done." } else reply.content
+                    withContext(Dispatchers.Main.immediate) {
+                        history.add(
+                            turn("assistant", content = text, toolCalls = reply.toolCalls)
+                                .copy(receipts = if (closing && receipts.isNotEmpty()) receipts.toList() else null),
+                        )
                     }
-                    for (call in calls) {
-                        val result = runCatching { runAssistantTool(call.function.name, parseToolArgs(call.function.arguments), newTasks, newLists) }
+                    if (closing) return AssistantTurn.Reply(text ?: "Done.")
+                    for (call in calls!!) {
+                        val args = parseToolArgs(call.function.arguments)
+                        val result = runCatching { runAssistantTool(call.function.name, args, newTasks, newLists) }
                             .getOrElse { "error: ${it.message ?: "failed"}" }
+                        deriveReceipt(call.function.name, receiptArgs(args), result, tasks.value)?.let { receipts += it }
                         withContext(Dispatchers.Main.immediate) {
-                            history.add(ChatMessage(role = "tool", content = result, toolCallId = call.id, name = call.function.name))
+                            history.add(turn("tool", content = result, toolCallId = call.id, name = call.function.name))
                         }
                     }
                 }
             }
         }
+        // Ran out of iterations — close out gracefully, keeping the receipts.
+        withContext(Dispatchers.Main.immediate) {
+            history.add(
+                turn("assistant", content = "Done.")
+                    .copy(receipts = if (receipts.isNotEmpty()) receipts.toList() else null),
+            )
+        }
         return AssistantTurn.Reply("Done.")
     }
+
+    /** Flatten a tool call's JSON args to the typed subset receipts read. */
+    private fun receiptArgs(args: JsonObject) = ReceiptArgs(
+        taskId = args["taskId"]?.jsonPrimitive?.contentOrNull,
+        date = args["date"]?.jsonPrimitive?.contentOrNull,
+        startTime = args["startTime"]?.jsonPrimitive?.contentOrNull,
+        later = args["later"]?.jsonPrimitive?.booleanOrNull,
+        kind = args["kind"]?.jsonPrimitive?.contentOrNull,
+    )
 
     private fun parseToolArgs(s: String): JsonObject =
         runCatching { Json.parseToJsonElement(s).jsonObject }.getOrDefault(JsonObject(emptyMap()))
@@ -2192,6 +2327,20 @@ class AppViewModel(
             "delete_task" -> {
                 val t = findTask(str("taskId")) ?: return "error: task not found"
                 deleteTask(t.id); "ok: deleted \"${t.name}\""
+            }
+            "share_task" -> {
+                // NEVER shares here: sharing sends the user's content to another
+                // person, so it always waits for an on-screen confirm tap. This
+                // only RESOLVES + STAGES; confirmPendingShare() does the RPC.
+                val res = resolveShareRequest(
+                    taskId = str("taskId"), taskName = str("taskName"),
+                    person = str("person"), level = str("level"),
+                    tasks = tasks.value + newTasks.values,
+                    people = shareCandidates(),
+                    newId = ::newUuid,
+                )
+                res.pending?.let { p -> withContext(Dispatchers.Main.immediate) { _pendingShares.value += p } }
+                res.message
             }
             "create_list" -> {
                 val nm = str("name") ?: return "error: name required"
@@ -2273,7 +2422,11 @@ class AppViewModel(
 
     val voiceProxyUrl: String get() = tech.csalliance.unstuck.BuildConfig.VOICE_PROXY_URL
     val voiceModel: String get() = "qwen3.5-omni-flash-realtime"
-    fun voiceConfigured(): Boolean = voiceProxyUrl.isNotBlank()
+    /** Realtime voice is available only when a proxy is configured AND the user
+     *  hasn't switched AI off (Settings → Interface → AI Assistant). The
+     *  kill-switch has to reach EVERY assistant surface, voice included — the
+     *  published privacy policy promises exactly that. */
+    fun voiceConfigured(): Boolean = voiceProxyUrl.isNotBlank() && settings.value.assistantEnabled
     fun voiceAccessToken(): String? = graph.provider?.client?.auth?.currentSessionOrNull()?.accessToken
 
     private val voiceNewTasks = HashMap<String, TaskItem>()

@@ -57,6 +57,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
@@ -199,12 +200,19 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     // turn outlives the sheet) — only an open sheet collects + speaks.
     LaunchedEffect(Unit) { vm.assistantReplies.collect { if (speakReplies) voice.speak(it) } }
 
+    val keyboard = LocalSoftwareKeyboardController.current
+
     fun ask(text: String) {
         val t = text.trim()
         if (t.isEmpty() || sending) return
         input = ""
         note = null
         showChips = false
+        // Drop the keyboard on send. It used to stay up for the whole
+        // exchange, so the reply you just asked for landed behind it (found on
+        // iOS while capturing marketing shots; Android had the same gap).
+        // Tap the field again to keep typing.
+        keyboard?.hide()
         vm.sendAssistant(t)
     }
 

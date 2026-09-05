@@ -52,6 +52,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tech.csalliance.unstuck.SettingsStore
 import tech.csalliance.unstuck.core.logic.newUuid
 import tech.csalliance.unstuck.core.model.Density
 import tech.csalliance.unstuck.core.model.LifeArea
@@ -198,6 +199,20 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
                     // Same slot as web (directly under Theme); off unmounts the
                     // launcher so nothing reaches the AI provider.
                     ToggleRow("AI Assistant", s.assistantEnabled) { v -> vm.updateSettings { it.copy(assistantEnabled = v) } }
+                    // Realtime voice fallback (bargein.md §8): press-and-hold instead of
+                    // an open mic. Device-local (SettingsStore key voice.holdToTalk, same
+                    // slot as web "Voice: hold to talk"); a voice session reads it once
+                    // at start, and the in-call "Noisy room?" chip flips it too.
+                    if (s.assistantEnabled) {
+                        val voiceStore = remember { SettingsStore(context) }
+                        var holdToTalk by remember { mutableStateOf(voiceStore.voiceHoldToTalk()) }
+                        ToggleRow("Hold to talk", holdToTalk) { v -> holdToTalk = v; voiceStore.setVoiceHoldToTalk(v) }
+                        Text(
+                            "For noisy rooms: press and hold the orb to speak; release to send",
+                            style = UFont.sans(12, FontWeight.Normal), color = c.ink2,
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+                        )
+                    }
                     SegRow("Accent", listOf("indigo", "rose", "forest"), accentKey(s.accent)) { v ->
                         vm.updateSettings { it.copy(accent = accentFromKey(v)) }
                     }

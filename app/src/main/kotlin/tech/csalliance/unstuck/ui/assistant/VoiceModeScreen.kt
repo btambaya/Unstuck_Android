@@ -13,6 +13,7 @@ import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +36,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.semantics.LiveRegionMode
@@ -42,6 +44,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.liveRegion
+import androidx.compose.ui.semantics.role
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -51,6 +54,7 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
+import tech.csalliance.unstuck.SettingsStore
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
@@ -59,6 +63,14 @@ import tech.csalliance.unstuck.ui.AppViewModel
  * Full-screen voice mode — live speech-to-speech with Qwen-Omni (through the
  * Cloudflare proxy). Talk naturally; it listens, reasons, runs your scheduling
  * tools, and speaks back, with barge-in. Shows the current state + live caption.
+ *
+ * Two ways to talk (spec bargein.md §6/§8):
+ *  - open mic (default): the server VAD + RMS gate handle turns; tapping the orb
+ *    or the Interrupt pill hard-cancels a reply — offered ONLY while the model is
+ *    responding or its speech is still playing (client.canInterrupt);
+ *  - hold to talk (Settings › Interface, or the one-tap "Noisy room?" chip the
+ *    client raises after 3 false barge-ins in 2 min): press and hold the orb to
+ *    speak, release to send. The label shows the mode.
  */
 @Composable
 fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
@@ -66,11 +78,26 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
     val context = LocalContext.current
     val main = remember { Handler(Looper.getMainLooper()) }
     val audio = remember { VoiceAudioEngine(context) }
+    val settingsStore = remember { SettingsStore(context) }
 
     var state by remember { mutableStateOf(VoiceState.CONNECTING) }
     var caption by remember { mutableStateOf("") }
     var note by remember { mutableStateOf<String?>(null) }
     var client by remember { mutableStateOf<VoiceRealtimeClient?>(null) }
+    // Hold-to-talk: the engine + client read the pref once per session (the
+    // engine's snapshot is what the client's controller was built from); this
+    // mirrors it for the orb/label and flips with the noisy-room chip.
+    var holdToTalk by remember { mutableStateOf(audio.holdToTalkPref) }
+    var holding by remember { mutableStateOf(false) }
+    // 3 false barge-ins inside 2 min → one-tap offer to switch to hold to talk.
+    var suggestHoldToTalk by remember { mutableStateOf(false) }
+
+    fun switchToHoldToTalk() {
+        settingsStore.setVoiceHoldToTalk(true)
+        client?.setHoldToTalk(true)
+        holdToTalk = true
+        suggestHoldToTalk = false
+    }
 
     fun startSession() {
         val token = vm.voiceAccessToken()
@@ -87,7 +114,8 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
         }
         val rc = VoiceRealtimeClient(
             proxyUrl = vm.voiceProxyUrl, token = token, model = vm.voiceModel,
-            instructions = vm.voiceInstructions(), tools = vm.voiceTools(), audio = audio,
+            instructions = vm.voiceInstructions(), tools = vm.voiceTools(), opening = vm.voiceOpening(),
+            audio = audio,
             runTool = { name, args -> vm.runVoiceTool(name, args) },
             onState = { s -> main.post { state = s } },
             onError = { msg -> main.post { note = msg } },
@@ -99,6 +127,8 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                     }
                 }
             },
+            // Already posted to the main thread by the client.
+            onSuggestHoldToTalk = { suggestHoldToTalk = true },
         )
         client = rc
         rc.start()
@@ -129,7 +159,8 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
         // Keep the screen awake while the call is live so the lock screen doesn't
         // cut the session mid-conversation. (The dialog has its own window.)
         val view = LocalView.current
-        val sessionLive = state == VoiceState.CONNECTING || state == VoiceState.LISTENING || state == VoiceState.SPEAKING
+        val live = state == VoiceState.LISTENING || state == VoiceState.THINKING || state == VoiceState.SPEAKING
+        val sessionLive = state == VoiceState.CONNECTING || live
         DisposableEffect(sessionLive) {
             view.keepScreenOn = sessionLive
             onDispose { view.keepScreenOn = false }
@@ -148,21 +179,43 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                 horizontalAlignment = Alignment.CenterHorizontally,
                 verticalArrangement = Arrangement.spacedBy(24.dp),
             ) {
-                val live = state == VoiceState.SPEAKING || state == VoiceState.LISTENING
+                // Interrupt is a hard cancel: offered only while a response is in
+                // flight or its speech is still playing (spec §6). The state
+                // transitions that flip `speaking` are the same ones that update
+                // `state`, so reading canInterrupt on recomposition is current.
+                val canInterrupt = (state == VoiceState.THINKING || state == VoiceState.SPEAKING) && client?.canInterrupt == true
+                val orbGesture = when {
+                    !live -> Modifier
+                    // Hold to talk: press = cancel any reply + open the gate; release = send.
+                    holdToTalk -> Modifier
+                        .semantics { role = Role.Button; contentDescription = if (holding) "Release to send" else "Hold to talk" }
+                        .pointerInput(Unit) {
+                            detectTapGestures(onPress = {
+                                holding = true
+                                client?.pttDown()
+                                try { tryAwaitRelease() } finally { client?.pttUp(); holding = false }
+                            })
+                        }
+                    canInterrupt -> Modifier.clickable(role = Role.Button) { client?.interrupt() }
+                        .semantics { contentDescription = "Interrupt assistant" }
+                    else -> Modifier
+                }
                 PulsingOrb(
-                    active = live,
+                    active = state == VoiceState.SPEAKING || state == VoiceState.THINKING ||
+                        (state == VoiceState.LISTENING && (!holdToTalk || holding)),
                     color = if (state == VoiceState.SPEAKING) c.coral else c.primary,
-                    onClick = if (live) ({ client?.interrupt() }) else null,
+                    gesture = orbGesture,
                 )
                 Text(
                     when (state) {
                         VoiceState.CONNECTING -> "Connecting…"
-                        VoiceState.LISTENING -> "Listening…"
+                        VoiceState.LISTENING -> if (holdToTalk) (if (holding) "Listening…" else "Hold to talk") else "Listening…"
+                        VoiceState.THINKING -> "Thinking…"
                         VoiceState.SPEAKING -> "Speaking…"
                         VoiceState.ERROR -> note ?: "Something went wrong."
                         VoiceState.CLOSED -> "Ended"
                     },
-                    // Announce state changes (Listening/Speaking/errors) to TalkBack.
+                    // Announce state changes (Listening/Thinking/Speaking/errors) to TalkBack.
                     modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                     style = UFont.sans(15, FontWeight.Medium), color = c.ink2,
                 )
@@ -170,12 +223,22 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                     Text(caption, style = UFont.serifItalic(22), color = c.ink, textAlign = TextAlign.Center)
                 }
                 // Manual interrupt — cut the model's speech and let the user talk.
-                if (live) {
+                if (canInterrupt) {
                     Box(
                         Modifier.clip(RoundedCornerShape(999.dp)).background(c.bg2)
                             .clickable(role = Role.Button) { client?.interrupt() }
                             .padding(horizontal = 24.dp, vertical = 12.dp),
                     ) { Text("Interrupt", style = UFont.sans(15, FontWeight.SemiBold), color = c.ink) }
+                }
+                // Noisy-room fallback offer (spec §8): the client saw 3 duck→restore
+                // cycles inside 2 minutes. One tap persists the pref + switches the
+                // live session (turn_detection: null) without reconnecting.
+                if (suggestHoldToTalk && !holdToTalk && live) {
+                    Box(
+                        Modifier.clip(RoundedCornerShape(999.dp)).background(c.bg2)
+                            .clickable(role = Role.Button) { switchToHoldToTalk() }
+                            .padding(horizontal = 18.dp, vertical = 10.dp),
+                    ) { Text("Noisy room? Switch to hold to talk", style = UFont.sans(13, FontWeight.Medium), color = c.ink2) }
                 }
             }
 
@@ -190,21 +253,17 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
     }
 }
 
+/** The orb. [gesture] carries the mode's interaction (tap-to-interrupt or
+ *  press-and-hold) plus its TalkBack label; empty when nothing is offered. */
 @Composable
-private fun PulsingOrb(active: Boolean, color: Color, onClick: (() -> Unit)? = null) {
+private fun PulsingOrb(active: Boolean, color: Color, gesture: Modifier = Modifier) {
     val transition = rememberInfiniteTransition(label = "orb")
     val scale by transition.animateFloat(
         initialValue = 1f, targetValue = if (active) 1.15f else 1f,
         animationSpec = infiniteRepeatable(tween(900), RepeatMode.Reverse), label = "scale",
     )
     Box(
-        Modifier.size(120.dp).scale(scale).clip(CircleShape).background(color)
-            .let { m ->
-                if (onClick != null) {
-                    m.clickable(role = Role.Button) { onClick() }
-                        .semantics { contentDescription = "Interrupt assistant" }
-                } else m
-            },
+        Modifier.size(120.dp).scale(scale).clip(CircleShape).background(color).then(gesture),
         contentAlignment = Alignment.Center,
         // The glyph is decorative — keep TalkBack on the orb's label, not "●".
     ) { Text("●", Modifier.clearAndSetSemantics {}, style = UFont.sans(36), color = Color.White.copy(alpha = 0.9f)) }

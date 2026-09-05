@@ -101,17 +101,22 @@ fun TasksScreen(
     val list = remember(view, tasks, blocks, nowState, activeArea, activeTag) {
         visibleTasks(view, tasks, blocks, nowState, activeArea = if (view == TaskListView.TODAY) null else activeArea, activeTag = activeTag, slipMode = false)
     }
-    // A completed shared task moves like any other completed task: gone from Today,
-    // today's win still shown in All, and it collects under Completed from then on
-    // (Ahmad, 2026-08-02). Null on the tabs the web doesn't mount the group on.
+    // A shared task behaves like my own, placed by the OWNER's next block (migration
+    // 052): Today = next block today or unplanned, Upcoming = after today, Backlog =
+    // before today and still open, All = every open one (+ today's win), Completed
+    // collects the finished ones (Ahmad, 2026-08-02). Null on Later / Recurring — a
+    // share can't be "later" for me, and a template of mine it is not. The group
+    // respects the active area filter (an area-less share always shows).
     val shareMode = when (view) {
         TaskListView.TODAY -> ShareViewMode.TODAY
+        TaskListView.UPCOMING -> ShareViewMode.UPCOMING
+        TaskListView.BACKLOG -> ShareViewMode.BACKLOG
         TaskListView.ALL -> ShareViewMode.ALL
         TaskListView.COMPLETED -> ShareViewMode.COMPLETED
         else -> null
     }
-    val sharedVisible = remember(sharedWithMe, shareMode, nowState) {
-        shareMode?.let { visibleShares(sharedWithMe, it, nowState) } ?: emptyList()
+    val sharedVisible = remember(sharedWithMe, shareMode, nowState, activeArea) {
+        shareMode?.let { visibleShares(sharedWithMe, it, nowState, Clock.dateIso(nowState), activeArea = activeArea) } ?: emptyList()
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -172,7 +177,7 @@ fun TasksScreen(
                     onOpen = onOpenShared,
                 )
             }
-            if (list.isEmpty()) {
+            if (list.isEmpty() && sharedVisible.isEmpty()) {
                 item { Text("No ${view.label.lowercase()} tasks.", style = UFont.sans(14), color = c.ink3, modifier = Modifier.padding(vertical = 32.dp)) }
             } else {
                 items(list, key = { it.id }) { t ->

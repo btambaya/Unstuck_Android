@@ -84,6 +84,19 @@ data class ShareForTask(
     val level: ShareLevel,
 )
 
+/** The slice of a shared row the schedule logic reads — the OWNER's next block
+ *  (migration 052). Implemented by both [SharedWithMe] and [SharedTaskDetail] so
+ *  the bucketing + label helpers in core/logic/SharedSchedule.kt take either.
+ *  Mirrors ShareSlotItem in lib/shared-blocks.ts. */
+interface ShareSlot {
+    val done: Boolean
+    /** 'YYYY-MM-DD' — the owner's next live block, else its most recent past one. */
+    val nextDate: String?
+    /** 'HH:MM' */
+    val nextStartTime: String?
+    val nextDurationMinutes: Int?
+}
+
 /** A task someone shared WITH me (read via the tasks_shared_with_me projection —
  *  RLS forbids reading the raw task row). Port of SharedWithMe. */
 data class SharedWithMe(
@@ -92,7 +105,7 @@ data class SharedWithMe(
     val ownerName: String,
     val level: ShareLevel,
     val title: String,
-    val done: Boolean,   // every level projects the done state (v3)
+    override val done: Boolean,   // every level projects the done state (v3)
     /** ISO completion time, when the projection provides one. OPTIONAL: the
      *  tasks_shared_with_me RPC only gains completed_at in migration 049, so a
      *  client talking to an older server sees null here. READ-only — a default
@@ -100,7 +113,19 @@ data class SharedWithMe(
      *  [tech.csalliance.unstuck.core.logic.shareVisibleIn]: with no timestamp a
      *  completed share simply leaves the active lists. */
     val completedAt: String? = null,
-)
+    // ── Schedule projection (migration 052). The owner's estimate + area plus the
+    // task's NEXT block: the earliest live one (not done, not skipped, on/after the
+    // owner's local today) or, when there is none, its most recent past block. Every
+    // field is nullable WITH a default so a pre-052 server (keys absent) still
+    // decodes; `next*` are all null when nothing is scheduled. READ-only. ──
+    val estimateMin: Int? = null,
+    val lifeArea: String? = null,
+    val nextBlockId: String? = null,
+    override val nextDate: String? = null,          // YYYY-MM-DD
+    override val nextStartTime: String? = null,     // HH:MM
+    override val nextDurationMinutes: Int? = null,
+    val nextDone: Boolean? = null,
+) : ShareSlot
 
 /** Read-only detail for a task shared WITH me, from the shared_task_detail RPC
  *  (migration 045). Recipients still can't read the raw `tasks` row (RLS); this
@@ -111,7 +136,7 @@ data class SharedTaskDetail(
     val ownerName: String,
     val level: ShareLevel,
     val title: String,
-    val done: Boolean,
+    override val done: Boolean,
     val estimateMin: Int,
     val totalFocused: Int,
     val lifeArea: String?,
@@ -119,6 +144,33 @@ data class SharedTaskDetail(
     val objectives: List<Objective>,
     val dueAt: String?,
     val createdAt: String,
+    // Migration 052: the same next-block projection as [SharedWithMe] (nullable +
+    // defaulted so a pre-052 shared_task_detail still decodes).
+    val nextBlockId: String? = null,
+    override val nextDate: String? = null,
+    override val nextStartTime: String? = null,
+    override val nextDurationMinutes: Int? = null,
+    val nextDone: Boolean? = null,
+) : ShareSlot
+
+/** One block of a task shared WITH me, inside a date window — the calendar
+ *  counterpart of the per-task `next*` projection (migration 052
+ *  shared_task_blocks). Any share level; the server never projects external
+ *  (calendar-import) blocks and caps a window at 62 days. Port of SharedBlock in
+ *  lib/use-task-shares.ts. READ-only: nothing here ever writes back. */
+data class SharedBlock(
+    val blockId: String,
+    val taskId: String,
+    val shareId: String,
+    val level: ShareLevel,
+    val ownerName: String,
+    val title: String,
+    val date: String,             // YYYY-MM-DD
+    val startTime: String,        // HH:MM
+    val durationMinutes: Int,
+    val done: Boolean,
+    val skipped: Boolean,
+    val kind: String,             // 'task' | 'placeholder' (never 'external')
 )
 
 /** One outgoing share badge for my task row. Port of ShareBadge (the web keys these

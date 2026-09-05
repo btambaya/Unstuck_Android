@@ -41,10 +41,18 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tech.csalliance.unstuck.core.logic.SHARED_BLOCK_ID_PREFIX
+import tech.csalliance.unstuck.core.logic.asCalBlock
+import tech.csalliance.unstuck.core.logic.asSharedWithMe
 import tech.csalliance.unstuck.core.logic.formatTime
+import tech.csalliance.unstuck.core.logic.isSharedBlockId
 import tech.csalliance.unstuck.core.logic.isTaskBlock
+import tech.csalliance.unstuck.core.logic.liveSharedBlocks
+import tech.csalliance.unstuck.core.logic.sharedBlockLabel
+import tech.csalliance.unstuck.core.logic.weekRangeContaining
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
+import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.time.Time
@@ -98,12 +106,22 @@ internal fun layoutLanes(blocks: List<CalBlock>): List<Laid> {
 /** Day grid with drag-to-schedule: long-press an unscheduled task in the tray
  *  and drop it onto an hour slot to create a cal_block at that time. */
 @Composable
-fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (String, String) -> Unit, initialDate: String? = null) {
+fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (SharedWithMe) -> Unit, onCreateAt: (String, String) -> Unit, initialDate: String? = null) {
     val c = UTheme.colors
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocksRaw by vm.blocks.collectAsStateWithLifecycle()
     // Skipped recurring occurrences are cancelled for that day — drop them.
     val blocks = remember(blocksRaw) { blocksRaw.filter { !it.skipped } }
+    // Read-only "shared" blocks (migration 052) at the OWNER's slot. They live in
+    // vm.sharedBlocks — never vm.blocks — so the tray / drop / edit paths below, which
+    // all derive from `blocks`, can't reach them; the render branch checks the shared
+    // map FIRST and attaches only a tap → the shared detail sheet (no edit sheet, no
+    // long-press drag, no focus start). Their ids carry the `shared:` prefix, so even
+    // an id lookup against own blocks can never match one.
+    val sharedRaw by vm.sharedBlocks.collectAsStateWithLifecycle()
+    val sharedWithMe by vm.sharedWithMe.collectAsStateWithLifecycle()
+    val shared = remember(sharedRaw) { liveSharedBlocks(sharedRaw) }
+    val sharedById = remember(shared) { shared.associateBy { SHARED_BLOCK_ID_PREFIX + it.blockId } }
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     // Id → task map (built once per task list) so each block's colour/title lookup
     // is O(1) instead of a per-block firstOrNull scan on every drag/ticker frame.
@@ -116,6 +134,9 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
     // A fresh day tapped in Month view jumps us straight to it (only when it actually
     // changes, so the user can still navigate days afterward without being snapped back).
     LaunchedEffect(initialDate) { if (initialDate != null) date = initialDate }
+    // Fetch the whole Monday-anchored week so day-to-day paging (and the Week view)
+    // is a cache hit; the ViewModel refetches on the shares-changed signal.
+    LaunchedEffect(date) { val r = weekRangeContaining(date); vm.setSharedBlockRange(r.from, r.to) }
     val scroll = rememberScrollState()
     // Open today's grid scrolled to roughly an hour before now.
     LaunchedEffect(date) {
@@ -159,9 +180,11 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
     var editingBlock by remember { mutableStateOf<CalBlock?>(null) }
 
     val dayBlocks = remember(blocks, date) { blocks.filter { it.date == date } }
-    // Precompute the lane layout for the day's blocks once per (blocks, date) — was
-    // re-running the greedy interval colouring on every drag-position / 30s-ticker frame.
-    val laidDayBlocks = remember(dayBlocks) { layoutLanes(dayBlocks) }
+    // Precompute the lane layout for the day's blocks once per (blocks, shared, date) —
+    // was re-running the greedy interval colouring on every drag-position / 30s-ticker
+    // frame. Shared blocks join the layout (so an overlap splits the width) but NOT
+    // `dayBlocks` / `scheduledIds` — those feed the mutating paths.
+    val laidDayBlocks = remember(dayBlocks, shared, date) { layoutLanes(dayBlocks + shared.filter { it.date == date }.map { it.asCalBlock() }) }
     // Scheduled-anywhere, not just on the viewed day — otherwise a task scheduled on
     // another date reappears in the unscheduled tray and dragging it MOVES its block.
     val scheduledIds = remember(blocks) { blocks.filter { isTaskBlock(it) }.mapNotNull { it.taskId }.toSet() }
@@ -187,6 +210,9 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
     // Drop an already-scheduled block onto a new slot → reschedule in place.
     fun dropBlock() {
         val b = dragBlock ?: return
+        // Belt and braces: a shared block never gets the drag gesture, but if one ever
+        // reached here it must not be written into MY cal_blocks.
+        if (isSharedBlockId(b.id)) { dragBlock = null; return }
         dropTimeOrNull()?.let { vm.moveBlock(b, date, it) }
         dragBlock = null
     }
@@ -243,10 +269,13 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                         val hDp = HOUR_HEIGHT * (b.durationMinutes / 60f)
                         // Color by source: external = blue, a task = its life-area swatch,
                         // placeholder = neutral. Mirrors the web bgFor().
-                        val bt = if (isTaskBlock(b)) b.taskId?.let { tasksById[it] } else null
+                        // Shared FIRST: an owner's block is display-only here.
+                        val sb = sharedById[b.id]
+                        val bt = if (sb == null && isTaskBlock(b)) b.taskId?.let { tasksById[it] } else null
                         // For a recurring occurrence the completion lives on the block.
                         val done = b.done || bt?.done == true
                         val fill = when {
+                            sb != null -> c.primarySoft.copy(alpha = 0.45f)
                             b.kind == CalBlockKind.EXTERNAL -> c.blueSoft
                             isTaskBlock(b) -> c.areaSwatch(areaColorFor(bt?.lifeArea, areas, c))
                             else -> c.bg2
@@ -265,12 +294,18 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                                 .onGloballyPositioned { blockOrigin = it.localToWindow(Offset.Zero) }
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(fill)
-                                .border(1.dp, c.line, RoundedCornerShape(8.dp))
-                                // Task blocks: tap to edit + long-press to drag. External/Google
-                                // blocks are display-only — they mirror the remote calendar, and
-                                // editing them only changes local state that reverts on next sync.
+                                // Shared blocks wear a dashed outline instead of the solid border.
+                                .then(if (sb != null) Modifier.dashedBorder(c.primaryDeep, 1.dp, 8.dp) else Modifier.border(1.dp, c.line, RoundedCornerShape(8.dp)))
+                                // Shared (checked FIRST): tap → the read-only shared detail sheet.
+                                // No edit sheet, no long-press drag, no focus start — the owner's
+                                // block is theirs; we only look at it. Then task blocks: tap to
+                                // edit + long-press to drag. External/Google blocks are display-
+                                // only — they mirror the remote calendar, and editing them only
+                                // changes local state that reverts on next sync.
                                 .then(
-                                    if (isTaskBlock(b)) Modifier.clickable { editingBlock = b }.pointerInput(b.id) {
+                                    if (sb != null) Modifier.clickable {
+                                        onOpenShared(sharedWithMe.firstOrNull { it.taskId == sb.taskId } ?: sb.asSharedWithMe())
+                                    } else if (isTaskBlock(b)) Modifier.clickable { editingBlock = b }.pointerInput(b.id) {
                                         detectDragGesturesAfterLongPress(
                                             onDragStart = { local -> dragBlock = b; dragPos = blockOrigin + local },
                                             onDrag = { change, delta -> change.consume(); dragPos += delta },
@@ -290,8 +325,8 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
                                 .padding(horizontal = 6.dp, vertical = 2.dp),
                         ) {
                             Text(
-                                b.taskName, style = UFont.sans(12, FontWeight.Medium),
-                                color = if (done) c.ink3 else c.ink, maxLines = 1,
+                                if (sb != null) sharedBlockLabel(sb) else b.taskName, style = UFont.sans(12, FontWeight.Medium),
+                                color = if (done) c.ink3 else if (sb != null) c.primaryDeep else c.ink, maxLines = 1,
                                 textDecoration = if (done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
                             )
                         }
@@ -360,7 +395,10 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (Str
             }
         }
 
-        editingBlock?.let { blk -> CalBlockEditSheet(vm, blk) { editingBlock = null } }
+        // The edit sheet is for MY blocks only — a shared block can never open it (its
+        // render branch sets no editingBlock), and this guard keeps that true even if a
+        // future path assigns one.
+        editingBlock?.takeUnless { isSharedBlockId(it.id) }?.let { blk -> CalBlockEditSheet(vm, blk) { editingBlock = null } }
     }
 }
 

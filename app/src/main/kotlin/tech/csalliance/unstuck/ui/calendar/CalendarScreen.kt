@@ -18,11 +18,14 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -45,8 +48,15 @@ import android.net.Uri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import tech.csalliance.unstuck.core.logic.SHARED_BLOCK_ID_PREFIX
+import tech.csalliance.unstuck.core.logic.asCalBlock
+import tech.csalliance.unstuck.core.logic.asSharedWithMe
 import tech.csalliance.unstuck.core.logic.isTaskBlock
+import tech.csalliance.unstuck.core.logic.liveSharedBlocks
+import tech.csalliance.unstuck.core.logic.monthRange
+import tech.csalliance.unstuck.core.logic.sharedBlockLabel
 import tech.csalliance.unstuck.core.logic.taskForBlock
+import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.time.Time
@@ -76,7 +86,7 @@ private val YearMonthSaver = Saver<java.time.YearMonth, String>(
 )
 
 @Composable
-fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, onNotifications: () -> Unit, notifUnread: Int, avatarInitials: String, onCreateAt: (String, String) -> Unit) {
+fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (SharedWithMe) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, onNotifications: () -> Unit, notifUnread: Int, avatarInitials: String, onCreateAt: (String, String) -> Unit) {
     val c = UTheme.colors
     // Saveable so the chosen Day/Week/Month tab survives rotation / process death.
     var view by rememberSaveable { mutableStateOf("Day") }
@@ -90,8 +100,8 @@ fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onSearch: () ->
         }
         CalendarSyncBar(vm)
         when (view) {
-            "Day" -> DayGridScreen(vm, onOpen, onCreateAt, initialDate = jumpDate)
-            "Week" -> WeekView(vm, onOpen, onCreateAt)
+            "Day" -> DayGridScreen(vm, onOpen, onOpenShared, onCreateAt, initialDate = jumpDate)
+            "Week" -> WeekView(vm, onOpen, onOpenShared, onCreateAt)
             else -> MonthView(vm) { iso -> jumpDate = iso; view = "Day" }
         }
     }
@@ -148,11 +158,19 @@ private fun CalendarSyncBar(vm: AppViewModel) {
 }
 
 @Composable
-private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (String, String) -> Unit) {
+private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (SharedWithMe) -> Unit, onCreateAt: (String, String) -> Unit) {
     val c = UTheme.colors
     val blocksRaw by vm.blocks.collectAsStateWithLifecycle()
     // Skipped recurring occurrences are cancelled for that day — drop them.
     val blocks = remember(blocksRaw) { blocksRaw.filter { !it.skipped } }
+    // Read-only "shared" blocks (migration 052): tasks others shared with me, at the
+    // OWNER's slot. They come from vm.sharedBlocks — never vm.blocks — so the planned
+    // roll-up and the tap-to-create path below can't see them; the render branch
+    // checks `sharedById` FIRST and attaches only a tap → the shared detail sheet.
+    val sharedRaw by vm.sharedBlocks.collectAsStateWithLifecycle()
+    val sharedWithMe by vm.sharedWithMe.collectAsStateWithLifecycle()
+    val shared = remember(sharedRaw) { liveSharedBlocks(sharedRaw) }
+    val sharedById = remember(shared) { shared.associateBy { SHARED_BLOCK_ID_PREFIX + it.blockId } }
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     // Monday-anchored week, navigable via the ‹ / › arrows (weekOffset = weeks from
@@ -162,10 +180,18 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (
     val today = java.time.LocalDate.now()
     val monday = today.minusDays(((today.dayOfWeek.value + 6) % 7).toLong()).plusWeeks(weekOffset.toLong())
     val days = remember(weekOffset) { (0..6).map { monday.plusDays(it.toLong()) } }
+    // The shared-block window follows the visible week (cached per window in the VM).
+    LaunchedEffect(days) { vm.setSharedBlockRange(days.first().toString(), days.last().toString()) }
     val dows = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
-    // Per-day lane layout for all 7 columns — computed once per (blocks, weekOffset)
+    // Per-day lane layout for all 7 columns — computed once per (blocks, shared, week)
     // instead of re-running layoutLanes for every day on each scroll/recomposition.
-    val laidByDay = remember(blocks, days) { days.associate { d -> d.toString() to layoutLanes(blocks.filter { it.date == d.toString() }) } }
+    // Own + shared blocks share the lane layout so an overlap splits the column.
+    val laidByDay = remember(blocks, shared, days) {
+        days.associate { d ->
+            val iso = d.toString()
+            iso to layoutLanes(blocks.filter { it.date == iso } + shared.filter { it.date == iso }.map { it.asCalBlock() })
+        }
+    }
     val plannedByDay = remember(blocks, days) { days.map { d -> blocks.filter { it.date == d.toString() && isTaskBlock(it) }.sumOf { it.durationMinutes } } }
     val totalPlanned = plannedByDay.sum()
     val maxPlanned = plannedByDay.maxOrNull() ?: 0
@@ -240,10 +266,16 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (
                         val b = laid.block
                         val top = hhmmToMin(b.startTime) - WSTART * 60
                         if (top in 0..((WEND - WSTART) * 60)) {
-                            val bt = if (isTaskBlock(b)) b.taskId?.let { tasksById[it] } else null
+                            // Shared FIRST: an owner's block is display-only here.
+                            val sb = sharedById[b.id]
+                            val bt = if (sb == null && isTaskBlock(b)) b.taskId?.let { tasksById[it] } else null
                             // For a recurring occurrence the completion lives on the block.
                             val done = b.done || bt?.done == true
-                            val fill = if (isTaskBlock(b)) c.areaSwatch(tech.csalliance.unstuck.ui.components.areaColorFor(bt?.lifeArea, areas, c)) else c.blueSoft
+                            val fill = when {
+                                sb != null -> c.primarySoft.copy(alpha = 0.45f)
+                                isTaskBlock(b) -> c.areaSwatch(tech.csalliance.unstuck.ui.components.areaColorFor(bt?.lifeArea, areas, c))
+                                else -> c.blueSoft
+                            }
                             val laneW = if (laid.lanes > 1 && colW > 0.dp) colW / laid.lanes else 0.dp
                             val place = if (laneW > 0.dp)
                                 Modifier.width((laneW - 1.dp).coerceAtLeast(5.dp)).offset(x = laneW * laid.lane, y = WHOUR * (top / 60f))
@@ -252,8 +284,18 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onCreateAt: (
                             Box(
                                 place.height((WHOUR * (b.durationMinutes / 60f)).coerceAtLeast(13.dp))
                                     .clip(RoundedCornerShape(3.dp)).background(fill)
-                                    .then(if (isTaskBlock(b)) Modifier.clickable { taskForBlock(b, tasks)?.let(onOpen) } else Modifier),
-                            ) { Text(b.taskName, style = UFont.sans(8, FontWeight.Medium), color = if (done) c.ink3 else c.ink, maxLines = 1, textDecoration = if (done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null) }
+                                    // Shared: dashed outline + owner-led label; tap → the read-only
+                                    // shared detail sheet (never the own-task detail, never create).
+                                    .then(
+                                        when {
+                                            sb != null -> Modifier.dashedBorder(c.primaryDeep, 1.dp, 3.dp).clickable {
+                                                onOpenShared(sharedWithMe.firstOrNull { it.taskId == sb.taskId } ?: sb.asSharedWithMe())
+                                            }
+                                            isTaskBlock(b) -> Modifier.clickable { taskForBlock(b, tasks)?.let(onOpen) }
+                                            else -> Modifier
+                                        },
+                                    ),
+                            ) { Text(if (sb != null) sharedBlockLabel(sb) else b.taskName, style = UFont.sans(8, FontWeight.Medium), color = if (done) c.ink3 else if (sb != null) c.primaryDeep else c.ink, maxLines = 1, textDecoration = if (done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null) }
                         }
                     }
                 }
@@ -276,6 +318,14 @@ private fun MonthView(vm: AppViewModel, onPickDay: (String) -> Unit) {
     val c = UTheme.colors
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     var ym by rememberSaveable(stateSaver = YearMonthSaver) { mutableStateOf(java.time.YearMonth.now()) }
+    // Planned indicators: the heatmap is what got DONE; the dots under a day say what's
+    // PLANNED — own task blocks (solid) + blocks of tasks shared with me (hollow, at
+    // the owner's slot; migration 052). The shared window follows the viewed month.
+    val blocksRaw by vm.blocks.collectAsStateWithLifecycle()
+    val sharedRaw by vm.sharedBlocks.collectAsStateWithLifecycle()
+    LaunchedEffect(ym) { val r = monthRange(ym.year, ym.monthValue); vm.setSharedBlockRange(r.from, r.to) }
+    val ownPlannedDays = remember(blocksRaw) { blocksRaw.filter { isTaskBlock(it) && !it.skipped }.map { it.date }.toSet() }
+    val sharedPlannedDays = remember(sharedRaw) { liveSharedBlocks(sharedRaw).map { it.date }.toSet() }
     val byDay = remember(sessions) {
         HashMap<String, Int>().apply {
             sessions.forEach { s -> Time.parseMillis(s.completedAt)?.let { val k = Clock.dateIso(it); put(k, (get(k) ?: 0) + s.actualSec) } }
@@ -295,7 +345,14 @@ private fun MonthView(vm: AppViewModel, onPickDay: (String) -> Unit) {
             Text("Today", style = UFont.sans(12, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { ym = java.time.YearMonth.now() }.padding(horizontal = 8.dp, vertical = 4.dp))
             Text("›", style = UFont.serifItalic(24), color = c.ink2, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { ym = ym.plusMonths(1) }.padding(horizontal = 10.dp, vertical = 2.dp))
         }
-        Text("Focus density", style = UFont.mono(10, FontWeight.Medium), color = c.ink3, modifier = Modifier.padding(top = 2.dp, bottom = 10.dp))
+        Row(Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text("Focus density", style = UFont.mono(10, FontWeight.Medium), color = c.ink3, modifier = Modifier.weight(1f))
+            // Legend for the per-day planned dots.
+            Box(Modifier.size(5.dp).clip(CircleShape).background(c.primaryDeep))
+            Text(" planned   ", style = UFont.mono(9), color = c.ink3)
+            Box(Modifier.size(5.dp).clip(CircleShape).border(1.dp, c.primaryDeep, CircleShape))
+            Text(" shared", style = UFont.mono(9), color = c.ink3)
+        }
         Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             dows.forEach { Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { Text(it, style = UFont.mono(10), color = c.ink4) } }
         }
@@ -318,7 +375,20 @@ private fun MonthView(vm: AppViewModel, onPickDay: (String) -> Unit) {
                                         .clickable(role = androidx.compose.ui.semantics.Role.Button) { onPickDay(iso) },
                                     contentAlignment = Alignment.Center,
                                 ) {
-                                    Text("${d.dayOfMonth}", style = UFont.sans(11, FontWeight.SemiBold), color = if (isToday || t > 0.5f) c.bg else c.ink2, textAlign = TextAlign.Center)
+                                    val onDark = isToday || t > 0.5f
+                                    val ownHere = iso in ownPlannedDays
+                                    val sharedHere = iso in sharedPlannedDays
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Text("${d.dayOfMonth}", style = UFont.sans(11, FontWeight.SemiBold), color = if (onDark) c.bg else c.ink2, textAlign = TextAlign.Center)
+                                        // ● own blocks planned · ○ shared blocks (the owner's slot).
+                                        if (ownHere || sharedHere) {
+                                            val dot = if (onDark) c.bg else c.primaryDeep
+                                            Row(Modifier.padding(top = 1.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                                if (ownHere) Box(Modifier.size(4.dp).clip(CircleShape).background(dot))
+                                                if (sharedHere) Box(Modifier.size(4.dp).clip(CircleShape).border(1.dp, dot, CircleShape))
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }

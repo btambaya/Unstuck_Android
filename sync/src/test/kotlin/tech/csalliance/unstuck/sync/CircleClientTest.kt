@@ -102,4 +102,80 @@ class CircleClientTest {
         val present = json.decodeFromString<SharedWithMeRow>("""{"share_id":"s1","task_id":"t1","done":true,"completed_at":"2026-08-02T09:30:00Z"}""")
         assertEquals("2026-08-02T09:30:00Z", present.completedAt)
     }
+
+    // ── migration 052: the owner's schedule reaches the recipient ──
+
+    @Test fun `shared-with-me row decodes the migration-052 schedule columns`() {
+        val r = json.decodeFromString<SharedWithMeRow>(
+            """{"share_id":"s1","task_id":"t1","owner_name":"Anna","level":"partner","title":"London weekend",
+                "done":false,"completed_at":null,"estimate_min":45,"life_area":"Family",
+                "next_block_id":"b9","next_date":"2026-09-06","next_start_time":"04:30",
+                "next_duration_minutes":45,"next_done":false}""",
+        )
+        assertEquals(45, r.estimateMin)
+        assertEquals("Family", r.lifeArea)
+        assertEquals("b9", r.nextBlockId)
+        assertEquals("2026-09-06", r.nextDate)
+        assertEquals("04:30", r.nextStartTime)
+        assertEquals(45, r.nextDurationMinutes)
+        assertEquals(false, r.nextDone)
+    }
+
+    @Test fun `shared-with-me row tolerates a pre-052 server (schedule keys absent) and an unscheduled task (explicit nulls)`() {
+        val pre052 = json.decodeFromString<SharedWithMeRow>("""{"share_id":"s1","task_id":"t1","level":"view","title":"Write","done":false}""")
+        assertNull(pre052.estimateMin); assertNull(pre052.lifeArea); assertNull(pre052.nextBlockId)
+        assertNull(pre052.nextDate); assertNull(pre052.nextStartTime); assertNull(pre052.nextDurationMinutes); assertNull(pre052.nextDone)
+        val unscheduled = json.decodeFromString<SharedWithMeRow>(
+            """{"share_id":"s1","task_id":"t1","level":"view","title":"Write","done":false,"estimate_min":25,"life_area":null,
+                "next_block_id":null,"next_date":null,"next_start_time":null,"next_duration_minutes":null,"next_done":null}""",
+        )
+        assertEquals(25, unscheduled.estimateMin)
+        assertNull(unscheduled.lifeArea)
+        assertNull(unscheduled.nextDate)
+        assertNull(unscheduled.nextDone)
+    }
+
+    @Test fun `shared-task-detail row decodes + tolerates the migration-052 next columns`() {
+        val with = json.decodeFromString<SharedTaskDetailRow>(
+            """{"task_id":"t1","level":"view","name":"Simple","done":false,"estimate_min":25,"total_focused":0,
+                "created_at":"2026-07-14T00:00:00Z","next_block_id":"b1","next_date":"2026-09-05",
+                "next_start_time":"09:15","next_duration_minutes":30,"next_done":true}""",
+        )
+        assertEquals("b1", with.nextBlockId)
+        assertEquals("2026-09-05", with.nextDate)
+        assertEquals("09:15", with.nextStartTime)
+        assertEquals(30, with.nextDurationMinutes)
+        assertEquals(true, with.nextDone)
+        val without = json.decodeFromString<SharedTaskDetailRow>("""{"task_id":"t1","level":"view","name":"Simple","done":false}""")
+        assertNull(without.nextDate)
+        assertNull(without.nextBlockId)
+    }
+
+    @Test fun `shared_task_blocks params are the two REQUIRED snake_case date bounds`() {
+        // No defaults on purpose: an omitted bound would make the RPC raise bad_range.
+        assertEquals("""{"p_from":"2026-09-01","p_to":"2026-09-30"}""", Json.encodeToString(RangeParams("2026-09-01", "2026-09-30")))
+    }
+
+    @Test fun `shared-block row decodes the migration-052 columns and tolerates absent flags`() {
+        val full = json.decodeFromString<SharedBlockRow>(
+            """{"block_id":"b1","task_id":"t1","share_id":"s1","level":"assign","owner_name":"Anna","title":"London weekend",
+                "date":"2026-09-05","start_time":"04:30","duration_minutes":45,"done":false,"skipped":false,"kind":"task"}""",
+        )
+        assertEquals("b1", full.blockId)
+        assertEquals("t1", full.taskId)
+        assertEquals("s1", full.shareId)
+        assertEquals("assign", full.level)
+        assertEquals("Anna", full.ownerName)
+        assertEquals("2026-09-05", full.date)
+        assertEquals("04:30", full.startTime)
+        assertEquals(45, full.durationMinutes)
+        assertEquals(false, full.done)
+        assertEquals("task", full.kind)
+        val sparse = json.decodeFromString<SharedBlockRow>("""{"block_id":"b2","task_id":"t1","date":"2026-09-06","done":null,"skipped":null,"kind":null}""")
+        assertEquals("b2", sparse.blockId)
+        assertNull(sparse.done)
+        assertNull(sparse.skipped)
+        assertNull(sparse.kind)
+        assertEquals("", sparse.shareId)
+    }
 }

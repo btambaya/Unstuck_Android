@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.ShareViewMode
+import tech.csalliance.unstuck.core.logic.UNASSIGNED_AREA
 import tech.csalliance.unstuck.core.logic.shareVisibleIn
 import tech.csalliance.unstuck.core.logic.visibleShares
 import tech.csalliance.unstuck.core.model.ShareLevel
@@ -13,21 +14,30 @@ import tech.csalliance.unstuck.core.time.Time
 
 // 1:1 with lib/shared-task-visibility.test.ts — a completed SHARED task follows the
 // same rules as the user's own completed tasks (Today hides it, All keeps today's
-// win, Completed collects them all). Tests run with -Duser.timezone=UTC.
+// win, Completed collects them all) — extended for migration 052: an OPEN share is
+// placed by the owner's next block (Today / Upcoming / Backlog). Tests run with
+// -Duser.timezone=UTC.
 class SharedTaskVisibilityTest {
 
-    // 2026-08-02T18:00 local — same instant the web test pins.
+    // 2026-08-02T18:00 local — same instant the web test pins. A Sunday.
     private val now = Time.civil(2026, 8, 2) + 18L * 60 * 60 * 1000
+    private val today = "2026-08-02"
 
-    private fun share(id: String, done: Boolean, completedAt: String? = null) = SharedWithMe(
+    private fun share(
+        id: String, done: Boolean, completedAt: String? = null,
+        nextDate: String? = null, nextStartTime: String? = null, lifeArea: String? = null,
+    ) = SharedWithMe(
         shareId = id, taskId = id, ownerName = "sam@example.com",
         level = ShareLevel.PARTNER, title = id, done = done, completedAt = completedAt,
+        nextDate = nextDate, nextStartTime = nextStartTime, nextDurationMinutes = 45, lifeArea = lifeArea,
     )
 
     private val open = share("open", done = false)
     private val doneToday = share("done", done = true, completedAt = "2026-08-02T09:30:00")
     private val doneYesterday = share("old", done = true, completedAt = "2026-08-01T09:30:00")
     private val doneUnknownWhen = share("unknown", done = true)
+
+    // ── the pre-052 rules (no schedule → every open share sits in Today) ──
 
     @Test fun `Today shows open work only - a completed share leaves immediately`() {
         assertTrue(shareVisibleIn(open, ShareViewMode.TODAY, now))
@@ -79,5 +89,86 @@ class SharedTaskVisibilityTest {
             listOf("done", "old"),
             visibleShares(items, ShareViewMode.COMPLETED, now).map { it.shareId },
         )
+    }
+
+    // ── migration 052: placed by the owner's next block ──
+
+    private val plannedToday = share("today", done = false, nextDate = today, nextStartTime = "14:00")
+    private val plannedTomorrow = share("tomorrow", done = false, nextDate = "2026-08-03", nextStartTime = "09:00")
+    private val plannedNextMonth = share("later", done = false, nextDate = "2026-09-10", nextStartTime = "09:00")
+    private val overdue = share("overdue", done = false, nextDate = "2026-07-30", nextStartTime = "09:00")
+    private val doneOverdue = share("done-overdue", done = true, nextDate = "2026-07-30", completedAt = "2026-07-30T10:00:00")
+
+    @Test fun `Today = next block today OR nothing scheduled - never a future or past slot`() {
+        assertTrue(shareVisibleIn(plannedToday, ShareViewMode.TODAY, now, today))
+        assertTrue(shareVisibleIn(open, ShareViewMode.TODAY, now, today))          // no block → Today
+        assertFalse(shareVisibleIn(plannedTomorrow, ShareViewMode.TODAY, now, today))
+        assertFalse(shareVisibleIn(plannedNextMonth, ShareViewMode.TODAY, now, today))
+        assertFalse(shareVisibleIn(overdue, ShareViewMode.TODAY, now, today))
+    }
+
+    @Test fun `Upcoming = next block after today only`() {
+        assertTrue(shareVisibleIn(plannedTomorrow, ShareViewMode.UPCOMING, now, today))
+        assertTrue(shareVisibleIn(plannedNextMonth, ShareViewMode.UPCOMING, now, today))
+        assertFalse(shareVisibleIn(plannedToday, ShareViewMode.UPCOMING, now, today))
+        assertFalse(shareVisibleIn(open, ShareViewMode.UPCOMING, now, today))
+        assertFalse(shareVisibleIn(overdue, ShareViewMode.UPCOMING, now, today))
+        assertFalse(shareVisibleIn(doneToday, ShareViewMode.UPCOMING, now, today))
+    }
+
+    @Test fun `Backlog = next block before today and still open`() {
+        assertTrue(shareVisibleIn(overdue, ShareViewMode.BACKLOG, now, today))
+        assertFalse(shareVisibleIn(doneOverdue, ShareViewMode.BACKLOG, now, today))   // done → Completed, never Backlog
+        assertFalse(shareVisibleIn(plannedToday, ShareViewMode.BACKLOG, now, today))
+        assertFalse(shareVisibleIn(plannedTomorrow, ShareViewMode.BACKLOG, now, today))
+        assertFalse(shareVisibleIn(open, ShareViewMode.BACKLOG, now, today))          // unplanned ≠ overdue
+    }
+
+    @Test fun `All keeps every open share whatever its slot, plus todays win`() {
+        listOf(open, plannedToday, plannedTomorrow, plannedNextMonth, overdue).forEach {
+            assertTrue(it.shareId, shareVisibleIn(it, ShareViewMode.ALL, now, today))
+        }
+        assertTrue(shareVisibleIn(doneToday, ShareViewMode.ALL, now, today))
+        assertFalse(shareVisibleIn(doneOverdue, ShareViewMode.ALL, now, today))
+    }
+
+    @Test fun `Completed is unchanged by the schedule`() {
+        assertTrue(shareVisibleIn(doneOverdue, ShareViewMode.COMPLETED, now, today))
+        assertFalse(shareVisibleIn(overdue, ShareViewMode.COMPLETED, now, today))
+    }
+
+    @Test fun `todayIso defaults to the local day containing now`() {
+        // No explicit todayIso: the bucket pivots on the day of `now` (2026-08-02 UTC).
+        assertTrue(shareVisibleIn(plannedToday, ShareViewMode.TODAY, now))
+        assertTrue(shareVisibleIn(plannedTomorrow, ShareViewMode.UPCOMING, now))
+        assertTrue(shareVisibleIn(overdue, ShareViewMode.BACKLOG, now))
+    }
+
+    @Test fun `open rows sort chronologically by the owners slot, unscheduled last, done last`() {
+        val items = listOf(
+            share("b-later", done = false, nextDate = today, nextStartTime = "16:00"),
+            share("unplanned", done = false),
+            doneToday,
+            share("a-early", done = false, nextDate = today, nextStartTime = "08:00"),
+        )
+        assertEquals(
+            listOf("a-early", "b-later", "unplanned", "done"),
+            visibleShares(items, ShareViewMode.ALL, now, today).map { it.shareId },
+        )
+        // Across dates the date wins over the time.
+        assertEquals(
+            listOf("tomorrow", "later"),
+            visibleShares(listOf(plannedNextMonth, plannedTomorrow), ShareViewMode.UPCOMING, now, today).map { it.shareId },
+        )
+    }
+
+    @Test fun `the active life-area filter narrows the group but never hides an area-less share`() {
+        val work = share("work", done = false, lifeArea = "Work")
+        val home = share("home", done = false, lifeArea = "Home")
+        val none = share("none", done = false)
+        val items = listOf(work, home, none)
+        assertEquals(listOf("work", "home", "none"), visibleShares(items, ShareViewMode.TODAY, now, today, activeArea = null).map { it.shareId })
+        assertEquals(listOf("work", "none"), visibleShares(items, ShareViewMode.TODAY, now, today, activeArea = "Work").map { it.shareId })
+        assertEquals(listOf("none"), visibleShares(items, ShareViewMode.TODAY, now, today, activeArea = UNASSIGNED_AREA).map { it.shareId })
     }
 }

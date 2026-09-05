@@ -36,7 +36,9 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tech.csalliance.unstuck.core.logic.plannedLabel
 import tech.csalliance.unstuck.core.model.ShareLevel
+import tech.csalliance.unstuck.core.model.ShareSlot
 import tech.csalliance.unstuck.core.model.SharedTaskDetail
 import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.time.Clock
@@ -117,19 +119,30 @@ fun SharedTaskDetailSheet(
                 textDecoration = if (done) TextDecoration.LineThrough else null,
             )
 
-            // Meta: area · estimate · due.
+            // Meta: area · estimate · due. The row already carries area + estimate since
+            // migration 052, so they render before the detail fetch lands.
             val d = detail
+            val area = d?.lifeArea ?: shared.lifeArea
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (d?.lifeArea != null) {
-                    AreaDotColor(areaColorFor(d.lifeArea, areas, c), size = 6)
-                    Text(d.lifeArea!!, style = UFont.sans(12), color = c.ink3)
+                if (area != null) {
+                    AreaDotColor(areaColorFor(area, areas, c), size = 6)
+                    Text(area, style = UFont.sans(12), color = c.ink3)
                     Text("·", style = UFont.sans(12), color = c.ink3)
                 }
-                Text("${(d?.estimateMin ?: 25)} min", style = UFont.sans(12), color = c.ink3)
+                Text("${(d?.estimateMin ?: shared.estimateMin ?: 25)} min", style = UFont.sans(12), color = c.ink3)
                 dueLabel(d?.dueAt)?.let {
                     Text("·", style = UFont.sans(12), color = c.ink3)
                     Text("due $it", style = UFont.sans(12), color = c.amberInk)
                 }
+            }
+
+            // The owner's schedule (migration 052): "Planned Sat, Sep 5 · 04:30 · 45m"
+            // (+ "· overdue" once the slot has passed and it's still open). The fresh
+            // detail wins; until it lands, the row — or the calendar block that was
+            // tapped — seeds it. Nothing to plan → no line.
+            val slot: ShareSlot = d ?: shared
+            plannedLabel(slot, Clock.todayIso())?.let { planned ->
+                Text(planned, style = UFont.sans(12, FontWeight.Medium), color = if (planned.endsWith("overdue")) c.amberInk else c.primaryDeep)
             }
 
             // Steps / subtasks (read-only).
@@ -203,6 +216,8 @@ private fun dueLabel(dueAt: String?): String? {
  *  Focus — enough to start a shared session (id, title, estimate default, level). */
 private fun fallbackDetail(shared: SharedWithMe): SharedTaskDetail = SharedTaskDetail(
     taskId = shared.taskId, ownerName = shared.ownerName, level = shared.level, title = shared.title,
-    done = shared.done, estimateMin = 25, totalFocused = 0, lifeArea = null, tags = emptyList(),
+    done = shared.done, estimateMin = shared.estimateMin ?: 25, totalFocused = 0, lifeArea = shared.lifeArea, tags = emptyList(),
     objectives = emptyList(), dueAt = null, createdAt = "",
+    nextBlockId = shared.nextBlockId, nextDate = shared.nextDate, nextStartTime = shared.nextStartTime,
+    nextDurationMinutes = shared.nextDurationMinutes, nextDone = shared.nextDone,
 )

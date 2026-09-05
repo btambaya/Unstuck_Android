@@ -105,7 +105,9 @@ import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.ShareBadge
 import tech.csalliance.unstuck.core.model.ShareForTask
 import tech.csalliance.unstuck.core.model.ShareLevel
+import tech.csalliance.unstuck.core.model.SharedBlock
 import tech.csalliance.unstuck.core.model.SharedWithMe
+import tech.csalliance.unstuck.core.logic.IsoRange
 import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.sync.AuthOutcome
@@ -209,6 +211,44 @@ class AppViewModel(
     val assignedOut: StateFlow<Map<String, String>> =
         shareBadges.map { tech.csalliance.unstuck.core.model.assignedOutMap(it) }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
+
+    // --- shared-task calendar blocks (migration 052 shared_task_blocks) ---
+    /** The calendar's visible window (inclusive ISO dates). Each calendar view points
+     *  it at what it paints — Day/Week the Monday-anchored week, Month the month — via
+     *  [setSharedBlockRange]; null until a calendar is on screen. */
+    private val _sharedBlockRange = MutableStateFlow<IsoRange?>(null)
+
+    /** Per-window cache so flipping Day↔Week (same week) or paging back to a month
+     *  already seen is free. Dropped wholesale on every shares-changed tick — a share
+     *  added/removed/moved anywhere invalidates every window. Only touched from the
+     *  [sharedBlocks] pipeline (viewModelScope → main thread), never elsewhere. */
+    private val sharedBlockCache = HashMap<IsoRange, List<SharedBlock>>()
+
+    /** Every block of every task shared WITH me inside the visible window — the
+     *  read-only "shared" blocks on the calendars (Day / Week grids, the Month planned
+     *  indicator). Never merged into [blocks]: nothing that schedules, moves, resizes,
+     *  unschedules or starts focus can see them. Refetches on the CollabRealtime
+     *  `sharesChanged` signal + the manual pulse (like [sharedWithMe]) AND whenever the
+     *  window changes; a window already fetched since the last change is served from
+     *  the cache. Empty on a pre-052 server (the RPC read degrades to empty). */
+    val sharedBlocks: StateFlow<List<SharedBlock>> =
+        combine(
+            _sharedBlockRange,
+            merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
+                .onStart { emit(Unit) }
+                .map { sharedBlockCache.clear(); System.nanoTime() },   // a distinct value per tick → combine re-emits
+        ) { range, _ -> range }
+            .map { range ->
+                if (range == null) emptyList()
+                else sharedBlockCache[range]
+                    ?: (graph.coordinator?.circle?.sharedTaskBlocks(range.from, range.to) ?: emptyList())
+                        .also { sharedBlockCache[range] = it }
+            }
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+    /** Point [sharedBlocks] at the window a calendar view paints (inclusive ISO dates;
+     *  the client clamps to the RPC's 62-day cap). */
+    fun setSharedBlockRange(from: String, to: String) { _sharedBlockRange.value = IsoRange(from, to) }
 
     /** null until the auth state resolves; true/false once known. */
     // Tri-state so AppRoot shows the splash (null) — NOT the sign-in screen —

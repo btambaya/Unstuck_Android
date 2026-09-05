@@ -175,11 +175,18 @@ fun TodayScreen(
     val backlogRows = remember(backlogAll, startNext, liveId, assignedOut) {
         backlogAll.filter { it.id != startNext?.id && it.id != liveId && it.id !in assignedOut }
     }
-    // "Shared with you" on Today follows the SAME rule as my own tasks: a completed
-    // share leaves this list immediately (it lives under Tasks → Completed from then
-    // on) instead of sitting here struck-through forever. Ports visibleShares(…,
-    // 'today') from shared-task-visibility.ts.
-    val sharedVisible = remember(sharedWithMe, now) { visibleShares(sharedWithMe, ShareViewMode.TODAY, now) }
+    // "Shared with you" follows the SAME rules as my own tasks, placed by the OWNER's
+    // next block (migration 052): Today holds shares whose next block is today or that
+    // have no plan yet; the Backlog view holds the overdue ones; a completed share
+    // leaves immediately (it lives under Tasks → Completed from then on). The group
+    // respects the area filter like Delegated does (an area-less share always shows).
+    // `sharedTodayAll` (unfiltered) feeds the all-clear hero decision below.
+    val todayIso = remember(now) { Clock.dateIso(now) }
+    val sharedTodayAll = remember(sharedWithMe, now) { visibleShares(sharedWithMe, ShareViewMode.TODAY, now, todayIso) }
+    val shareMode = if (backlogActive) ShareViewMode.BACKLOG else ShareViewMode.TODAY
+    val sharedVisible = remember(sharedWithMe, now, shareMode, areaFilter) {
+        visibleShares(sharedWithMe, shareMode, now, todayIso, activeArea = if (backlogActive) null else areaFilter)
+    }
     // Delegated group: MY tasks handed off at 'assign'. A completed hand-off lingers
     // today (a quiet "done ✓"), then ages out — mirrors delegated-group.tsx.
     val delegatedRows = remember(tasks, assignedOut, areaFilter, now) {
@@ -203,7 +210,7 @@ fun TodayScreen(
     // toggle. A genuinely empty account still has no todayAll/backlogAll/startNext.
     // "Company" (tasks shared WITH me) also counts as content, so a user whose only
     // rows are shared-with-you still sees them instead of the all-clear empty hero.
-    val empty = todayAll.isEmpty() && live == null && backlogAll.isEmpty() && startNext == null && sharedVisible.isEmpty() && delegatedRows.isEmpty()
+    val empty = todayAll.isEmpty() && live == null && backlogAll.isEmpty() && startNext == null && sharedTodayAll.isEmpty() && delegatedRows.isEmpty()
     val weekMin = remember(sessions, now) {
         sessions.filter { (now - (it.completedAtMs() ?: 0)) in 0..(7L * 86_400_000) }.sumOf { it.actualSec } / 60
     }
@@ -348,15 +355,15 @@ fun TodayScreen(
                         }
                     }
                 }
-                // Sharing groups sit at the top of the Today list (web parity), not in
-                // the Backlog view: tasks OTHERS shared with me, then tasks I delegated.
-                if (!backlogActive) {
-                    if (sharedVisible.isNotEmpty()) item(key = "shared-with-you") {
-                        SharedWithYouSection(vm, sharedVisible, ShareViewMode.TODAY, onToggle = { taskId, done -> vm.completeSharedTask(taskId, done) }, onOpen = onOpenShared, modifier = Modifier.padding(horizontal = 18.dp))
-                    }
-                    if (delegatedRows.isNotEmpty()) item(key = "delegated") {
-                        DelegatedSection(delegatedRows, assignedOut, onOpen)
-                    }
+                // Sharing groups sit at the top of the list (web parity). "Shared with
+                // you" follows the view — today's + unplanned shares here, the OVERDUE
+                // ones in the Backlog view (placed by the owner's next block) — then, on
+                // Today only, the tasks I delegated.
+                if (sharedVisible.isNotEmpty()) item(key = "shared-with-you") {
+                    SharedWithYouSection(vm, sharedVisible, shareMode, onToggle = { taskId, done -> vm.completeSharedTask(taskId, done) }, onOpen = onOpenShared, modifier = Modifier.padding(horizontal = 18.dp))
+                }
+                if (!backlogActive && delegatedRows.isNotEmpty()) item(key = "delegated") {
+                    DelegatedSection(delegatedRows, assignedOut, onOpen)
                 }
                 if (liveTask != null && live != null) {
                     item {
@@ -372,7 +379,7 @@ fun TodayScreen(
                 // Per-view empty note: switching to Backlog or an area filter with no
                 // matches showed a blank list under the header (looked broken). The live
                 // card counts as content, so only show this when nothing else is there.
-                if (displayRows.isEmpty() && liveTask == null && (backlogActive || areaFilter != null)) {
+                if (displayRows.isEmpty() && liveTask == null && sharedVisible.isEmpty() && (backlogActive || areaFilter != null)) {
                     item {
                         Text(
                             if (backlogActive) "Backlog's clear — nothing waiting." else "Nothing in $areaFilter right now.",

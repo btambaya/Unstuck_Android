@@ -25,10 +25,16 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import tech.csalliance.unstuck.core.logic.ShareBucket
 import tech.csalliance.unstuck.core.logic.ShareViewMode
+import tech.csalliance.unstuck.core.logic.fmtDuration
+import tech.csalliance.unstuck.core.logic.shareBucket
+import tech.csalliance.unstuck.core.logic.shareFirstName
+import tech.csalliance.unstuck.core.logic.shareSlotLabel
 import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.shareStatusLabel
+import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
@@ -57,11 +63,19 @@ fun SharedWithYouSection(
 ) {
     if (items.isEmpty()) return
     val c = UTheme.colors
+    val todayIso = Clock.todayIso()
     Column(Modifier.fillMaxWidth().then(modifier).padding(top = 12.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(bottom = 2.dp)) {
             Icon(Icons.Filled.Person, contentDescription = null, tint = c.ink3, modifier = Modifier.size(12.dp))
-            // Same wording as the web group header.
-            SectionLabel(if (mode == ShareViewMode.COMPLETED) "Shared with you · completed" else "Shared with you")
+            // Same wording as the web group header; the date buckets say which slice this is.
+            SectionLabel(
+                when (mode) {
+                    ShareViewMode.COMPLETED -> "Shared with you · completed"
+                    ShareViewMode.BACKLOG -> "Shared with you · overdue"
+                    ShareViewMode.UPCOMING -> "Shared with you · upcoming"
+                    else -> "Shared with you"
+                },
+            )
         }
         items.forEach { s ->
             val done = s.done
@@ -89,7 +103,13 @@ fun SharedWithYouSection(
                         textDecoration = if (done) TextDecoration.LineThrough else null,
                         maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
-                    Text("from ${s.ownerName.substringBefore('@')}", style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 2.dp))
+                    // The owner's slot leads — "Sat 04:30 · 45m · from anna" — so a shared
+                    // task reads like one of your own rows (migration 052). Unscheduled falls
+                    // back to the estimate; an overdue slot is tinted like a backlog age badge.
+                    val slot = shareSlotLabel(s, todayIso)
+                    val overdue = !done && shareBucket(s, todayIso) == ShareBucket.OVERDUE
+                    val meta = listOfNotNull(slot ?: fmtDuration(s.estimateMin), "from ${shareFirstName(s.ownerName)}").joinToString(" · ")
+                    Text(meta, style = UFont.sans(12), color = if (overdue) c.amberInk else c.ink3, modifier = Modifier.padding(top = 2.dp))
                     // Partner rows: live co-focus — "focusing now" + "Sit with them".
                     if (s.level == ShareLevel.PARTNER && !done) {
                         PartnerPresence(vm, s.taskId, modifier = Modifier.padding(top = 6.dp))

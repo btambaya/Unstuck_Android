@@ -15,12 +15,15 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import tech.csalliance.unstuck.core.logic.FocusTimer
+import tech.csalliance.unstuck.core.logic.IsoRange
+import tech.csalliance.unstuck.core.logic.clampSharedRange
 import tech.csalliance.unstuck.core.model.CircleMember
 import tech.csalliance.unstuck.core.model.CircleStatus
 import tech.csalliance.unstuck.core.model.Objective
 import tech.csalliance.unstuck.core.model.ShareBadge
 import tech.csalliance.unstuck.core.model.ShareForTask
 import tech.csalliance.unstuck.core.model.ShareLevel
+import tech.csalliance.unstuck.core.model.SharedBlock
 import tech.csalliance.unstuck.core.model.SharedTaskDetail
 import tech.csalliance.unstuck.core.model.SharedWithMe
 
@@ -62,6 +65,14 @@ enum class SharedFocusLogResult { LOGGED, SKIPPED, NOT_ALLOWED, FAILED }
     @SerialName("p_done") val done: Boolean,
 )
 
+// migration 052 shared_task_blocks(p_from date, p_to date) — inclusive 'YYYY-MM-DD'
+// bounds. Both REQUIRED (no defaults: kotlinx would omit them and the RPC raises
+// bad_range on a null bound).
+@Serializable internal data class RangeParams(
+    @SerialName("p_from") val from: String,
+    @SerialName("p_to") val to: String,
+)
+
 @Serializable internal data class LogFocusParams(
     @SerialName("p_task_id") val taskId: String,
     @SerialName("p_actual_sec") val actualSec: Int,
@@ -100,6 +111,33 @@ enum class SharedFocusLogResult { LOGGED, SKIPPED, NOT_ALLOWED, FAILED }
     val title: String = "",
     val done: Boolean? = null,
     @SerialName("completed_at") val completedAt: String? = null,
+    // Migration 052 schedule projection — same absent-OR-explicit-null tolerance:
+    // nullable WITH a default. All read-only (this DTO is never encoded).
+    @SerialName("estimate_min") val estimateMin: Int? = null,
+    @SerialName("life_area") val lifeArea: String? = null,
+    @SerialName("next_block_id") val nextBlockId: String? = null,
+    @SerialName("next_date") val nextDate: String? = null,
+    @SerialName("next_start_time") val nextStartTime: String? = null,
+    @SerialName("next_duration_minutes") val nextDurationMinutes: Int? = null,
+    @SerialName("next_done") val nextDone: Boolean? = null,
+)
+
+// One row of shared_task_blocks (migration 052): a block of a task shared WITH me
+// inside the requested window. block_id / task_id / date are the identity and are
+// always present; everything else tolerates absence.
+@Serializable internal data class SharedBlockRow(
+    @SerialName("block_id") val blockId: String,
+    @SerialName("task_id") val taskId: String,
+    @SerialName("share_id") val shareId: String = "",
+    val level: String = "view",
+    @SerialName("owner_name") val ownerName: String? = null,
+    val title: String = "",
+    val date: String,
+    @SerialName("start_time") val startTime: String = "00:00",
+    @SerialName("duration_minutes") val durationMinutes: Int = 0,
+    val done: Boolean? = null,
+    val skipped: Boolean? = null,
+    val kind: String? = null,
 )
 
 @Serializable internal data class BadgeRow(
@@ -127,6 +165,12 @@ enum class SharedFocusLogResult { LOGGED, SKIPPED, NOT_ALLOWED, FAILED }
     val objectives: List<Objective>? = null,
     @SerialName("due_at") val dueAt: String? = null,
     @SerialName("created_at") val createdAt: String? = null,
+    // Migration 052: the owner's next block (absent on a pre-052 server).
+    @SerialName("next_block_id") val nextBlockId: String? = null,
+    @SerialName("next_date") val nextDate: String? = null,
+    @SerialName("next_start_time") val nextStartTime: String? = null,
+    @SerialName("next_duration_minutes") val nextDurationMinutes: Int? = null,
+    @SerialName("next_done") val nextDone: Boolean? = null,
 )
 
 // ── Edge-fn bodies ──
@@ -238,9 +282,37 @@ class CircleClient(private val client: SupabaseClient) {
      *  task rows are RLS-forbidden). Degrades to empty on error. */
     suspend fun tasksSharedWithMe(): List<SharedWithMe> = runCatching {
         client.postgrest.rpc("tasks_shared_with_me").decodeList<SharedWithMeRow>().map {
-            SharedWithMe(it.shareId, it.taskId, it.ownerName, ShareLevel.fromWire(it.level), it.title, it.done == true, it.completedAt)
+            SharedWithMe(
+                shareId = it.shareId, taskId = it.taskId, ownerName = it.ownerName,
+                level = ShareLevel.fromWire(it.level), title = it.title, done = it.done == true,
+                completedAt = it.completedAt,
+                estimateMin = it.estimateMin, lifeArea = it.lifeArea,
+                nextBlockId = it.nextBlockId, nextDate = it.nextDate, nextStartTime = it.nextStartTime,
+                nextDurationMinutes = it.nextDurationMinutes, nextDone = it.nextDone,
+            )
         }
     }.getOrDefault(emptyList())
+
+    /** Every block of every task shared WITH me dated inside [from, to] (inclusive
+     *  'YYYY-MM-DD') — the calendar surface (migration 052 shared_task_blocks). The
+     *  window is clamped to the RPC's 62-day cap client-side so it can never raise
+     *  range_too_wide. Any share level; external blocks never arrive. Degrades to
+     *  empty on error (a pre-052 server has no such function → empty calendar, not
+     *  a crash). READ-only. */
+    suspend fun sharedTaskBlocks(from: String, to: String): List<SharedBlock> = runCatching {
+        val r = clampSharedRange(IsoRange(from, to))
+        client.postgrest.rpc("shared_task_blocks", RangeParams(r.from, r.to)).decodeList<SharedBlockRow>().map {
+            SharedBlock(
+                blockId = it.blockId, taskId = it.taskId, shareId = it.shareId,
+                level = ShareLevel.fromWire(it.level), ownerName = it.ownerName.orEmpty(), title = it.title,
+                date = it.date, startTime = it.startTime, durationMinutes = it.durationMinutes,
+                done = it.done == true, skipped = it.skipped == true, kind = it.kind ?: "task",
+            )
+        }
+    }.getOrElse {
+        println("[shared-blocks] shared_task_blocks($from..$to) failed: ${it.message}")
+        emptyList()
+    }
 
     /** Complete/uncomplete a task shared with me — partner OR assign only (the RPC
      *  rejects view). THROWS on error so the optimistic UI can roll back. */
@@ -268,6 +340,8 @@ class CircleClient(private val client: SupabaseClient) {
                     objectives = r.objectives.orEmpty(),
                     dueAt = r.dueAt,
                     createdAt = r.createdAt.orEmpty(),
+                    nextBlockId = r.nextBlockId, nextDate = r.nextDate, nextStartTime = r.nextStartTime,
+                    nextDurationMinutes = r.nextDurationMinutes, nextDone = r.nextDone,
                 )
             }
     }.getOrNull()

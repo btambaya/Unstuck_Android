@@ -13,8 +13,11 @@ import tech.csalliance.unstuck.core.time.Time
 //               own task). Completed rows leave immediately.
 //   Upcoming  — next block after today.
 //   Backlog   — next block before today and still open (overdue).
-//   All       — everything open; a completed row lingers only if finished today.
+//   Later     — the owner parked it in Later (migration 053) — theirs to un-park.
+//   All       — everything open (incl. Later + a task whose latest block already
+//               ran and finished); a completed row lingers only if finished today.
 //   Completed — every finished share, however old.
+// Dates are the recipient's OWN zone (the sync client resolves `next_start_at`).
 // Applies whoever ticked it — owner or an assign/partner recipient (Ahmad,
 // 2026-08-02: completed shared tasks should move to Completed "for all, like all
 // other tasks").
@@ -27,7 +30,7 @@ import tech.csalliance.unstuck.core.time.Time
 /** Which of the recipient's own list views a shared row is being rendered into.
  *  Extends the web ShareViewMode union ('today' | 'all' | 'completed') with the
  *  two date buckets the schedule projection unlocks. */
-enum class ShareViewMode { TODAY, UPCOMING, BACKLOG, ALL, COMPLETED }
+enum class ShareViewMode { TODAY, UPCOMING, BACKLOG, LATER, ALL, COMPLETED }
 
 /** True when this shared row belongs in the given view. [todayIso] is the LOCAL
  *  'YYYY-MM-DD' the date buckets pivot on (defaults to the day containing [now]). */
@@ -55,6 +58,7 @@ fun shareVisibleIn(
         }
         ShareViewMode.UPCOMING -> shareBucket(item, todayIso) == ShareBucket.UPCOMING
         ShareViewMode.BACKLOG -> shareBucket(item, todayIso) == ShareBucket.OVERDUE
+        ShareViewMode.LATER -> shareBucket(item, todayIso) == ShareBucket.LATER
         ShareViewMode.COMPLETED -> false   // handled above; keeps the `when` exhaustive
     }
 }

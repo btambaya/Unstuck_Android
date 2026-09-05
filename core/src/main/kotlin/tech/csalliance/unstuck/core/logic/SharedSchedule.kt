@@ -5,7 +5,10 @@ import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.ShareSlot
 import tech.csalliance.unstuck.core.model.SharedBlock
 import tech.csalliance.unstuck.core.model.SharedWithMe
+import tech.csalliance.unstuck.core.time.Time
+import java.time.Instant
 import java.time.LocalDate
+import java.time.ZoneId
 import java.time.format.TextStyle
 import java.util.Locale
 
@@ -65,17 +68,48 @@ fun monthRange(year: Int, month: Int): IsoRange {
 
 // ── Bucketing by the owner's next block ──────────────────────────────────────
 
-enum class ShareBucket { DONE, TODAY, UPCOMING, OVERDUE, UNSCHEDULED }
+enum class ShareBucket {
+    DONE, TODAY, UPCOMING, OVERDUE, UNSCHEDULED,
+    /** The owner parked it in Later (migration 053) — only All shows it. */
+    LATER,
+    /** The owner's latest block already ran AND was ticked done while the task
+     *  stays open (a multi-session task between sessions). Not a live plan, not
+     *  overdue: it sits in All only — never in Today (cross-platform rule, 2026-09). */
+    FINISHED,
+}
 
 /** Where a share lands, given the local [todayIso]:
- *  done → DONE; no block → UNSCHEDULED (lives in Today, like a task that arrived
- *  without a plan); block today → TODAY; later → UPCOMING; earlier (and still
- *  open) → OVERDUE (Backlog). ISO dates compare lexicographically. */
+ *  done → DONE; the owner's Later → LATER; no block → UNSCHEDULED (lives in Today,
+ *  like a task that arrived without a plan); block today → TODAY; later → UPCOMING;
+ *  a past block still open → OVERDUE (Backlog); a past block already FINISHED →
+ *  FINISHED (All only). ISO dates compare lexicographically. [item]'s date is the
+ *  recipient-local one the sync client resolved from `next_start_at`. */
 fun shareBucket(item: ShareSlot, todayIso: String): ShareBucket {
     if (item.done) return ShareBucket.DONE
+    if (item.later) return ShareBucket.LATER
     val d = item.nextDate ?: return ShareBucket.UNSCHEDULED
     if (d == todayIso) return ShareBucket.TODAY
-    return if (d > todayIso) ShareBucket.UPCOMING else ShareBucket.OVERDUE
+    if (d > todayIso) return ShareBucket.UPCOMING
+    return if (item.nextDone == true) ShareBucket.FINISHED else ShareBucket.OVERDUE
+}
+
+// ── Recipient-zone resolution (migration 053) ────────────────────────────────
+
+/** A slot's civil date + time as the RECIPIENT sees it. */
+data class LocalSlot(val date: String?, val time: String?)
+
+/** Resolve the owner's slot into [zone]: when the server sent [startAt] (an ISO
+ *  instant computed from the owner's date + time in the OWNER's zone) it wins and
+ *  is re-expressed as the recipient's local 'YYYY-MM-DD' + 'HH:MM' — so a 09:00
+ *  London block reads 10:00 in Berlin and buckets on the right day across midnight.
+ *  FORGIVING: an absent / unparseable instant (pre-053 server, garbage) falls back
+ *  to the owner's raw [date] / [time] untouched, never to a blank slot. */
+fun resolveSharedSlot(startAt: String?, date: String?, time: String?, zone: ZoneId = ZoneId.systemDefault()): LocalSlot {
+    val ms = startAt?.takeIf { it.isNotBlank() }?.let { Time.parseMillis(it) } ?: return LocalSlot(date, time)
+    val local = runCatching { Instant.ofEpochMilli(ms).atZone(zone) }.getOrNull() ?: return LocalSlot(date, time)
+    val d = "%04d-%02d-%02d".format(local.year, local.monthValue, local.dayOfMonth)
+    val t = "%02d:%02d".format(local.hour, local.minute)
+    return LocalSlot(d, t)
 }
 
 /** Chronological: earliest slot first; unscheduled rows sink to the end. Equal
@@ -146,7 +180,9 @@ fun plannedLabel(item: ShareSlot, todayIso: String): String? {
     val parts = mutableListOf("Planned $whenLabel")
     item.nextStartTime?.let { parts += it }
     fmtDuration(item.nextDurationMinutes)?.let { parts += it }
-    if (!item.done && d < todayIso) parts += "overdue"
+    // A past block the owner already ticked done (task still open) reads "finished",
+    // not "overdue" — nothing is due (web wording).
+    if (!item.done && d < todayIso) parts += if (item.nextDone == true) "finished" else "overdue"
     return parts.joinToString(" · ")
 }
 
@@ -181,14 +217,22 @@ fun SharedBlock.asCalBlock(): CalBlock = CalBlock(
 
 /** The row the shared-task detail sheet takes, synthesized from a tapped calendar
  *  block (the sheet then fetches shared_task_detail for the live task state). The
- *  block's own slot seeds `next*` so the "Planned …" line is right immediately;
- *  `done` is the BLOCK's state (the best this projection knows) — callers prefer
- *  the live SharedWithMe row for the same task when they have one. */
+ *  block's own slot seeds `next*` so the "Planned …" line is right immediately, and
+ *  [SharedWithMe.openedFrom] pins the sheet to THIS occurrence even after the live
+ *  detail (with the task's NEXT block) lands — the sheet describes what was tapped,
+ *  as on the web. `done` is the BLOCK's state (the best this projection knows) —
+ *  callers prefer the live SharedWithMe row for the same task when they have one
+ *  (see [openedFrom] to keep the tapped slot in that case). */
 fun SharedBlock.asSharedWithMe(): SharedWithMe = SharedWithMe(
     shareId = shareId, taskId = taskId, ownerName = ownerName, level = level, title = title,
     done = done, nextBlockId = blockId, nextDate = date, nextStartTime = startTime,
-    nextDurationMinutes = durationMinutes, nextDone = done,
+    nextDurationMinutes = durationMinutes, nextDone = done, openedFrom = this,
 )
+
+/** The live list row for a task, pinned to the calendar occurrence it was opened
+ *  from: `sharedWithMe.firstOrNull { it.taskId == b.taskId }?.openedFrom(b) ?: b.asSharedWithMe()`.
+ *  The detail sheet then shows the tapped slot, not the task's next one. */
+fun SharedWithMe.openedFrom(block: SharedBlock): SharedWithMe = copy(openedFrom = block)
 
 /** The renderable set: skipped occurrences are cancelled for that day (the same
  *  rule the own-block surfaces apply) and external blocks never arrive from the

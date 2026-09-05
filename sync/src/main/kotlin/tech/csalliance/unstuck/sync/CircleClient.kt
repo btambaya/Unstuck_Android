@@ -14,9 +14,13 @@ import io.ktor.http.contentType
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+import java.time.ZoneId
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.IsoRange
 import tech.csalliance.unstuck.core.logic.clampSharedRange
+import tech.csalliance.unstuck.core.logic.resolveSharedSlot
 import tech.csalliance.unstuck.core.model.CircleMember
 import tech.csalliance.unstuck.core.model.CircleStatus
 import tech.csalliance.unstuck.core.model.Objective
@@ -120,7 +124,39 @@ enum class SharedFocusLogResult { LOGGED, SKIPPED, NOT_ALLOWED, FAILED }
     @SerialName("next_start_time") val nextStartTime: String? = null,
     @SerialName("next_duration_minutes") val nextDurationMinutes: Int? = null,
     @SerialName("next_done") val nextDone: Boolean? = null,
+    // Migration 053: the same slot as an INSTANT (owner wall-clock → their zone),
+    // the owner's Later flag and recurrence template (a jsonb object, or null).
+    // Nullable WITH defaults — absent on a pre-053 server, explicit null when the
+    // task has no block / isn't recurring. `recurrence` is kept as a raw element:
+    // only its presence matters here, and a shape this build can't parse must not
+    // fail the whole row (FORGIVING decode).
+    @SerialName("next_start_at") val nextStartAt: String? = null,
+    val later: Boolean? = null,
+    val recurrence: JsonElement? = null,
 )
+
+/** The `later` column as a flag: only an explicit true parks the share. */
+internal val SharedWithMeRow.isLater: Boolean get() = later == true
+
+/** A recurrence template is present when the column is a non-empty JSON object. */
+internal val SharedWithMeRow.isRecurring: Boolean
+    get() = (recurrence as? JsonObject)?.isNotEmpty() == true
+
+/** Row → model, with the owner's slot re-expressed in [zone] (the recipient's)
+ *  when `next_start_at` arrived; the raw owner date/time otherwise. Internal so
+ *  the module's tests pin the zone. */
+internal fun SharedWithMeRow.toModel(zone: ZoneId = ZoneId.systemDefault()): SharedWithMe {
+    val slot = resolveSharedSlot(nextStartAt, nextDate, nextStartTime, zone)
+    return SharedWithMe(
+        shareId = shareId, taskId = taskId, ownerName = ownerName,
+        level = ShareLevel.fromWire(level), title = title, done = done == true,
+        completedAt = completedAt,
+        estimateMin = estimateMin, lifeArea = lifeArea,
+        nextBlockId = nextBlockId, nextDate = slot.date, nextStartTime = slot.time,
+        nextDurationMinutes = nextDurationMinutes, nextDone = nextDone,
+        nextStartAt = nextStartAt, later = isLater, recurring = isRecurring,
+    )
+}
 
 // One row of shared_task_blocks (migration 052): a block of a task shared WITH me
 // inside the requested window. block_id / task_id / date are the identity and are
@@ -138,7 +174,21 @@ enum class SharedFocusLogResult { LOGGED, SKIPPED, NOT_ALLOWED, FAILED }
     val done: Boolean? = null,
     val skipped: Boolean? = null,
     val kind: String? = null,
+    // Migration 053: the block's start as an instant (absent pre-053).
+    @SerialName("start_at") val startAt: String? = null,
 )
+
+/** Row → model, painted on the RECIPIENT's calendar day/time (see [resolveSharedSlot]). */
+internal fun SharedBlockRow.toModel(zone: ZoneId = ZoneId.systemDefault()): SharedBlock {
+    val slot = resolveSharedSlot(startAt, date, startTime, zone)
+    return SharedBlock(
+        blockId = blockId, taskId = taskId, shareId = shareId,
+        level = ShareLevel.fromWire(level), ownerName = ownerName.orEmpty(), title = title,
+        date = slot.date ?: date, startTime = slot.time ?: startTime, durationMinutes = durationMinutes,
+        done = done == true, skipped = skipped == true, kind = kind ?: "task",
+        startAt = startAt,
+    )
+}
 
 @Serializable internal data class BadgeRow(
     @SerialName("task_id") val taskId: String,
@@ -171,7 +221,32 @@ enum class SharedFocusLogResult { LOGGED, SKIPPED, NOT_ALLOWED, FAILED }
     @SerialName("next_start_time") val nextStartTime: String? = null,
     @SerialName("next_duration_minutes") val nextDurationMinutes: Int? = null,
     @SerialName("next_done") val nextDone: Boolean? = null,
+    // Migration 053 (see SharedWithMeRow).
+    @SerialName("next_start_at") val nextStartAt: String? = null,
+    val later: Boolean? = null,
 )
+
+/** Row → model, the owner's next slot re-expressed in [zone] (the recipient's). */
+internal fun SharedTaskDetailRow.toModel(zone: ZoneId = ZoneId.systemDefault()): SharedTaskDetail {
+    val slot = resolveSharedSlot(nextStartAt, nextDate, nextStartTime, zone)
+    return SharedTaskDetail(
+        taskId = taskId,
+        ownerName = ownerName.orEmpty(),
+        level = ShareLevel.fromWire(level),
+        title = name,
+        done = done,
+        estimateMin = estimateMin,
+        totalFocused = totalFocused,
+        lifeArea = lifeArea,
+        tags = tags.orEmpty(),
+        objectives = objectives.orEmpty(),
+        dueAt = dueAt,
+        createdAt = createdAt.orEmpty(),
+        nextBlockId = nextBlockId, nextDate = slot.date, nextStartTime = slot.time,
+        nextDurationMinutes = nextDurationMinutes, nextDone = nextDone,
+        nextStartAt = nextStartAt, later = later == true,
+    )
+}
 
 // ── Edge-fn bodies ──
 @Serializable internal data class InviteBody(val email: String? = null)
@@ -281,16 +356,9 @@ class CircleClient(private val client: SupabaseClient) {
     /** Tasks other people have shared WITH me (SECURITY DEFINER projection — the raw
      *  task rows are RLS-forbidden). Degrades to empty on error. */
     suspend fun tasksSharedWithMe(): List<SharedWithMe> = runCatching {
-        client.postgrest.rpc("tasks_shared_with_me").decodeList<SharedWithMeRow>().map {
-            SharedWithMe(
-                shareId = it.shareId, taskId = it.taskId, ownerName = it.ownerName,
-                level = ShareLevel.fromWire(it.level), title = it.title, done = it.done == true,
-                completedAt = it.completedAt,
-                estimateMin = it.estimateMin, lifeArea = it.lifeArea,
-                nextBlockId = it.nextBlockId, nextDate = it.nextDate, nextStartTime = it.nextStartTime,
-                nextDurationMinutes = it.nextDurationMinutes, nextDone = it.nextDone,
-            )
-        }
+        // Slots land in the RECIPIENT's zone (migration 053 next_start_at) — see
+        // SharedWithMeRow.toModel. A pre-053 server leaves the owner's wall-clock.
+        client.postgrest.rpc("tasks_shared_with_me").decodeList<SharedWithMeRow>().map { it.toModel() }
     }.getOrDefault(emptyList())
 
     /** Every block of every task shared WITH me dated inside [from, to] (inclusive
@@ -301,14 +369,7 @@ class CircleClient(private val client: SupabaseClient) {
      *  a crash). READ-only. */
     suspend fun sharedTaskBlocks(from: String, to: String): List<SharedBlock> = runCatching {
         val r = clampSharedRange(IsoRange(from, to))
-        client.postgrest.rpc("shared_task_blocks", RangeParams(r.from, r.to)).decodeList<SharedBlockRow>().map {
-            SharedBlock(
-                blockId = it.blockId, taskId = it.taskId, shareId = it.shareId,
-                level = ShareLevel.fromWire(it.level), ownerName = it.ownerName.orEmpty(), title = it.title,
-                date = it.date, startTime = it.startTime, durationMinutes = it.durationMinutes,
-                done = it.done == true, skipped = it.skipped == true, kind = it.kind ?: "task",
-            )
-        }
+        client.postgrest.rpc("shared_task_blocks", RangeParams(r.from, r.to)).decodeList<SharedBlockRow>().map { it.toModel() }
     }.getOrElse {
         println("[shared-blocks] shared_task_blocks($from..$to) failed: ${it.message}")
         emptyList()
@@ -326,24 +387,7 @@ class CircleClient(private val client: SupabaseClient) {
      *  known title + level). */
     suspend fun sharedTaskDetail(taskId: String): SharedTaskDetail? = runCatching {
         client.postgrest.rpc("shared_task_detail", TaskIdParam(taskId))
-            .decodeList<SharedTaskDetailRow>().firstOrNull()?.let { r ->
-                SharedTaskDetail(
-                    taskId = r.taskId,
-                    ownerName = r.ownerName.orEmpty(),
-                    level = ShareLevel.fromWire(r.level),
-                    title = r.name,
-                    done = r.done,
-                    estimateMin = r.estimateMin,
-                    totalFocused = r.totalFocused,
-                    lifeArea = r.lifeArea,
-                    tags = r.tags.orEmpty(),
-                    objectives = r.objectives.orEmpty(),
-                    dueAt = r.dueAt,
-                    createdAt = r.createdAt.orEmpty(),
-                    nextBlockId = r.nextBlockId, nextDate = r.nextDate, nextStartTime = r.nextStartTime,
-                    nextDurationMinutes = r.nextDurationMinutes, nextDone = r.nextDone,
-                )
-            }
+            .decodeList<SharedTaskDetailRow>().firstOrNull()?.toModel()
     }.getOrNull()
 
     /** Accrue a recipient's focus onto the OWNER's shared task (task.total_focused) —

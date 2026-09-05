@@ -53,6 +53,7 @@ import tech.csalliance.unstuck.core.logic.asCalBlock
 import tech.csalliance.unstuck.core.logic.asSharedWithMe
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.liveSharedBlocks
+import tech.csalliance.unstuck.core.logic.openedFrom
 import tech.csalliance.unstuck.core.logic.monthRange
 import tech.csalliance.unstuck.core.logic.sharedBlockLabel
 import tech.csalliance.unstuck.core.logic.taskForBlock
@@ -289,7 +290,7 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
                                     .then(
                                         when {
                                             sb != null -> Modifier.dashedBorder(c.primaryDeep, 1.dp, 3.dp).clickable {
-                                                onOpenShared(sharedWithMe.firstOrNull { it.taskId == sb.taskId } ?: sb.asSharedWithMe())
+                                                onOpenShared(sharedWithMe.firstOrNull { it.taskId == sb.taskId }?.openedFrom(sb) ?: sb.asSharedWithMe())
                                             }
                                             isTaskBlock(b) -> Modifier.clickable { taskForBlock(b, tasks)?.let(onOpen) }
                                             else -> Modifier

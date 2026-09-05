@@ -50,6 +50,31 @@ interface RecordDao {
 
     @Query("DELETE FROM records WHERE tableName = :table AND id NOT LIKE :likePattern")
     suspend fun deleteNotPrefixed(table: String, likePattern: String)
+
+    /** Ids in [table] with a queued outbox UPSERT — read INSIDE the replace
+     *  transaction so a write landing between "read pending" and "wipe + insert"
+     *  can't be dropped (the TOCTOU the non-transactional hydrate had). */
+    @Query("SELECT recordId FROM outbox WHERE recordTable = :table AND op = 'upsert'")
+    suspend fun pendingUpsertIds(table: String): List<String>
+
+    /** Replace-per-table that KEEPS every local row with a still-pending outbox
+     *  upsert — even when the server also has that id. The local op is by
+     *  construction the newer state (the engine reconciles it against the server
+     *  row BEFORE flushing, so a genuinely superseded op never reaches here), and
+     *  the server's copy of such a row is skipped rather than clobbering the edit
+     *  the user just made. Pending ids are read in the same transaction. */
+    @Transaction
+    suspend fun replaceTableKeepingPending(table: String, rows: List<RecordEntity>, preserveIdsPrefix: String? = null) {
+        val pending = pendingUpsertIds(table).toSet()
+        if (pending.isEmpty()) {
+            replaceTable(table, rows, preserveIdsPrefix)
+            return
+        }
+        val keep = get(table).filter { it.id in pending || (preserveIdsPrefix != null && it.id.startsWith(preserveIdsPrefix)) }
+        clearTable(table)
+        upsert(keep)
+        upsert(rows.filter { it.id !in pending })
+    }
 }
 
 @Dao
@@ -68,6 +93,30 @@ interface OutboxDao {
 
     @Query("DELETE FROM outbox")
     suspend fun clear()
+
+    /** The newest queued upsert for one row (its `base` is the state every later
+     *  edit of that row still measures against). */
+    @Query("SELECT * FROM outbox WHERE recordTable = :table AND recordId = :id AND op = 'upsert' ORDER BY seq DESC LIMIT 1")
+    suspend fun latestUpsert(table: String, id: String): OutboxEntity?
+
+    /** Rewrite an op after a 3-way merge against a newer server row. */
+    @Query("UPDATE outbox SET payload = :payload, base = :base WHERE seq = :seq")
+    suspend fun rewrite(seq: Long, payload: String?, base: String?)
+}
+
+@Dao
+interface ParkedOutboxDao {
+    @Query("SELECT * FROM parked_outbox WHERE userId = :userId ORDER BY seq ASC")
+    suspend fun forUser(userId: String): List<ParkedOutboxEntity>
+
+    @Query("SELECT COUNT(*) FROM parked_outbox WHERE userId = :userId")
+    suspend fun countForUser(userId: String): Int
+
+    @Insert
+    suspend fun insertAll(ops: List<ParkedOutboxEntity>)
+
+    @Query("DELETE FROM parked_outbox WHERE userId = :userId")
+    suspend fun clearForUser(userId: String)
 }
 
 @Dao

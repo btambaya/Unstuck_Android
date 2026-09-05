@@ -29,9 +29,32 @@ class WriteThrough(private val store: LocalStore) {
     internal var pushCalBlock: (suspend (CalBlock) -> String?)? = null
     internal var pushCalBlockDelete: (suspend (CalBlock) -> Unit)? = null
 
+    /** Fired after EVERY enqueued op (same seam as iOS `setOnEnqueue`). The
+     *  SyncCoordinator hooks a debounced flush here so a mid-session edit reaches
+     *  the server within ~1.5 s instead of waiting for the next auth event / the
+     *  30-min worker — and so the foreground pulls (which flush first anyway) find
+     *  an empty outbox. Never throws into the write path. */
+    internal var onEnqueue: (() -> Unit)? = null
+
     suspend fun upsertTask(t: TaskItem) {
+        // Capture the merge base BEFORE the local write: the server-shaped row this
+        // edit started from. If an earlier edit of the same row is still queued, its
+        // base carries forward (the flusher coalesces the older op away, so the base
+        // must stay the last SYNCED state, not the intermediate local one). Null for
+        // a brand-new row. Hydrator.pruneStaleTaskOps 3-way merges against it.
+        val base = mergeBaseFor(Tables.TASKS, t.id) {
+            store.getOne(Tables.TASKS, t.id, TaskItem.serializer())?.let { DbRowCodec.encodeTask(it).toString() }
+        }
         store.upsert(Tables.TASKS, t, TaskItem.serializer(), t.id, t.updatedAt)
-        enqueue("tasks", t.id, "upsert", DbRowCodec.encodeTask(t).toString())
+        enqueue("tasks", t.id, "upsert", DbRowCodec.encodeTask(t).toString(), base = base)
+    }
+
+    /** The base for a new upsert of (table,id): the still-queued upsert's base when
+     *  one exists (even if that is null — a local create stays a create), else the
+     *  current local row encoded by [current]. */
+    private suspend fun mergeBaseFor(table: String, id: String, current: suspend () -> String?): String? {
+        val queued = store.latestPendingUpsert(table, id)
+        return if (queued != null) queued.base else current()
     }
 
     suspend fun upsertCalBlock(b: CalBlock) {
@@ -126,10 +149,12 @@ class WriteThrough(private val store: LocalStore) {
             .forEach { store.dequeue(it.seq) }
     }
 
-    private suspend fun enqueue(table: String, id: String, op: String, payload: String?, dependsOn: String? = null) {
+    private suspend fun enqueue(table: String, id: String, op: String, payload: String?, dependsOn: String? = null, base: String? = null) {
         store.enqueue(
-            OutboxEntity(op = op, recordTable = table, recordId = id, payload = payload, dependsOn = dependsOn, createdAt = nowMillis()),
+            OutboxEntity(op = op, recordTable = table, recordId = id, payload = payload, dependsOn = dependsOn, createdAt = nowMillis(), base = base),
         )
+        // Outside the store write so a hook failure can never lose the local edit.
+        runCatching { onEnqueue?.invoke() }
     }
 
     // Injectable seam — overridable in tests (Date.now() is non-deterministic).

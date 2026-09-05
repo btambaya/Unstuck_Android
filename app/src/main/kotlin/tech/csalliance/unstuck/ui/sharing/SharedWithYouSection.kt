@@ -73,6 +73,7 @@ fun SharedWithYouSection(
                     ShareViewMode.COMPLETED -> "Shared with you · completed"
                     ShareViewMode.BACKLOG -> "Shared with you · overdue"
                     ShareViewMode.UPCOMING -> "Shared with you · upcoming"
+                    ShareViewMode.LATER -> "Shared with you · later"
                     else -> "Shared with you"
                 },
             )

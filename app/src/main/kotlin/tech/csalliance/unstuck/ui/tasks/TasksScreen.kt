@@ -102,15 +102,18 @@ fun TasksScreen(
         visibleTasks(view, tasks, blocks, nowState, activeArea = if (view == TaskListView.TODAY) null else activeArea, activeTag = activeTag, slipMode = false)
     }
     // A shared task behaves like my own, placed by the OWNER's next block (migration
-    // 052): Today = next block today or unplanned, Upcoming = after today, Backlog =
-    // before today and still open, All = every open one (+ today's win), Completed
-    // collects the finished ones (Ahmad, 2026-08-02). Null on Later / Recurring — a
-    // share can't be "later" for me, and a template of mine it is not. The group
-    // respects the active area filter (an area-less share always shows).
+    // 052, in MY zone since 053): Today = next block today or unplanned, Upcoming =
+    // after today, Backlog = before today and still open, Later = the owner parked it
+    // (053 `later` — their own bucketing rule applies to me too), All = every open one
+    // incl. Later + a task whose latest block already finished (+ today's win),
+    // Completed collects the finished ones (Ahmad, 2026-08-02). Null on Recurring — a
+    // template of mine it is not. The group respects the active area filter (an
+    // area-less share always shows).
     val shareMode = when (view) {
         TaskListView.TODAY -> ShareViewMode.TODAY
         TaskListView.UPCOMING -> ShareViewMode.UPCOMING
         TaskListView.BACKLOG -> ShareViewMode.BACKLOG
+        TaskListView.LATER -> ShareViewMode.LATER
         TaskListView.ALL -> ShareViewMode.ALL
         TaskListView.COMPLETED -> ShareViewMode.COMPLETED
         else -> null

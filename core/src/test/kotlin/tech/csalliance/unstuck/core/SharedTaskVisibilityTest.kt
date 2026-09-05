@@ -26,10 +26,12 @@ class SharedTaskVisibilityTest {
     private fun share(
         id: String, done: Boolean, completedAt: String? = null,
         nextDate: String? = null, nextStartTime: String? = null, lifeArea: String? = null,
+        nextDone: Boolean? = null, later: Boolean = false,
     ) = SharedWithMe(
         shareId = id, taskId = id, ownerName = "sam@example.com",
         level = ShareLevel.PARTNER, title = id, done = done, completedAt = completedAt,
         nextDate = nextDate, nextStartTime = nextStartTime, nextDurationMinutes = 45, lifeArea = lifeArea,
+        nextDone = nextDone, later = later,
     )
 
     private val open = share("open", done = false)
@@ -159,6 +161,44 @@ class SharedTaskVisibilityTest {
         assertEquals(
             listOf("tomorrow", "later"),
             visibleShares(listOf(plannedNextMonth, plannedTomorrow), ShareViewMode.UPCOMING, now, today).map { it.shareId },
+        )
+    }
+
+    // ── migration 053 / the 2026-09 cross-platform rules ──
+
+    private val finishedPast = share("finished", done = false, nextDate = "2026-07-30", nextStartTime = "09:00", nextDone = true)
+    private val parkedLater = share("parked", done = false, nextDate = today, later = true)
+
+    @Test fun `a share whose only block is a FINISHED past block shows in All, never in Today or Backlog`() {
+        assertFalse(shareVisibleIn(finishedPast, ShareViewMode.TODAY, now, today))
+        assertFalse(shareVisibleIn(finishedPast, ShareViewMode.BACKLOG, now, today))
+        assertFalse(shareVisibleIn(finishedPast, ShareViewMode.UPCOMING, now, today))
+        assertTrue(shareVisibleIn(finishedPast, ShareViewMode.ALL, now, today))
+        assertFalse(shareVisibleIn(finishedPast, ShareViewMode.COMPLETED, now, today))   // the task itself is still open
+        // An UNFINISHED past block is still overdue (unchanged).
+        assertTrue(shareVisibleIn(overdue, ShareViewMode.BACKLOG, now, today))
+    }
+
+    @Test fun `the owners Later flag keeps a share out of Today Upcoming and Backlog - Later and All hold it`() {
+        assertFalse(shareVisibleIn(parkedLater, ShareViewMode.TODAY, now, today))
+        assertFalse(shareVisibleIn(parkedLater, ShareViewMode.UPCOMING, now, today))
+        assertFalse(shareVisibleIn(parkedLater, ShareViewMode.BACKLOG, now, today))
+        assertTrue(shareVisibleIn(parkedLater, ShareViewMode.LATER, now, today))
+        assertTrue(shareVisibleIn(parkedLater, ShareViewMode.ALL, now, today))
+        assertFalse(shareVisibleIn(plannedToday, ShareViewMode.LATER, now, today))
+        assertFalse(shareVisibleIn(open, ShareViewMode.LATER, now, today))
+        // A completed Later share is Completed, not Later.
+        val doneLater = share("done-later", done = true, later = true, completedAt = "2026-08-02T09:30:00")
+        assertFalse(shareVisibleIn(doneLater, ShareViewMode.LATER, now, today))
+        assertTrue(shareVisibleIn(doneLater, ShareViewMode.COMPLETED, now, today))
+    }
+
+    @Test fun `All orders open rows chronologically with unscheduled and later-ish rows sinking by slot`() {
+        val items = listOf(finishedPast, parkedLater, share("unplanned", done = false), plannedTomorrow, plannedToday)
+        // finishedPast (Jul 30) < plannedToday (Aug 2, 14:00) = parkedLater (Aug 2, no time → "" sorts first) < tomorrow < unscheduled.
+        assertEquals(
+            listOf("finished", "parked", "today", "tomorrow", "unplanned"),
+            visibleShares(items, ShareViewMode.ALL, now, today).map { it.shareId },
         )
     }
 

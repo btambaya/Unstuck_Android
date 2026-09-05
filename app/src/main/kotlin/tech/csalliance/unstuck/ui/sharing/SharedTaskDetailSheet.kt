@@ -137,10 +137,12 @@ fun SharedTaskDetailSheet(
             }
 
             // The owner's schedule (migration 052): "Planned Sat, Sep 5 · 04:30 · 45m"
-            // (+ "· overdue" once the slot has passed and it's still open). The fresh
-            // detail wins; until it lands, the row — or the calendar block that was
-            // tapped — seeds it. Nothing to plan → no line.
-            val slot: ShareSlot = d ?: shared
+            // (+ "· overdue" once the slot has passed and it's still open, "· finished"
+            // when that block was already done). Opened from a CALENDAR block, the sheet
+            // describes THAT occurrence (openedFrom) even after the live detail — which
+            // carries the task's NEXT block — lands, as on the web. Otherwise the fresh
+            // detail wins; until it lands the row seeds it. Nothing to plan → no line.
+            val slot: ShareSlot = shared.openedFrom ?: d ?: shared
             plannedLabel(slot, Clock.todayIso())?.let { planned ->
                 Text(planned, style = UFont.sans(12, FontWeight.Medium), color = if (planned.endsWith("overdue")) c.amberInk else c.primaryDeep)
             }

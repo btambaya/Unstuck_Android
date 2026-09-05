@@ -37,8 +37,13 @@ enum class NotificationLevel(val label: String, val blurb: String) {
             COACH -> tech.csalliance.unstuck.core.logic.CopilotLevel.COACH
         }
 
+    /** The `notification_preferences.notification_level` wire value ('calm' | 'balanced' | 'coach'). */
+    val wire: String get() = name.lowercase()
+
     companion object {
         fun fromLabel(l: String): NotificationLevel = entries.firstOrNull { it.label == l } ?: BALANCED
+        /** Null for an unknown / absent wire value (callers keep their local level). */
+        fun fromWire(s: String?): NotificationLevel? = s?.let { w -> entries.firstOrNull { it.wire == w.lowercase() } }
     }
 }
 
@@ -148,6 +153,16 @@ class SettingsStore(context: Context) {
             .apply()
     }
 
+    /**
+     * Realtime voice: hold-to-talk fallback (spec §8, key `voice.holdToTalk`,
+     * default OFF). When on, the session runs with turn_detection = null and the
+     * orb is press-and-hold; a noisy room that keeps false-triggering the server
+     * VAD is the reason to switch. Device-local (mirrors web localStorage /
+     * iOS @AppStorage("voiceHoldToTalk")).
+     */
+    fun voiceHoldToTalk(): Boolean = p.getBoolean("voice.holdToTalk", false)
+    fun setVoiceHoldToTalk(on: Boolean) { p.edit().putBoolean("voice.holdToTalk", on).apply() }
+
     /** Per-task reminder lead override (minutes), or null to use the global default.
      *  Stored device-locally — reminders fire from on-device alarms. */
     fun reminderOverride(taskId: String): Int? =
@@ -167,13 +182,52 @@ class SettingsStore(context: Context) {
         p.edit().putStringSet("dismissedNudges", ids).apply()
     }
 
-    /** Capture ids the user has archived from the Inbox (triaged without
-     *  deleting). Mirrors dismissedNudges; cleared on sign-out. */
+    /** Capture ids the user has archived from the Inbox (triaged without deleting).
+     *  Since migration 053 the SERVER owns this (`captures.archived_at`); this set is
+     *  the device CACHE — keeps the inbox right offline, migrates up once (see
+     *  [captureArchiveMigrated]) and is overwritten by the server after each pull.
+     *  Cleared on sign-out. */
     fun loadArchivedCaptureIds(): Set<String> = (p.getStringSet("archivedCaptureIds", emptySet()) ?: emptySet()).toSet()
 
     fun saveArchivedCaptureIds(ids: Set<String>) {
         p.edit().putStringSet("archivedCaptureIds", ids).apply()
     }
+
+    /** Archive writes not yet landed on the server (id → archived?). Retried on every
+     *  pull; the server-wins reconcile keeps these local values until they land, so an
+     *  offline archive never flips back. Cleared on sign-out. */
+    fun loadPendingCaptureArchiveWrites(): Map<String, Boolean> =
+        (p.getStringSet("captureArchivePending", emptySet()) ?: emptySet()).mapNotNull { raw ->
+            val i = raw.lastIndexOf(':'); if (i <= 0) null else raw.substring(0, i) to (raw.substring(i + 1) == "1")
+        }.toMap()
+
+    fun savePendingCaptureArchiveWrites(pending: Map<String, Boolean>) {
+        p.edit().putStringSet("captureArchivePending", pending.map { (id, a) -> "$id:${if (a) 1 else 0}" }.toSet()).apply()
+    }
+
+    /** True once this device's pre-053 local archive has been pushed up for [uid]
+     *  (one-time). Keyed per account, so it survives sign-out. */
+    fun captureArchiveMigrated(uid: String): Boolean = p.getBoolean("captureArchiveMigrated.$uid", false)
+    fun setCaptureArchiveMigrated(uid: String) { p.edit().putBoolean("captureArchiveMigrated.$uid", true).apply() }
+
+    // ── notification level + reminder lead: server-backed since 2026-09 ──
+    // notification_preferences.notification_level / reminder_lead_min are the source
+    // of truth (what web Settings shows, what the server crons read). The local
+    // SettingsState fields are the cache the alarms run from.
+
+    /** True once this device has pushed its local level + lead up for [uid] (one-time:
+     *  before this build Android never wrote `notification_level`, and the server row
+     *  register-push-token creates carries `reminder_lead_min = 0` = reminders OFF — so
+     *  taking the server's word first would silently switch an existing user's
+     *  reminders off). Afterwards the server wins on every pull. Keyed per account. */
+    fun notifPrefsMigrated(uid: String): Boolean = p.getBoolean("notifPrefsMigrated.$uid", false)
+    fun setNotifPrefsMigrated(uid: String) { p.edit().putBoolean("notifPrefsMigrated.$uid", true).apply() }
+
+    /** Server writes not yet landed: "level" and/or "lead". The server-wins reconcile
+     *  skips a field while its write is pending (an offline choice must not revert
+     *  before it's pushed). Cleared on sign-out. */
+    fun loadPendingNotifPrefWrites(): Set<String> = (p.getStringSet("notifPrefsPending", emptySet()) ?: emptySet()).toSet()
+    fun savePendingNotifPrefWrites(fields: Set<String>) { p.edit().putStringSet("notifPrefsPending", fields).apply() }
 
     /** Pending log_shared_focus retries (a JSON array, encoded/decoded by
      *  SharedFocusLedger). A partner-shared session's accrual is LEDGER-EXCLUSIVE,
@@ -189,13 +243,16 @@ class SettingsStore(context: Context) {
     }
 
     /** Remove per-user device-local content (reminder overrides + dismissed
-     *  nudges + archived captures) on sign-out so a different account on this
-     *  device starts clean. */
+     *  nudges + the archived-capture cache + un-landed server writes) on sign-out so
+     *  a different account on this device starts clean. Per-ACCOUNT keys
+     *  (`*.<uid>` migration markers) are inert for anyone else and stay. */
     fun clearUserContent() {
         p.edit().apply {
             p.all.keys.filter { it.startsWith("reminder.override.") }.forEach { remove(it) }
             remove("dismissedNudges")
             remove("archivedCaptureIds")
+            remove("captureArchivePending")
+            remove("notifPrefsPending")
             // Pending shared-focus retries are the signed-out user's — a different
             // account must not try (and fail) to accrue them.
             remove("pendingSharedFocus")

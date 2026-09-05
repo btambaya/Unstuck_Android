@@ -6,9 +6,12 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.jsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -192,6 +195,129 @@ class OfflineEngineTest {
         remote.serverRows[Tables.TASKS] = listOf(serverRow(server))
         hydrator.pruneStaleTaskOps()
         assertEquals("valid newer offline edit must survive", listOf("t1"), store.pending().map { it.recordId })
+    }
+
+    // --- 2026-09 sync sweep: flush-on-enqueue / push-then-pull / merge fixes ---
+
+    // THE CRITICAL SCENARIO. A user renames a task; the op is still queued when the
+    // ~60s foreground pull (or a resume hydrate) runs. The server still has the OLD
+    // name AND the same id, so the old `id !in serverIds` preservation didn't apply
+    // and the pull wrote the stale server row back over the edit ("reverts until the
+    // next flush"). The local row must survive the pull.
+    @Test fun hydrate_keepsPendingEditEvenWhenServerHasTheSameId() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store)
+        val write = WriteThrough(store)
+        val original = task("t1", updatedAt = "2026-05-21T10:00:00.000Z", name = "Draft")
+        store.upsert(Tables.TASKS, original, TaskItem.serializer(), original.id, original.updatedAt)
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(original))
+        // The local edit (WriteThrough: Room updated + op enqueued, nothing pushed).
+        write.upsertTask(original.copy(name = "Draft v2", updatedAt = "2026-05-21T10:05:00.000Z"))
+        assertEquals(1, store.pending().size)
+        hydrator.hydrate("u1")
+        assertEquals("the unflushed rename must NOT revert to the stale server copy", "Draft v2", store.tasks().first().single().name)
+        assertEquals("the op is still queued for the next drain", 1, store.pending().size)
+    }
+
+    @Test fun writeThrough_capturesTheMergeBase_andCarriesItAcrossStackedEdits() = runTest {
+        val write = WriteThrough(store)
+        // A brand-new row: no prior local state → base null (a create stays a create).
+        val created = task("t1", updatedAt = "2026-05-21T10:00:00.000Z", name = "New")
+        write.upsertTask(created)
+        assertNull(store.pending().single().base)
+        store.dequeue(store.pending().single().seq)   // "flushed"
+        // First edit of a synced row: base = the row as it was before the edit.
+        write.upsertTask(created.copy(name = "Edit 1", updatedAt = "2026-05-21T10:01:00.000Z"))
+        val first = store.pending().single()
+        val base1 = Json.parseToJsonElement(first.base!!) as JsonObject
+        assertEquals("New", (base1["name"] as JsonPrimitive).content)
+        // A second edit while the first is still queued: the base stays the last SYNCED
+        // state (the flusher coalesces the older op away; the merge must still measure
+        // both edits against what the server had).
+        write.upsertTask(created.copy(name = "Edit 2", updatedAt = "2026-05-21T10:02:00.000Z"))
+        val latest = store.latestPendingUpsert(Tables.TASKS, "t1")!!
+        assertEquals("Edit 2", (Json.parseToJsonElement(latest.payload!!).jsonObject["name"] as JsonPrimitive).content)
+        assertEquals(first.base, latest.base)
+    }
+
+    @Test fun onEnqueueHook_firesOnEveryQueuedOp_andNeverBreaksTheWrite() = runTest {
+        val write = WriteThrough(store)
+        var fired = 0
+        write.onEnqueue = { fired++; throw IllegalStateException("hook blew up") }
+        write.upsertTask(task("t1", updatedAt = "2026-05-21T10:00:00.000Z"))
+        write.deleteTask("t2")   // a different row: deleting t1 would (rightly) cancel its queued upsert
+        assertEquals("one hook call per op (upsert + delete)", 2, fired)
+        assertEquals("the local write + enqueue survive a throwing hook", listOf("t1", "t2"), store.pending().map { it.recordId })
+    }
+
+    // Row-level LWW used to drop the WHOLE local op when the server row was newer, so
+    // an unrelated field edited on the phone (first_physical_action) was lost when the
+    // web ticked the same task done. With a base, the two edits merge per field.
+    @Test fun pruneStaleTaskOps_threeWayMergesAnOlderLocalEditAgainstANewerServerRow() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store).apply { nowIso = { "2026-05-21T12:00:00.000Z" } }
+        val write = WriteThrough(store)
+        val synced = task("t1", updatedAt = "2026-05-21T09:00:00.000Z", name = "Dentist")
+        store.upsert(Tables.TASKS, synced, TaskItem.serializer(), synced.id, synced.updatedAt)
+        // Phone (10:00, unflushed): sets the first physical action.
+        write.upsertTask(synced.copy(firstPhysicalAction = "Find the insurance card", updatedAt = "2026-05-21T10:00:00.000Z"))
+        // Web (10:05): ticks it done.
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(synced.copy(done = true, completedAt = "2026-05-21T10:05:00.000Z", updatedAt = "2026-05-21T10:05:00.000Z")))
+
+        hydrator.pruneStaleTaskOps()
+
+        val op = store.pending().single()
+        val merged = Json.parseToJsonElement(op.payload!!).jsonObject
+        assertEquals("the server's completion is absorbed", true, (merged["done"] as JsonPrimitive).content.toBoolean())
+        assertEquals("the phone's unrelated edit SURVIVES", "Find the insurance card", (merged["first_physical_action"] as JsonPrimitive).content)
+        assertEquals("re-stamped newer than both so other devices accept it", "2026-05-21T12:00:00.000Z", (merged["updated_at"] as JsonPrimitive).content)
+        assertEquals("the base now IS the server row we absorbed", serverRow(synced.copy(done = true, completedAt = "2026-05-21T10:05:00.000Z", updatedAt = "2026-05-21T10:05:00.000Z")).toString(), op.base)
+        val local = store.tasks().first().single()
+        assertTrue("the UI shows the merged row at once", local.done)
+        assertEquals("Find the insurance card", local.firstPhysicalAction)
+    }
+
+    @Test fun mergeTaskRow_fieldRules_localWinsUnchangedServer_serverWinsUnchangedLocal_skewOnConflicts() {
+        fun row(name: String, done: Boolean, est: Int, at: String) = serverRow(task("t1", updatedAt = at, name = name).copy(done = done, estimateMin = est))
+        val base = row("A", false, 25, "2026-05-21T09:00:00.000Z")
+        val local = row("Local", false, 25, "2026-05-21T10:00:00.000Z")          // changed: name
+        val server = row("Server", true, 40, "2026-05-21T10:00:01.000Z")         // changed: name (conflict), done, estimate
+        val m = Hydrator.mergeTaskRow(base, local, server, localMs = Hydrator.updatedAtMs(local)!!, serverMs = Hydrator.updatedAtMs(server)!!, nowIso = "2026-05-21T12:00:00.000Z")
+        assertEquals("server is newer by only 1 s (inside the skew margin) → the local edit wins the conflict", "Local", (m["name"] as JsonPrimitive).content)
+        assertEquals("a field only the server changed takes the server value", "true", (m["done"] as JsonPrimitive).content)
+        assertEquals("40", (m["estimate_min"] as JsonPrimitive).content)
+        val serverMuchNewer = row("Server", true, 40, "2026-05-21T10:00:05.000Z")
+        val m2 = Hydrator.mergeTaskRow(base, local, serverMuchNewer, localMs = Hydrator.updatedAtMs(local)!!, serverMs = Hydrator.updatedAtMs(serverMuchNewer)!!, nowIso = "x")
+        assertEquals("beyond the skew margin the newer writer (server) wins the conflict", "Server", (m2["name"] as JsonPrimitive).content)
+        assertFalse("user_id is never carried (the gateway re-attaches it)", m2.containsKey("user_id"))
+    }
+
+    @Test fun pruneStaleTaskOps_withoutBase_keepsAnOpInsideTheSkewMargin_dropsBeyondIt() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store)
+        val local = task("t1", updatedAt = "2026-05-21T10:00:00.000Z")
+        store.enqueue(OutboxEntity(op = "upsert", recordTable = Tables.TASKS, recordId = "t1", payload = DbRowCodec.encodeTask(local).toString(), createdAt = 1L))
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(task("t1", updatedAt = "2026-05-21T10:00:01.500Z")))   // 1.5 s newer: clocks disagree, not conclusive
+        hydrator.pruneStaleTaskOps()
+        assertEquals("inside the skew margin the local op is kept", 1, store.pending().size)
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(task("t1", updatedAt = "2026-05-21T10:00:03.000Z")))   // 3 s newer: genuinely superseded
+        hydrator.pruneStaleTaskOps()
+        assertTrue("beyond it the base-less op is pruned (row-level LWW)", store.pending().isEmpty())
+    }
+
+    @Test fun pruneStaleTaskOps_withBase_leavesTheOpAloneWhenTheServerRowIsUnchanged() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store)
+        val write = WriteThrough(store)
+        val synced = task("t1", updatedAt = "2026-05-21T09:00:00.000Z", name = "Dentist")
+        store.upsert(Tables.TASKS, synced, TaskItem.serializer(), synced.id, synced.updatedAt)
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(synced))
+        write.upsertTask(synced.copy(name = "Dentist (moved)", updatedAt = "2026-05-21T10:00:00.000Z"))
+        val before = store.pending().single()
+        hydrator.pruneStaleTaskOps()
+        val after = store.pending().single()
+        assertEquals("nothing to merge: payload untouched", before.payload, after.payload)
+        assertEquals(before.base, after.base)
     }
 
     // Build a server-shaped row JsonObject (DbRowCodec encodes the row; decodeTask

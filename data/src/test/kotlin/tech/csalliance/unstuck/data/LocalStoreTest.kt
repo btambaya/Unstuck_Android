@@ -124,4 +124,69 @@ class LocalStoreTest {
         assertTrue(store.tasks().first().isEmpty())
         assertTrue(store.pending().isEmpty())
     }
+
+    // --- schema v2: pending-aware replace + the per-user parked outbox ---
+
+    @Test fun replaceKeepingPending_keepsLocalEditOverServerCopyOfSameId() = runTest {
+        // Local "Renamed" with a queued upsert; the server still returns "Server".
+        store.upsert(Tables.TASKS, task("a", "Renamed"), TaskItem.serializer(), "a")
+        store.enqueue(OutboxEntity(op = "upsert", recordTable = Tables.TASKS, recordId = "a", payload = "{}", createdAt = 1))
+        store.replace(Tables.TASKS, listOf(task("a", "Server"), task("b", "New")), TaskItem.serializer(), { it.id }, keepPendingUpserts = true)
+        val byId = store.tasks().first().associateBy { it.id }
+        assertEquals("Renamed", byId["a"]?.name)   // the pending local edit survives the pull
+        assertEquals("New", byId["b"]?.name)       // everything else is server-canonical
+    }
+
+    @Test fun replaceKeepingPending_withoutPendingOpsIsPlainReplace() = runTest {
+        store.upsert(Tables.TASKS, task("a", "Stale"), TaskItem.serializer(), "a")
+        store.replace(Tables.TASKS, listOf(task("a", "Server")), TaskItem.serializer(), { it.id }, keepPendingUpserts = true)
+        assertEquals("Server", store.tasks().first().single().name)
+    }
+
+    @Test fun replaceKeepingPending_stillPreservesExternalPrefixRows() = runTest {
+        val external = CalBlock(id = "g_evt1", taskId = null, taskName = "Standup", startTime = "09:00", durationMinutes = 30, date = "2026-05-21", externalEventId = "evt1", kind = CalBlockKind.EXTERNAL)
+        store.upsert(Tables.CAL_BLOCKS, external, CalBlock.serializer(), external.id)
+        val local = CalBlock(id = "blk1", taskId = "a", taskName = "Mine", startTime = "10:00", durationMinutes = 25, date = "2026-05-21", kind = CalBlockKind.TASK)
+        store.upsert(Tables.CAL_BLOCKS, local, CalBlock.serializer(), local.id)
+        store.enqueue(OutboxEntity(op = "upsert", recordTable = Tables.CAL_BLOCKS, recordId = "blk1", payload = "{}", createdAt = 1))
+        val server = local.copy(taskName = "ServerName")
+        store.replace(Tables.CAL_BLOCKS, listOf(server), CalBlock.serializer(), { it.id }, preservePrefix = "g_", keepPendingUpserts = true)
+        val byId = store.blocks().first().associateBy { it.id }
+        assertEquals(setOf("blk1", "g_evt1"), byId.keys)
+        assertEquals("Mine", byId["blk1"]?.taskName)
+    }
+
+    @Test fun parkedOutbox_survivesClearAllAndRestoresForSameUserOnly() = runTest {
+        store.enqueue(OutboxEntity(op = "upsert", recordTable = Tables.TASKS, recordId = "a", payload = "{\"id\":\"a\"}", createdAt = 1, base = "{\"id\":\"a\",\"name\":\"old\"}"))
+        store.enqueue(OutboxEntity(op = "delete", recordTable = Tables.TAGS, recordId = "t", payload = null, createdAt = 2))
+        assertEquals(2, store.parkOutbox("u1"))
+        assertTrue("outbox is empty once parked", store.pending().isEmpty())
+        store.clearAll()                                   // the sign-out wipe
+        assertEquals("parked ops survive the wipe", 2, store.parkedCount("u1"))
+        assertEquals("another user gets nothing back", 0, store.restoreParkedOutbox("u2"))
+        assertEquals(2, store.parkedCount("u1"))
+        assertEquals(2, store.restoreParkedOutbox("u1"))
+        val back = store.pending()
+        assertEquals(listOf("a", "t"), back.map { it.recordId })          // original order
+        assertEquals("{\"id\":\"a\",\"name\":\"old\"}", back[0].base)  // merge base carried
+        assertEquals("delete", back[1].op)
+        assertEquals(0, store.parkedCount("u1"))
+    }
+
+    @Test fun parkOutbox_withNothingQueuedParksNothing() = runTest {
+        assertEquals(0, store.parkOutbox("u1"))
+        assertEquals(0, store.parkedCount("u1"))
+    }
+
+    @Test fun latestPendingUpsert_andRewrite() = runTest {
+        assertNull(store.latestPendingUpsert(Tables.TASKS, "a"))
+        store.enqueue(OutboxEntity(op = "upsert", recordTable = Tables.TASKS, recordId = "a", payload = "v1", createdAt = 1, base = "b0"))
+        store.enqueue(OutboxEntity(op = "upsert", recordTable = Tables.TASKS, recordId = "a", payload = "v2", createdAt = 2, base = "b0"))
+        val latest = store.latestPendingUpsert(Tables.TASKS, "a")
+        assertEquals("v2", latest?.payload)
+        store.rewriteOutbox(latest!!.seq, "merged", "b1")
+        val after = store.pending().last()
+        assertEquals("merged", after.payload)
+        assertEquals("b1", after.base)
+    }
 }

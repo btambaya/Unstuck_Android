@@ -48,6 +48,7 @@ import tech.csalliance.unstuck.core.logic.formatTime
 import tech.csalliance.unstuck.core.logic.isSharedBlockId
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.liveSharedBlocks
+import tech.csalliance.unstuck.core.logic.openedFrom
 import tech.csalliance.unstuck.core.logic.sharedBlockLabel
 import tech.csalliance.unstuck.core.logic.weekRangeContaining
 import tech.csalliance.unstuck.core.model.CalBlock
@@ -304,7 +305,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
                                 // changes local state that reverts on next sync.
                                 .then(
                                     if (sb != null) Modifier.clickable {
-                                        onOpenShared(sharedWithMe.firstOrNull { it.taskId == sb.taskId } ?: sb.asSharedWithMe())
+                                        onOpenShared(sharedWithMe.firstOrNull { it.taskId == sb.taskId }?.openedFrom(sb) ?: sb.asSharedWithMe())
                                     } else if (isTaskBlock(b)) Modifier.clickable { editingBlock = b }.pointerInput(b.id) {
                                         detectDragGesturesAfterLongPress(
                                             onDragStart = { local -> dragBlock = b; dragPos = blockOrigin + local },

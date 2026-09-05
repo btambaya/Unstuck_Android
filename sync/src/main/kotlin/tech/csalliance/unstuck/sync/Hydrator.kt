@@ -2,10 +2,12 @@ package tech.csalliance.unstuck.sync
 
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import java.time.Instant
 import tech.csalliance.unstuck.core.logic.isExternalBlock
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.core.model.CalBlock
@@ -24,40 +26,62 @@ import tech.csalliance.unstuck.data.db.Tables
 // (server-canonical). Per-table error isolation: a table whose fetch fails is
 // left intact (mirrors hydrate.ts's `if (res.ok) replace(...)`). cal_blocks
 // preserves locally-cached Google external blocks across the replace, and every
-// table preserves rows whose outbox upsert is still pending (an unflushed
-// optimistic write must not vanish from the UI). RLS auto-scopes reads. Port of
-// the iOS Hydrator.swift.
+// table preserves rows whose outbox upsert is still pending — INCLUDING rows the
+// server also returned (an unflushed optimistic edit must never revert to the
+// stale server copy; the pending set is read inside the replace transaction).
+// RLS auto-scopes reads. Port of the iOS Hydrator.swift.
 
 class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
 
-    /** Drop queued `tasks` upsert ops the server already supersedes (its row is
-     *  STRICTLY newer by updatedAt). Run BEFORE the flush: without it, a stale
-     *  local op — e.g. an old `done=false` edit still sitting in the outbox —
-     *  re-pushes and clobbers a newer server change (a completion made on the
-     *  WEB), which the following hydrate then faithfully pulls back as not-done.
-     *  This is the load-bearing fix for "completed on web, didn't reflect on the
-     *  phone". Only reads the server when task ops are actually queued, so it's
-     *  free in the common empty-outbox case. (Genuine offline edits — whose op is
-     *  newer than the server — survive and flush normally.) */
+    // Injectable clock for the merged row's updated_at (tests pin it).
+    internal var nowIso: () -> String = { Instant.now().toString() }
+
+    /** Reconcile queued `tasks` upsert ops against the server BEFORE the flush.
+     *  Two regimes, per op:
+     *
+     *  • The op carries a `base` (the server-shaped row the edit started from —
+     *    schema v2): when the server row has moved on since, 3-WAY MERGE it at the
+     *    field level ([mergeTaskRow]) instead of dropping the whole local op — the
+     *    fields this device changed survive, everything it didn't change takes the
+     *    server's value (a completion made on the web, an accrued total_focused…),
+     *    and a field BOTH sides changed goes to the newer writer with a clock-skew
+     *    margin ([LWW_SKEW_MS]). The merged row is written to the local store (the
+     *    UI shows it at once) and back into the op (with base = the server row we
+     *    just absorbed), stamped with a fresh updated_at so other devices' LWW
+     *    accepts it.
+     *
+     *  • No base (a local create, or an op queued by a pre-v2 build): the row-level
+     *    rule — drop the op when the server row is STRICTLY newer by more than the
+     *    skew margin. Without it, a stale `done=false` re-pushes and clobbers a newer
+     *    server change, which the following hydrate then faithfully pulls back as
+     *    not-done (the original "completed on web, didn't reflect on the phone").
+     *
+     *  Only reads the server when task ops are actually queued, so it's free in the
+     *  common empty-outbox case. Timestamps compare as instants, never strings. */
     suspend fun pruneStaleTaskOps() {
         val taskOps = store.pending().filter { it.recordTable == Tables.TASKS && it.op == "upsert" }
         if (taskOps.isEmpty()) return
-        val serverUpdatedAt = runCatching {
-            gateway.fetchAll(Tables.TASKS).associate { val t = DbRowCodec.decodeTask(it); t.id to t.updatedAt }
+        val serverRows = runCatching {
+            gateway.fetchAll(Tables.TASKS).mapNotNull { row ->
+                runCatching { DbRowCodec.decodeTask(row).id }.getOrNull()?.let { it to row }
+            }.toMap()
         }.getOrElse { return }
         for (op in taskOps) {
             val payload = op.payload ?: continue
-            val serverTime = serverUpdatedAt[op.recordId] ?: continue
-            val localTime = runCatching {
-                DbRowCodec.decodeTask(Json.parseToJsonElement(payload).jsonObject).updatedAt
-            }.getOrNull() ?: continue
-            // Compare as instants, NOT strings: ISO timestamps with differing
-            // precision/offset ("…Z" vs "+00:00", millis vs not) don't sort
-            // lexicographically, so a string compare could wrongly keep or prune.
-            val serverMs = Time.parseMillis(serverTime) ?: continue
-            val localMs = Time.parseMillis(localTime) ?: continue
-            if (serverMs > localMs) {
-                println("[outbox] pruning stale tasks op ${op.recordId} — server is newer")
+            val server = serverRows[op.recordId] ?: continue
+            val local = runCatching { Json.parseToJsonElement(payload).jsonObject }.getOrNull() ?: continue
+            val serverMs = updatedAtMs(server) ?: continue
+            val localMs = updatedAtMs(local) ?: continue
+            val base = op.base?.let { b -> runCatching { Json.parseToJsonElement(b).jsonObject }.getOrNull() }
+            if (base != null) {
+                if (stripVolatile(server) == stripVolatile(base)) continue   // server unchanged since we read it → our op is the only change
+                val merged = mergeTaskRow(base = base, local = local, server = server, localMs = localMs, serverMs = serverMs, nowIso = nowIso())
+                val model = runCatching { DbRowCodec.decodeTask(merged) }.getOrNull() ?: continue
+                println("[outbox] 3-way merged tasks op ${op.recordId} against a newer server row")
+                store.upsert(Tables.TASKS, model, TaskItem.serializer(), model.id, model.updatedAt)
+                store.rewriteOutbox(op.seq, merged.toString(), server.toString())
+            } else if (serverMs > localMs + LWW_SKEW_MS) {
+                println("[outbox] pruning stale tasks op ${op.recordId} — server is newer (no merge base)")
                 store.dequeue(op.seq)
             }
         }
@@ -99,8 +123,7 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
             }
             // Keep optimistic local collections whose outbox upsert hasn't flushed yet
             // (same preservation the generic replace() applies).
-            val localPending = pendingLocalRows(Tables.COLLECTIONS, ItemCollection.serializer(), { it.id }, enriched.map { it.id }.toSet())
-            store.replace(Tables.COLLECTIONS, enriched + localPending, ItemCollection.serializer(), { it.id })
+            store.replace(Tables.COLLECTIONS, enriched, ItemCollection.serializer(), { it.id }, keepPendingUpserts = true)
         }.onFailure { println("[hydrate] collections failed, leaving local intact: $it") }
     }
 
@@ -116,29 +139,15 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
             // shape this build can't parse) must not abort the whole table and wipe
             // every good row off the UI. Drop only the bad row.
             val models = gateway.fetchAll(table).mapNotNull { runCatching { decode(it) }.getOrNull() }
-            // Preserve optimistic local rows with a still-pending outbox upsert (e.g.
-            // a transient flush failure followed by a successful fetch): they're not
-            // in `models`, so the replace would wipe them off the UI until the next
-            // successful flush. Same rule hydrateCalBlocks applies for cal_blocks.
-            val localPending = pendingLocalRows(table, ser, id, models.map(id).toSet())
-            store.replace(table, models + localPending, ser, id, updatedAt)
+            // keepPendingUpserts: every local row with a still-queued outbox upsert
+            // survives the replace — whether or not the server also returned that id.
+            // Rows NOT on the server (a transient flush failure) would otherwise vanish
+            // until the next flush; rows the server DOES have would revert to its stale
+            // copy (the edit reappearing only after the next flush + pull). The pending
+            // set is read inside the replace transaction, so a write racing this pull
+            // can't slip through the old read-then-replace gap.
+            store.replace(table, models, ser, id, updatedAt, keepPendingUpserts = true)
         }.onFailure { println("[hydrate] $table failed, leaving local intact: $it") }
-    }
-
-    /** Local rows for [table] that still have a queued outbox upsert and are not
-     *  in the server set — re-added across the replace so an unflushed write
-     *  doesn't vanish from the UI. */
-    private suspend fun <T> pendingLocalRows(
-        table: String,
-        ser: KSerializer<T>,
-        id: (T) -> String,
-        serverIds: Set<String>,
-    ): List<T> {
-        val pendingIds = store.pending()
-            .filter { it.recordTable == table && it.op == "upsert" }
-            .map { it.recordId }.toSet()
-        if (pendingIds.isEmpty()) return emptyList()
-        return store.snapshot(table, ser).filter { id(it) in pendingIds && id(it) !in serverIds }
     }
 
     private suspend fun hydrateCalBlocks() {
@@ -149,15 +158,65 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
             val local = store.snapshot(Tables.CAL_BLOCKS, CalBlock.serializer())
             val localExternal = local.filter { isExternalBlock(it) }
             val merged = SyncDecision.mergeHydratedCalBlocks(remote, localExternal)
-            // Preserve unsynced optimistic TASK blocks (a pending outbox upsert): they're
-            // in neither `remote` nor `localExternal`, so the replace would wipe them off
-            // the UI until the next flush. Keep any not already present from the server.
-            val pendingIds = store.pending()
-                .filter { it.recordTable == Tables.CAL_BLOCKS && it.op == "upsert" }
-                .map { it.recordId }.toSet()
-            val mergedIds = merged.map { it.id }.toSet()
-            val localPending = local.filter { it.id in pendingIds && it.id !in mergedIds && !isExternalBlock(it) }
-            store.replace(Tables.CAL_BLOCKS, merged + localPending, CalBlock.serializer(), { it.id })
+            // Preserve unsynced optimistic TASK blocks (a pending outbox upsert) — even
+            // when the server already has an older copy of that block (a move that
+            // hasn't flushed yet must not snap back). See replace().
+            store.replace(Tables.CAL_BLOCKS, merged, CalBlock.serializer(), { it.id }, keepPendingUpserts = true)
         }.onFailure { println("[hydrate] cal_blocks failed, leaving local intact: $it") }
+    }
+
+    companion object {
+        /** Clock-skew tolerance between devices' updated_at stamps (each client
+         *  stamps its own wall clock). Within it, "the server is newer" is not
+         *  conclusive, so the local op is kept (no base) or the local value wins a
+         *  field conflict (merge). */
+        internal const val LWW_SKEW_MS = 2_000L
+
+        // Columns that are not part of the user's edit and must not make a base look
+        // "changed": the gateway-injected owner + the stamp itself.
+        private val VOLATILE_KEYS = setOf("user_id", "updated_at")
+
+        private fun stripVolatile(o: JsonObject): Map<String, JsonElement> = o.filterKeys { it !in VOLATILE_KEYS }
+
+        internal fun updatedAtMs(row: JsonObject): Long? =
+            (row["updated_at"] as? JsonPrimitive)?.contentOrNull?.let { Time.parseMillis(it) }
+
+        /** Field-level 3-way merge of a queued task row against a server row that
+         *  changed since [base] was read. Per key (union of local + server):
+         *   - unchanged locally → the server's value (whatever it is now)
+         *   - changed locally, unchanged on the server → the local value
+         *   - changed on BOTH → the newer writer, with a skew margin: the server
+         *     wins only when it is newer by more than [LWW_SKEW_MS], else local.
+         *  `updated_at` is re-stamped with [nowIso] (strictly newer than both, so the
+         *  other devices' stale-write guards accept the merged row); `user_id` is
+         *  dropped (the gateway re-attaches it). Pure — unit-tested. */
+        internal fun mergeTaskRow(
+            base: JsonObject,
+            local: JsonObject,
+            server: JsonObject,
+            localMs: Long,
+            serverMs: Long,
+            nowIso: String,
+        ): JsonObject {
+            val serverWinsConflicts = serverMs > localMs + LWW_SKEW_MS
+            val out = LinkedHashMap<String, JsonElement>()
+            for (key in (local.keys + server.keys)) {
+                if (key in VOLATILE_KEYS) continue
+                val l = local[key]
+                val s = server[key]
+                val b = base[key]
+                val localChanged = l != b
+                val serverChanged = s != b
+                val chosen = when {
+                    !localChanged -> s
+                    !serverChanged -> l
+                    serverWinsConflicts -> s
+                    else -> l
+                }
+                if (chosen != null) out[key] = chosen
+            }
+            out["updated_at"] = JsonPrimitive(nowIso)
+            return JsonObject(out)
+        }
     }
 }

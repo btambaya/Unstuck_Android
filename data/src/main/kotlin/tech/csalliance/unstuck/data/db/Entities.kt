@@ -31,7 +31,12 @@ data class RecordEntity(
 /** A pending write to flush to the server, FIFO by `seq`. `payload` is the
  *  encoded row JSON for an upsert (null for a delete). `dependsOn` is the id
  *  of a parent record whose op must flush first (a cal_block waits for its
- *  task), so we never reference a row the server hasn't seen. */
+ *  task), so we never reference a row the server hasn't seen. `base` (schema
+ *  v2) is the server-shaped row JSON the local edit STARTED from — the last
+ *  state this device had synced for that row — so the sync engine can 3-way
+ *  merge a queued edit against a server row another device changed meanwhile
+ *  instead of dropping the whole local op (row-level LWW). Null for a create
+ *  (no prior row) or for ops queued by a pre-v2 build. */
 @Entity(tableName = "outbox")
 data class OutboxEntity(
     @PrimaryKey(autoGenerate = true) val seq: Long = 0,
@@ -41,6 +46,25 @@ data class OutboxEntity(
     val payload: String?,
     val dependsOn: String? = null,
     val createdAt: Long,
+    val base: String? = null,
+)
+
+/** An outbox op PARKED at sign-out because the bounded drain couldn't land it
+ *  (offline sign-out). Keyed by the user it belongs to: the sign-out cache wipe
+ *  clears `outbox` but never this table, and the next sign-in of the SAME user
+ *  moves these back into the outbox ahead of the first flush — an un-pushed
+ *  edit is never silently discarded. A different account never sees them. */
+@Entity(tableName = "parked_outbox")
+data class ParkedOutboxEntity(
+    @PrimaryKey(autoGenerate = true) val seq: Long = 0,
+    val userId: String,
+    val op: String,
+    val recordTable: String,
+    val recordId: String,
+    val payload: String?,
+    val dependsOn: String? = null,
+    val createdAt: Long,
+    val base: String? = null,
 )
 
 /** Device-local live focus session — single row (id = 0). */

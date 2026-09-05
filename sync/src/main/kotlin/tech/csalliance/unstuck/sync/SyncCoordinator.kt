@@ -11,7 +11,10 @@ import io.github.jan.supabase.realtime.realtime
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
@@ -30,10 +33,20 @@ import java.time.LocalDate
 
 // SyncCoordinator — the orchestrator (port of bootstrap-listener.tsx). Observes
 // auth state and drives the engine: on sign-in / initial-session / user-updated
-// it applies the cache-wipe rule, flushes any offline outbox, hydrates
-// server-canonical, then subscribes to realtime. On sign-out it tears down
-// realtime + wipes the local cache. prevUserId (SharedPreferences) distinguishes
-// a same-user reload from a user switch.
+// it applies the cache-wipe rule, restores any writes parked at an offline
+// sign-out, flushes the outbox, hydrates server-canonical, then subscribes to
+// realtime. On sign-out it drains (bounded), PARKS what couldn't land under the
+// user id, tears down realtime + wipes the local cache. prevUserId
+// (SharedPreferences) distinguishes a same-user reload from a user switch.
+//
+// Engine invariants (2026-09 sync sweep):
+//  - every local write arms a debounced (~1.5 s) drain (flush-on-enqueue);
+//  - every full pull is preceded by a drain and both run under one mutex, so a
+//    pull can never overwrite an edit that is being pushed (push-then-pull);
+//  - the Hydrator keeps every local row with a still-pending upsert, whether or
+//    not the server also returned that id;
+//  - a queued task edit that lost the LWW race is 3-way MERGED per field against
+//    the newer server row, not dropped whole (Hydrator.pruneStaleTaskOps).
 
 class SyncCoordinator(
     provider: SupabaseClientProvider,
@@ -50,6 +63,7 @@ class SyncCoordinator(
     val push = PushClient(client)
     val notifications = NotificationsClient(client)
     val preferences = PreferencesClient(client)
+    val captures = CapturesClient(client)
     val collectionShare = CollectionShareClient(client)
     val circle = CircleClient(client)
     val feedback = FeedbackClient(client)
@@ -103,18 +117,72 @@ class SyncCoordinator(
     // Coalesces channel-close self-heals (BUG 4) so several channels dropping at
     // once collapse to a single mirror rebuild.
     private val healInFlight = AtomicBoolean(false)
+    // Serializes every outbox DRAIN against every full PULL. A drain that dequeues an
+    // op while a pull (whose server snapshot predates that push) is mid-replace would
+    // let the stale server row overwrite the just-pushed edit until the next pull;
+    // holding this across "flush, then hydrate" closes that window. Never re-entered:
+    // the locked helpers below call only the *Unlocked variants.
+    private val engineMutex = Mutex()
 
-    /** Full server-canonical pull, coalesced: at most one runs at a time. A caller
-     *  arriving while a pull is in flight is DROPPED (coalesced to the running one —
-     *  its fresh snapshot already reflects whatever prompted this call). The Mutex
-     *  serializes the actual pull so no two overlap. Deadlock-free: the mutex is only
-     *  ever held around [Hydrator.hydrate], never across an unrelated suspend. */
-    private suspend fun coalescedHydrate(uid: String) {
-        if (!hydrateInFlight.compareAndSet(false, true)) return
+    /** Fires after every completed server-canonical pull. App-level reconciliations
+     *  that need the server's word (the notification level / reminder lead, the
+     *  capture archive, the onboarding flag) hang here rather than polling. */
+    private val _hydrated = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val hydrated: SharedFlow<Unit> = _hydrated
+
+    /** Invoked (on the coordinator scope) right after the sign-out cache wipe, so the
+     *  app layer can drop its own per-user device state in the same breath. */
+    var onSignedOut: (() -> Unit)? = null
+
+    // FLUSH-ON-ENQUEUE (the iOS `setOnEnqueue` seam). Every local write schedules a
+    // debounced drain: a mid-session edit reaches the server within ~1.5 s instead of
+    // waiting for the next auth event / the 30-min worker, and the foreground pulls
+    // find an empty outbox. Cancelled at sign-out (the bounded drains take over).
+    private val enqueueFlush = EnqueueFlushScheduler(scope, ENQUEUE_FLUSH_DEBOUNCE_MS, onError = { Log.w(TAG, "enqueue flush failed; will retry on the next write / pull", it) }) {
+        flushNow()
+    }
+
+    /** Reconcile stale task ops against the server, then drain the outbox. The one
+     *  drain primitive every path uses. No-op when signed out. */
+    private suspend fun flushNow() {
+        val uid = auth.currentUserId ?: return
+        engineMutex.withLock { flushUnlocked(uid) }
+    }
+
+    private suspend fun flushUnlocked(uid: String) {
+        // Drop / 3-way-merge local task ops the server already superseded BEFORE
+        // pushing, so a queued done=false can't clobber a completion made on another
+        // platform (which the following hydrate would then pull back).
+        hydrator.pruneStaleTaskOps()
+        flusher.flush(uid) { auth.currentUserId }
+    }
+
+    /** Full server-canonical pull, ALWAYS preceded by an outbox drain (push before
+     *  pull — otherwise an unflushed edit is compared against, and for non-pending
+     *  rows overwritten by, a stale server snapshot). Serialized behind
+     *  [hydrateMutex] + [engineMutex] so no two overlap. Coalesced by default: a
+     *  caller arriving while a pull is in flight is DROPPED (the running one's fresh
+     *  snapshot already reflects whatever prompted this call). [waitIfBusy] callers
+     *  (the auth branch, the worker, calendar connect — the ones whose caller expects
+     *  a pull to have HAPPENED) queue behind the running pull instead. Deadlock-free:
+     *  the mutexes are only ever held around the engine calls, never across an
+     *  unrelated suspend. */
+    private suspend fun coalescedHydrate(uid: String, waitIfBusy: Boolean = false) {
+        val claimed = hydrateInFlight.compareAndSet(false, true)
+        if (!claimed && !waitIfBusy) return
         try {
-            hydrateMutex.withLock { hydrator.hydrate(uid) }
+            hydrateMutex.withLock {
+                engineMutex.withLock {
+                    // A failed drain (offline) must not block the pull: the pending
+                    // rows survive the replace regardless (Hydrator keeps them).
+                    runCatching { flushUnlocked(uid) }
+                        .onFailure { if (it is CancellationException) throw it; Log.w(TAG, "pre-pull flush failed; pulling anyway", it) }
+                    hydrator.hydrate(uid)
+                }
+            }
+            _hydrated.tryEmit(Unit)
         } finally {
-            hydrateInFlight.set(false)
+            if (claimed) hydrateInFlight.set(false)
         }
     }
 
@@ -144,33 +212,57 @@ class SyncCoordinator(
      *  still valid (RLS: user_id = auth.uid()). Stops the previous user's
      *  morning brief / pushes from reaching whoever signs in next on this
      *  device. The server single-owner pre-delete is the other half. */
-    suspend fun signOutAndUnregister() {
+    /** Returns how many queued writes could NOT be landed and were PARKED under this
+     *  user (0 in the normal case) — the caller may tell the user they'll sync on
+     *  their next sign-in. */
+    suspend fun signOutAndUnregister(): Int {
+        val uid = auth.currentUserId
+        enqueueFlush.cancel()
         // Drain any queued offline writes BEFORE signing out — the NotAuthenticated
-        // branch calls store.clearAll() which also wipes the outbox, so un-flushed
-        // edits would be lost forever. Best-effort + bounded so a flaky network can't
-        // hang sign-out.
-        auth.currentUserId?.let { uid ->
-            runCatching { kotlinx.coroutines.withTimeoutOrNull(5_000) { flusher.flush(uid) { auth.currentUserId } } }
+        // branch calls store.clearAll() which also wipes the outbox. Best-effort +
+        // bounded so a flaky network can't hang sign-out.
+        if (uid != null) {
+            runCatching { kotlinx.coroutines.withTimeoutOrNull(5_000) { engineMutex.withLock { flushUnlocked(uid) } } }
         }
         runCatching { push.unregister(thisDeviceId()) }
         // Narrow the sign-out-vs-write race: a write landing AFTER the first flush
         // window (or during the push unregister) would otherwise be wiped by clearAll.
-        // The JWT is still valid here, so a final bounded re-flush captures it. (Writes
-        // after THIS flush but before clearAll remain a residual hair — acceptable.)
-        auth.currentUserId?.let { uid ->
-            runCatching { kotlinx.coroutines.withTimeoutOrNull(3_000) { flusher.flush(uid) { auth.currentUserId } } }
+        // The JWT is still valid here, so a final bounded re-flush captures it.
+        if (uid != null) {
+            runCatching { kotlinx.coroutines.withTimeoutOrNull(3_000) { engineMutex.withLock { flushUnlocked(uid) } } }
         }
+        // Whatever the bounded drains could NOT land (offline sign-out) is PARKED
+        // under this user id: the wipe below never touches the parking lot, and the
+        // same user's next sign-in re-queues it ahead of the first flush. An un-pushed
+        // edit is never silently discarded. (A write racing between THIS park and
+        // clearAll remains a residual hair — acceptable.)
+        // Park under the engine mutex when it can be had quickly (so a drain still in
+        // flight can't dequeue an op we're moving); a wedged drain must not block
+        // sign-out, so after a short wait park anyway (a doubly-pushed upsert is
+        // idempotent server-side — a lost one is not).
+        val parked = if (uid != null) {
+            runCatching {
+                kotlinx.coroutines.withTimeoutOrNull(2_000) { engineMutex.withLock { store.parkOutbox(uid) } }
+                    ?: store.parkOutbox(uid)
+            }.getOrDefault(0)
+        } else 0
+        if (parked > 0) Log.w(TAG, "sign-out with $parked un-pushed writes — parked for $uid until next sign-in")
         auth.signOut()
+        return parked
     }
 
     /** Delete the account, then ALWAYS unregister this device's push token (while the
      *  JWT may still be valid) and sign out — even if the server invoke timed out after
      *  it already deleted the account. Otherwise a dead local session + a lingering
      *  push-token row survive (the previous owner's pushes could reach the next user).
-     *  No outbox flush: the account is being destroyed, so queued writes are moot. */
+     *  No outbox flush: the account is being destroyed, so queued writes are moot —
+     *  including any parked from an earlier offline sign-out. */
     suspend fun deleteAccount(): AuthOutcome {
+        enqueueFlush.cancel()
+        val uid = auth.currentUserId
         val invoke = auth.deleteAccountInvoke()
         runCatching { push.unregister(thisDeviceId()) }
+        if (uid != null) runCatching { store.clearParked(uid) }
         auth.signOut()
         return invoke
     }
@@ -194,6 +286,8 @@ class SyncCoordinator(
         // written/removed so the change mirrors to Google (best-effort).
         write.pushCalBlock = { pushBlockUpsert(it) }
         write.pushCalBlockDelete = { pushBlockDelete(it) }
+        // Flush-on-enqueue: every queued op arms the debounced drain.
+        write.onEnqueue = { enqueueFlush.schedule() }
     }
 
     fun start() {
@@ -304,21 +398,15 @@ class SyncCoordinator(
      *  land a just-created task row before a task_share RPC that validates ownership
      *  server-side — otherwise the share races the not-yet-flushed insert and the
      *  server raises not_your_task (T2). No-op when signed out. */
-    suspend fun flushOutbox() {
-        val uid = auth.currentUserId ?: return
-        flusher.flush(uid) { auth.currentUserId }
-    }
+    suspend fun flushOutbox() = flushNow()
 
     /** Manual best-effort sync (flush outbox → hydrate) for the periodic
-     *  WorkManager job. No-op when signed out. */
+     *  WorkManager job. Goes through the same serialized push-then-pull as every
+     *  other hydrate path (waits for an in-flight pull rather than racing it). No-op
+     *  when signed out. */
     suspend fun syncNow() {
         val uid = auth.currentUserId ?: return
-        // Drop stale local task ops the server already superseded BEFORE flushing,
-        // so a queued done=false can't clobber a completion made on another platform
-        // (which the hydrate would then pull back). Then push + pull.
-        hydrator.pruneStaleTaskOps()
-        flusher.flush(uid) { auth.currentUserId }
-        hydrator.hydrate(uid)
+        coalescedHydrate(uid, waitIfBusy = true)
         runCatching { pullCalendar() }
     }
 
@@ -346,9 +434,10 @@ class SyncCoordinator(
         }
         pendingCalState = null   // single-use: a replayed deep link can't be honored twice
         calendar.connectGoogle(code, CAL_REDIRECT, state)
-        // Flush first: hydrate replaces cal_blocks with (remote + localExternal), so an
-        // unflushed local TASK block (in neither set) would vanish until the next sync.
-        auth.currentUserId?.let { flusher.flush(it) { auth.currentUserId }; hydrator.hydrate(it) }   // pull the new calendar_connections row so the UI flips to "Synced" now, not on next launch
+        // Push-then-pull through the serialized path: pulls the new calendar_connections
+        // row so the UI flips to "Synced" now, not on next launch (and never races the
+        // foreground pull into a double replace).
+        auth.currentUserId?.let { coalescedHydrate(it, waitIfBusy = true) }
         pullCalendar()
         true
     }.getOrElse { Log.w(TAG, "calendar connect failed", it); false }
@@ -472,18 +561,26 @@ class SyncCoordinator(
                 val prev = prefs.getString(KEY_PREV_USER, null)
                 if (SyncDecision.shouldWipeCache(event, prev, uid)) store.clearAll()
                 prefs.edit().putString(KEY_PREV_USER, uid).apply()
-                // Prune stale task ops (server already newer) so they can't clobber
-                // another platform's change, then push offline edits, pull
-                // server-canonical, and mirror live. Guard the drain on the LIVE user id
-                // so a sign-out + switch mid-flush doesn't stamp ops with the prior user.
+                // Push offline edits (stale task ops pruned / merged first so they can't
+                // clobber another platform's change), pull server-canonical, and mirror
+                // live — all through the one serialized push-then-pull path, WAITING
+                // for any in-flight pull (a sign-in must actually land + pull). The
+                // drain is guarded on the LIVE user id so a sign-out + switch mid-flush
+                // doesn't stamp ops with the prior user.
                 // Wrap the whole body in runCatching: an uncaught throw here (transient
                 // REST/decode error) would cancel observeJob, and start()'s
                 // `if (observeJob != null) return` means sync would NEVER restart for the
                 // rest of the process — a transient failure must not permanently kill sync.
                 runCatching {
-                    hydrator.pruneStaleTaskOps()
-                    flusher.flush(uid) { auth.currentUserId }
-                    coalescedHydrate(uid)
+                    // Writes parked at an earlier OFFLINE sign-out of THIS user come back
+                    // first, ahead of the first drain. (Another account's stay parked.)
+                    val restored = runCatching { store.restoreParkedOutbox(uid) }.getOrDefault(0)
+                    if (restored > 0) Log.i(TAG, "restored $restored parked writes for $uid")
+                    coalescedHydrate(uid, waitIfBusy = true)
+                    // Parked child ops (a cal_block whose parent task row was wiped with
+                    // the cache) are held by the flusher until the parent exists locally —
+                    // it does now, after the pull — so drain once more.
+                    if (restored > 0) runCatching { flushNow() }
                     // A user now definitively exists. On sign-in / initial session force
                     // a fresh REAL (re)subscribe regardless of the lifecycle flag — a
                     // resume() that ran before the session was restored may have flipped
@@ -504,10 +601,12 @@ class SyncCoordinator(
                 }.onFailure { Log.w(TAG, "sync authenticated-branch step failed; sync stays alive", it) }
             }
             is SessionStatus.NotAuthenticated -> if (status.isSignOut) {
+                enqueueFlush.cancel()
                 stopForegroundNets()
                 realtimeLifecycle.forceUnsubscribe()
-                store.clearAll()
+                store.clearAll()   // leaves parked_outbox alone (per-user, see LocalStore)
                 prefs.edit().remove(KEY_PREV_USER).apply()
+                runCatching { onSignedOut?.invoke() }.onFailure { Log.w(TAG, "onSignedOut hook failed", it) }
             }
             else -> {} // Initializing / RefreshFailure — no action
         }
@@ -519,11 +618,73 @@ class SyncCoordinator(
         // Foreground backstop pull cadence — cheap full hydrate; catches the
         // continuously-foregrounded case where no realtime socket event fires.
         private const val FOREGROUND_PULL_INTERVAL_MS = 60_000L
+        // Flush-on-enqueue debounce: a burst of edits (typing, a drag) collapses to one
+        // drain ~1.5 s after the last one (same window as iOS).
+        internal const val ENQUEUE_FLUSH_DEBOUNCE_MS = 1_500L
         // Google rejects custom schemes (unstuck://) on a Web OAuth client, so the
         // redirect_uri we hand Google is the HTTPS bounce page the web app serves
         // (the same one iOS uses). That page forwards ?code&state to
         // unstuck://calendar-callback, which MainActivity captures. This EXACT URL
         // must be registered as an Authorized redirect URI on the Google Web OAuth client.
         private const val CAL_REDIRECT = "https://unstuck-602.pages.dev/calendar-callback"
+    }
+}
+
+/**
+ * Debounced flush-on-enqueue. [schedule] (called on EVERY outbox enqueue) arms one
+ * [action] run [debounceMs] after the LAST call — a burst of edits collapses to a
+ * single drain. A schedule() that lands while the action is RUNNING never cancels
+ * it (an aborted drain would burn a round-trip and re-push later); it marks a
+ * re-run, so the ops queued during the drain go out right after, again debounced.
+ * [cancel] drops an armed (not-yet-running) run — sign-out. Pure orchestration,
+ * unit-tested without Supabase/Android.
+ */
+internal class EnqueueFlushScheduler(
+    private val scope: CoroutineScope,
+    private val debounceMs: Long,
+    private val onError: (Throwable) -> Unit = {},
+    private val action: suspend () -> Unit,
+) {
+    private val lock = Any()
+    private var armed: Job? = null      // the delay-phase job (cancellable)
+    private var running = false
+    private var rerun = false
+
+    fun schedule() {
+        synchronized(lock) {
+            if (running) { rerun = true; return }
+            armed?.cancel()
+            armed = scope.launch {
+                delay(debounceMs)
+                run()
+            }
+        }
+    }
+
+    fun cancel() {
+        synchronized(lock) {
+            armed?.cancel(); armed = null
+            rerun = false
+        }
+    }
+
+    private suspend fun run() {
+        synchronized(lock) { running = true; rerun = false; armed = null }
+        try {
+            while (true) {
+                try {
+                    action()
+                } catch (t: CancellationException) {
+                    throw t
+                } catch (t: Throwable) {
+                    onError(t)
+                }
+                val again = synchronized(lock) { rerun.also { rerun = false } }
+                if (!again) break
+                delay(debounceMs)   // coalesce whatever queued while we drained
+            }
+        } finally {
+            synchronized(lock) { running = false }
+        }
     }
 }

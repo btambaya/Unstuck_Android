@@ -90,11 +90,21 @@ data class ShareForTask(
  *  Mirrors ShareSlotItem in lib/shared-blocks.ts. */
 interface ShareSlot {
     val done: Boolean
-    /** 'YYYY-MM-DD' — the owner's next live block, else its most recent past one. */
+    /** 'YYYY-MM-DD' — the owner's next live block, else its most recent past one.
+     *  Since migration 053 the sync client resolves this (and [nextStartTime]) into
+     *  the RECIPIENT's zone from `next_start_at` whenever the server sends one, so
+     *  every consumer buckets/labels in local time; a pre-053 server leaves the
+     *  owner's wall-clock values in place. */
     val nextDate: String?
     /** 'HH:MM' */
     val nextStartTime: String?
     val nextDurationMinutes: Int?
+    /** Whether that block already ran and was ticked done (the task itself still
+     *  open). A finished past block is not a live plan — see ShareBucket.FINISHED. */
+    val nextDone: Boolean? get() = null
+    /** The owner parked the task in Later (migration 053). Applies the owner's own
+     *  bucketing rule on the recipient's side: never Today / Upcoming / Backlog. */
+    val later: Boolean get() = false
 }
 
 /** A task someone shared WITH me (read via the tasks_shared_with_me projection —
@@ -121,10 +131,22 @@ data class SharedWithMe(
     val estimateMin: Int? = null,
     val lifeArea: String? = null,
     val nextBlockId: String? = null,
-    override val nextDate: String? = null,          // YYYY-MM-DD
+    override val nextDate: String? = null,          // YYYY-MM-DD (recipient-local when nextStartAt is known)
     override val nextStartTime: String? = null,     // HH:MM
     override val nextDurationMinutes: Int? = null,
-    val nextDone: Boolean? = null,
+    override val nextDone: Boolean? = null,
+    // ── Migration 053. `nextStartAt` is the owner's slot as an ISO instant (their
+    // date + start_time in THEIR zone); the sync client derives nextDate/nextStartTime
+    // from it in the recipient's zone and keeps the raw instant here for reference.
+    // `later` / `recurring` carry the owner's own bucketing inputs. All defaulted so a
+    // pre-053 server still decodes. READ-only. ──
+    val nextStartAt: String? = null,
+    override val later: Boolean = false,
+    val recurring: Boolean = false,
+    /** The calendar occurrence this row was OPENED from (a tapped shared block),
+     *  when any — the detail sheet describes THAT slot rather than the task's next
+     *  one, matching the web. Never set on rows from the list projection. */
+    val openedFrom: SharedBlock? = null,
 ) : ShareSlot
 
 /** Read-only detail for a task shared WITH me, from the shared_task_detail RPC
@@ -150,7 +172,10 @@ data class SharedTaskDetail(
     override val nextDate: String? = null,
     override val nextStartTime: String? = null,
     override val nextDurationMinutes: Int? = null,
-    val nextDone: Boolean? = null,
+    override val nextDone: Boolean? = null,
+    // Migration 053 (see SharedWithMe).
+    val nextStartAt: String? = null,
+    override val later: Boolean = false,
 ) : ShareSlot
 
 /** One block of a task shared WITH me, inside a date window — the calendar
@@ -165,13 +190,23 @@ data class SharedBlock(
     val level: ShareLevel,
     val ownerName: String,
     val title: String,
-    val date: String,             // YYYY-MM-DD
+    val date: String,             // YYYY-MM-DD (recipient-local when startAt is known)
     val startTime: String,        // HH:MM
     val durationMinutes: Int,
-    val done: Boolean,
+    override val done: Boolean,
     val skipped: Boolean,
     val kind: String,             // 'task' | 'placeholder' (never 'external')
-)
+    /** Migration 053: the block's start as an ISO instant (owner wall-clock in the
+     *  owner's zone). The sync client has already resolved date/startTime from it. */
+    val startAt: String? = null,
+) : ShareSlot {
+    // A block IS a slot — so the detail sheet can describe the tapped occurrence
+    // with the same "Planned …" helper the list rows use.
+    override val nextDate: String get() = date
+    override val nextStartTime: String get() = startTime
+    override val nextDurationMinutes: Int get() = durationMinutes
+    override val nextDone: Boolean get() = done
+}
 
 /** One outgoing share badge for my task row. Port of ShareBadge (the web keys these
  *  by taskId in a Record; each Android badge carries its taskId so a flat list groups). */

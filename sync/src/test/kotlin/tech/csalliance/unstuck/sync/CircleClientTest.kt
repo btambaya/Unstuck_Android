@@ -3,9 +3,11 @@ package tech.csalliance.unstuck.sync
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import java.time.ZoneId
 
 // Wire-contract tests for the CircleClient DTOs. The RPC param objects must
 // serialize to the EXACT snake_case names the SQL functions expect (migrations
@@ -177,5 +179,87 @@ class CircleClientTest {
         assertNull(sparse.skipped)
         assertNull(sparse.kind)
         assertEquals("", sparse.shareId)
+    }
+
+    // ── migration 053: next_start_at / start_at / later / recurrence ──
+
+    @Test fun `shared-with-me row decodes the 053 columns and lands the slot in the RECIPIENT's zone`() {
+        // Owner in London (BST): 2026-09-05 09:00 local → 08:00Z. Recipient in Berlin sees 10:00.
+        val r = json.decodeFromString<SharedWithMeRow>(
+            """{"share_id":"s1","task_id":"t1","level":"partner","title":"Gym","done":false,
+                "next_block_id":"b1","next_date":"2026-09-05","next_start_time":"09:00","next_duration_minutes":45,"next_done":false,
+                "next_start_at":"2026-09-05T08:00:00+00:00","later":false,"recurrence":{"kind":"weekly","daysOfWeek":[1,3,5]}}""",
+        )
+        assertEquals("2026-09-05T08:00:00+00:00", r.nextStartAt)
+        assertFalse(r.isLater)
+        assertTrue(r.isRecurring)
+        val berlin = r.toModel(ZoneId.of("Europe/Berlin"))
+        assertEquals("2026-09-05", berlin.nextDate)
+        assertEquals("10:00", berlin.nextStartTime)
+        assertTrue(berlin.recurring)
+        assertFalse(berlin.later)
+        assertEquals("2026-09-05T08:00:00+00:00", berlin.nextStartAt)
+        // Across midnight for a far-east recipient: the date itself moves.
+        val tokyo = json.decodeFromString<SharedWithMeRow>(
+            """{"share_id":"s1","task_id":"t1","next_date":"2026-09-05","next_start_time":"23:30","next_start_at":"2026-09-05T22:30:00Z"}""",
+        ).toModel(ZoneId.of("Asia/Tokyo"))
+        assertEquals("2026-09-06", tokyo.nextDate)
+        assertEquals("07:30", tokyo.nextStartTime)
+    }
+
+    @Test fun `shared-with-me row is FORGIVING - pre-053 keys absent, explicit nulls, garbage instant + odd recurrence all decode`() {
+        val pre053 = json.decodeFromString<SharedWithMeRow>(
+            """{"share_id":"s1","task_id":"t1","level":"view","title":"Write","done":false,"next_date":"2026-09-05","next_start_time":"09:00"}""",
+        ).toModel(ZoneId.of("Asia/Tokyo"))
+        assertEquals("2026-09-05", pre053.nextDate)      // the owner's raw values stay
+        assertEquals("09:00", pre053.nextStartTime)
+        assertFalse(pre053.later); assertFalse(pre053.recurring); assertNull(pre053.nextStartAt)
+
+        val nulls = json.decodeFromString<SharedWithMeRow>(
+            """{"share_id":"s1","task_id":"t1","next_start_at":null,"later":null,"recurrence":null}""",
+        )
+        assertFalse(nulls.isLater); assertFalse(nulls.isRecurring)
+
+        val garbage = json.decodeFromString<SharedWithMeRow>(
+            """{"share_id":"s1","task_id":"t1","next_date":"2026-09-05","next_start_time":"09:00","next_start_at":"not-a-time","later":true,"recurrence":"weekly"}""",
+        )
+        val m = garbage.toModel(ZoneId.of("Asia/Tokyo"))
+        assertEquals("2026-09-05", m.nextDate)           // unparseable instant → owner's raw slot, never blank
+        assertEquals("09:00", m.nextStartTime)
+        assertTrue(m.later)
+        assertFalse("a non-object recurrence is not a template", m.recurring)
+        assertFalse("an EMPTY recurrence object is not a template", json.decodeFromString<SharedWithMeRow>("""{"share_id":"s","task_id":"t","recurrence":{}}""").isRecurring)
+    }
+
+    @Test fun `shared-block row decodes start_at and paints the block on the recipient's day + time`() {
+        val row = json.decodeFromString<SharedBlockRow>(
+            """{"block_id":"b1","task_id":"t1","date":"2026-09-05","start_time":"23:30","duration_minutes":45,"start_at":"2026-09-05T22:30:00Z"}""",
+        )
+        assertEquals("2026-09-05T22:30:00Z", row.startAt)
+        val ny = row.toModel(ZoneId.of("America/New_York"))
+        assertEquals("2026-09-05", ny.date)
+        assertEquals("18:30", ny.startTime)
+        assertEquals("2026-09-05T22:30:00Z", ny.startAt)
+        val tokyo = row.toModel(ZoneId.of("Asia/Tokyo"))
+        assertEquals("2026-09-06", tokyo.date)
+        assertEquals("07:30", tokyo.startTime)
+        // Pre-053 (no start_at): the owner's wall-clock is painted as-is.
+        val pre = json.decodeFromString<SharedBlockRow>("""{"block_id":"b2","task_id":"t1","date":"2026-09-05","start_time":"09:00"}""").toModel(ZoneId.of("Asia/Tokyo"))
+        assertEquals("2026-09-05", pre.date); assertEquals("09:00", pre.startTime); assertNull(pre.startAt)
+    }
+
+    @Test fun `shared-task-detail row decodes next_start_at + later and resolves the slot in the recipient's zone`() {
+        val row = json.decodeFromString<SharedTaskDetailRow>(
+            """{"task_id":"t1","level":"view","name":"Simple","done":false,"next_date":"2026-09-05","next_start_time":"09:00",
+                "next_start_at":"2026-09-05T08:00:00Z","later":true}""",
+        )
+        val d = row.toModel(ZoneId.of("America/New_York"))
+        assertEquals("2026-09-05", d.nextDate)
+        assertEquals("04:00", d.nextStartTime)
+        assertTrue(d.later)
+        assertEquals("2026-09-05T08:00:00Z", d.nextStartAt)
+        val pre = json.decodeFromString<SharedTaskDetailRow>("""{"task_id":"t1","level":"view","name":"Simple","done":false,"next_date":"2026-09-05"}""").toModel(ZoneId.of("Asia/Tokyo"))
+        assertEquals("2026-09-05", pre.nextDate)
+        assertFalse(pre.later)
     }
 }

@@ -64,14 +64,64 @@ class AppGraph(
         provider?.let { SyncCoordinator(it, store, context.applicationContext, scope) }
 
     private val appPrefs = context.applicationContext.getSharedPreferences("unstuck.app", Context.MODE_PRIVATE)
+    // The sync engine's own prefs: `unstuck.prevUserId` is the account that was signed
+    // in — the only one the pre-2026-09 device-global onboarded flag may migrate to.
+    private val syncPrefs = context.applicationContext.getSharedPreferences("unstuck.sync", Context.MODE_PRIVATE)
+
+    /** Onboarding, PER ACCOUNT (`onboarded.<uid>`): a second account signing in on
+     *  the same phone must onboard itself (its own struggles, its own area seed, its
+     *  own one-time tour offer) — the old device-global flag let it skip all three.
+     *  Reconciled from the SERVER after every pull (AppViewModel.reconcileOnboarded)
+     *  so a returning account on a fresh install isn't re-onboarded either. See
+     *  [OnboardedFlag] for the legacy-key migration rule. */
     var onboarded: Boolean
-        get() = appPrefs.getBoolean("onboarded", false)
-        set(value) { appPrefs.edit().putBoolean("onboarded", value).apply() }
+        get() = OnboardedFlag.get(appPrefs, coordinator?.auth?.currentUserId, syncPrefs.getString("unstuck.prevUserId", null))
+        set(value) = OnboardedFlag.set(appPrefs, coordinator?.auth?.currentUserId, value)
 
     /** Device-local settings (theme / focus / sound / a11y). */
     val settings = SettingsStore(context.applicationContext)
 
+    init {
+        // Sign-out: the legacy device-global flag must never survive into the next
+        // account's session (the per-account keys are inert for anyone else).
+        coordinator?.onSignedOut = { OnboardedFlag.clearLegacy(appPrefs) }
+    }
+
     fun start() {
         coordinator?.start()
+    }
+}
+
+/**
+ * The per-account onboarded flag. Keys: `onboarded.<uid>`. The pre-2026-09 build
+ * kept ONE device-global `onboarded` key; it migrates to an account exactly once,
+ * and ONLY to the account that was signed in when the build upgraded
+ * ([legacyOwnerUid] = the engine's prevUserId) — never to whoever signs in next on
+ * a signed-out phone. With no session yet (cold start before the session restores)
+ * nothing is granted. Pure over SharedPreferences — unit-tested.
+ */
+internal object OnboardedFlag {
+    const val LEGACY_KEY = "onboarded"
+    fun key(uid: String) = "onboarded.$uid"
+
+    fun get(p: android.content.SharedPreferences, uid: String?, legacyOwnerUid: String?): Boolean {
+        if (uid == null) return false
+        val k = key(uid)
+        if (p.contains(k)) return p.getBoolean(k, false)
+        if (p.getBoolean(LEGACY_KEY, false) && legacyOwnerUid == uid) {
+            p.edit().putBoolean(k, true).remove(LEGACY_KEY).apply()
+            return true
+        }
+        return false
+    }
+
+    fun set(p: android.content.SharedPreferences, uid: String?, value: Boolean) {
+        // No account → nothing to attribute it to (onboarding completes signed-in).
+        if (uid == null) return
+        p.edit().putBoolean(key(uid), value).remove(LEGACY_KEY).apply()
+    }
+
+    fun clearLegacy(p: android.content.SharedPreferences) {
+        p.edit().remove(LEGACY_KEY).apply()
     }
 }

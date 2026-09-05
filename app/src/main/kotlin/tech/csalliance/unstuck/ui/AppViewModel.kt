@@ -96,6 +96,7 @@ import tech.csalliance.unstuck.core.model.FocusTreatment
 import tech.csalliance.unstuck.core.model.CollectionItem
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.LifeArea
+import tech.csalliance.unstuck.data.db.Tables
 import tech.csalliance.unstuck.core.model.LiveSession
 import tech.csalliance.unstuck.core.model.Priority
 import tech.csalliance.unstuck.core.model.ReasonAction
@@ -554,18 +555,61 @@ class AppViewModel(
         }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     // --- capture Inbox: triage captures (promote / open / archive / discard) ---
-    // "Archived" ids are device-local + cleared on sign-out (like nudges).
+    // "Archived" lives on the SERVER since migration 053 (captures.archived_at:
+    // archive = now(), unarchive = null) so every platform shows the same inbox. The
+    // device-local id set is a CACHE: it keeps the inbox right offline, migrates up
+    // once (pre-053 installs), and is overwritten by the server after every pull —
+    // except for writes that haven't landed yet, which stay local until they do.
     private val _archivedCaptureIds = MutableStateFlow(graph.settings.loadArchivedCaptureIds())
     val archivedCaptureIds: StateFlow<Set<String>> = _archivedCaptureIds
-    fun archiveCapture(id: String) {
-        val next = _archivedCaptureIds.value + id
+    private val capturesClient get() = graph.coordinator?.captures
+    private val captureArchiveMutex = Mutex()
+    fun archiveCapture(id: String) = setCaptureArchived(id, true)
+    fun unarchiveCapture(id: String) = setCaptureArchived(id, false)
+    private fun setCaptureArchived(id: String, archived: Boolean) {
+        applyArchivedCaptureIds(if (archived) _archivedCaptureIds.value + id else _archivedCaptureIds.value - id)
+        // Queue the server write durably, then try to land it now. A failure (offline)
+        // leaves it queued; every pull retries (reconcileCaptureArchive).
+        graph.settings.savePendingCaptureArchiveWrites(graph.settings.loadPendingCaptureArchiveWrites() + (id to archived))
+        viewModelScope.launch { runCatching { drainCaptureArchiveWrites() } }
+    }
+    private fun applyArchivedCaptureIds(next: Set<String>) {
         _archivedCaptureIds.value = next
         graph.settings.saveArchivedCaptureIds(next)
     }
-    fun unarchiveCapture(id: String) {
-        val next = _archivedCaptureIds.value - id
-        _archivedCaptureIds.value = next
-        graph.settings.saveArchivedCaptureIds(next)
+    /** Push queued archive writes in order; stop at the first failure (offline) and
+     *  keep the rest queued. */
+    private suspend fun drainCaptureArchiveWrites() = captureArchiveMutex.withLock {
+        val client = capturesClient ?: return@withLock
+        val pending = graph.settings.loadPendingCaptureArchiveWrites()
+        if (pending.isEmpty()) return@withLock
+        val remaining = pending.toMutableMap()
+        for ((id, archived) in pending) {
+            val ok = runCatching { client.setArchived(id, archived) }.isSuccess
+            if (!ok) break
+            remaining.remove(id)
+        }
+        graph.settings.savePendingCaptureArchiveWrites(remaining)
+    }
+    /** After every pull: land what's queued, then take the server's word for the
+     *  archive — keeping any still-unlanded local write. A pre-053 server (no column)
+     *  or a transport failure leaves the local cache untouched. The FIRST successful
+     *  reconcile per account pushes the pre-053 device-local archive UP instead. */
+    private suspend fun reconcileCaptureArchive(uid: String) {
+        val client = capturesClient ?: return
+        drainCaptureArchiveWrites()
+        val server = runCatching { client.archivedIds() }.getOrNull() ?: return
+        if (!graph.settings.captureArchiveMigrated(uid)) {
+            val toPush = _archivedCaptureIds.value - server
+            var allLanded = true
+            for (id in toPush) if (runCatching { client.setArchived(id, true) }.isFailure) allLanded = false
+            if (allLanded) graph.settings.setCaptureArchiveMigrated(uid)
+            applyArchivedCaptureIds(server + toPush)   // local stays authoritative until it has landed
+            return
+        }
+        val stillPending = graph.settings.loadPendingCaptureArchiveWrites()
+        val next = (server + stillPending.filterValues { it }.keys) - stillPending.filterValues { !it }.keys
+        if (next != _archivedCaptureIds.value) applyArchivedCaptureIds(next)
     }
     /** Captures still needing triage (not archived), newest first. */
     val inboxCaptures: StateFlow<List<Capture>> =
@@ -1617,7 +1661,10 @@ class AppViewModel(
 
     fun deleteCapture(id: String) = launchWrite {
         write?.deleteCapture(id)
-        unarchiveCapture(id)   // drop any device-local archived flag so the set doesn't leak ids
+        // Drop the cached archived flag so the set doesn't leak ids — locally only:
+        // the row is gone, there is nothing to un-archive on the server.
+        applyArchivedCaptureIds(_archivedCaptureIds.value - id)
+        graph.settings.savePendingCaptureArchiveWrites(graph.settings.loadPendingCaptureArchiveWrites() - id)
     }
 
     /**
@@ -1977,7 +2024,23 @@ class AppViewModel(
 
     // --- onboarding ---
 
+    /** Per-account (see AppGraph.onboarded) and reconciled from the server after each
+     *  pull, so neither a second account on this phone nor a returning account on a
+     *  fresh install gets the wrong answer. */
     val onboarded: Boolean get() = graph.onboarded
+
+    /** A pull just landed: if this device doesn't know the account as onboarded but
+     *  the SERVER shows it was (struggles saved / the interview done / life areas
+     *  seeded — on any platform), record it, so the account isn't re-onboarded. */
+    private suspend fun reconcileOnboarded(uid: String) {
+        if (graph.onboarded) return
+        val server = runCatching { graph.coordinator?.preferences?.fetchUserPrefs(uid) }.getOrNull()
+        val areas = store.snapshot(Tables.LIFE_AREAS, LifeArea.serializer())
+        val onboardedElsewhere = server?.adhd_struggles?.isNotEmpty() == true ||
+            server?.assistant_interview_done_at != null ||
+            areas.isNotEmpty()
+        if (onboardedElsewhere) graph.onboarded = true
+    }
 
     fun completeOnboarding(struggles: List<String>, areas: List<String> = emptyList()) = launchWrite {
         // Arm the ONE-TIME guided-tour auto-offer (next Today arrival) FIRST —
@@ -2015,19 +2078,69 @@ class AppViewModel(
         val next = transform(prev)
         _settings.value = next
         settingsStore.save(next)
-        // Mirror the notification level to the server so the cron-driven morning brief
-        // (and the server-side paused-checkin cap) honour it. Best-effort.
-        if (next.notificationLevel != prev.notificationLevel) {
-            val uid = auth?.currentUserId
-            if (uid != null) viewModelScope.launch {
-                runCatching {
-                    graph.coordinator?.preferences?.setNotificationLevel(
-                        uid,
-                        morningBrief = next.notificationLevel.morningBrief,
-                        pausedCheckin = next.notificationLevel.pausedCheckin,
-                    )
-                }
-            }
+        // Mirror the notification level + reminder lead to notification_preferences
+        // (the server source of truth: web Settings + the server crons read them).
+        // Queued durably so an offline change lands on the next pull, and the
+        // server-wins read-back skips a field while its write is pending.
+        val changed = buildSet {
+            if (next.notificationLevel != prev.notificationLevel) add(NOTIF_PREF_LEVEL)
+            if (next.reminderLeadMin != prev.reminderLeadMin) add(NOTIF_PREF_LEAD)
+        }
+        if (changed.isNotEmpty()) {
+            settingsStore.savePendingNotifPrefWrites(settingsStore.loadPendingNotifPrefWrites() + changed)
+            viewModelScope.launch { auth?.currentUserId?.let { uid -> runCatching { drainNotifPrefWrites(uid) } } }
+        }
+    }
+
+    private val notifPrefsMutex = Mutex()
+
+    /** Push the queued level / lead writes; a failure leaves the field queued. */
+    private suspend fun drainNotifPrefWrites(uid: String) = notifPrefsMutex.withLock {
+        val prefsClient = graph.coordinator?.preferences ?: return@withLock
+        val pending = settingsStore.loadPendingNotifPrefWrites()
+        if (pending.isEmpty()) return@withLock
+        val s = _settings.value
+        val remaining = pending.toMutableSet()
+        if (NOTIF_PREF_LEVEL in pending) {
+            val level = s.notificationLevel
+            runCatching { prefsClient.setNotificationLevel(uid, level.wire, morningBrief = level.morningBrief, pausedCheckin = level.pausedCheckin) }
+                .onSuccess { remaining.remove(NOTIF_PREF_LEVEL) }
+        }
+        if (NOTIF_PREF_LEAD in pending) {
+            runCatching { prefsClient.setReminderLead(uid, s.reminderLeadMin) }
+                .onSuccess { remaining.remove(NOTIF_PREF_LEAD) }
+        }
+        settingsStore.savePendingNotifPrefWrites(remaining)
+    }
+
+    /** After every pull: land queued writes, then READ BACK notification_level +
+     *  reminder_lead_min — the server wins (a level picked on the web reaches this
+     *  phone's alarms), except for a field whose own write hasn't landed yet. The
+     *  FIRST reconcile per account pushes this device's local values UP instead
+     *  (see SettingsStore.notifPrefsMigrated for why). Re-arms the local alarms
+     *  when anything changed. */
+    private suspend fun reconcileNotificationPrefs(uid: String) {
+        val prefsClient = graph.coordinator?.preferences ?: return
+        if (!settingsStore.notifPrefsMigrated(uid)) {
+            settingsStore.savePendingNotifPrefWrites(settingsStore.loadPendingNotifPrefWrites() + setOf(NOTIF_PREF_LEVEL, NOTIF_PREF_LEAD))
+            drainNotifPrefWrites(uid)
+            if (settingsStore.loadPendingNotifPrefWrites().isEmpty()) settingsStore.setNotifPrefsMigrated(uid)
+            return
+        }
+        drainNotifPrefWrites(uid)
+        val pending = settingsStore.loadPendingNotifPrefWrites()
+        val server = runCatching { prefsClient.fetchNotificationPrefs(uid) }.getOrNull() ?: return
+        val cur = _settings.value
+        val level = if (NOTIF_PREF_LEVEL in pending) cur.notificationLevel
+            else tech.csalliance.unstuck.NotificationLevel.fromWire(server.notification_level) ?: cur.notificationLevel
+        val lead = if (NOTIF_PREF_LEAD in pending) cur.reminderLeadMin else (server.reminder_lead_min ?: cur.reminderLeadMin)
+        if (level == cur.notificationLevel && lead == cur.reminderLeadMin) return
+        // Apply WITHOUT re-mirroring (it came from the server) and re-arm the alarms.
+        val next = cur.copy(notificationLevel = level, reminderLeadMin = lead)
+        _settings.value = next
+        settingsStore.save(next)
+        (graph.appContext as? tech.csalliance.unstuck.UnstuckApp)?.let { app ->
+            runCatching { tech.csalliance.unstuck.surface.ReminderScheduler.reschedule(app) }
         }
     }
 
@@ -2347,7 +2460,15 @@ class AppViewModel(
             }
             "set_task_later" -> {
                 val t = findTask(str("taskId")) ?: return "error: task not found"
-                setLater(t, bool("later") ?: true); "ok"
+                // No-op guard (web/iOS parity): a redundant park/unpark returns an
+                // error string so nothing is written and no receipt/Undo is attached
+                // (AssistantReceipts drops any result that isn't "ok\u2026").
+                val want = bool("later") ?: true
+                if ((t.later == true) == want) {
+                    return if (want) "error: \"${t.name}\" is already in Later \u2014 nothing changed"
+                    else "error: \"${t.name}\" is not in Later \u2014 nothing changed"
+                }
+                setLater(t, want); "ok"
             }
             "set_task_recurrence" -> {
                 val t = findTask(str("taskId")) ?: return "error: task not found"
@@ -2362,7 +2483,10 @@ class AppViewModel(
             }
             "complete_task" -> {
                 val t = findTask(str("taskId")) ?: return "error: task not found"
-                if (!t.done) toggleDone(t); "ok: completed \"${t.name}\""
+                // Already-done is an error, not a silent success (web/iOS parity):
+                // the old "ok: completed" lied and minted a bogus Undo receipt.
+                if (t.done) return "error: \"${t.name}\" is already done \u2014 nothing changed"
+                toggleDone(t); "ok: completed \"${t.name}\""
             }
             "delete_task" -> {
                 val t = findTask(str("taskId")) ?: return "error: task not found"
@@ -2569,9 +2693,19 @@ class AppViewModel(
     // Default FALSE when auth isn't wired (mirrors AuthService.hasPassword) — never
     // offer "Change password" to a Google-only / not-yet-known account.
     val hasPassword: Boolean get() = auth?.hasPassword ?: false
+    /** Writes that could not be pushed before the last sign-out (offline) and were
+     *  PARKED for that account — they sync on its next sign-in, never discarded.
+     *  Non-zero right after a sign-out; a surface may tell the user. */
+    private val _parkedOnSignOut = MutableStateFlow(0)
+    val parkedOnSignOut: StateFlow<Int> = _parkedOnSignOut.asStateFlow()
+
     // Unregister this device's push token (while the JWT is still valid) then
     // sign out — prevents the previous user's pushes reaching the next user.
-    fun signOut() = launchWrite { graph.coordinator?.signOutAndUnregister() ?: auth?.signOut() }
+    fun signOut() = launchWrite {
+        val c = graph.coordinator
+        if (c == null) { auth?.signOut(); return@launchWrite }
+        _parkedOnSignOut.value = c.signOutAndUnregister()
+    }
 
     /** Serialise every user-owned collection into one JSON bundle (matches web exportAll). */
     fun exportJson(): String = EXPORT_JSON.encodeToString(
@@ -2583,7 +2717,25 @@ class AppViewModel(
         ),
     )
 
+    init {
+        // Server-backed state that the engine can't own: after every completed pull,
+        // reconcile the notification level / reminder lead, the capture archive and the
+        // onboarding flag against the server (each best-effort + independent).
+        graph.coordinator?.let { c ->
+            viewModelScope.launch {
+                c.hydrated.collect {
+                    val uid = auth?.currentUserId ?: return@collect
+                    runCatching { reconcileNotificationPrefs(uid) }
+                    runCatching { reconcileCaptureArchive(uid) }
+                    runCatching { reconcileOnboarded(uid) }
+                }
+            }
+        }
+    }
+
     companion object {
+        private const val NOTIF_PREF_LEVEL = "level"
+        private const val NOTIF_PREF_LEAD = "lead"
         private val ISO: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
         private val EXPORT_JSON = Json { prettyPrint = true; encodeDefaults = true }

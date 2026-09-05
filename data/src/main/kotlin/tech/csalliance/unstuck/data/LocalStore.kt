@@ -20,6 +20,7 @@ import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.data.db.LiveSessionEntity
 import tech.csalliance.unstuck.data.db.OutboxEntity
+import tech.csalliance.unstuck.data.db.ParkedOutboxEntity
 import tech.csalliance.unstuck.data.db.RecordEntity
 import tech.csalliance.unstuck.data.db.Tables
 import tech.csalliance.unstuck.data.db.UnstuckDatabase
@@ -38,6 +39,7 @@ class LocalStore(private val db: UnstuckDatabase) {
 
     private val records get() = db.records()
     private val outboxDao get() = db.outbox()
+    private val parkedDao get() = db.parkedOutbox()
     private val liveDao get() = db.liveSession()
 
     // --- reactive reads ---
@@ -75,6 +77,11 @@ class LocalStore(private val db: UnstuckDatabase) {
     suspend fun <T> snapshot(table: String, ser: KSerializer<T>): List<T> =
         records.get(table).mapNotNull { runCatching { json.decodeFromString(ser, it.data) }.getOrNull() }
 
+    /** One row by id (null when absent / undecodable). O(1) — the per-write base
+     *  capture in WriteThrough must not decode the whole table. */
+    suspend fun <T> getOne(table: String, id: String, ser: KSerializer<T>): T? =
+        records.getOne(table, id)?.let { runCatching { json.decodeFromString(ser, it.data) }.getOrNull() }
+
     // --- writes (local-first; the sync layer mirrors to the server) ---
 
     fun <T> entity(table: String, model: T, ser: KSerializer<T>, id: String, updatedAt: String? = null): RecordEntity =
@@ -104,7 +111,11 @@ class LocalStore(private val db: UnstuckDatabase) {
 
     suspend fun delete(table: String, id: String) = records.deleteById(table, id)
 
-    /** Replace-per-table hydrate. cal_blocks preserve local external `g_` rows. */
+    /** Replace-per-table hydrate. cal_blocks preserve local external `g_` rows.
+     *  [keepPendingUpserts] keeps every local row that still has a queued outbox
+     *  upsert — even one the server also returned — so an unflushed optimistic edit
+     *  never reverts to the stale server copy; the pending set is read inside the
+     *  same transaction as the wipe + insert (no TOCTOU). */
     suspend fun <T> replace(
         table: String,
         items: List<T>,
@@ -112,11 +123,15 @@ class LocalStore(private val db: UnstuckDatabase) {
         id: (T) -> String,
         updatedAt: (T) -> String? = { null },
         preservePrefix: String? = null,
+        keepPendingUpserts: Boolean = false,
     ) {
         val rows = items.map { RecordEntity(table, id(it), json.encodeToString(ser, it), updatedAt(it)) }
-        records.replaceTable(table, rows, preservePrefix)
+        if (keepPendingUpserts) records.replaceTableKeepingPending(table, rows, preservePrefix)
+        else records.replaceTable(table, rows, preservePrefix)
     }
 
+    /** Sign-out / user-switch wipe. Deliberately leaves `parked_outbox` alone: those
+     *  are another (or the same, returning) user's un-pushed edits. */
     suspend fun clearAll() {
         records.clearAll()
         outboxDao.clear()
@@ -129,6 +144,55 @@ class LocalStore(private val db: UnstuckDatabase) {
     suspend fun pending(): List<OutboxEntity> = outboxDao.all()
     suspend fun dequeue(seq: Long) = outboxDao.remove(seq)
     fun pendingCount(): Flow<Int> = outboxDao.count()
+
+    /** The newest queued upsert for a row, if any (its `base` carries forward). */
+    suspend fun latestPendingUpsert(table: String, id: String): OutboxEntity? = outboxDao.latestUpsert(table, id)
+
+    /** Rewrite a queued op's payload + base after a 3-way merge. */
+    suspend fun rewriteOutbox(seq: Long, payload: String?, base: String?) = outboxDao.rewrite(seq, payload, base)
+
+    // --- parked outbox (un-pushed ops kept across sign-out, per user) ---
+
+    /** Move every queued op into [userId]'s parking lot and empty the outbox.
+     *  Returns how many were parked. Called at sign-out AFTER the bounded drain
+     *  so the following cache wipe can't discard them. */
+    suspend fun parkOutbox(userId: String): Int {
+        val ops = outboxDao.all()
+        if (ops.isEmpty()) return 0
+        parkedDao.insertAll(
+            ops.map {
+                ParkedOutboxEntity(
+                    userId = userId, op = it.op, recordTable = it.recordTable, recordId = it.recordId,
+                    payload = it.payload, dependsOn = it.dependsOn, createdAt = it.createdAt, base = it.base,
+                )
+            },
+        )
+        outboxDao.clear()
+        return ops.size
+    }
+
+    /** Re-queue [userId]'s parked ops (original order, ahead of nothing — the
+     *  outbox is empty right after the sign-in wipe) and clear the lot. Returns
+     *  how many came back. */
+    suspend fun restoreParkedOutbox(userId: String): Int {
+        val parked = parkedDao.forUser(userId)
+        if (parked.isEmpty()) return 0
+        for (p in parked) {
+            outboxDao.enqueue(
+                OutboxEntity(
+                    op = p.op, recordTable = p.recordTable, recordId = p.recordId, payload = p.payload,
+                    dependsOn = p.dependsOn, createdAt = p.createdAt, base = p.base,
+                ),
+            )
+        }
+        parkedDao.clearForUser(userId)
+        return parked.size
+    }
+
+    suspend fun parkedCount(userId: String): Int = parkedDao.countForUser(userId)
+
+    /** Drop [userId]'s parked ops (account deleted — the writes are moot). */
+    suspend fun clearParked(userId: String) = parkedDao.clearForUser(userId)
 
     // --- live session ---
 

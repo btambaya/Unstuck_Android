@@ -3,6 +3,8 @@ package tech.csalliance.unstuck.sync
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.functions.functions
 import io.github.jan.supabase.postgrest.from
+import io.github.jan.supabase.postgrest.query.Columns
+import io.github.jan.supabase.postgrest.query.filter.FilterOperator
 import io.ktor.client.call.body
 import io.ktor.client.request.setBody
 import io.ktor.http.ContentType
@@ -12,8 +14,10 @@ import kotlinx.serialization.Serializable
 import java.util.TimeZone
 
 // PushClient (FCM register) + NotificationsClient (recap / paused-checkin) +
-// PreferencesClient (onboarding struggles). Ports of the iOS PushClient.swift +
-// NotificationsClient.swift, with the FCM token replacing the APNs token.
+// PreferencesClient (onboarding struggles + the server-backed notification level /
+// reminder lead) + CapturesClient (the 053 inbox archive). Ports of the iOS
+// PushClient.swift + NotificationsClient.swift, with the FCM token replacing the
+// APNs token.
 
 class PushClient(private val client: SupabaseClient) {
     @Serializable
@@ -98,17 +102,86 @@ class PreferencesClient(private val client: SupabaseClient) {
         client.from("user_preferences").upsert(StrugglesRow(userId, struggles)) { onConflict = "user_id" }
     }
 
+    /** The server's copy of the onboarding / interview state (user_preferences). Both
+     *  nullable: an account that never onboarded has no row at all. */
+    @Serializable
+    data class ServerUserPrefs(
+        val adhd_struggles: List<String>? = null,
+        val assistant_interview_done_at: String? = null,
+    )
+
+    /** Read back the account-wide onboarding signals so a second account on the same
+     *  device (or a fresh install) reconciles `onboarded` from the SERVER rather than a
+     *  device-global flag. Null = no row (never onboarded anywhere) — and ALSO null on a
+     *  transport error, so callers treat null as "unknown", never as "not onboarded". */
+    suspend fun fetchUserPrefs(userId: String): ServerUserPrefs? =
+        client.from("user_preferences")
+            .select(Columns.list("adhd_struggles", "assistant_interview_done_at")) { filter { eq("user_id", userId) } }
+            .decodeSingleOrNull<ServerUserPrefs>()
+
     @Serializable private data class NotifPrefsRow(
         val user_id: String,
+        // The canonical column the web reads (lib/notification-prefs.ts) — the
+        // booleans below are DERIVED from it and only exist for the server crons.
+        val notification_level: String,
         val morning_brief_enabled: Boolean,
         val paused_checkin_enabled: Boolean,
     )
 
-    /** Mirror the device notification level to notification_preferences (owner-self
-     *  RLS) so the server-driven morning brief + paused-checkin cap honour it.
-     *  Only the level-derived toggles are sent; other columns keep their values. */
-    suspend fun setNotificationLevel(userId: String, morningBrief: Boolean, pausedCheckin: Boolean) {
+    /** Mirror the notification level to notification_preferences (owner-self RLS):
+     *  the `notification_level` column (server source of truth, what web Settings
+     *  shows) PLUS the level-derived toggles the morning brief + paused-checkin crons
+     *  read. Other columns keep their values. [level] is 'calm' | 'balanced' | 'coach'. */
+    suspend fun setNotificationLevel(userId: String, level: String, morningBrief: Boolean, pausedCheckin: Boolean) {
         client.from("notification_preferences")
-            .upsert(NotifPrefsRow(userId, morningBrief, pausedCheckin)) { onConflict = "user_id" }
+            .upsert(NotifPrefsRow(userId, level, morningBrief, pausedCheckin)) { onConflict = "user_id" }
     }
+
+    @Serializable private data class ReminderLeadRow(val user_id: String, val reminder_lead_min: Int)
+
+    /** Mirror the pre-task reminder lead (minutes, 0 = off) — the server-cron
+     *  reminders (dispatch_task_reminders) and web Settings read this column. */
+    suspend fun setReminderLead(userId: String, leadMin: Int) {
+        client.from("notification_preferences")
+            .upsert(ReminderLeadRow(userId, leadMin)) { onConflict = "user_id" }
+    }
+
+    /** The server's copy of the two settings every platform shares. */
+    @Serializable
+    data class ServerNotificationPrefs(
+        val notification_level: String? = null,
+        val reminder_lead_min: Int? = null,
+    )
+
+    /** Read back notification_level + reminder_lead_min (the server is the source of
+     *  truth — a level picked on the web must reach this phone's local alarms). Null
+     *  = no row yet (register-push-token / the first mirror creates it) OR a transport
+     *  error; callers must treat null as "unknown" and keep their local value. */
+    suspend fun fetchNotificationPrefs(userId: String): ServerNotificationPrefs? =
+        client.from("notification_preferences")
+            .select(Columns.list("notification_level", "reminder_lead_min")) { filter { eq("user_id", userId) } }
+            .decodeSingleOrNull<ServerNotificationPrefs>()
+}
+
+/** The inbox archive (migration 053 `captures.archived_at`): archive = set now(),
+ *  unarchive = null. The SERVER is the source of truth for which captures are
+ *  archived; the app keeps its old device-local id set only as a cache. Owner RLS
+ *  scopes every call. */
+class CapturesClient(private val client: SupabaseClient) {
+    @Serializable private data class IdRow(val id: String)
+
+    /** Archive (true) or restore (false) one capture. THROWS on error so the caller
+     *  can keep the write queued and retry — an archive must never silently fail. */
+    suspend fun setArchived(id: String, archived: Boolean) {
+        val stamp: String? = if (archived) java.time.Instant.now().toString() else null
+        client.from("captures").update({ set("archived_at", stamp) }) { filter { eq("id", id) } }
+    }
+
+    /** Every archived capture id of the signed-in user. THROWS on error (a pre-053
+     *  server has no such column → PostgREST 400) so the caller falls back to its
+     *  local cache instead of un-archiving everything. */
+    suspend fun archivedIds(): Set<String> =
+        client.from("captures")
+            .select(Columns.list("id")) { filter { filterNot("archived_at", FilterOperator.IS, "null") } }
+            .decodeList<IdRow>().map { it.id }.toSet()
 }

@@ -97,6 +97,15 @@ class RealtimeMirror(
         subscribe(Tables.PROFILE_FACTS, userId,
             { o -> val m = DbRowCodec.decodeProfileFact(o); store.upsertIfNewer(Tables.PROFILE_FACTS, m, ProfileFact.serializer(), m.id, m.updatedAt) },
             { id -> store.delete(Tables.PROFILE_FACTS, id) })
+        // call_requests (051: in the publication, replica identity FULL; 053's
+        // BEFORE UPDATE guard owns status on the server): a READ-ONLY mirror so
+        // get_calls / the task editor read locally and a ring / snooze / cancel made
+        // on another device or by the dispatcher shows up live. Same updated_at
+        // last-write-wins guard as tasks; there is never a local write to protect
+        // (the table is not in the outbox), so this only orders out-of-order echoes.
+        subscribe(Tables.CALL_REQUESTS, userId,
+            { o -> val m = DbRowCodec.decodeCallRequest(o); store.upsertIfNewer(Tables.CALL_REQUESTS, m, CallRequest.serializer(), m.id, m.updatedAt) },
+            { id -> store.delete(Tables.CALL_REQUESTS, id) })
         // Membership changes for ME — a new share or a revocation. Re-hydrate
         // collections so the freshly-shared list appears / the revoked one drops.
         subscribeMembers(userId, onMembersChanged)

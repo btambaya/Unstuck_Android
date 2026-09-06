@@ -197,6 +197,27 @@ object AssistantHarnessRules {
      *  (e.g. cut off mid-JSON) reads as empty, like the web's parseToolArgs. */
     fun argsAreEmpty(argumentsJson: String): Boolean =
         runCatching { LENIENT_JSON.parseToJsonElement(argumentsJson).jsonObject.isEmpty() }.getOrDefault(true)
+
+    // ---- tool-call hygiene
+
+    /** A tool call's `arguments` as it is PERSISTED and replayed: anything that
+     *  does not parse (STRICTLY) to a JSON object becomes "{}". DashScope rejects
+     *  the WHOLE request (400 InvalidParameter: "function.arguments … must be in
+     *  JSON format") when any replayed assistant tool_call carries an empty
+     *  string or JSON cut off by finish_reason=length — clients persisted those
+     *  turns verbatim, so ONE bad call poisoned every later turn of the thread
+     *  (2026-09-06). A valid object is returned untouched, so the model-facing
+     *  history is otherwise identical. Execution still sees the raw string (the
+     *  truncated-args hint keys on it). */
+    fun argumentsAsObjectJson(raw: String): String {
+        val s = raw.trim()
+        if (s.isEmpty()) return "{}"
+        return if (runCatching { Json.parseToJsonElement(s).jsonObject }.isSuccess) raw else "{}"
+    }
+
+    /** The calls as they go into the thread (see [argumentsAsObjectJson]). */
+    fun normalisedForHistory(calls: List<HarnessToolCall>): List<HarnessToolCall> =
+        calls.map { it.copy(argumentsJson = argumentsAsObjectJson(it.argumentsJson)) }
 }
 
 class AssistantHarness(
@@ -241,7 +262,11 @@ class AssistantHarness(
             }
 
             val replyIndex = working.size
-            working += HarnessMessage("assistant", reply.text, reply.toolCalls)
+            // The thread (persisted + replayed) carries NORMALISED tool calls — a
+            // non-object `arguments` string would 400 every later request (see
+            // argumentsAsObjectJson); execution below still runs on the raw
+            // reply so the truncated-args hint fires.
+            working += HarnessMessage("assistant", reply.text, AssistantHarnessRules.normalisedForHistory(reply.toolCalls))
 
             if (reply.toolCalls.isEmpty()) {
                 // Final reply. NEVER synthesise "Done." (harness audit, 2026-09-01).

@@ -84,6 +84,33 @@ class CallsClientTest {
         assertEquals("new label", reanchored["label"]!!.jsonPrimitive.content)
     }
 
+    @Test fun `reportOutcome folds the client-side end states onto the server's seven outcomes`() {
+        for (o in CallsClient.SERVER_OUTCOMES) assertEquals(o to null, CallsClient.normalizeOutcome(o))
+        assertEquals("declined" to null, CallsClient.normalizeOutcome("outside_hours"))
+        assertEquals("done" to listOf("voice failed"), CallsClient.normalizeOutcome("voice_failed"))
+        assertEquals("done" to null, CallsClient.normalizeOutcome(" Done "))
+        assertNull("an unknown outcome is refused locally, never sent to be 400'd", CallsClient.normalizeOutcome("wandered_off"))
+    }
+
+    @Test fun `the call-outcome body carries only what is set - built by hand, no default omission`() {
+        val done = CallsClient.outcomeBody("c1", "done", null, null)
+        assertEquals(setOf("callId", "outcome"), done.keys)
+        assertEquals("done", done["outcome"]!!.jsonPrimitive.content)
+        val snoozed = CallsClient.outcomeBody("c1", "snoozed", 15, null)
+        assertEquals("15", snoozed["snoozeMinutes"]!!.jsonPrimitive.content)
+        val failed = CallsClient.outcomeBody("c1", "done", null, listOf("voice failed: mic"))
+        assertEquals("[\"voice failed: mic\"]", failed["outcomeNotes"].toString())
+        assertEquals("empty notes are not sent", setOf("callId", "outcome"), CallsClient.outcomeBody("c1", "done", null, emptyList()).keys)
+    }
+
+    @Test fun `a PostgREST null array column decodes as empty (core row shape)`() {
+        val row = json.decodeFromString<CallRequest>(
+            """{"id":"c2","call_at":"2026-09-02T14:45:00+00:00","label":"x","notes":null,"outcome_notes":null,"status":"snoozed","snooze_until":"2026-09-02T15:05:00+00:00"}""",
+        )
+        assertEquals(emptyList<String>(), row.notes)
+        assertEquals(CallsClient.parseIsoMs("2026-09-02T15:05:00+00:00"), row.effectiveAtMs)
+    }
+
     @Test fun `call-outcome permanence - 4xx minus 401 408 429`() {
         assertTrue(CallOutcomeRejected.isPermanent(404))
         assertTrue(CallOutcomeRejected.isPermanent(422))

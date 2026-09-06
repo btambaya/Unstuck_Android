@@ -566,8 +566,56 @@ object CallToolLogic {
     }
 }
 
+// ── snooze_call — the CALL-LEVEL tool ("call me back in ten") ──
+// Voice-only, call mode only (iOS CallTools.names includes it; CallScript.callTools
+// lists it). CallVoiceService owns the ACTION — it intercepts the name BEFORE the
+// executor (iOS RealtimeCallVoiceLauncher.runCallTool → deps.snooze), hangs up
+// and reports outcome `snoozed` + minutes ONCE — and answers the model with
+// [ok]. The executor only ever sees it OUTSIDE a call (text chat / plain Talk),
+// where the honest answer is [NO_ACTIVE] (iOS CallCoordinator.snoozeActiveCall
+// with no active call). Strings are the iOS contract byte-for-byte.
+object SnoozeCallTool {
+    const val NAME = "snooze_call"
+    const val DEFAULT_MINUTES = 10
+    const val MIN_MINUTES = 1
+    const val MAX_MINUTES = 180
+
+    /** No call is up (or it is still ringing) — iOS `snoozeActiveCall` guard. */
+    const val NO_ACTIVE = "error: no call is active"
+    /** The session is gone by the time the tool ran (iOS launcher). */
+    const val CALL_ENDED = "error: the call has ended"
+
+    /** The tool result the model reads: it says the minutes, then a quick goodbye;
+     *  the service ends the call (iOS CallCoordinator.snoozeActiveCall). */
+    fun ok(minutes: Int): String = "ok: I'll call back in ${clamp(minutes)} minutes — say a quick goodbye; the call ends now"
+
+    /** A tool outside `CallScript.callTools` asked for during a call. */
+    fun notAvailableDuringCall(name: String): String = "error: $name isn't available during a call"
+
+    /** iOS clampSnooze: 1…180. */
+    fun clamp(minutes: Int): Int = minutes.coerceIn(MIN_MINUTES, MAX_MINUTES)
+
+    /** `{minutes}` from the model's arguments; default 10 (iOS snoozeMinutes). */
+    fun minutes(args: ToolArgs): Int = args.int("minutes") ?: DEFAULT_MINUTES
+    fun minutes(argsJson: String): Int = minutes(ToolArgs.parse(argsJson))
+}
+
+/** What a receipt's Undo control should read: "Undo", or — while a NETWORK undo
+ *  (CANCEL_CALL, the request_call receipt's cancel round-trip) is in flight —
+ *  "cancelling…" so the tap isn't repeated and the row isn't lied about. The
+ *  in-flight set is [tech.csalliance.unstuck.ui.AppViewModel.receiptUndosInFlight],
+ *  keyed [receiptUndoKey]. */
+fun receiptUndoLabel(kind: tech.csalliance.unstuck.core.logic.ReceiptUndoKind, inFlight: Boolean): String =
+    if (inFlight && kind == tech.csalliance.unstuck.core.logic.ReceiptUndoKind.CANCEL_CALL) "cancelling…" else "Undo"
+
+/** The in-flight key for one receipt on one persisted turn. */
+fun receiptUndoKey(messageId: String, index: Int): String = "$messageId:$index"
+
 /** Dispatch a call tool through the executor's state + scratch. Null ⇒ not a call tool. */
 suspend fun runCallTool(name: String, args: ToolArgs, api: AssistantApi, scratch: TurnScratch): String? {
+    // Outside a call session there is nothing to snooze (the service answers
+    // it in call mode before we're reached).
+    if (name == SnoozeCallTool.NAME) return SnoozeCallTool.NO_ACTIVE
     if (name !in CallToolLogic.names) return null
     val store = api.callStore() ?: return CallToolLogic.UNAVAILABLE
     val userId = api.currentUserId() ?: return CallToolLogic.UNAVAILABLE

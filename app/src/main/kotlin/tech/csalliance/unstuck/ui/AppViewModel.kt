@@ -93,6 +93,17 @@ import tech.csalliance.unstuck.ui.assistant.buildVoiceInstructions
 import tech.csalliance.unstuck.ui.assistant.buildVoiceOpening
 import tech.csalliance.unstuck.ui.assistant.runAssistantTool
 import tech.csalliance.unstuck.ui.assistant.voiceToolsJson
+import tech.csalliance.unstuck.ui.assistant.callVoiceToolsJson
+import tech.csalliance.unstuck.ui.assistant.CallToolLogic
+import tech.csalliance.unstuck.calls.CallSettingsStore
+import tech.csalliance.unstuck.core.logic.CallScript
+import tech.csalliance.unstuck.core.logic.CallSettings
+import tech.csalliance.unstuck.core.logic.CallSettingsLogic
+import tech.csalliance.unstuck.sync.CallRequest
+import tech.csalliance.unstuck.sync.CallRequestsMirror
+import tech.csalliance.unstuck.sync.CallsClient
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.putJsonArray
 import tech.csalliance.unstuck.core.logic.DivergenceResolution
 import tech.csalliance.unstuck.core.logic.PendingShare
 import tech.csalliance.unstuck.core.logic.Receipt
@@ -214,6 +225,17 @@ class AppViewModel(
         graph.appContext.getSharedPreferences("unstuck.pa", android.content.Context.MODE_PRIVATE)
     }
     private fun paKey(base: String, uid: String) = "$base.$uid"
+    private val _callSettings = MutableStateFlow(tech.csalliance.unstuck.core.logic.CallSettings())
+    /** "Calls from Unstuck" — this account's device-local kill-switch, allowed
+     *  hours and default lead (calls/CallSettingsStore, same per-uid file as the
+     *  rituals; scrubbed at sign-out). Push.kt's decide() reads it on receipt. */
+    val callSettings: StateFlow<tech.csalliance.unstuck.core.logic.CallSettings> = _callSettings.asStateFlow()
+    private val _receiptUndosInFlight = MutableStateFlow<Set<String>>(emptySet())
+    /** Receipt undos whose round-trip is still running (keyed
+     *  [tech.csalliance.unstuck.ui.assistant.receiptUndoKey]) — the CANCEL_CALL
+     *  undo is a network write, so its control reads "cancelling…" meanwhile
+     *  ([tech.csalliance.unstuck.ui.assistant.receiptUndoLabel]). */
+    val receiptUndosInFlight: StateFlow<Set<String>> = _receiptUndosInFlight.asStateFlow()
     private val _rituals = MutableStateFlow(RitualPrefs.DEFAULTS)
     /** Which recurring PA moments run (Settings / interview picker / moments engine). */
     override val rituals: StateFlow<RitualPrefs> = _rituals.asStateFlow()
@@ -1157,6 +1179,9 @@ class AppViewModel(
      *  re-opens it off the live-session flow. */
     override fun onCleared() {
         closeCoFocusChannel()
+        // A LIVE call keeps the client it already dialled; this only stops a
+        // future Answer from dialling through a dead ViewModel.
+        runCatching { tech.csalliance.unstuck.calls.CallVoiceService.unbind(callVoiceDeps) }
         super.onCleared()
     }
 
@@ -2335,6 +2360,18 @@ class AppViewModel(
     /** Error code of the last failed turn (null = none); survives sheet reopen. */
     private val _assistantError = MutableStateFlow<String?>(null)
     val assistantError: StateFlow<String?> = _assistantError.asStateFlow()
+    /** Consecutive turns the upstream rejected (`upstream`). Two in a row on one
+     *  thread is the poisoned-history signature (a persisted tool_call with
+     *  non-object arguments made DashScope 400 every later turn, 2026-09-06):
+     *  the sheet then offers "Start a fresh thread" next to the error. Reset by
+     *  a good turn or [clearAssistant]. */
+    private var assistantUpstreamStreak = 0
+    private val _assistantOffersFreshThread = MutableStateFlow(false)
+    val assistantOffersFreshThread: StateFlow<Boolean> = _assistantOffersFreshThread.asStateFlow()
+    private fun noteAssistantOutcome(errorCode: String?) {
+        assistantUpstreamStreak = if (errorCode == "upstream") assistantUpstreamStreak + 1 else 0
+        _assistantOffersFreshThread.value = assistantUpstreamStreak >= 2
+    }
     /** Reply texts as turns complete — an OPEN sheet collects to speak them. */
     private val _assistantReplies = MutableSharedFlow<String>(extraBufferCapacity = 1)
     val assistantReplies: SharedFlow<String> = _assistantReplies.asSharedFlow()
@@ -2429,8 +2466,11 @@ class AppViewModel(
             _dismissedMoments.value = emptyList()
             _interviewDone.value = false
             _struggles.value = emptyList()
+            _callSettings.value = tech.csalliance.unstuck.core.logic.CallSettings()
             return
         }
+        _callSettings.value = runCatching { tech.csalliance.unstuck.calls.CallSettingsStore.load(graph.appContext, uid) }
+            .getOrDefault(tech.csalliance.unstuck.core.logic.CallSettings())
         _rituals.value = PAPrefsLogic.decodeRituals(paPrefs.getString(paKey(PAPrefsLogic.RITUALS_KEY, uid), null))
         _dismissedMoments.value = PAPrefsLogic.parseDismissed(paPrefs.getString(paKey(PAPrefsLogic.DISMISSED_KEY, uid), null))
         _interviewDone.value = paPrefs.getBoolean(paKey(INTERVIEW_DONE_KEY, uid), false)
@@ -2724,7 +2764,17 @@ class AppViewModel(
      *  [clearAssistant]. */
     internal suspend fun scrubAssistantUserState() {
         runCatching { profileFactsService.wipeLocal() }
+        // The call settings share the file (calls.<field>.<uid>) — cleared with it
+        // (risk 9); the explicit per-uid clear covers a uid still known here.
+        currentUid()?.let { uid -> runCatching { tech.csalliance.unstuck.calls.CallSettingsStore.clear(graph.appContext, uid) } }
+        // A ring / an unsent outcome must never survive into the NEXT account
+        // (iOS signedOut parity): the queue would be replayed with the new JWT
+        // (call-outcome answers not_found for every item) and the ring would
+        // show the previous account's notes. No report — the JWT is already gone.
+        runCatching { tech.csalliance.unstuck.calls.CallRinger.clear(graph.appContext) }
+        runCatching { tech.csalliance.unstuck.calls.CallOutcomeStore.clear(graph.appContext) }
         runCatching { paPrefs.edit().clear().apply() }
+        _callSettings.value = tech.csalliance.unstuck.core.logic.CallSettings()
         _rituals.value = RitualPrefs.DEFAULTS
         _dismissedMoments.value = emptyList()
         _interviewDone.value = false
@@ -2810,8 +2860,15 @@ class AppViewModel(
         val receipt = existing.getOrNull(index) ?: return
         if (receipt.undone) return
         val undo = receipt.undo ?: return
+        // One round-trip per receipt: a second tap while the CANCEL_CALL network
+        // undo is running is ignored (its control reads "cancelling…" meanwhile).
+        val key = tech.csalliance.unstuck.ui.assistant.receiptUndoKey(messageId, index)
+        if (key in _receiptUndosInFlight.value) return
+        _receiptUndosInFlight.value = _receiptUndosInFlight.value + key
         viewModelScope.launch {
-            val ok = runCatching { performReceiptUndo(undo) }.getOrDefault(false)
+            val ok = try { runCatching { performReceiptUndo(undo) }.getOrDefault(false) } finally {
+                _receiptUndosInFlight.value = _receiptUndosInFlight.value - key
+            }
             if (!ok) return@launch
             val cur = assistantHistory.indexOfFirst { it.id == messageId }
             if (cur < 0) return@launch
@@ -2882,6 +2939,7 @@ class AppViewModel(
         assistantJob = null
         _assistantSending.value = false
         _assistantError.value = null
+        noteAssistantOutcome(null)
         _assistantQueued.value = emptyList()
         assistantHistory.clear()
         // Staged-but-unconfirmed shares belong to the conversation that proposed
@@ -2916,8 +2974,14 @@ class AppViewModel(
         assistantJob = viewModelScope.launch {
             try {
                 when (val result = runAssistantTurn(text, epoch)) {
-                    is AssistantTurn.Reply -> if (epoch == assistantEpoch) _assistantReplies.tryEmit(result.text)
-                    is AssistantTurn.Error -> if (epoch == assistantEpoch) _assistantError.value = result.code
+                    is AssistantTurn.Reply -> if (epoch == assistantEpoch) {
+                        _assistantReplies.tryEmit(result.text)
+                        noteAssistantOutcome(null)
+                    }
+                    is AssistantTurn.Error -> if (epoch == assistantEpoch) {
+                        _assistantError.value = result.code
+                        noteAssistantOutcome(result.code)
+                    }
                 }
                 if (epoch == assistantEpoch) persistAssistant()
             } finally {
@@ -3099,6 +3163,91 @@ class AppViewModel(
      *  the executor runs (VoiceToolSchema.kt), so voice can never advertise a
      *  tool the executor lacks. */
     fun voiceTools(): JsonArray = voiceToolsJson()
+
+    /** Tool schemas for a CALL session (CallVoiceService): the same registry
+     *  filtered to core `CallScript.callTools()` plus the call-level snooze_call. */
+    fun callVoiceTools(): JsonArray = callVoiceToolsJson(CallScript.callTools())
+
+    /** The app-side seams an ANSWERED call's conversation runs on (instructions,
+     *  tools, the executor, the access token). CallVoiceService owns the socket
+     *  and the mic but has no ViewModel of its own, so it waits up to
+     *  LAUNCHER_GRACE_MS for these to be bound — unbound, EVERY answered call
+     *  degrades to the "couldn't start the call" notification. */
+    private val callVoiceDeps: tech.csalliance.unstuck.calls.CallVoiceService.Deps =
+        tech.csalliance.unstuck.calls.CallVoiceService.Deps.live(this)
+
+    init { tech.csalliance.unstuck.calls.CallVoiceService.bind(callVoiceDeps) }
+
+    // --- "Calls from Unstuck": the task editor's "Call me about this" + Settings
+    // book / update / cancel through the SAME executor path as the assistant's
+    // request_call / update_call / cancel_call (guards, duplicate rule, wording),
+    // so the editor can never book what the assistant would refuse. Results are
+    // the contract strings ("ok: …" / "error: …"); CallMeLogic.userMessage turns
+    // them into copy. Writes go DIRECT (never the outbox — 053's guard owns status). ---
+
+    /** Calls need a signed-in Supabase client (the tools say so otherwise). */
+    fun callsAvailable(): Boolean = currentUid() != null && assistantApi.callStore() != null
+
+    /** A USER change from Settings → Calls: cache for this account (+ the in-memory
+     *  value Push.kt's decide() reads). Signed out → in-memory only. */
+    fun updateCallSettings(transform: (CallSettings) -> CallSettings) {
+        val next = transform(_callSettings.value)
+        _callSettings.value = next
+        val uid = currentUid() ?: return
+        runCatching { CallSettingsStore.save(graph.appContext, uid, next) }
+    }
+
+    /** The live call anchored to a task (the editor's initial state). Reads the
+     *  server (`CallsClient.forTask`); null = none, signed out, or offline. The
+     *  sync layer's read-only `call_requests` mirror can replace this read once it
+     *  exposes a per-task query — the editor only needs the row. */
+    suspend fun callForTask(taskId: String): CallRequest? {
+        val client = assistantSupabaseClient ?: return null
+        if (currentUid() == null) return null
+        return runCatching { CallsClient(client, CallRequestsMirror(store)).forTask(taskId) }.getOrNull()
+    }
+
+    /** One call row by id (after a book, to show what the server stored). */
+    suspend fun callRequest(callId: String): CallRequest? =
+        runCatching { assistantApi.callStore()?.call(callId) }.getOrNull()
+
+    private suspend fun runEditorCallTool(name: String, args: JsonObject): String =
+        runCatching { runAssistantTool(name, ToolArgs(args), assistantApi, TurnScratch()) }.getOrElse { CallToolLogic.NETWORK }
+
+    private fun notesJson(notes: List<String>) = JsonArray(notes.map { JsonPrimitive(it) })
+
+    /** "Call me about this" → request_call(taskId, leadMin, notes): rings `leadMin`
+     *  minutes before the task's NEXT live block (the server follows the block). */
+    suspend fun bookTaskCall(taskId: String, leadMin: Int, notes: List<String>): String =
+        runEditorCallTool("request_call", buildJsonObject { put("taskId", taskId); put("leadMin", leadMin); put("notes", notesJson(notes)) })
+
+    /** Update the task's call: update_call(callId, leadMin, notes) — re-anchors on
+     *  the task's current next block, replaces the notes verbatim. */
+    suspend fun updateTaskCall(callId: String, leadMin: Int, notes: List<String>): String =
+        runEditorCallTool("update_call", buildJsonObject { put("callId", callId); put("leadMin", leadMin); put("notes", notesJson(notes)) })
+
+    /** cancel_call(callId) — "error: that call is already <status>" when it rang /
+     *  was cancelled elsewhere (gone either way for the editor). */
+    suspend fun cancelCallRequest(callId: String): String =
+        runEditorCallTool("cancel_call", buildJsonObject { put("callId", callId) })
+
+    /** Settings → "Test call now": a REAL `call_requests` row one minute from now
+     *  through request_call, so the whole server → FCM → ring path is exercised.
+     *  The assistant's guards apply (server window 06:00–23:00, past-time) PLUS the
+     *  user's own allowed hours — otherwise the phone would decline it quietly and
+     *  "Booked — ringing at …" would be a lie. A live earlier test call is
+     *  cancelled first (the one-live-call-per-label rule would refuse the retry). */
+    suspend fun bookTestCall(): String {
+        val at = nowMs() + 60_000L
+        val s = _callSettings.value
+        val hm = CallToolLogic.hhmm(at)
+        if (!CallSettingsLogic.withinHours(hm, s)) return TEST_CALL_OUTSIDE_HOURS(hm, s)
+        val args = buildJsonObject { put("when", CallToolLogic.fmt(at)); put("label", TEST_CALL_LABEL); put("notes", notesJson(listOf(TEST_CALL_NOTE))) }
+        val first = runEditorCallTool("request_call", args)
+        val dup = DUPLICATE_ID_RE.find(first) ?: return first
+        runEditorCallTool("cancel_call", buildJsonObject { put("callId", dup.groupValues[1]) })
+        return runEditorCallTool("request_call", args)
+    }
 
     // --- seams for the executor's AppViewModel adapter (AssistantToolsAppModel.kt) ---
 
@@ -3288,3 +3437,14 @@ data class Nudge(
     val taskId: String? = null,
     val captureId: String? = null,
 )
+
+// ── "Test call now" (Settings → Calls) — copy from iOS CallSettingsView ──
+/** The label of the row "Test call now" books (a live one is cancelled before a retry). */
+const val TEST_CALL_LABEL = "Test call"
+const val TEST_CALL_NOTE = "This is what a call from Unstuck sounds like"
+/** The user's own hours refuse the test — widen them (iOS wording). */
+@Suppress("FunctionName")
+fun TEST_CALL_OUTSIDE_HOURS(hm: String, s: CallSettings): String =
+    "error: $hm is outside your allowed hours (${s.hoursStart}–${s.hoursEnd}) — the phone would decline it quietly. Widen the hours above to try it now."
+/** request_call's duplicate refusal carries the live row's id. */
+private val DUPLICATE_ID_RE = Regex("^error: a call is already booked for .* id=(\\S+) — ")

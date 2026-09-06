@@ -19,6 +19,11 @@ class UnstuckApp : Application() {
         graph.start()
         NotificationChannels.ensureAll(this)
         NotificationLog.init(this)
+        // Replay call outcomes that couldn't be sent when they happened (offline,
+        // 5xx, a token refresh) on every foreground / completed hydrate — a lost
+        // `missed` / `snoozed` / `done` would leave the server row in `calling`
+        // for ever (the cron never re-rings it).
+        tech.csalliance.unstuck.calls.CallOutcomeStore.installForegroundFlush(this)
         // Keep pre-task reminder alarms in sync with the scheduled blocks.
         ReminderScheduler.observe(this)
         // Drop the realtime channels + websocket while the whole app is backgrounded

@@ -15,6 +15,17 @@
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <!-- Realtime voice: communication mode + routing for hardware echo cancellation. -->
     <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
+    <!-- "Unstuck calls you" (C1-android): the ring shows full-screen over the lock
+         screen (API 34: special access, pre-granted only to apps Play classifies
+         as calling — declared on the Play form; otherwise the ring degrades to a
+         heads-up and Settings › Calls offers ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT),
+         the in-call voice service is a `microphone` foreground service started
+         ONLY from the Answer tap, and the ring channel vibrates. WAKE_LOCK: the
+         ring activity keeps the screen on while it rings. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <!-- Package visibility (Android 11+): see the system speech recognition + TTS
          services so SpeechRecognizer / TextToSpeech resolve. -->
@@ -55,6 +66,35 @@
                 <data android:scheme="unstuck" />
             </intent-filter>
         </activity>
+
+        <!-- "Unstuck calls you": the full-screen ring. Over the keyguard with the
+             screen turned on, its own task kept out of recents, never exported (the
+             CallStyle notification's PendingIntents target it by component), singleTop
+             so a shade "Answer" re-enters the ringing instance. -->
+        <activity
+            android:name=".calls.IncomingCallActivity"
+            android:exported="false"
+            android:launchMode="singleTop"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true"
+            android:taskAffinity=""
+            android:screenOrientation="portrait"
+            android:theme="@style/Theme.Unstuck" />
+
+        <!-- The ring's background outcomes: the 30 s missed alarm, the shade's
+             Decline / Snooze. Not exported (explicit-component PendingIntents only). -->
+        <receiver
+            android:name=".calls.MissedCallReceiver"
+            android:exported="false" />
+
+        <!-- The in-call voice conversation (calls/CallVoiceService): a microphone
+             foreground service, started only from IncomingCallActivity's Answer tap. -->
+        <service
+            android:name=".calls.CallVoiceService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
 
         <!-- Foreground focus-session timer (chronometer notification). -->
         <service

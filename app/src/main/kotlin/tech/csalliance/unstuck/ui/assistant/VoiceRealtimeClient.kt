@@ -72,6 +72,46 @@ import kotlin.concurrent.thread
 // ducks then restores without cancelling. Deltas of a cancelled response are
 // dropped even after the next response.created (they interleave on the wire).
 // Interrupt (button/orb) is a hard cancel that never ducks.
+//
+// CALL MODE (C1-android — "Unstuck calls you", CallVoiceService): the SAME client
+// with a [CallMode] attached. Three things differ, all mirroring iOS
+// RealtimeCallVoiceLauncher: (1) tool calls are filtered to the call tools —
+// `snooze_call` is answered LOCALLY (the tool result the model reads back, then
+// `CallMode.onSnoozeCall` so the owner hangs up and reports `snoozed`) and any
+// tool outside `allowedTools` returns "error: <name> isn't available during a
+// call" without reaching the executor; (2) `micMuted` gates the upload (audio
+// focus lost → mute, never end); (3) `onTransportEnded` fires ONCE when the
+// socket ends on its own (failure → message, clean close → null) and never after
+// stop() — a protocol-level `error` event does NOT end the call.
+
+/** Call-mode configuration for [VoiceRealtimeClient] (see the file header). */
+class CallMode(
+    /** Tool names the model may run during the call (CallScript.callTools). */
+    val allowedTools: Set<String>,
+    /** `snooze_call` ran with these (clamped) minutes — the owner ends the call
+     *  and reports `snoozed`; the client itself keeps the session open so the
+     *  goodbye can play. Invoked on the client's IO scope. */
+    val onSnoozeCall: (minutes: Int) -> Unit,
+) {
+    companion object {
+        const val SNOOZE_TOOL = "snooze_call"
+        const val DEFAULT_SNOOZE_MIN = 10
+        const val MAX_SNOOZE_MIN = 180
+
+        /** `{minutes}` from the raw tool args; default 10, clamped 1…180 (the
+         *  coordinator's clamp — call-outcome applies the same one). */
+        fun snoozeMinutes(args: JsonObject): Int {
+            val raw = (args["minutes"] as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull?.trim()?.toDoubleOrNull()
+            val m = raw?.let { Math.round(it).toInt() } ?: DEFAULT_SNOOZE_MIN
+            return m.coerceIn(1, MAX_SNOOZE_MIN)
+        }
+
+        fun snoozeResult(minutes: Int): String =
+            "ok: I'll call back in $minutes minutes — say a quick goodbye; the call ends now"
+
+        fun notAvailable(name: String): String = "error: $name isn't available during a call"
+    }
+}
 
 /** THINKING = a response is in flight but no audio has arrived yet (tool call /
  *  model latency) — the screen shows "Thinking…" and offers Interrupt. */
@@ -155,6 +195,8 @@ class VoiceRealtimeClient(
     private val speakerHalfDuplex: Boolean = false,
     /** Test seam: where sockets come from (production = the shared OkHttpClient). */
     private val socketFactory: WebSocket.Factory = http,
+    /** Non-null ⇒ this session is a call from Unstuck (see the file header). */
+    private val callMode: CallMode? = null,
 ) {
     companion object {
         // One client for ALL voice sessions — each OkHttpClient owns a dispatcher
@@ -190,6 +232,19 @@ class VoiceRealtimeClient(
 
     /** stop() has run (by the UI, focus loss, or a capture failure) — a new session needs a new client. */
     val isStopped: Boolean get() = stopped
+
+    /** Call mode: drop captured frames instead of uploading them (audio focus lost
+     *  to another app — most importantly a phone call — mutes rather than ends;
+     *  the CallStyle notification's mute would land here too). Playback and the
+     *  socket stay up. Read on the capture thread. */
+    @Volatile var micMuted: Boolean = false
+
+    /** Call mode: the transport ended on its own — `null` for a clean server
+     *  close, a message for a failure. Fires at most once, from the socket
+     *  listener thread, and NEVER after [stop]. Ignored outside call mode only in
+     *  the sense that nobody sets it. */
+    @Volatile var onTransportEnded: ((String?) -> Unit)? = null
+    @Volatile private var transportEndedFired = false
 
     // The barge-in state machine. Events arrive from the WS reader thread, the
     // capture thread (gate), the playback thread (drain), the main thread (route
@@ -230,7 +285,7 @@ class VoiceRealtimeClient(
         // (the gate emits no frames yet).
         audio.startCapture { frame ->
             val socket = ws ?: return@startCapture
-            if (!open) return@startCapture
+            if (!open || micMuted) return@startCapture
             socket.send(buildJsonObject {
                 put("type", "input_audio_buffer.append")
                 put("audio", Base64.encodeToString(frame, Base64.NO_WRAP))
@@ -470,13 +525,22 @@ class VoiceRealtimeClient(
                 else -> t.message?.take(160) ?: "Couldn't reach the voice server"
             }
             onError(msg); onState(VoiceState.ERROR)
+            transportEnded(msg)
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
             open = false
             if (stopped) return // stop() already shut audio down and reported CLOSED
             mainHandler.removeCallbacks(tick); audio.shutdown(); onState(VoiceState.CLOSED)
+            transportEnded(null)
         }
+    }
+
+    /** Call mode's end contract: once, never after stop(). */
+    private fun transportEnded(error: String?) {
+        if (stopped || transportEndedFired) return
+        transportEndedFired = true
+        onTransportEnded?.invoke(error)
     }
 
     /** First response finished → the opening primer has served its purpose; remove
@@ -528,7 +592,7 @@ class VoiceRealtimeClient(
             Json.parseToJsonElement(arguments ?: "{}").jsonObject
         }.getOrDefault(JsonObject(emptyMap()))
         scope.launch {
-            val result = runCatching { runTool(name, args) }.getOrElse { "error: ${it.message ?: "failed"}" }
+            val result = runCatching { runCallAwareTool(name, args) }.getOrElse { "error: ${it.message ?: "failed"}" }
             // Feed the tool result back; the reply after it is tool-backed only
             // when the tool really changed something.
             send(buildJsonObject {
@@ -542,6 +606,21 @@ class VoiceRealtimeClient(
             synchronized(ctlLock) { guard.toolFinished(name, result) }
             scheduleContinue()
         }
+    }
+
+    /** Call mode's tool gate (iOS RealtimeCallVoiceLauncher.runCallTool): snooze
+     *  is answered here and handed to the owner; a tool outside the call set never
+     *  reaches the executor; everything else is the normal executor. Talk mode
+     *  (no [callMode]) is untouched. */
+    private suspend fun runCallAwareTool(name: String, args: JsonObject): String {
+        val cm = callMode ?: return runTool(name, args)
+        if (name == CallMode.SNOOZE_TOOL) {
+            val minutes = CallMode.snoozeMinutes(args)
+            runCatching { cm.onSnoozeCall(minutes) }
+            return CallMode.snoozeResult(minutes)
+        }
+        if (name !in cm.allowedTools) return CallMode.notAvailable(name)
+        return runTool(name, args)
     }
 
     /** One coalesced response.create ~120 ms after the last tool output. */

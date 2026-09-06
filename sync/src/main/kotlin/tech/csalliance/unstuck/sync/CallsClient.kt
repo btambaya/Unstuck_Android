@@ -8,14 +8,15 @@ import io.ktor.client.request.setBody
 import io.ktor.http.ContentType
 import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
-import kotlinx.serialization.SerialName
-import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
+import kotlinx.coroutines.flow.Flow
+import tech.csalliance.unstuck.data.LocalStore
+import tech.csalliance.unstuck.data.db.Tables
 import java.time.Instant
 import java.time.ZoneOffset
 import java.time.format.DateTimeFormatter
@@ -39,64 +40,29 @@ import java.time.format.DateTimeParseException
 // still being LIVE and return the row the server actually wrote — null means
 // zero rows matched (the call was cancelled / rang / finished underneath the
 // caller), and callers must say so rather than echo stale state.
+//
+// LOCAL MIRROR (C1-android): `Tables.CALL_REQUESTS` is hydrated + realtime-mirrored
+// READ-ONLY into the LocalStore (Hydrator / RealtimeMirror). Given a
+// [CallRequestsMirror], the reads below (`list` / `get` / `forTask`) come from it —
+// offline-safe, no round trip for get_calls / the task editor — and every write
+// still goes DIRECT to PostgREST (never the outbox: 053's BEFORE UPDATE guard owns
+// status) with the returned row absorbed into the mirror at once, so a booking is
+// visible locally before its realtime echo lands. Without a mirror the reads hit
+// the network exactly as before.
 
-/** What the phone reports back after a call attempt (call-outcome `outcome`). */
-enum class CallOutcome(val wire: String) {
-    ANSWERED("answered"), DECLINED("declined"), MISSED("missed"), BUSY("busy"),
-    SNOOZED("snoozed"), DONE("done"), STALE("stale"),
-}
+/** What the phone reports back after a call attempt (call-outcome `outcome`) is
+ *  :core's `CallOutcome` — the ring path, the voice service and the durable
+ *  outcome queue all report through it, so there is ONE type with ONE set of
+ *  wire strings. Aliased here so every `tech.csalliance.unstuck.sync.CallOutcome`
+ *  import keeps resolving. */
+typealias CallOutcome = tech.csalliance.unstuck.core.logic.CallOutcome
 
-/** A `call_requests` row as the client reads it. Tolerant decoding: array
- *  columns default to `[]`, so a row written by another platform without notes
- *  still loads. Every field with a default is ALSO emitted on encode only when
- *  the writer builds the JSON by hand (see [CallsClient.create]) — the
- *  kotlinx default-omission rule means this type is a READ shape. */
-@Serializable
-data class CallRequest(
-    val id: String,
-    @SerialName("user_id") val userId: String? = null,
-    @SerialName("task_id") val taskId: String? = null,
-    @SerialName("block_id") val blockId: String? = null,
-    /** ISO-8601 timestamptz (absolute; the server re-derives it from the block
-     *  when `leadMin` is set and the block moves). */
-    @SerialName("call_at") val callAt: String,
-    @SerialName("lead_min") val leadMin: Int? = null,
-    val label: String = "",
-    val notes: List<String> = emptyList(),
-    val status: String = "scheduled",
-    @SerialName("snooze_until") val snoozeUntil: String? = null,
-    @SerialName("outcome_notes") val outcomeNotes: List<String> = emptyList(),
-    @SerialName("call_id") val callId: String? = null,
-    val attempts: Int? = null,
-    @SerialName("created_at") val createdAt: String? = null,
-    @SerialName("updated_at") val updatedAt: String? = null,
-) {
-    companion object {
-        /** Web parity (lib/calls/types.ts LIVE_CALL_STATUSES): a call that is
-         *  ringing right now still "is coming" — get_calls lists it ("· ringing
-         *  now") and it counts as a duplicate anchor. */
-        val liveStatuses = listOf("scheduled", "snoozed", "calling")
-        /** Rows whose NOTES / LABEL may still change: the live ones plus a call
-         *  that has been ANSWERED and is in progress. Its TIME may not move. */
-        val editableStatuses = listOf("scheduled", "snoozed", "calling", "answered")
-        /** Rows whose TIME may move. A ringing / answered call is NOT one of them:
-         *  re-arming it to `scheduled` would be overwritten by the phone's own
-         *  outcome report a moment later. */
-        val reschedulableStatuses = listOf("scheduled", "snoozed")
-    }
-
-    /** `callAt` as epoch ms (null if the server sent something unparseable). */
-    val callAtMs: Long? get() = CallsClient.parseIsoMs(callAt)
-    /** The effective next ring time: `snoozeUntil` when snoozed, else `callAt`. */
-    val effectiveAtMs: Long? get() =
-        if (status == "snoozed") snoozeUntil?.let { CallsClient.parseIsoMs(it) } ?: callAtMs else callAtMs
-    val isLive: Boolean get() = status in liveStatuses
-    /** Notes / label may still change (live, or answered and in progress). */
-    val isEditable: Boolean get() = status in editableStatuses
-    /** The call is ringing or in progress right now: notes/label edits land,
-     *  a time change is refused. */
-    val isInProgress: Boolean get() = status == "calling" || status == "answered"
-}
+/** The `call_requests` row shape is :core's `CallRequest` (core/model/CallRequest.kt
+ *  — tolerant decode, the status families, callAtMs / effectiveAtMs / isLive /
+ *  isEditable / isInProgress). Aliased here so every existing
+ *  `tech.csalliance.unstuck.sync.CallRequest` import (the assistant's call
+ *  tools, the task editor, the mirror) keeps resolving; there is ONE row type. */
+typealias CallRequest = tech.csalliance.unstuck.core.model.CallRequest
 
 /** call-outcome refused a report FOR GOOD (a 4xx other than 401 / 408 / 429):
  *  retrying can never succeed, so a reporter drops the item. */
@@ -106,10 +72,60 @@ class CallOutcomeRejected(val status: Int, override val message: String?) : Exce
     }
 }
 
-class CallsClient(private val client: SupabaseClient) {
+/** The read side of the local `call_requests` mirror (see the file header). Pure
+ *  LocalStore reads + the absorb rule (last-write-wins by `updated_at`, like the
+ *  realtime path) — no network, unit-tested with an in-memory Room store. */
+class CallRequestsMirror(private val store: LocalStore) {
+    suspend fun all(): List<CallRequest> = store.snapshot(Tables.CALL_REQUESTS, CallRequest.serializer())
+    /** Live rows (scheduled / snoozed / calling), soonest first. */
+    suspend fun live(): List<CallRequest> = all().filter { it.isLive }.sortedBy { it.effectiveAtMs ?: Long.MAX_VALUE }
+    suspend fun get(id: String): CallRequest? = store.getOne(Tables.CALL_REQUESTS, id, CallRequest.serializer())
+    /** The live call anchored to a task, soonest first, if any. */
+    suspend fun forTask(taskId: String): CallRequest? = live().firstOrNull { it.taskId == taskId }
+    fun observe(): Flow<List<CallRequest>> = store.observeTable(Tables.CALL_REQUESTS, CallRequest.serializer())
+    /** Write a row the SERVER just returned into the mirror (skipped when the local
+     *  copy is strictly newer — a realtime echo may have overtaken the response). */
+    suspend fun absorb(row: CallRequest) {
+        store.upsertIfNewer(Tables.CALL_REQUESTS, row, CallRequest.serializer(), row.id, row.updatedAt)
+    }
+}
+
+class CallsClient(private val client: SupabaseClient, private val mirror: CallRequestsMirror? = null) {
 
     companion object {
         private const val TABLE = "call_requests"
+
+        /** The `outcome` values call-outcome accepts (its OUTCOMES set, verbatim). */
+        val SERVER_OUTCOMES: Set<String> = setOf("answered", "declined", "missed", "busy", "snoozed", "done", "stale")
+
+        /** The wire outcome + note for a client-side end state. The server only
+         *  knows the seven [SERVER_OUTCOMES]; the phone's richer decisions are
+         *  folded exactly as iOS does — outside call hours ends the row as
+         *  `declined` (CallCoordinator.reportIncoming), a voice failure as `done`
+         *  with the note "voice failed" (CallCoordinator.performEnd). Any other
+         *  string is a programming error and is REJECTED here (null) rather than
+         *  sent to be refused with a 400. */
+        fun normalizeOutcome(raw: String): Pair<String, List<String>?>? {
+            val o = raw.trim().lowercase()
+            return when {
+                o in SERVER_OUTCOMES -> o to null
+                o == "outside_hours" -> "declined" to null
+                o == "voice_failed" -> "done" to listOf("voice failed")
+                else -> null
+            }
+        }
+
+        /** The call-outcome POST body. Built as a JsonObject on purpose: kotlinx
+         *  omits default-valued fields, and while a missing `snoozeMinutes` would
+         *  merely default to 10 server-side, a body that silently loses a field is
+         *  exactly the class of bug this codebase keeps hitting — so every present
+         *  value is written explicitly and the absent ones are genuinely absent. */
+        fun outcomeBody(callId: String, outcome: String, snoozeMinutes: Int?, outcomeNotes: List<String>?): JsonObject = buildJsonObject {
+            put("callId", callId)
+            put("outcome", outcome)
+            if (snoozeMinutes != null) put("snoozeMinutes", snoozeMinutes)
+            if (!outcomeNotes.isNullOrEmpty()) put("outcomeNotes", JsonArray(outcomeNotes.map { JsonPrimitive(it) }))
+        }
         private val ISO_MS: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
 
@@ -127,7 +143,7 @@ class CallsClient(private val client: SupabaseClient) {
         /** The compare-and-set status list for an [update]: the reschedulable
          *  rows when the patch moves the call, the editable rows otherwise. */
         fun statusesAccepting(timeChange: Boolean): List<String> =
-            if (timeChange) CallRequest.reschedulableStatuses else CallRequest.editableStatuses
+            tech.csalliance.unstuck.core.model.CallStatus.wiresAccepting(timeChange)
 
         /** The `call_requests` upsert row for [create] — built as a JsonObject on
          *  purpose so nullable columns are sent explicitly (kotlinx would drop a
@@ -172,23 +188,41 @@ class CallsClient(private val client: SupabaseClient) {
 
     // ── outcome (the ring path → call-outcome edge fn) ──────────────────────
 
-    @Serializable
-    private data class OutcomeBody(
-        val callId: String,
-        val outcome: String,
-        val snoozeMinutes: Int? = null,
-        val outcomeNotes: List<String>? = null,
-    )
-
     /** Report how a call ended. Throws [CallOutcomeRejected] for a PERMANENT
      *  refusal so the reporter can drop the item; every other failure (transport,
      *  5xx, 401 refresh, 429) is rethrown as-is → retry. */
     suspend fun outcome(callId: String, outcome: CallOutcome, snoozeMinutes: Int? = null, outcomeNotes: List<String>? = null) {
+        postOutcome(outcomeBody(callId, outcome.wire, snoozeMinutes, outcomeNotes))
+    }
+
+    /** The C1 ring path's reporter entry point (CallOutcomeStore.flush): [outcome]
+     *  is the wire string of the app's `CallOutcome` — the seven server values, or
+     *  the two client-side ones (`outside_hours` / `voice_failed`) which are folded
+     *  by [normalizeOutcome]. Never throws:
+     *   - success → `Result.success(Unit)`;
+     *   - a PERMANENT refusal (4xx other than 401/408/429, or an outcome string the
+     *     server can never accept) → `Result.failure(CallOutcomeRejected)` — drop it;
+     *   - anything else (offline, 5xx, 401 refresh, 429) → `Result.failure(other)` — retry. */
+    suspend fun reportOutcome(callId: String, outcome: String, snoozeMin: Int? = null, outcomeNotes: List<String>? = null): Result<Unit> {
+        val (wire, folded) = normalizeOutcome(outcome)
+            ?: return Result.failure(CallOutcomeRejected(400, "unknown outcome \"$outcome\""))
+        val notes = (folded.orEmpty() + outcomeNotes.orEmpty()).takeIf { it.isNotEmpty() }
+        return try {
+            postOutcome(outcomeBody(callId, wire, if (wire == "snoozed") snoozeMin else null, notes))
+            Result.success(Unit)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
+    }
+
+    private suspend fun postOutcome(body: JsonObject) {
         try {
             client.functions.invoke("call-outcome") {
                 method = HttpMethod.Post
                 contentType(ContentType.Application.Json)
-                setBody(OutcomeBody(callId, outcome.wire, snoozeMinutes, outcomeNotes))
+                setBody(body)
             }
         } catch (e: io.github.jan.supabase.exceptions.RestException) {
             val code = e.statusCode
@@ -200,9 +234,12 @@ class CallsClient(private val client: SupabaseClient) {
     // ── reads ───────────────────────────────────────────────────────────────
 
     /** The user's calls. `upcoming` (default) = status in scheduled/snoozed/calling,
-     *  soonest first; otherwise the 50 most recent rows of any status. */
+     *  soonest first; otherwise the 50 most recent rows of any status. From the
+     *  local mirror when one is attached (offline-safe), else PostgREST. */
     suspend fun list(upcoming: Boolean = true): List<CallRequest> =
-        if (upcoming) {
+        if (mirror != null) {
+            if (upcoming) mirror.live() else mirror.all().sortedByDescending { it.callAtMs ?: Long.MIN_VALUE }.take(50)
+        } else if (upcoming) {
             client.from(TABLE).select {
                 filter { isIn("status", CallRequest.liveStatuses) }
                 order("call_at", Order.ASCENDING)
@@ -215,14 +252,14 @@ class CallsClient(private val client: SupabaseClient) {
         }
 
     suspend fun get(id: String): CallRequest? =
-        client.from(TABLE).select {
+        mirror?.get(id) ?: client.from(TABLE).select {
             filter { eq("id", id) }
             limit(1)
         }.decodeList<CallRequest>().firstOrNull()
 
     /** The live (scheduled/snoozed/calling) call anchored to a task, if any. */
     suspend fun forTask(taskId: String): CallRequest? =
-        client.from(TABLE).select {
+        if (mirror != null) mirror.forTask(taskId) else client.from(TABLE).select {
             filter { eq("task_id", taskId); isIn("status", CallRequest.liveStatuses) }
             order("call_at", Order.ASCENDING)
             limit(1)
@@ -241,10 +278,12 @@ class CallsClient(private val client: SupabaseClient) {
             onConflict = "id"
             select()
         }.decodeList()
-        return rows.firstOrNull() ?: CallRequest(
+        val stored = rows.firstOrNull() ?: CallRequest(
             id = id, userId = userId, taskId = taskId, blockId = blockId, callAt = iso(callAtMs),
-            leadMin = leadMin, label = label, notes = notes,
+            leadMin = leadMin, label = label, notes = notes, updatedAt = iso(nowMs),
         )
+        mirror?.absorb(stored)
+        return stored
     }
 
     /** Patch a booked call — only the given fields change. Re-arms a snoozed
@@ -261,7 +300,7 @@ class CallsClient(private val client: SupabaseClient) {
             select()
             filter { eq("id", id); isIn("status", statusesAccepting(timeChange)) }
         }.decodeList()
-        return rows.firstOrNull()
+        return rows.firstOrNull()?.also { mirror?.absorb(it) }
     }
 
     /** Cancel a booked call (status → cancelled; the row stays for history).
@@ -273,6 +312,6 @@ class CallsClient(private val client: SupabaseClient) {
             select()
             filter { eq("id", id); isIn("status", CallRequest.liveStatuses) }
         }.decodeList()
-        return rows.firstOrNull()
+        return rows.firstOrNull()?.also { mirror?.absorb(it) }
     }
 }

@@ -22,6 +22,7 @@ import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.data.db.Tables
+import tech.csalliance.unstuck.sync.CallRequestsMirror
 import tech.csalliance.unstuck.sync.CallsClient
 import tech.csalliance.unstuck.ui.AppViewModel
 
@@ -229,7 +230,10 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
     override fun currentUserId(): String? = vm.currentUid()
     override fun callStore(): AssistantCallStore? {
         val client = vm.assistantSupabaseClient ?: return null
-        return CallsClientStore(CallsClient(client), ::newUuid)
+        // With the local `call_requests` mirror attached, get_calls / the receipt's
+        // cancel round-trip / the task editor read from Room (offline-safe, no
+        // round trip) while every WRITE still goes direct to PostgREST.
+        return CallsClientStore(CallsClient(client, CallRequestsMirror(vm.assistantStore)), ::newUuid)
     }
 }
 

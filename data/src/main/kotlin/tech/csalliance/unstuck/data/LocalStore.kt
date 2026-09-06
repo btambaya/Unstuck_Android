@@ -78,6 +78,11 @@ class LocalStore(private val db: UnstuckDatabase) {
      *  that read facts filter on `active` (ProfileFactsService does). */
     fun profileFacts(): Flow<List<ProfileFact>> = observe(Tables.PROFILE_FACTS, ProfileFact.serializer())
 
+    /** Reactive rows of a table the facade has no typed accessor for (the :sync
+     *  read-only mirrors whose row type lives outside :core, e.g. call_requests).
+     *  Same decode-once / distinct chain as the typed flows. */
+    fun <T> observeTable(table: String, ser: KSerializer<T>): Flow<List<T>> = observe(table, ser)
+
     suspend fun <T> snapshot(table: String, ser: KSerializer<T>): List<T> =
         records.get(table).mapNotNull { runCatching { json.decodeFromString(ser, it.data) }.getOrNull() }
 

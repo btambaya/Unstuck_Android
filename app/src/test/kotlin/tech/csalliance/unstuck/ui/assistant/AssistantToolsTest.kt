@@ -6,6 +6,9 @@ import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
@@ -1122,5 +1125,68 @@ class AssistantToolsTest {
         assertTrue(a.isNull("z")); assertTrue(a.has("z")); assertFalse(a.has("nope"))
         assertTrue(ToolArgs.parse("{\"name\": \"cut off").isEmpty)
         assertTrue(ToolArgs.parse("not json").isEmpty)
+    }
+
+    // ── calls: snooze_call (call-level, voice-only) + the cancel undo ─────────
+
+    @Test fun `snooze_call outside a call session is refused honestly, signed in or not`() = runTest {
+        // CallVoiceService intercepts it during a call; the executor only sees it
+        // from text chat / plain Talk, where nothing is ringing.
+        assertEquals(SnoozeCallTool.NO_ACTIVE, makeApi { callStoreAvailable = true }.run("snooze_call", "minutes" to 20))
+        assertEquals(SnoozeCallTool.NO_ACTIVE, makeApi { callStoreAvailable = false }.run("snooze_call"))
+        assertEquals("error: no call is active", SnoozeCallTool.NO_ACTIVE)
+    }
+
+    @Test fun `snooze_call contract strings, clamp and minutes parsing match iOS`() {
+        assertEquals("ok: I'll call back in 20 minutes — say a quick goodbye; the call ends now", SnoozeCallTool.ok(20))
+        assertEquals("ok: I'll call back in 1 minutes — say a quick goodbye; the call ends now", SnoozeCallTool.ok(0))
+        assertEquals("ok: I'll call back in 180 minutes — say a quick goodbye; the call ends now", SnoozeCallTool.ok(999))
+        assertEquals(10, SnoozeCallTool.minutes("{}"))
+        assertEquals(10, SnoozeCallTool.minutes("not json"))
+        assertEquals(25, SnoozeCallTool.minutes("""{"minutes": 25}"""))
+        assertEquals(7, SnoozeCallTool.minutes("""{"minutes": "7"}"""))
+        assertEquals("error: get_insights isn't available during a call", SnoozeCallTool.notAvailableDuringCall("get_insights"))
+        assertEquals("error: the call has ended", SnoozeCallTool.CALL_ENDED)
+    }
+
+    @Test fun `the call-mode registry is the executor's schemas filtered to CallScript callTools plus snooze_call`() {
+        // snooze_call is NOT a contract tool (ContractDiffTest pins the 57).
+        assertFalse("snooze_call" in ASSISTANT_TOOL_NAMES)
+        val specs = callVoiceToolSpecs(listOf("complete_task", "add_capture", "schedule_task", "start_focus", "update_call", "snooze_call", "no_such_tool"))
+        assertEquals(listOf("complete_task", "add_capture", "schedule_task", "start_focus", "update_call", "snooze_call"), specs.map { it.name })
+        val json = callVoiceToolsJson(listOf("snooze_call", "complete_task"))
+        assertEquals(2, json.size)
+        val snooze = json[0].jsonObject
+        assertEquals("snooze_call", snooze["name"]!!.jsonPrimitive.content)
+        assertEquals("\"Call me back in ten\" — hang up now and ring again in `minutes`. Say the minutes out loud, then a quick goodbye.", snooze["description"]!!.jsonPrimitive.content)
+        val minutes = snooze["parameters"]!!.jsonObject["properties"]!!.jsonObject["minutes"]!!.jsonObject
+        assertEquals("integer", minutes["type"]!!.jsonPrimitive.content)
+        assertEquals("Minutes until the call-back (1–180).", minutes["description"]!!.jsonPrimitive.content)
+        assertEquals(10, minutes["default"]!!.jsonPrimitive.content.toInt())
+        assertEquals(0, snooze["parameters"]!!.jsonObject["required"]!!.jsonArray.size)
+        // The base registry never carries snooze_call (plain Talk can't hang up a call).
+        assertTrue(voiceToolsJson().none { it.jsonObject["name"]!!.jsonPrimitive.content == "snooze_call" })
+        // The real call list from :core resolves entirely (no unknown names dropped).
+        val core = tech.csalliance.unstuck.core.logic.CallScript.callTools()
+        assertEquals(core, callVoiceToolSpecs(core).map { it.name })
+    }
+
+    @Test fun `a request_call receipt undoes through CANCEL_CALL once, and its control reads cancelling while in flight`() = runTest {
+        val h = makeApi { callStoreAvailable = true }
+        val r = h.run("request_call", "when" to "$TOMORROW 15:00", "label" to "speak to James")
+        assertEquals("ok: call booked $TOMORROW 15:00 \"speak to James\" (0 notes) id=call1", r)
+        val receipt = tech.csalliance.unstuck.core.logic.deriveReceipt("request_call", tech.csalliance.unstuck.core.logic.ReceiptArgs(), r, emptyList())!!
+        assertEquals(tech.csalliance.unstuck.core.logic.ReceiptUndo.cancelCall("call1"), receipt.undo)
+        assertEquals("cancelling…", receiptUndoLabel(receipt.undo!!.kind, inFlight = true))
+        assertEquals("Undo", receiptUndoLabel(receipt.undo!!.kind, inFlight = false))
+        assertEquals("Undo", receiptUndoLabel(tech.csalliance.unstuck.core.logic.ReceiptUndoKind.DELETE_TASK, inFlight = true))
+        assertEquals("m1:2", receiptUndoKey("m1", 2))
+        // AppViewModel.performReceiptUndo("CANCEL_CALL") = store.cancelCall(id) != null:
+        // the first undo cancels, a repeat is a no-op (the receipt stays honest).
+        val store = h.api.callStore()!!
+        assertTrue(store.cancelCall("call1") != null)
+        assertEquals("cancelled", h.state.calls[0].status)
+        assertNull(store.cancelCall("call1"))
+        assertEquals("error: that call is already cancelled", h.run("cancel_call", "callId" to "call1"))
     }
 }

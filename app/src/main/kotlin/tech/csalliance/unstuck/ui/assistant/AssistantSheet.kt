@@ -131,10 +131,15 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     val messages = vm.assistantHistory
     val sending by vm.assistantSending.collectAsStateWithLifecycle()
     val errorCode by vm.assistantError.collectAsStateWithLifecycle()
+    // Two upstream rejections in a row → the error row offers "Start a fresh thread".
+    val offersFreshThread by vm.assistantOffersFreshThread.collectAsStateWithLifecycle()
     val pendingShares by vm.pendingShares.collectAsStateWithLifecycle()
     // Messages typed while a turn was in flight: queued, shown faded, sent when
     // the reply lands (contract §8) — never silently dropped.
     val queued by vm.assistantQueued.collectAsStateWithLifecycle()
+    // Receipts whose undo is a NETWORK round trip (cancel_call): the control reads
+    // "cancelling…" while it's in flight instead of inviting a second tap.
+    val undosInFlight by vm.receiptUndosInFlight.collectAsStateWithLifecycle()
 
     // Coarse clock for the day dividers + the context strip: a sheet left open
     // across midnight must roll "Today" over rather than freeze.
@@ -334,7 +339,10 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                         when (val r = rows[i]) {
                             is ThreadRow.Divider -> DayDivider(r.label)
                             is ThreadRow.Bubble -> MessageBubble(r.msg)
-                            is ThreadRow.ReceiptItem -> ReceiptCard(r) { vm.undoAssistantReceipt(r.messageId, r.index) }
+                            is ThreadRow.ReceiptItem -> ReceiptCard(
+                                r,
+                                inFlight = receiptUndoKey(r.messageId, r.index) in undosInFlight,
+                            ) { vm.undoAssistantReceipt(r.messageId, r.index) }
                         }
                     }
                     if (sending) item(key = "thinking") { ThinkingRow() }
@@ -368,11 +376,24 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
         // Local notes (mic permission) or the last turn's error off the VM (which
         // survives close/reopen). Polite live region so TalkBack announces failures.
         (note ?: errorCode?.let(::friendlyError))?.let {
-            Text(
-                it, style = UFont.sans(12), color = c.coralDeep,
-                modifier = Modifier.padding(horizontal = 22.dp, vertical = 4.dp)
-                    .semantics { liveRegion = LiveRegionMode.Polite },
-            )
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 4.dp),
+                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+            ) {
+                Text(
+                    it, style = UFont.sans(12), color = c.coralDeep,
+                    modifier = Modifier.weight(1f, fill = false).semantics { liveRegion = LiveRegionMode.Polite },
+                )
+                // Two upstream rejections in a row: the thread itself is the
+                // likely cause (a poisoned replayed tool_call, 2026-09-06) —
+                // offer the way out right where it hurts.
+                if (note == null && errorCode != null && offersFreshThread) {
+                    Text(
+                        "Start a fresh thread", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink,
+                        modifier = Modifier.clickable(role = Role.Button) { showChips = true; vm.clearAssistant() },
+                    )
+                }
+            }
         }
 
         // ── Input bar: ✦ re-summon + text + speaker + mic + send ─────────────
@@ -477,7 +498,7 @@ private fun MessageBubble(m: ChatMessage) {
 
 /** A deterministic ✓ card for one thing the agent actually did. */
 @Composable
-private fun ReceiptCard(row: ThreadRow.ReceiptItem, onUndo: () -> Unit) {
+private fun ReceiptCard(row: ThreadRow.ReceiptItem, inFlight: Boolean = false, onUndo: () -> Unit) {
     val c = UTheme.colors
     val r = row.receipt
     Row(
@@ -494,9 +515,13 @@ private fun ReceiptCard(row: ThreadRow.ReceiptItem, onUndo: () -> Unit) {
         when {
             r.undone -> Text("undone", style = UFont.sans(11), color = c.ink3)
             r.undo != null -> Text(
-                "Undo", style = UFont.sans(12, FontWeight.SemiBold), color = c.coralDeep,
+                receiptUndoLabel(r.undo!!.kind, inFlight),
+                style = UFont.sans(12, FontWeight.SemiBold),
+                color = if (inFlight) c.ink3 else c.coralDeep,
                 modifier = Modifier.clip(RoundedCornerShape(999.dp))
-                    .clickable(role = Role.Button, onClick = onUndo)
+                    // In flight the tap is a no-op (the VM ignores a repeat for the
+                    // same key anyway) — no second cancel round trip, no lie.
+                    .clickable(role = Role.Button, enabled = !inFlight, onClick = onUndo)
                     .minimumInteractiveComponentSize().padding(horizontal = 6.dp, vertical = 2.dp),
             )
         }

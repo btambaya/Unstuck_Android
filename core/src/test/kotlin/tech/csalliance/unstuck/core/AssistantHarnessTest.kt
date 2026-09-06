@@ -241,6 +241,51 @@ class AssistantHarnessTest {
         assertEquals(listOf("create_tasks" to AssistantHarnessRules.TRUNCATED_ARGS_RESULT), observed)
     }
 
+    // ---- tool-call hygiene (DashScope 400s on a replayed non-object `arguments`, 2026-09-06)
+
+    @Test fun `empty or truncated tool arguments are persisted and replayed as an empty object, valid ones verbatim`() {
+        val ask = ScriptedAsk(
+            call("create_task", "", id = "c1"),
+            call("create_tasks", """{"tasks":[{"name":"a"},{"name":"b""", id = "c2", finishReason = "length"),
+            call("create_task", """{"name":"A"}""", id = "c3"),
+            text("Added A."),
+        )
+        val turn = run("dump", ask)
+        val persisted = turn.messages.filter { it.toolCalls.isNotEmpty() }.map { it.toolCalls.single() }
+        assertEquals(listOf("{}", "{}", """{"name":"A"}"""), persisted.map { it.argumentsJson })
+        assertEquals(listOf("c1", "c2", "c3"), persisted.map { it.id })
+        // The model-facing history on the last round carries the same normalised calls.
+        assertEquals(listOf("{}", "{}", """{"name":"A"}"""), ask.asks[3].filter { it.toolCalls.isNotEmpty() }.map { it.toolCalls.single().argumentsJson })
+        // Execution saw the RAW strings: the empty call got the runner's own
+        // error, the truncated one the split hint, the valid one ran.
+        assertEquals(listOf("", """{"tasks":[{"name":"a"},{"name":"b""", """{"name":"A"}"""), runner.calls.map { it.argumentsJson })
+        val results = turn.messages.filter { it.role == "tool" }.map { it.content }
+        assertEquals("error: bad json", results[0])
+        assertEquals(AssistantHarnessRules.TRUNCATED_ARGS_RESULT, results[1])
+        assertEquals("ok: created task id=t1 name=\"A\"", results[2])
+        assertEquals(listOf("A"), runner.tasks)
+        // toolResults (receipts) still carry the raw call, unchanged.
+        assertEquals("", turn.toolResults[0].first.argumentsJson)
+    }
+
+    @Test fun `argumentsAsObjectJson keeps a JSON object verbatim and replaces everything else with an empty object`() {
+        assertEquals("{}", AssistantHarnessRules.argumentsAsObjectJson(""))
+        assertEquals("{}", AssistantHarnessRules.argumentsAsObjectJson("   \n"))
+        assertEquals("{}", AssistantHarnessRules.argumentsAsObjectJson("""{"tasks":[{"name":"a"},{"name":"b"""))
+        assertEquals("{}", AssistantHarnessRules.argumentsAsObjectJson("[]"))
+        assertEquals("{}", AssistantHarnessRules.argumentsAsObjectJson("\"x\""))
+        assertEquals("{}", AssistantHarnessRules.argumentsAsObjectJson("null"))
+        // Lenient-only JSON (unquoted keys) is NOT an object to a strict upstream.
+        assertEquals("{}", AssistantHarnessRules.argumentsAsObjectJson("{name: A}"))
+        assertEquals("{}", AssistantHarnessRules.argumentsAsObjectJson("{}"))
+        assertEquals("""{"name":"A","when":null}""", AssistantHarnessRules.argumentsAsObjectJson("""{"name":"A","when":null}"""))
+        assertEquals(""" {"name":"A"} """, AssistantHarnessRules.argumentsAsObjectJson(""" {"name":"A"} """))
+        assertEquals(
+            listOf(HarnessToolCall("c1", "x", "{}"), HarnessToolCall("c2", "y", """{"a":1}""")),
+            AssistantHarnessRules.normalisedForHistory(listOf(HarnessToolCall("c1", "x", ""), HarnessToolCall("c2", "y", """{"a":1}"""))),
+        )
+    }
+
     @Test fun `finish_reason length after a tool round adds the hidden cut-off hint after the tool results`() {
         val ask = ScriptedAsk(call("create_task", """{"name":"A"}""", finishReason = "length"), text("Added A."))
         val turn = run("add a", ask)

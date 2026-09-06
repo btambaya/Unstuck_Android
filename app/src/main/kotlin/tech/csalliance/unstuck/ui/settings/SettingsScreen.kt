@@ -22,6 +22,7 @@ import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
+import androidx.compose.material.icons.filled.Call
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenu
@@ -83,6 +84,9 @@ enum class SettingsSection(val title: String, val eyebrow: String) {
     ACCOUNT("Your account.", "SETTINGS · ACCOUNT"),
     PEOPLE("Sit with someone, not be watched.", "SETTINGS · PEOPLE"),
     FOCUS("How focus mode behaves.", "SETTINGS · FOCUS"),
+    /** "Calls from Unstuck" (iOS CallSettingsView): kill-switch, allowed hours,
+     *  default lead, the full-screen-intent permission row, "Test call now". */
+    CALLS("Ask, and Unstuck calls you.", "SETTINGS · CALLS"),
     SOUND("Quiet by default.", "SETTINGS · SOUND"),
     A11Y("Adjust to your brain.", "SETTINGS · ACCESSIBILITY"),
     INTERFACE("How things look.", "SETTINGS · INTERFACE"),
@@ -95,7 +99,8 @@ enum class SettingsSection(val title: String, val eyebrow: String) {
 }
 
 private val HUB = listOf(
-    "Account" to SettingsSection.ACCOUNT, "People" to SettingsSection.PEOPLE, "Focus" to SettingsSection.FOCUS, "Sound" to SettingsSection.SOUND,
+    "Account" to SettingsSection.ACCOUNT, "People" to SettingsSection.PEOPLE, "Focus" to SettingsSection.FOCUS,
+    CALLS_NAV_TITLE to SettingsSection.CALLS, "Sound" to SettingsSection.SOUND,
     "Accessibility" to SettingsSection.A11Y, "Interface" to SettingsSection.INTERFACE,
     FactsPanelCopy.NAV_TITLE to SettingsSection.MEMORY, "Backup" to SettingsSection.BACKUP,
     "Areas" to SettingsSection.AREAS, "Tags" to SettingsSection.TAGS,
@@ -139,6 +144,7 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
                 SettingsSection.ACCOUNT -> AccountContent(vm)
                 SettingsSection.PEOPLE -> ConnectionsContent(vm)
                 SettingsSection.MEMORY -> FactsPanelContent(vm)
+                SettingsSection.CALLS -> CallsContent(vm)
                 SettingsSection.FOCUS -> SettingsCard {
                     SegRow("Default focus length", listOf("15", "25", "45"), s.focusDefaultMin.toString()) { v ->
                         vm.updateSettings { it.copy(focusDefaultMin = v.toIntOrNull() ?: 25) }
@@ -233,6 +239,199 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
             Box(Modifier.padding(24.dp)) {}
         }
     }
+}
+
+// ── Calls from Unstuck (iOS App/Calls/CallSettingsView.swift, copy verbatim) ──
+
+/** The hub row / nav title. */
+internal const val CALLS_NAV_TITLE = "Calls from Unstuck"
+internal const val CALLS_EXPLAINER_TITLE = "Ask, and Unstuck calls you"
+internal const val CALLS_EXPLAINER_BODY = "Say \"call me at three about the James meeting — remind me about A, B and C\", or tick \"Call me about this\" on a task. Your phone rings like a normal call, the notes are read back, then you can tick things off, add a thought, start a timer, or ask for a call-back — all by voice. Nothing is booked unless you ask."
+internal const val CALLS_DEVICE_READY = "This phone can take calls."
+/** Android's analogue of the iOS "waiting for the call token" line: the API 34
+ *  full-screen-intent grant is what lets the ring take the lock screen. */
+internal const val CALLS_FULL_SCREEN_OFF = "Full-screen calls are off for Unstuck — a call shows as a notification until you allow them."
+internal const val CALLS_FULL_SCREEN_ROW = "Allow full-screen calls"
+internal const val CALLS_FULL_SCREEN_ROW_SUB = "Lets a call take over the lock screen, like the phone app"
+internal const val CALLS_ENABLED_ROW = "Calls from Unstuck"
+internal const val CALLS_ENABLED_OFF_HINT = "Calls are declined quietly — you get the notes as a notification instead."
+internal const val CALLS_ASSISTANT_OFF_HINT = "Calls are part of the AI Assistant — turn it on under Settings → Interface to receive them."
+internal const val CALLS_HOURS_HINT_SUFFIX = "A call outside these hours is declined quietly and you get the notes as a notification instead."
+internal const val CALLS_LEAD_HINT = "\"Call me about this\" on a scheduled task rings this many minutes before it starts."
+internal const val CALLS_TEST_BODY = "Book a test call for one minute from now. Lock your phone — it rings through the real path (server → push → call screen)."
+internal const val CALLS_TEST_BUTTON = "Test call now"
+internal const val CALLS_TEST_BOOKING = "Booking…"
+internal const val CALLS_DND_HINT = "Under Do Not Disturb, a call only rings if Unstuck's Calls notifications are allowed to interrupt."
+internal const val CALLS_DND_ROW = "Calls notification channel"
+internal const val CALLS_DND_ROW_SUB = "Sound, vibration and Do Not Disturb for the ring"
+/** The ring channel CallRinger posts on (calls/CallNotifications, C1 ring-ui). */
+internal const val CALLS_CHANNEL_ID = "unstuck_calls"
+
+/** "Test call now" outcome — iOS `TestState`. */
+internal sealed class TestCallState {
+    data object Idle : TestCallState()
+    data object Booking : TestCallState()
+    data class Booked(val at: String) : TestCallState()
+    data class Failed(val why: String) : TestCallState()
+}
+
+/** Pure mapping of the request_call result → the card's state (iOS
+ *  bookTestCall): an `ok:` carries the time the row landed on. */
+internal fun testCallStateFrom(result: String): TestCallState {
+    val m = Regex("^ok: call booked \\S+ (\\d{2}:\\d{2})").find(result)
+    return if (m != null) TestCallState.Booked(m.groupValues[1])
+    else TestCallState.Failed(tech.csalliance.unstuck.ui.tasks.CallMeLogic.userMessage(result).let { if (it.endsWith(".")) it else "$it." })
+}
+
+/** iOS "Booked — ringing at HH:MM. Lock your phone and wait." */
+internal fun testCallBookedLine(at: String) = "Booked — ringing at $at. Lock your phone and wait."
+
+/** Allowed-hours sub-line: the user's hint + the server window. */
+internal fun callsHoursHint(): String {
+    val w = tech.csalliance.unstuck.core.logic.CallSettingsLogic.SERVER_WINDOW
+    return "$CALLS_HOURS_HINT_SUFFIX Calls can only be booked between ${w.start} and ${w.endInclusive}."
+}
+
+/** API 34+: has the user (or Play's calling-app classification) allowed
+ *  USE_FULL_SCREEN_INTENT? Below 34 the manifest permission is enough. */
+private fun canUseFullScreenIntent(context: android.content.Context): Boolean {
+    if (android.os.Build.VERSION.SDK_INT < 34) return true
+    val nm = context.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager ?: return true
+    return runCatching { nm.canUseFullScreenIntent() }.getOrDefault(true)
+}
+
+@Composable
+private fun CallsContent(vm: AppViewModel) {
+    val c = UTheme.colors
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val s by vm.settings.collectAsStateWithLifecycle()
+    val cs by vm.callSettings.collectAsStateWithLifecycle()
+    var testState by remember { mutableStateOf<TestCallState>(TestCallState.Idle) }
+    // Re-check the full-screen grant whenever we come back from the system page.
+    var fullScreenOk by remember { mutableStateOf(canUseFullScreenIntent(context)) }
+    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
+    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
+        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) fullScreenOk = canUseFullScreenIntent(context)
+        }
+        lifecycleOwner.lifecycle.addObserver(obs)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
+    }
+
+    fun pickHour(current: String, commit: (String) -> Unit) {
+        val parts = current.split(":").mapNotNull { it.toIntOrNull() }
+        val h0 = parts.getOrNull(0) ?: 8
+        val m0 = parts.getOrNull(1) ?: 0
+        android.app.TimePickerDialog(context, { _, h, m -> commit("%02d:%02d".format(h, m)) }, h0, m0, true).show()
+    }
+
+    // Explainer (iOS `explainer` + `deviceStatus`)
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.bg2).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+            Icon(Icons.Filled.Call, contentDescription = null, tint = c.primary, modifier = Modifier.size(18.dp))
+            Text(CALLS_EXPLAINER_TITLE, style = UFont.sans(16, FontWeight.SemiBold), color = c.ink)
+        }
+        Text(CALLS_EXPLAINER_BODY, style = UFont.sans(13), color = c.ink2)
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 4.dp)) {
+            Box(Modifier.size(7.dp).clip(RoundedCornerShape(999.dp)).background(if (fullScreenOk) c.green else c.ink3))
+            Text(if (fullScreenOk) CALLS_DEVICE_READY else CALLS_FULL_SCREEN_OFF, style = UFont.sans(12), color = c.ink3)
+        }
+    }
+
+    // Risk 1: on API 34 USE_FULL_SCREEN_INTENT is pre-granted only to apps Play
+    // classifies as calling/alarm; otherwise the ring degrades to a heads-up.
+    // Deep-link the per-app system page.
+    if (!fullScreenOk) {
+        SectionLabel("Permission", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
+        SettingsCard {
+            SettingRow(CALLS_FULL_SCREEN_ROW, CALLS_FULL_SCREEN_ROW_SUB, last = true) {
+                runCatching {
+                    val i = android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT)
+                        .setData(android.net.Uri.parse("package:${context.packageName}"))
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
+                    context.startActivity(i)
+                }.onFailure {
+                    runCatching {
+                        context.startActivity(android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
+                            .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }
+                }
+            }
+        }
+    }
+
+    // Kill-switch (risk 10: the assistant switch governs calls too).
+    SectionLabel("Calls", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
+    SettingsCard {
+        if (s.assistantEnabled) {
+            ToggleRow(CALLS_ENABLED_ROW, cs.enabled, last = true) { v -> vm.updateCallSettings { it.copy(enabled = v) } }
+        } else {
+            Text(CALLS_ASSISTANT_OFF_HINT, style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(16.dp))
+        }
+    }
+    if (s.assistantEnabled && !cs.enabled) {
+        Text(CALLS_ENABLED_OFF_HINT, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
+    }
+
+    // Allowed hours
+    SectionLabel("Allowed hours", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
+    SettingsCard {
+        SettingRow("From", cs.hoursStart) { pickHour(cs.hoursStart) { hm -> vm.updateCallSettings { it.copy(hoursStart = hm) } } }
+        SettingRow("Until", cs.hoursEnd, last = true) { pickHour(cs.hoursEnd) { hm -> vm.updateCallSettings { it.copy(hoursEnd = hm) } } }
+    }
+    Text(callsHoursHint(), style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
+
+    // Default lead
+    SectionLabel("Default lead for task calls", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+        tech.csalliance.unstuck.calls.CallSettingsStore.LEAD_OPTIONS.forEach { m ->
+            tech.csalliance.unstuck.ui.tasks.SelectableChip("${m}m", selected = cs.defaultLeadMin == m, accent = c.primary) {
+                vm.updateCallSettings { it.copy(defaultLeadMin = m) }
+            }
+        }
+    }
+    Text(CALLS_LEAD_HINT, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
+
+    // Try it
+    SectionLabel("Try it", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp)).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
+    ) {
+        Text(CALLS_TEST_BODY, style = UFont.sans(13), color = c.ink2)
+        val booking = testState == TestCallState.Booking
+        UButton(
+            if (booking) CALLS_TEST_BOOKING else CALLS_TEST_BUTTON, kind = ButtonKind.PRIMARY, leadingIcon = Icons.Filled.Call,
+            enabled = !booking && vm.callsAvailable(),
+        ) {
+            testState = TestCallState.Booking
+            scope.launch { testState = testCallStateFrom(vm.bookTestCall()) }
+        }
+        when (val t = testState) {
+            is TestCallState.Booked -> Text(testCallBookedLine(t.at), style = UFont.sans(12), color = c.green)
+            is TestCallState.Failed -> Text(t.why, style = UFont.sans(12), color = c.red)
+            else -> {}
+        }
+    }
+
+    // DND (risk 7): full-screen rings are suppressed under DND unless the channel may interrupt.
+    SectionLabel("Do Not Disturb", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
+    SettingsCard {
+        SettingRow(CALLS_DND_ROW, CALLS_DND_ROW_SUB, last = true) {
+            runCatching {
+                context.startActivity(android.content.Intent(android.provider.Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
+                    .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
+                    .putExtra(android.provider.Settings.EXTRA_CHANNEL_ID, CALLS_CHANNEL_ID)
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+            }
+        }
+    }
+    Text(CALLS_DND_HINT, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
 }
 
 @Composable

@@ -153,6 +153,19 @@ class PreferencesClient(private val client: SupabaseClient) {
         client.from("user_preferences").upsert(row) { onConflict = "user_id" }
     }
 
+    // ── timezone (migration 053 C) ──────────────────────────────────────────────
+
+    @Serializable private data class TimezoneParams(val p_tz: String)
+
+    /** Mirror the device's IANA zone into `notification_preferences.timezone`
+     *  through `set_timezone` (validated server-side against pg_timezone_names;
+     *  a partial upsert that no-ops when unchanged). Returns the RPC's boolean —
+     *  false = the server rejected the zone string. The Hydrator calls this on
+     *  every pull (Hydrator.pushTimezone, once per zone per process); this entry
+     *  point is for an explicit Settings-driven push. Throws on transport / 404. */
+    suspend fun setTimezone(tz: String = TimeZone.getDefault().id): Boolean =
+        client.postgrest.rpc("set_timezone", TimezoneParams(tz)).decodeAs<Boolean>()
+
     // ── interview flag (migration 052) ──────────────────────────────────────────
 
     /** Mirror "the get-to-know-you interview is done" to the ACCOUNT —

@@ -19,6 +19,12 @@ object Tables {
     /** The assistant's memory (migration 050). Rows with `active=false` are
      *  soft-delete tombstones and stay in the store (every read filters them). */
     const val PROFILE_FACTS = "profile_facts"
+    /** "Unstuck calls you" bookings (migrations 051/053/058). A READ-ONLY mirror:
+     *  hydrate replaces it and realtime keeps it live so `get_calls` / the task
+     *  editor read locally; every write goes DIRECT to PostgREST (compare-and-set
+     *  on status), never through the outbox — 053's BEFORE UPDATE guard owns
+     *  status/snooze_until and a queued whole-row upsert would fight it. */
+    const val CALL_REQUESTS = "call_requests"
 }
 
 /** One synced row, stored as a JSON blob of the domain model. Composite key

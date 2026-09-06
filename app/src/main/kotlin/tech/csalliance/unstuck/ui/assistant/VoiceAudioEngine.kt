@@ -92,8 +92,11 @@ open class VoiceAudioEngine(private val context: Context) {
     val holdToTalkPref: Boolean = runCatching { SettingsStore(context).voiceHoldToTalk() }.getOrDefault(false)
 
     // Session-level callbacks, set by the owner of the engine (voice screen / client).
-    /** Another app (most importantly telephony) took audio focus — end the session. */
+    /** Another app (most importantly telephony) took audio focus — end the session
+     *  (Talk) or MUTE the mic and wait (a call from Unstuck: CallVoiceService). */
     @Volatile var onFocusLost: (() -> Unit)? = null
+    /** Focus came back after a transient loss — a call-mode owner un-mutes. */
+    @Volatile var onFocusGained: (() -> Unit)? = null
     /** Mic capture couldn't start or died mid-session (mic held elsewhere). */
     @Volatile var onCaptureError: (() -> Unit)? = null
     /** Output route changed mid-session (headset plugged/unplugged) — re-profile. Main thread. */
@@ -123,6 +126,8 @@ open class VoiceAudioEngine(private val context: Context) {
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
             onFocusLost?.invoke()
+        } else if (change == AudioManager.AUDIOFOCUS_GAIN) {
+            onFocusGained?.invoke()
         }
     }
 

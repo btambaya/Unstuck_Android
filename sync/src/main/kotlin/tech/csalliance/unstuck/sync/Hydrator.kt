@@ -6,8 +6,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 import java.time.Instant
 import tech.csalliance.unstuck.core.logic.isExternalBlock
 import tech.csalliance.unstuck.core.time.Time
@@ -106,6 +108,33 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
         // table, so an offline "Noted" can't vanish until the flush. Mirrors the
         // web hydrateProfileFacts (remote wins on shared ids, local-only pushed).
         replace(Tables.PROFILE_FACTS, ProfileFact.serializer(), { it.id }, { it.updatedAt }) { DbRowCodec.decodeProfileFact(it) }
+        // call_requests — the read-only bookings mirror (no outbox ops exist for the
+        // table, so keepPendingUpserts is a no-op here; server canonical, always).
+        replace(Tables.CALL_REQUESTS, CallRequest.serializer(), { it.id }, { it.updatedAt }) { DbRowCodec.decodeCallRequest(it) }
+        pushTimezone()
+    }
+
+    // ── timezone (migration 053 C, android-gateway-plan risk 8) ─────────────────
+    // The call dispatcher (and every server cron) converts the user's wall-clock
+    // with `notification_preferences.timezone`. Only register-push-token used to
+    // write it, so a zone change after install (travel, a DST-less OEM default)
+    // left calls ringing on the OLD zone. Mirror the device zone on every hydrate,
+    // sent at most once per zone per process: the RPC is a partial upsert that
+    // no-ops server-side when unchanged, and a pre-053 server (404 → RpcRejected)
+    // or an offline pull is simply retried by the next hydrate.
+
+    /** Injectable: the device's IANA zone id (tests pin it). */
+    internal var zoneId: () -> String = { java.util.TimeZone.getDefault().id }
+    /** The zone the server has acknowledged this process; null until the first success. */
+    internal var timezoneSent: String? = null
+        private set
+
+    internal suspend fun pushTimezone() {
+        val tz = zoneId().trim()
+        if (tz.isEmpty() || tz == timezoneSent) return
+        runCatching { gateway.rpc(SET_TIMEZONE_RPC, buildJsonObject { put(SET_TIMEZONE_PARAM, tz) }) }
+            .onSuccess { timezoneSent = tz }
+            .onFailure { if (it is kotlinx.coroutines.CancellationException) throw it; println("[hydrate] set_timezone($tz) failed, will retry next pull: $it") }
     }
 
     /** Collections + their membership. RLS returns own AND shared-with-me rows;
@@ -192,6 +221,10 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
     }
 
     companion object {
+        /** `set_timezone(p_tz text)` — migration 053 C. */
+        const val SET_TIMEZONE_RPC = "set_timezone"
+        const val SET_TIMEZONE_PARAM = "p_tz"
+
         /** Clock-skew tolerance between devices' updated_at stamps (each client
          *  stamps its own wall clock). Within it, "the server is newer" is not
          *  conclusive, so the local op is kept (no base) or the local value wins a

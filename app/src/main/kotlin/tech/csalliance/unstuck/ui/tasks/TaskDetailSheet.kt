@@ -69,6 +69,19 @@ import tech.csalliance.unstuck.ui.components.TagPicker
 import tech.csalliance.unstuck.ui.components.areaColorFor
 import tech.csalliance.unstuck.ui.tour.TourAnchorIds
 import tech.csalliance.unstuck.ui.tour.tourAnchor
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import kotlinx.coroutines.launch
+import tech.csalliance.unstuck.core.model.CalBlock
+import tech.csalliance.unstuck.core.time.Clock
+import tech.csalliance.unstuck.design.component.MdToggle
+import tech.csalliance.unstuck.sync.CallRequest
+import tech.csalliance.unstuck.ui.assistant.CallToolLogic
+import tech.csalliance.unstuck.ui.assistant.nextLiveBlock
 
 /** Full-screen task detail — editable (name / first action / estimate / area /
  *  repeat / tags), with session history and capture management. */
@@ -242,6 +255,14 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                         }
                     }
                 }
+            }
+
+            // "Call me about this" — books / updates / cancels the call_requests
+            // row anchored to this task's next scheduled block (iOS CallMeSection).
+            // Occurrences anchor on the TEMPLATE (its blocks carry the series id);
+            // a task assigned out is view-only here.
+            if (!isAssignedOut && vm.callsAvailable()) {
+                CallMeSection(vm, editTarget, blocks.filter { it.taskId == editTarget.id })
             }
 
             SectionLabel("Repeat", Modifier.padding(top = 18.dp, bottom = 4.dp))
@@ -432,5 +453,193 @@ private fun MetaCell(label: String, value: String, modifier: Modifier = Modifier
     Column(modifier) {
         SectionLabel(label)
         Text(value, style = UFont.sans(13), color = c.ink, modifier = Modifier.padding(top = 3.dp))
+    }
+}
+
+// ── "Call me about this" (iOS App/Calls/CallMeSection.swift, copy verbatim) ──
+// Book / update / cancel the call_requests row anchored to this task's next
+// scheduled block. Lead-relative (`lead_min` + `block_id`, so the server follows
+// the block if it moves); disabled with a hint until the task has a scheduled
+// time. Notes are one per line (a note may contain ";"), 20 × 300 chars like
+// the web — they're read back verbatim when the phone rings. The writes run
+// through the executor's request_call / update_call / cancel_call
+// (AppViewModel.bookTaskCall / updateTaskCall / cancelCallRequest) so the editor
+// gets the assistant's guards + duplicate rule; a compare-and-set miss reloads
+// instead of showing stale state.
+
+/** The section's pure half — unit-tested (TaskDetailCallMeLogicTest). */
+object CallMeLogic {
+    const val SECTION_TITLE = "Call me about this"
+    const val SCHEDULE_FIRST = "Schedule it first — the call rings a few minutes before the task starts."
+    const val OFF_HINT = "Your phone rings before it starts and reads your notes back."
+    const val NOTES_LABEL = "Notes to read back — one per line"
+    const val BOOK = "Book call"
+    const val UPDATE = "Update call"
+    const val CANCEL_FAILED = "Couldn't cancel the call — try again."
+    const val BOOK_FAILED = "Couldn't book the call — check your connection and try again."
+    const val CHANGED_UNDERNEATH = "That call changed underneath you — reloaded."
+
+    fun chip(minutes: Int): String = "${minutes}m before"
+    fun ringsLine(callAtMs: Long): String = "Rings ${CallToolLogic.fmt(callAtMs)}"
+
+    /** A call needs a scheduled start and a task that isn't parked in Later. */
+    fun canBook(blockStartMs: Long?, later: Boolean?): Boolean = blockStartMs != null && later != true
+
+    fun callAtMs(blockStartMs: Long?, leadMin: Int): Long? = blockStartMs?.let { it - leadMin * 60_000L }
+
+    /** One note per line — trimmed, blanks dropped, 300 chars × 20 (web / CallToolLogic.notes). */
+    fun notes(text: String): List<String> = text.lines().map { it.trim() }.filter { it.isNotEmpty() }
+        .map { it.take(CallToolLogic.MAX_NOTE_LENGTH) }
+        .take(CallToolLogic.MAX_NOTES)
+
+    /** Anything to save? No row yet ⇒ always; else notes / lead / anchor differ. */
+    fun dirty(row: CallRequest?, notes: List<String>, leadMin: Int, nextBlockId: String?): Boolean {
+        if (row == null) return true
+        return row.notes != notes || row.leadMin != leadMin || row.blockId != nextBlockId
+    }
+
+    fun isOk(result: String): Boolean = result.startsWith("ok")
+
+    /** cancel_call / update_call on a row that already rang / was cancelled
+     *  elsewhere ("error: that call is already <status>…") — gone either way. */
+    fun isAlreadyGone(result: String): Boolean = result.startsWith("error: that call is already ")
+
+    /** The tool's contract string → the copy the section shows (iOS: the error
+     *  minus "error: ", first letter capitalised; the two iOS-local strings map
+     *  to their sentences). */
+    fun userMessage(result: String): String = when {
+        isOk(result) -> ""
+        result == CallToolLogic.NETWORK -> BOOK_FAILED
+        result == CallToolLogic.CHANGED_UNDERNEATH -> CHANGED_UNDERNEATH
+        else -> result.removePrefix("error: ").replaceFirstChar { it.uppercase() }
+    }
+
+    /** The row a successful request_call describes when the read-back fails
+     *  (offline right after): `ok: call booked <date> <time> "<label>" (<n> notes) id=<id>`. */
+    fun rowFromResult(result: String, userId: String?, taskId: String, blockId: String?, leadMin: Int, notes: List<String>, callAtMs: Long): CallRequest? {
+        val m = Regex("^ok: call booked \\S+ \\S+ \"(.*)\" \\(\\d+ notes?\\) id=(\\S+)$").find(result) ?: return null
+        return CallRequest(
+            id = m.groupValues[2], userId = userId, taskId = taskId, blockId = blockId,
+            callAt = tech.csalliance.unstuck.sync.CallsClient.iso(callAtMs), leadMin = leadMin, label = m.groupValues[1], notes = notes,
+        )
+    }
+}
+
+@Composable
+internal fun CallMeSection(vm: AppViewModel, task: TaskItem, taskBlocks: List<CalBlock>) {
+    val c = UTheme.colors
+    val scope = rememberCoroutineScope()
+    val callSettings by vm.callSettings.collectAsStateWithLifecycle()
+    var loaded by remember(task.id) { mutableStateOf(false) }
+    var row by remember(task.id) { mutableStateOf<CallRequest?>(null) }
+    var enabled by remember(task.id) { mutableStateOf(false) }
+    var lead by remember(task.id) { mutableStateOf(callSettings.defaultLeadMin) }
+    var notesText by remember(task.id) { mutableStateOf("") }
+    var busy by remember(task.id) { mutableStateOf(false) }
+    var error by remember(task.id) { mutableStateOf<String?>(null) }
+
+    // The same anchor request_call uses: the task's NEXT live block.
+    val nextBlock = nextLiveBlock(taskBlocks, Clock.todayIso(), task.id)
+    val blockStart = nextBlock?.let { CallToolLogic.blockStartMs(it) }
+    val canBook = CallMeLogic.canBook(blockStart, task.later)
+    val notes = CallMeLogic.notes(notesText)
+    val callAt = CallMeLogic.callAtMs(blockStart, lead)
+
+    suspend fun load() {
+        val existing = vm.callForTask(task.id)
+        row = existing
+        if (existing != null) {
+            enabled = true
+            lead = existing.leadMin ?: callSettings.defaultLeadMin
+            notesText = existing.notes.joinToString("\n")
+        }
+        loaded = true
+    }
+    LaunchedEffect(task.id) { load() }
+
+    fun toggle(on: Boolean) {
+        error = null
+        if (on) { enabled = true; return }
+        enabled = false
+        val r = row ?: return
+        busy = true
+        scope.launch {
+            val res = vm.cancelCallRequest(r.id)
+            // "already <status>" ⇒ it rang / was cancelled elsewhere — gone either way.
+            if (CallMeLogic.isOk(res) || CallMeLogic.isAlreadyGone(res)) row = null
+            else { error = CallMeLogic.CANCEL_FAILED; enabled = true }
+            busy = false
+        }
+    }
+
+    fun save() {
+        val at = callAt ?: return
+        val block = nextBlock ?: return
+        error = null
+        busy = true
+        val leadNow = lead
+        val notesNow = notes
+        scope.launch {
+            val existing = row
+            val res = if (existing != null) vm.updateTaskCall(existing.id, leadNow, notesNow) else vm.bookTaskCall(task.id, leadNow, notesNow)
+            when {
+                CallMeLogic.isOk(res) -> row = vm.callForTask(task.id)
+                    ?: CallMeLogic.rowFromResult(res, existing?.userId, task.id, block.id, leadNow, notesNow, at) ?: existing
+                // Zero rows: the call rang / was cancelled underneath us.
+                res == CallToolLogic.CHANGED_UNDERNEATH || CallMeLogic.isAlreadyGone(res) -> {
+                    error = CallMeLogic.CHANGED_UNDERNEATH
+                    enabled = false
+                    load()
+                }
+                else -> error = CallMeLogic.userMessage(res)
+            }
+            busy = false
+        }
+    }
+
+    val toggleLocked = !canBook || busy || !loaded
+    Card(Modifier.fillMaxWidth().padding(top = 18.dp), radius = 14) {
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                SectionLabel(CallMeLogic.SECTION_TITLE, Modifier.weight(1f))
+                MdToggle(
+                    enabled, { if (!toggleLocked) toggle(it) },
+                    Modifier.alpha(if (toggleLocked) 0.5f else 1f)
+                        .semantics { contentDescription = CallMeLogic.SECTION_TITLE },
+                )
+            }
+            when {
+                !canBook -> Text(CallMeLogic.SCHEDULE_FIRST, style = UFont.sans(12), color = c.ink3)
+                enabled -> Column(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.bg2).padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        tech.csalliance.unstuck.calls.CallSettingsStore.LEAD_OPTIONS.forEach { m ->
+                            SelectableChip(CallMeLogic.chip(m), selected = lead == m) { lead = m }
+                        }
+                    }
+                    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                        Text(CallMeLogic.NOTES_LABEL, style = UFont.sans(11, FontWeight.Medium), color = c.ink3)
+                        BasicTextField(
+                            value = notesText, onValueChange = { notesText = it },
+                            textStyle = UFont.sans(14).copy(color = c.ink), cursorBrush = SolidColor(c.ink),
+                            modifier = Modifier.fillMaxWidth().heightIn(min = 72.dp)
+                                .clip(RoundedCornerShape(10.dp)).background(c.surface).padding(8.dp),
+                        )
+                    }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        callAt?.let { Text(CallMeLogic.ringsLine(it), style = UFont.sans(12), color = c.ink2) }
+                        Box(Modifier.weight(1f))
+                        UButton(
+                            if (row == null) CallMeLogic.BOOK else CallMeLogic.UPDATE, kind = ButtonKind.DARK, fill = false,
+                            enabled = !busy && CallMeLogic.dirty(row, notes, lead, nextBlock?.id),
+                        ) { save() }
+                    }
+                }
+                loaded -> Text(CallMeLogic.OFF_HINT, style = UFont.sans(12), color = c.ink3)
+            }
+            error?.let { Text(it, style = UFont.sans(12), color = c.red) }
+        }
     }
 }

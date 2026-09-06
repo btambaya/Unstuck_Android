@@ -15,8 +15,12 @@ import kotlinx.serialization.json.putJsonObject
 // path gets its schemas from the server; ContractDiffTest checks this registry
 // against the vendored contract so the two can't drift.
 
-/** One property of a tool schema. */
-data class ToolProp(val name: String, val type: String, val description: String, val items: JsonObject? = null)
+/** One property of a tool schema. [default] is emitted as the JSON-schema
+ *  `default` when present (the call-level snooze_call's `minutes: 10`). */
+data class ToolProp(
+    val name: String, val type: String, val description: String, val items: JsonObject? = null,
+    val default: kotlinx.serialization.json.JsonPrimitive? = null,
+)
 
 data class ToolSpec(
     val name: String,
@@ -158,6 +162,34 @@ val ASSISTANT_TOOL_SPECS: List<ToolSpec> = listOf(
 /** Every tool name the executor accepts. */
 val ASSISTANT_TOOL_NAMES: Set<String> = ASSISTANT_TOOL_SPECS.map { it.name }.toSet()
 
+// ── call mode ("Unstuck calls you", C1) ──
+// snooze_call is CALL-LEVEL and VOICE-ONLY: it is NOT one of the 57 contract
+// tools (ContractDiffTest pins the registry to exactly those) and never
+// reaches the text harness. CallVoiceService handles it locally before the
+// executor (hang up → outcome `snoozed` + minutes — iOS
+// RealtimeCallVoiceLauncher.snoozeCallSchema / CallCoordinator.snoozeActiveCall);
+// the schema + result strings live in [SnoozeCallTool] (AssistantTools.kt).
+
+/** `{minutes: integer, default 10}` — iOS snoozeCallSchema verbatim. */
+val SNOOZE_CALL_SPEC: ToolSpec = ToolSpec(
+    SnoozeCallTool.NAME,
+    "\"Call me back in ten\" — hang up now and ring again in `minutes`. Say the minutes out loud, then a quick goodbye.",
+    emptyList(),
+    listOf(ToolProp("minutes", "integer", "Minutes until the call-back (1–180).", default = kotlinx.serialization.json.JsonPrimitive(SnoozeCallTool.DEFAULT_MINUTES))),
+)
+
+/** The registry filtered to the tools live during a call — `callTools` is
+ *  core `CallScript.callTools()` (iOS CallScript.callTools), in that order —
+ *  plus the call-level snooze_call when the list names it. Unknown names are
+ *  dropped (voice can never advertise a tool the executor lacks). */
+fun callVoiceToolSpecs(callTools: List<String>): List<ToolSpec> {
+    val byName = ASSISTANT_TOOL_SPECS.associateBy { it.name }
+    return callTools.mapNotNull { name -> if (name == SnoozeCallTool.NAME) SNOOZE_CALL_SPEC else byName[name] }
+}
+
+/** Tool schemas for a CALL session (realtime function shape). */
+fun callVoiceToolsJson(callTools: List<String>): JsonArray = voiceToolsJson(callVoiceToolSpecs(callTools))
+
 /** Tool schemas for the realtime session (OpenAI/DashScope function shape —
  *  name/description/parameters at the top level). */
 fun voiceToolsJson(specs: List<ToolSpec> = ASSISTANT_TOOL_SPECS): JsonArray = buildJsonArray {
@@ -174,6 +206,7 @@ fun voiceToolsJson(specs: List<ToolSpec> = ASSISTANT_TOOL_SPECS): JsonArray = bu
                             put("type", prop.type)
                             put("description", prop.description)
                             prop.items?.let { put("items", it) }
+                            prop.default?.let { put("default", it) }
                         }
                     }
                 }

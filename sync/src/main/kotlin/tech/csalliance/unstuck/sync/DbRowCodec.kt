@@ -277,4 +277,9 @@ internal object DbRowCodec {
     fun decodeLifeArea(o: JsonObject) = rowJson.decodeFromJsonElement(LifeAreaDbRow.serializer(), o).toModel()
     fun decodeConnection(o: JsonObject) = rowJson.decodeFromJsonElement(CalendarConnectionRow.serializer(), o).toModel()
     fun decodeProfileFact(o: JsonObject) = rowJson.decodeFromJsonElement(ProfileFactRow.serializer(), o).toModel()
+    /** `call_requests` (051/053/058) — READ ONLY. [CallRequest] already carries the
+     *  snake_case wire names and tolerant defaults (array columns → `[]`), so the
+     *  same type is both the PostgREST row and the local mirror blob. There is
+     *  deliberately NO encoder: the table is never written through the outbox. */
+    fun decodeCallRequest(o: JsonObject): CallRequest = rowJson.decodeFromJsonElement(CallRequest.serializer(), o)
 }

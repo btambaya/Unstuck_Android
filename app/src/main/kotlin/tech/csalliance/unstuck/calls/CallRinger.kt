@@ -1,0 +1,275 @@
+package tech.csalliance.unstuck.calls
+
+import android.app.AlarmManager
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.Context
+import android.content.Intent
+import android.os.Build
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.app.Person
+import kotlinx.serialization.builtins.MapSerializer
+import kotlinx.serialization.builtins.serializer
+import kotlinx.serialization.json.Json
+import tech.csalliance.unstuck.R
+import tech.csalliance.unstuck.core.logic.CallCoordinatorLogic
+import tech.csalliance.unstuck.core.logic.CallOutcome
+import tech.csalliance.unstuck.core.logic.IncomingCallPayload
+import tech.csalliance.unstuck.surface.NotifIds
+import tech.csalliance.unstuck.surface.NotificationChannels
+import tech.csalliance.unstuck.surface.NotificationLog
+
+// CallRinger — the Android ring for "Unstuck calls you" (C1-android; the
+// activity + CallStyle shape the iOS plan calls fallback B, since there is no
+// CallKit here — Telecom's ConnectionService is C3's evaluation).
+//
+//   FCM (kind=call) ─▶ Push.kt decides ─▶ ring(): persist the ring, post the
+//   CallStyle notification (full-screen intent → IncomingCallActivity, the
+//   `unstuck_calls` ringtone channel), arm the 30 s missed alarm — ALL of it
+//   synchronously inside onMessageReceived (a high-priority data push that
+//   posts nothing promptly eats the app's Doze quota; risk 2 of the plan).
+//   Answer / Decline / Snooze (activity or shade) and the missed alarm each
+//   go through settle(): the FIRST outcome for the call wins, the rest are
+//   no-ops (iOS CallCoordinator's one-end-per-call rule), and the winner is
+//   what clears the ring. The ring state lives in SharedPreferences so a
+//   process killed mid-ring still reports `missed` when the alarm fires.
+//
+// The ringtone + vibration are the CHANNEL's (system-managed: they follow the
+// ringer volume, silent/vibrate mode, DND, and keep going if our process dies
+// — see NotificationChannels.CALLS); nothing here touches the microphone: the
+// voice foreground service starts ONLY from the user's Answer tap (risk 3).
+object CallRinger {
+
+    /** Ring for this long before giving up (iOS CallCoordinator.ringTimeout). */
+    const val MISSED_AFTER_MS: Long = CallCoordinatorLogic.MISSED_AFTER_MS
+
+    private const val PREFS = "unstuck.calls.ring"
+    private const val K_CALL_ID = "callId"
+    private const val K_STARTED = "startedMs"
+    private const val K_SETTLED = "settled"
+    private const val K_PAYLOAD = "payload"
+    private const val K_FSI_DENIED = "fullScreenIntentDenied"
+    private const val K_PHASE = "phase"
+    private const val PHASE_RINGING = "ringing"
+    private const val PHASE_ACTIVE = "active"
+
+    /** Extra on the full-screen / Answer intents: the payload as a String map
+     *  (IncomingCallPayload.toData), one extra per key. */
+    const val EXTRA_CALL_ID = "callId"
+    const val ACTION_ANSWER = "tech.csalliance.unstuck.call.ANSWER"
+
+    private val lock = Any()
+    private val json = Json { ignoreUnknownKeys = true }
+    private val mapSer = MapSerializer(String.serializer(), String.serializer())
+
+    private fun prefs(context: Context) = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    // ── state ────────────────────────────────────────────────────────────────
+
+    /** The call that is up right now (ringing, or answered and in the voice
+     *  service) — null once its outcome has been settled. A second push for
+     *  ANOTHER call while this is non-null ends as `busy` (Push.kt). */
+    fun activeCallId(context: Context): String? = synchronized(lock) {
+        val p = prefs(context)
+        if (p.getBoolean(K_SETTLED, true)) null else p.getString(K_CALL_ID, null)
+    }
+
+    /** The payload of the call that is still RINGING (unsettled), for the
+     *  activity to restore itself from / a deep link to resume into. */
+    fun ringing(context: Context): IncomingCallPayload? = synchronized(lock) {
+        val p = prefs(context)
+        if (p.getBoolean(K_SETTLED, true) || p.getString(K_PHASE, PHASE_RINGING) != PHASE_RINGING) return null
+        decodePayload(p.getString(K_PAYLOAD, null))
+    }
+
+    /** When the current ring started (epoch ms), or null when nothing rings. */
+    fun ringStartedMs(context: Context): Long? = synchronized(lock) {
+        val p = prefs(context)
+        if (p.getBoolean(K_SETTLED, true)) null else p.getLong(K_STARTED, 0L).takeIf { it > 0 }
+    }
+
+    private fun decodePayload(raw: String?): IncomingCallPayload? {
+        val s = raw ?: return null
+        val map = runCatching { json.decodeFromString(mapSer, s) }.getOrNull() ?: return null
+        return IncomingCallPayload.fromData(map)
+    }
+
+    /** Whether the OS lets us show the full-screen ring (API 34+: the
+     *  USE_FULL_SCREEN_INTENT special access; pre-granted only to apps Play
+     *  classifies as calling/alarm). Older APIs: always. */
+    fun canUseFullScreenIntent(context: Context): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.UPSIDE_DOWN_CAKE) return true
+        val mgr = context.getSystemService(NotificationManager::class.java) ?: return true
+        return runCatching { mgr.canUseFullScreenIntent() }.getOrDefault(true)
+    }
+
+    /** Set when the LAST ring had to degrade to a heads-up because the
+     *  full-screen intent permission was missing — the Settings › Calls row
+     *  reads this to show the "allow full-screen calls" prompt. */
+    fun fullScreenIntentDenied(context: Context): Boolean = prefs(context).getBoolean(K_FSI_DENIED, false)
+
+    // ── ring ─────────────────────────────────────────────────────────────────
+
+    /**
+     * Ring for [payload]: persist, post the CallStyle notification, arm the
+     * missed alarm. Called synchronously from the FCM window. A retried /
+     * duplicated push for the call ALREADY ringing re-posts the notification
+     * (updates in place) and touches nothing else — the 30 s clock keeps its
+     * original start (iOS: "touch NOTHING").
+     */
+    fun ring(context: Context, payload: IncomingCallPayload, nowMs: Long = System.currentTimeMillis()) {
+        val duplicate: Boolean
+        synchronized(lock) {
+            val p = prefs(context)
+            duplicate = !p.getBoolean(K_SETTLED, true) && p.getString(K_CALL_ID, null) == payload.callId
+            // A retry for a call that was already ANSWERED: the voice service owns
+            // it now — re-posting the ring over the conversation would be wrong.
+            if (duplicate && p.getString(K_PHASE, PHASE_RINGING) == PHASE_ACTIVE) return
+            if (!duplicate) {
+                p.edit()
+                    .putString(K_CALL_ID, payload.callId)
+                    .putLong(K_STARTED, nowMs)
+                    .putBoolean(K_SETTLED, false)
+                    .putString(K_PHASE, PHASE_RINGING)
+                    .putString(K_PAYLOAD, json.encodeToString(mapSer, payload.toData()))
+                    .putBoolean(K_FSI_DENIED, !canUseFullScreenIntent(context))
+                    .commit()   // commit, not apply: the alarm + activity read this next
+            }
+        }
+        postRing(context, payload)
+        if (!duplicate) armMissedAlarm(context, payload.callId, nowMs + MISSED_AFTER_MS)
+    }
+
+    /** The intent the full-screen ring / a tap / the shade "Answer" open. */
+    fun activityIntent(context: Context, payload: IncomingCallPayload, action: String? = null): Intent =
+        Intent(context, IncomingCallActivity::class.java)
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_NO_USER_ACTION)
+            .apply {
+                if (action != null) setAction(action)
+                payload.toData().forEach { (k, v) -> putExtra(k, v) }
+            }
+
+    private fun postRing(context: Context, payload: IncomingCallPayload) {
+        val nm = NotificationManagerCompat.from(context)
+        if (!nm.areNotificationsEnabled()) return
+        val flags = PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        val rc = payload.callId.hashCode()
+        val fullScreen = PendingIntent.getActivity(context, rc, activityIntent(context, payload), flags)
+        val answer = PendingIntent.getActivity(context, rc + 1, activityIntent(context, payload, ACTION_ANSWER), flags)
+        val decline = PendingIntent.getBroadcast(
+            context, rc + 2,
+            MissedCallReceiver.intent(context, MissedCallReceiver.ACTION_DECLINE, payload.callId), flags,
+        )
+        val snooze = PendingIntent.getBroadcast(
+            context, rc + 3,
+            MissedCallReceiver.intent(context, MissedCallReceiver.ACTION_SNOOZE, payload.callId), flags,
+        )
+        val caller = Person.Builder().setName("Unstuck · ${payload.label}").setImportant(true).build()
+        val n = NotificationCompat.Builder(context, NotificationChannels.CALLS)
+            .setSmallIcon(R.drawable.ic_orbit)
+            .setColor(NotificationChannels.CORAL)
+            .setStyle(NotificationCompat.CallStyle.forIncomingCall(caller, decline, answer))
+            .setContentTitle("Unstuck · ${payload.label}")
+            .setContentText("Unstuck is calling")
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setPriority(NotificationCompat.PRIORITY_MAX)
+            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            // The ring is what the user is asked to answer: sticky, not swipe-away,
+            // and the full-screen intent turns the screen on over the keyguard. On
+            // API 34 without the special access the system silently shows a
+            // heads-up instead (fullScreenIntentDenied flags it for Settings).
+            .setFullScreenIntent(fullScreen, true)
+            .setContentIntent(fullScreen)
+            .setOngoing(true)
+            .setAutoCancel(false)
+            .setOnlyAlertOnce(true)
+            // Belt and braces behind the missed alarm: a ring that somehow outlives
+            // its alarm (Doze delayed it) must not sit in the shade for ever.
+            .setTimeoutAfter(MISSED_AFTER_MS + 15_000)
+            .addAction(0, "Snooze 10", snooze)
+            .build()
+        nm.notify(NotifIds.CALL, n)
+        NotificationLog.add(context, "call", "Unstuck is calling", "About ${payload.label}", payload.deepLink)
+    }
+
+    private fun missedPendingIntent(context: Context, callId: String): PendingIntent = PendingIntent.getBroadcast(
+        context, ("missed:$callId").hashCode(),
+        MissedCallReceiver.intent(context, MissedCallReceiver.ACTION_MISSED, callId),
+        PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+    )
+
+    private fun armMissedAlarm(context: Context, callId: String, fireAtMs: Long) {
+        val am = context.getSystemService(AlarmManager::class.java) ?: return
+        val pi = missedPendingIntent(context, callId)
+        val canExact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S || am.canScheduleExactAlarms()
+        // AllowWhileIdle either way: a ring that arrived through Doze must also
+        // time out through Doze, or the row sits in `calling` until the server ages it.
+        if (canExact) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, fireAtMs, pi)
+        else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, fireAtMs, pi)
+    }
+
+    private fun disarmMissedAlarm(context: Context, callId: String) {
+        val am = context.getSystemService(AlarmManager::class.java) ?: return
+        am.cancel(missedPendingIntent(context, callId))
+    }
+
+    /** Take the ring notification down (the outcome is settled, or the user
+     *  answered and the voice service now owns the notification slot). */
+    fun dismissRing(context: Context, callId: String) {
+        NotificationManagerCompat.from(context).cancel(NotifIds.CALL)
+        disarmMissedAlarm(context, callId)
+    }
+
+    // ── outcomes: first one wins ─────────────────────────────────────────────
+
+    /**
+     * Record how [callId] ended. True when THIS call settled it: the ring is
+     * cleared (notification + alarm) and the outcome is queued for
+     * call-outcome (durable, flushed now and on every foreground). False when
+     * the call is not the active one or was settled already — the caller must
+     * then do nothing (no notification, no service start).
+     *
+     * `answered` keeps the call ACTIVE (activeCallId stays set, so a second
+     * ring meanwhile ends as busy) until the voice service settles it as
+     * `done` / `snoozed`; every other outcome ends it.
+     */
+    fun settle(context: Context, callId: String, outcome: CallOutcome, snoozeMin: Int? = null,
+               outcomeNotes: List<String>? = null, nowMs: Long = System.currentTimeMillis()): Boolean {
+        synchronized(lock) {
+            val p = prefs(context)
+            if (p.getString(K_CALL_ID, null) != callId) return false
+            val phase = p.getString(K_PHASE, PHASE_RINGING)
+            if (p.getBoolean(K_SETTLED, true)) return false
+            when (outcome) {
+                CallOutcome.ANSWERED -> {
+                    if (phase != PHASE_RINGING) return false
+                    p.edit().putString(K_PHASE, PHASE_ACTIVE).commit()
+                }
+                CallOutcome.DECLINED, CallOutcome.MISSED -> {
+                    // Only a RINGING call can be declined / missed; an answered one
+                    // ends as done / snoozed from the voice service.
+                    if (phase != PHASE_RINGING) return false
+                    p.edit().putBoolean(K_SETTLED, true).putString(K_PHASE, PHASE_RINGING).commit()
+                }
+                else -> p.edit().putBoolean(K_SETTLED, true).putString(K_PHASE, PHASE_RINGING).commit()
+            }
+        }
+        dismissRing(context, callId)
+        // Durable + flushed now and on every foreground / reconnect (CallOutcomeStore).
+        CallOutcomeStore.enqueue(context, callId, outcome, snoozeMin, outcomeNotes, nowMs)
+        return true
+    }
+
+    /** Sign-out / the voice service tearing down without an outcome: forget
+     *  the ring (no report — the JWT is gone / the service reported already). */
+    fun clear(context: Context) {
+        val callId = synchronized(lock) {
+            val p = prefs(context)
+            val id = p.getString(K_CALL_ID, null)
+            p.edit().clear().commit()
+            id
+        }
+        if (callId != null) dismissRing(context, callId)
+    }
+}

@@ -62,6 +62,9 @@ import tech.csalliance.unstuck.core.logic.taskForBlock
 import tech.csalliance.unstuck.ui.tasks.TaskDetailScreen
 import tech.csalliance.unstuck.ui.tasks.TasksScreen
 import tech.csalliance.unstuck.ui.today.TodayScreen
+import tech.csalliance.unstuck.core.logic.InterviewFlag
+import tech.csalliance.unstuck.core.logic.InterviewScript
+import tech.csalliance.unstuck.ui.assistant.InterviewSheet
 import tech.csalliance.unstuck.core.logic.isTemplate
 import tech.csalliance.unstuck.ui.tour.TourAnchorIds
 import tech.csalliance.unstuck.ui.tour.TourEvents
@@ -122,6 +125,11 @@ fun MainScaffold(vm: AppViewModel) {
         restore = { l -> Sheet.of(l.firstOrNull()) },
     )) { mutableStateOf<Sheet?>(null) }
     var showNewTask by rememberSaveable { mutableStateOf(false) }
+    // The gateway's get-to-know-you interview (a bottom sheet here; inline on
+    // web/iOS) and whether the Assistant sheet was opened by a gateway hand-off
+    // (composer / chip / chat moment) — it then opens onto the thread.
+    var interviewOpen by rememberSaveable { mutableStateOf(false) }
+    var assistantHandoff by rememberSaveable { mutableStateOf(false) }
     // Set by `open_screen week|month|calendar` — CalendarScreen owns its Day/Week/Month
     // tab, so this is a one-shot request it consumes (null again) on arrival.
     var calendarView by rememberSaveable { mutableStateOf<String?>(null) }
@@ -150,6 +158,8 @@ fun MainScaffold(vm: AppViewModel) {
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
         if (hostActivity?.isChangingConfigurations != true) {
             tab = "today"; stack.clear(); sheet = null; showNewTask = false; newTaskPrefill = null
+            // The interview parks its step on the way out — the pill resumes it.
+            interviewOpen = false; assistantHandoff = false
         }
     }
     val c = UTheme.colors
@@ -170,7 +180,38 @@ fun MainScaffold(vm: AppViewModel) {
     // The published privacy policy promises this on every platform.
     val settings by vm.settings.collectAsStateWithLifecycle()
     val assistantAllowed = BuildConfig.ASSISTANT_ENABLED && settings.assistantEnabled
-    LaunchedEffect(assistantAllowed) { if (!assistantAllowed && sheet == Sheet.Assistant) sheet = null }
+    LaunchedEffect(assistantAllowed) {
+        if (!assistantAllowed) { if (sheet == Sheet.Assistant) sheet = null; interviewOpen = false }
+    }
+    // Gateway hand-offs (the Today composer / chips / a chat moment): the message
+    // is already queued on the ViewModel — present the sheet onto the thread.
+    LaunchedEffect(assistantAllowed) {
+        vm.assistantOpenRequests.collect { if (assistantAllowed) { assistantHandoff = true; sheet = Sheet.Assistant } }
+    }
+    // ── the first-run interview: auto-open + auto-done gates (plan F9) ──────
+    // Opens BY ITSELF exactly once per account, and only after BOTH the local
+    // facts have been read AND the sign-in hydrate has applied the account's
+    // interview flag (profileFactsHydrated flips right after) — someone who
+    // finished on the web must never be greeted as a stranger here. Every
+    // question is skippable; a parked step means the pill is the way back in.
+    val profileFacts by vm.profileFacts.collectAsStateWithLifecycle()
+    val profileFactsLoaded by vm.profileFactsLoaded.collectAsStateWithLifecycle()
+    val profileFactsHydrated by vm.profileFactsHydrated.collectAsStateWithLifecycle()
+    val interviewDone by vm.interviewDone.collectAsStateWithLifecycle()
+    LaunchedEffect(assistantAllowed, profileFactsHydrated, profileFactsLoaded, profileFacts.size, interviewDone) {
+        // Never spend the one-shot decision while AI is off — it must still be
+        // able to fire once the switch comes back on.
+        if (assistantAllowed && vm.evaluateInterviewAutoOpen(profileFactsLoaded, profileFacts.size)) interviewOpen = true
+    }
+    // Onboarding by CONVERSATION counts: once ≥1 real fact exists (voice / chat /
+    // settings / another device) the interview stands down — never while the
+    // sheet is open (its own answers grow the count) nor while a step past the
+    // first is parked (that fact may be its own answer).
+    LaunchedEffect(profileFactsLoaded, profileFacts.size, interviewOpen, interviewDone) {
+        if (!profileFactsLoaded) return@LaunchedEffect
+        val parked = vm.interviewParkedStep(InterviewScript.questionCount)
+        if (InterviewFlag.shouldAutoComplete(profileFacts.size, interviewOpen, interviewDone, parked)) vm.markInterviewDone()
+    }
     val notifUnread by vm.notifUnread.collectAsStateWithLifecycle()
     val inboxCaptures by vm.inboxCaptures.collectAsStateWithLifecycle()
     fun push(r: Route) = stack.add(r)
@@ -311,13 +352,18 @@ fun MainScaffold(vm: AppViewModel) {
             // land there alongside unstuck://today, /recap, /brief.
             else -> { tab = "today"; stack.clear() }
         }
+        // The assistant (sheet or its Talk overlay) is up while it navigates —
+        // the user should SEE the destination, so close ours first (an
+        // `open_screen` tool call arrives as one of the links above; iOS
+        // AppModel+Routing.dismissForNavigation).
+        if (sheet == Sheet.Assistant) { sheet = null; assistantHandoff = false }
         vm.consumeDeepLink()
     }
 
     // System back, top layer wins. NewTask / Avatar ride on ModalBottomSheet which
     // intercepts back itself, so we only handle the focus overlay, the route stack,
     // and the non-Today tab fall-back. (Leaving focus keeps the live session running.)
-    val sheetOpen = showNewTask || sheet != null
+    val sheetOpen = showNewTask || sheet != null || interviewOpen
     BackHandler(enabled = focusTask != null) { focusTask = null; focusAutoCapture = false; focusShared = null }
     BackHandler(enabled = focusTask == null && !sheetOpen && stack.isNotEmpty()) { pop() }
     BackHandler(enabled = focusTask == null && !sheetOpen && stack.isEmpty() && tab != "today") { tab = "today" }
@@ -351,6 +397,10 @@ fun MainScaffold(vm: AppViewModel) {
                         onInbox = openInbox,
                         inboxCount = inboxCaptures.size,
                         onOpenShared = { sharedDetail = it },
+                        // The gateway's interview pill: shown until the interview is
+                        // DONE (not merely started); tapping presents the sheet.
+                        interviewPending = assistantAllowed && !interviewDone && !interviewOpen,
+                        onPersonalise = { interviewOpen = true },
                     )
                     "tasks" -> TasksScreen(vm, activeArea = activeArea, onClearArea = { activeArea = null }, onAreaPick = { activeArea = it }, onOpen = { push(Route.Detail(it.id)) }, onOpenShared = { sharedDetail = it }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
                     "calendar" -> CalendarScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onOpenShared = { sharedDetail = it }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials, onCreateAt = { d, t -> newTaskPrefill = d to t; showNewTask = true }, requestedView = calendarView, onViewApplied = { calendarView = null })
@@ -455,9 +505,22 @@ fun MainScaffold(vm: AppViewModel) {
                 // Same resolver as `open_screen`, so a chip and a tool call can
                 // never land on different screens.
                 onNavigate = { dest -> goAssistantScreen(dest.screen, dest.id) },
-                onDismiss = { sheet = null },
+                onDismiss = { sheet = null; assistantHandoff = false },
+                handoff = assistantHandoff,
             )
             null -> {}
+        }
+        // The get-to-know-you interview (gateway A2): greets by first name; every
+        // exit — done, the chevron, a swipe-down — comes back through onDismiss
+        // (a parked step keeps the pill up; done drops it).
+        if (interviewOpen) {
+            InterviewSheet(
+                host = vm,
+                firstName = vm.currentName?.trim()?.split(' ', '\t', '\n')?.firstOrNull { it.isNotBlank() },
+                onDismiss = { interviewOpen = false },
+                // Facts landing from another device stand an untouched panel down.
+                factCount = profileFacts.size,
+            )
         }
         // Read-only detail for a task shared WITH me (T1). Its Focus action starts a
         // shared focus session (T3); Complete goes through shared_task_set_done.

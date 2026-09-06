@@ -35,6 +35,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -77,6 +78,7 @@ import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UnstuckColors
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.ui.assistant.VoiceModeScreen
 import tech.csalliance.unstuck.ui.sharing.SharedWithYouSection
 import tech.csalliance.unstuck.ui.tour.TourAnchorIds
 import tech.csalliance.unstuck.ui.tour.tourAnchor
@@ -99,6 +101,10 @@ fun TodayScreen(
     onInbox: () -> Unit,
     inboxCount: Int,
     onOpenShared: (SharedWithMe) -> Unit,
+    // The AI gateway's interview hooks: the pill shows while the interview is
+    // pending (not done, not open); tapping it asks the host to present the sheet.
+    interviewPending: Boolean = false,
+    onPersonalise: () -> Unit = {},
 ) {
     val c = UTheme.colors
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -115,7 +121,10 @@ fun TodayScreen(
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val live by vm.liveSession.collectAsStateWithLifecycle()
     val recap by vm.lastRecap.collectAsStateWithLifecycle()
-    val nudges by vm.nudges.collectAsStateWithLifecycle()
+    // Talk mode from the gateway's mic — presented here exactly as the Assistant
+    // sheet presents it (saveable so a rotation keeps the live session's screen).
+    var voiceOpen by rememberSaveable { mutableStateOf(false) }
+    if (voiceOpen) VoiceModeScreen(vm) { voiceOpen = false }
     // Sharing (M2/M3): tasks OTHERS shared with me, badges on MY outgoing shares, and
     // the taskId→assignee map for tasks I assigned away (they leave the active list).
     val sharedWithMe by vm.sharedWithMe.collectAsStateWithLifecycle()
@@ -279,6 +288,19 @@ fun TodayScreen(
                     }
                 }
             }
+            // The AI gateway — brief + one moment + composer — sits between the
+            // greeting and the recap/hero (additive; the classic Today continues
+            // underneath). It REPLACES the old quiet-nudge card outright: moments
+            // subsume slip radar / habit gaps, so `vm.nudges` / `computeNudges`
+            // now have no reader (kept for the moment; delete with A3's sweep).
+            // With the AI kill-switch off the card draws nothing at all.
+            item(key = "gateway") {
+                GatewayCard(
+                    vm, onTalk = { voiceOpen = true },
+                    interviewPending = interviewPending, onPersonalise = onPersonalise,
+                    modifier = Modifier.padding(horizontal = 18.dp).padding(top = 10.dp, bottom = 4.dp),
+                )
+            }
             // Expire the "just now" recap after 6h (web parity) using the existing now ticker.
             recap?.takeIf { now - it.at < 6L * 3600_000 }?.let { r ->
                 item {
@@ -299,29 +321,6 @@ fun TodayScreen(
                             "${(r.focusedSec / 60).coerceAtLeast(1)} MIN FOCUSED · ${r.taskName}",
                             style = UFont.mono(11), color = c.ink2, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp),
                         )
-                    }
-                }
-            }
-
-            nudges.firstOrNull()?.let { n ->
-                item {
-                    Row(
-                        Modifier.padding(horizontal = 18.dp, vertical = 6.dp).fillMaxWidth().clip(RoundedCornerShape(16.dp))
-                            .background(c.bg2).border(1.dp, c.line, RoundedCornerShape(16.dp)).padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
-                    ) {
-                        Text(n.title, style = UFont.sans(13), color = c.ink2, maxLines = 2, modifier = Modifier.weight(1f))
-                        Text(
-                            n.action, style = UFont.sans(12, FontWeight.SemiBold), color = c.primaryDeep,
-                            modifier = Modifier.clickable {
-                                when (n.kind) {
-                                    tech.csalliance.unstuck.ui.NudgeKind.SLIPPING -> tasks.firstOrNull { it.id == n.taskId }?.let(onOpen)
-                                    tech.csalliance.unstuck.ui.NudgeKind.CAPTURE -> vm.captures.value.firstOrNull { it.id == n.captureId }?.let { vm.promoteCapture(it) }
-                                }
-                                vm.dismissNudge(n.id)
-                            },
-                        )
-                        Text("✕", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clickable { vm.dismissNudge(n.id) })
                     }
                 }
             }

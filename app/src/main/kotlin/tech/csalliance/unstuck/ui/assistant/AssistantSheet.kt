@@ -95,16 +95,20 @@ import tech.csalliance.unstuck.ui.AppViewModel
  * There is no "new chat" — the conversation continues forever (⋯ still offers a
  * deliberate "Clear conversation"). Feedback moved to Settings → Send feedback.
  */
+/** @param handoff opened by the Today gateway (composer / chip / a chat moment)
+ *  with the message ALREADY on its way through [AppViewModel.sendAssistant]'s
+ *  queue: the sheet opens onto the thread (the sent bubble + "Thinking…"), not
+ *  the suggestion card parked over it. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AssistantSheet(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit, onDismiss: () -> Unit) {
+fun AssistantSheet(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit, onDismiss: () -> Unit, handoff: Boolean = false) {
     val c = UTheme.colors
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = SheetScrim,
         dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } },
     ) {
-        AssistantChat(vm, onNavigate = { onNavigate(it); onDismiss() })
+        AssistantChat(vm, onNavigate = { onNavigate(it); onDismiss() }, handoff = handoff)
     }
 }
 
@@ -116,7 +120,7 @@ private sealed interface ThreadRow {
 }
 
 @Composable
-private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit) {
+private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit, handoff: Boolean = false) {
     val c = UTheme.colors
     val context = LocalContext.current
     val voice = rememberVoiceController()
@@ -145,8 +149,9 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     var menuOpen by remember { mutableStateOf(false) }
     var sharingId by remember { mutableStateOf<String?>(null) }
     // The suggestion card sits at the thread tail until the user engages this
-    // visit; the ✦ button re-summons it.
-    var showChips by rememberSaveable { mutableStateOf(true) }
+    // visit; the ✦ button re-summons it. A gateway hand-off IS the engagement —
+    // the user just sent something from Today, so the thread shows at once.
+    var showChips by rememberSaveable { mutableStateOf(!handoff) }
     val listState = rememberLazyListState()
 
     // Tool steps, the harness's hidden guard bounce (the fabricated claim + the

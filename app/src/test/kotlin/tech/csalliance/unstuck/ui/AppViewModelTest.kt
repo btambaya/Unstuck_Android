@@ -44,7 +44,13 @@ import tech.csalliance.unstuck.data.db.OutboxEntity
 import tech.csalliance.unstuck.data.db.Tables
 import tech.csalliance.unstuck.data.db.UnstuckDatabase
 import tech.csalliance.unstuck.sync.CoFocusControl
+import tech.csalliance.unstuck.sync.PreferencesClient
 import tech.csalliance.unstuck.sync.WriteThrough
+import tech.csalliance.unstuck.core.logic.Moment
+import tech.csalliance.unstuck.core.logic.MomentAction
+import tech.csalliance.unstuck.core.logic.MomentKind
+import tech.csalliance.unstuck.core.logic.MomentRun
+import tech.csalliance.unstuck.core.logic.addDaysIso
 
 /**
  * The first unit-test suite for the :app module — exercising the highest-risk
@@ -1607,5 +1613,215 @@ class AppViewModelTest {
 
         awaitTasks { l -> l.size == 2 && l.none { it.done } }
         assertTrue("receipt marked used", vm.assistantHistory.first().receipts!![0].undone)
+    }
+
+    // -----------------------------------------------------------------------
+    // Gateway (the AI card on Today) — A2. Moment actions must write through the
+    // SAME seam the assistant's tools use (AssistantApi → WriteThrough → Room +
+    // outbox), the composer hand-off must open the sheet AND queue the message,
+    // and the interview must never open by itself before the account's server
+    // flag has been applied (plan F9).
+    // -----------------------------------------------------------------------
+
+    private fun moment(run: MomentRun, id: String = "m1") =
+        Moment(id = id, kind = MomentKind.RITUAL, priority = 2, salience = 1, text = "moment", actions = listOf(MomentAction("Do it", run)))
+
+    private fun taskBlock(id: String, taskId: String, date: String, time: String = "10:00") =
+        CalBlock(id = id, taskId = taskId, taskName = "T", startTime = time, durationMinutes = 30, date = date, kind = CalBlockKind.TASK)
+
+    /** A gateway action whose ONLY effect is bookkeeping (no store write to
+     *  await) still suspends on a Room READ on a real thread before it settles —
+     *  poll the virtual scheduler until [cond] holds. */
+    private fun TestScope.awaitGateway(cond: () -> Boolean) {
+        repeat(300) {
+            advanceUntilIdle()
+            if (cond()) return
+            Thread.sleep(10)
+        }
+        error("gateway action never settled")
+    }
+
+    /** Drive an assistant turn to rest (the style-preference save awaits Room on a
+     *  real executor thread the virtual scheduler can't advance through). */
+    private fun TestScope.settleAssistantTurn(vm: AppViewModel) {
+        repeat(300) {
+            advanceUntilIdle()
+            if (!vm.assistantSending.value) { Thread.sleep(25); advanceUntilIdle(); return }
+            Thread.sleep(10)
+        }
+        error("assistant turn never settled")
+    }
+
+    @Test fun gateway_carryTasksMoment_movesTodaysBlockThroughTheAssistantApi() = runTest(dispatcher) {
+        val today = Clock.dateIso(nowMs)
+        val tomorrow = addDaysIso(today, 1)
+        seedTask(task("a", "Gym"))
+        seedBlock(taskBlock("b1", "a", today))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        val m = moment(MomentRun.CarryTasks(listOf("a")))
+
+        vm.runMomentAction(m, m.actions[0])
+        advanceUntilIdle()
+
+        // The same rows the carry_to_tomorrow tool would write: block moved, an
+        // honest slip counter, and the change queued for the account (outbox).
+        awaitBlock("b1") { it.date == tomorrow && !it.skipped }
+        assertEquals(1, awaitTask("a") { it.moveCount == 1 }.moveCount)
+        assertTrue(store.pending().any { it.recordTable == Tables.CAL_BLOCKS && it.recordId == "b1" })
+        assertTrue(store.pending().any { it.recordTable == Tables.TASKS && it.recordId == "a" })
+        assertTrue("the moment is settled", vm.isMomentDismissed("m1"))
+        assertEquals("Carried 1 to tomorrow.", vm.momentDone.value)
+        vm.clearMomentDone("someone else's ✓")
+        assertEquals("only its own confirmation clears", "Carried 1 to tomorrow.", vm.momentDone.value)
+        vm.clearMomentDone("Carried 1 to tomorrow.")
+        assertNull(vm.momentDone.value)
+    }
+
+    @Test fun gateway_carryTasksMoment_withNothingOnTodayWritesNothingAndStaysUp() = runTest(dispatcher) {
+        seedTask(task("a", "Gym"))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        val m = moment(MomentRun.CarryTasks(listOf("a")))
+        vm.runMomentAction(m, m.actions[0])
+        // Let the action's Room reads + the (empty) reduce fully settle first.
+        repeat(5) { advanceUntilIdle(); Thread.sleep(10) }
+        advanceUntilIdle()
+        assertFalse("not acted on → not dismissed", vm.isMomentDismissed("m1"))
+        assertNull(vm.momentDone.value)
+        assertTrue(store.blocks().first().isEmpty())
+        assertNull(loadTask("a")!!.moveCount)
+    }
+
+    @Test fun gateway_scheduleMoment_createsTheBlockThroughTheAssistantApi() = runTest(dispatcher) {
+        seedTask(task("a", "Gym", estimateMin = 45))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        val m = moment(MomentRun.Schedule("a", "2031-01-07", "18:30"))
+        vm.runMomentAction(m, m.actions[0])
+        advanceUntilIdle()
+        val b = awaitBlocks { l -> l.any { it.taskId == "a" } }.single { it.taskId == "a" }
+        assertEquals("2031-01-07", b.date)
+        assertEquals("18:30", b.startTime)
+        assertEquals(45, b.durationMinutes)
+        assertEquals(CalBlockKind.TASK, b.kind)
+        assertTrue(store.pending().any { it.recordTable == Tables.CAL_BLOCKS && it.recordId == b.id })
+        assertNull("booking a habit gap isn't a slip", loadTask("a")!!.moveCount)
+        assertTrue(vm.isMomentDismissed("m1"))
+        assertEquals("Blocked — Gym, 2031-01-07 18:30.", vm.momentDone.value)
+    }
+
+    @Test fun gateway_scheduleMoment_forAVanishedTaskWritesNothingButRetiresTheMoment() = runTest(dispatcher) {
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        val m = moment(MomentRun.Schedule("ghost", "2031-01-07", null))
+        vm.runMomentAction(m, m.actions[0])
+        awaitGateway { vm.isMomentDismissed("m1") }
+        assertTrue(store.blocks().first().isEmpty())
+        assertNull(vm.momentDone.value)
+    }
+
+    @Test fun gateway_createTaskMoment_addsTheTaskThroughTheAssistantApi() = runTest(dispatcher) {
+        val vm = vm()
+        subscribeReads(vm, vm.tasks)
+        val m = moment(MomentRun.CreateTask("Call mum", null))
+        vm.runMomentAction(m, m.actions[0])
+        advanceUntilIdle()
+        val t = awaitTasks { it.isNotEmpty() }.single()
+        assertEquals("Call mum", t.name)
+        assertEquals(25, t.estimateMin)
+        assertFalse(t.done)
+        assertTrue(store.pending().any { it.recordTable == Tables.TASKS && it.recordId == t.id })
+        assertEquals("Added “Call mum”.", vm.momentDone.value)
+        assertTrue(vm.isMomentDismissed("m1"))
+    }
+
+    @Test fun gateway_dismissMoment_onlyRecordsTheDismissal() = runTest(dispatcher) {
+        val vm = vm()
+        val m = moment(MomentRun.Dismiss)
+        vm.runMomentAction(m, m.actions[0])
+        advanceUntilIdle()
+        assertTrue(vm.isMomentDismissed("m1"))
+        assertNull(vm.momentDone.value)
+        assertTrue(store.tasks().first().isEmpty())
+    }
+
+    @Test fun gateway_chatMoment_settlesThenHandsTheMessageToTheAssistant() = runTest(dispatcher) {
+        val vm = vm()
+        var opens = 0
+        backgroundScope.launch { vm.assistantOpenRequests.collect { opens += 1 } }
+        advanceUntilIdle()
+        val m = moment(MomentRun.Chat("How did the call go?"))
+
+        vm.runMomentAction(m, m.actions[0])
+        settleAssistantTurn(vm)
+
+        assertTrue(vm.isMomentDismissed("m1"))
+        assertEquals("the sheet was asked to open", 1, opens)
+        // The message took the SAME path as a typed one: it's the user turn of
+        // the thread (the turn itself fails offline — no coordinator).
+        assertEquals("How did the call go?", vm.assistantHistory.first { it.role == "user" }.content)
+        assertEquals("not_configured", vm.assistantError.value)
+    }
+
+    @Test fun gateway_openAssistantWith_opensTheSheetAndQueuesThroughSendAssistant() = runTest(dispatcher) {
+        val vm = vm()
+        var opens = 0
+        backgroundScope.launch { vm.assistantOpenRequests.collect { opens += 1 } }
+        advanceUntilIdle()
+
+        vm.openAssistantWith("   ")
+        advanceUntilIdle()
+        assertEquals("blank is a no-op", 0, opens)
+        assertTrue(vm.assistantHistory.isEmpty())
+
+        vm.openAssistantWith("Plan my day — what should I start with and what order makes sense?")
+        settleAssistantTurn(vm)
+        assertEquals(1, opens)
+        assertEquals("Plan my day — what should I start with and what order makes sense?", vm.assistantHistory.first { it.role == "user" }.content)
+    }
+
+    @Test fun gateway_interviewAutoOpen_neverFiresBeforeTheServerFlagIsApplied() = runTest(dispatcher) {
+        val vm = vm()
+        // Facts read, zero facts, not done locally — the classic "fresh install"
+        // shape. Before the hydrate lands the gate must NOT open (and must not
+        // spend its one-shot decision either).
+        assertFalse(vm.profileFactsHydrated.value)
+        assertFalse(vm.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
+        assertFalse(vm.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
+        // The account finished the interview on the web: the hydrate pins done
+        // BEFORE the hydrated flag flips, so the gate sees done and stays shut.
+        vm.completeAssistantHydrate("me", PreferencesClient.ServerUserPrefs(assistant_interview_done_at = "2026-09-05T10:00:00+00:00"))
+        assertTrue(vm.profileFactsHydrated.value)
+        assertTrue(vm.interviewDone.value)
+        assertFalse(vm.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
+    }
+
+    @Test fun gateway_interviewAutoOpen_firesExactlyOnceAfterHydrateForAnAccountNobodyHasMet() = runTest(dispatcher) {
+        val vm = vm()
+        assertFalse(vm.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
+        vm.completeAssistantHydrate("me", null)   // no row anywhere: never onboarded
+        assertFalse("still waits for the local facts read", vm.evaluateInterviewAutoOpen(factsLoaded = false, factCount = 0))
+        assertTrue(vm.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
+        assertFalse("one shot", vm.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
+        // A parked step ("Skip for now") on another fresh VM: the pill is the way in.
+        val parked = vm()
+        parked.setInterviewStep(3)
+        parked.completeAssistantHydrate("me", null)
+        assertFalse(parked.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
+    }
+
+    @Test fun gateway_strugglesFromTheServerAreCanonicalisedCachedAndReadByTheAssistantApi() = runTest(dispatcher) {
+        val vm = vm()
+        assertTrue(vm.struggles.value.isEmpty())
+        vm.completeAssistantHydrate("me", PreferencesClient.ServerUserPrefs(adhd_struggles = listOf("Getting started", "Distraction", "nonsense")))
+        assertEquals(listOf("Starting", "Sustaining"), vm.struggles.value)
+        assertEquals("the context builder's read", listOf("Starting", "Sustaining"), vm.assistantApi.getStruggles())
+        // A fresh ViewModel for the same account reads the cache back (offline launch).
+        assertEquals(listOf("Starting", "Sustaining"), vm().struggles.value)
+        // Sign-out scrub: the next account on this phone never inherits them.
+        vm.scrubAssistantUserState()
+        assertTrue(vm.struggles.value.isEmpty())
+        assertTrue(vm().struggles.value.isEmpty())
     }
 }

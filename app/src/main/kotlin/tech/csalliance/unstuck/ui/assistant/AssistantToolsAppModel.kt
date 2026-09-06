@@ -51,10 +51,9 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
 
     override suspend fun getSessions(): List<Session> = store.snapshot(Tables.SESSIONS, Session.serializer())
     override suspend fun getReasonLogs(): List<ReasonLog> = store.snapshot(Tables.REASON_LOGS, ReasonLog.serializer())
-    /** Android keeps the onboarding struggles only on the server (user_preferences
-     *  .adhd_struggles) — nothing local to read yet, so the context carries no
-     *  `struggle` line until that column is mirrored down. */
-    override fun getStruggles(): List<String> = emptyList()
+    /** The account's onboarding struggles (user_preferences.adhd_struggles),
+     *  canonicalised + cached per account on the ViewModel at every pull. */
+    override fun getStruggles(): List<String> = vm.struggles.value
 
     // ── tasks + blocks (committed locally before returning) ──
     override suspend fun upsertTask(t: TaskItem) { write?.upsertTask(t) ?: store.upsert(Tables.TASKS, t, TaskItem.serializer(), t.id, t.updatedAt) }

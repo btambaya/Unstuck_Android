@@ -26,6 +26,7 @@ import okhttp3.Request
 import okhttp3.Response
 import okhttp3.WebSocket
 import okhttp3.WebSocketListener
+import tech.csalliance.unstuck.core.logic.AssistantGuard
 import tech.csalliance.unstuck.core.logic.BargeInCommand
 import tech.csalliance.unstuck.core.logic.BargeInController
 import tech.csalliance.unstuck.core.logic.BargeInEvent
@@ -50,10 +51,16 @@ import kotlin.concurrent.thread
 //          → response.done {response:{id,status}}
 //          → input_audio_buffer.speech_started / speech_stopped  (→ barge-in)
 //          → response.function_call_arguments.done {name, call_id, arguments}
+//          → response.output_item.done {item: function_call}  (same, other shape)
 //   client → conversation.item.create {function_call_output, call_id, output}
-//          → response.create
+//          → response.create (ONE, coalesced ~120 ms after the last tool output)
 //   client → response.cancel  (ONLY while a response is in flight; the server
 //            answers a stray one with an "…active response" error — benign)
+//
+// Plus the voice integrity guard (web lib/voice/realtime-client.ts + iOS
+// VoiceRealtimeClient.swift): a spoken "I've added it" with no write tool call
+// behind it in that response gets ONE hidden corrective (3 per session, never
+// its own follow-up, never mid-utterance) — see VoiceIntegrityGuard below.
 //
 // BARGE-IN (spec: scratchpad bargein.md §2/§6/§8; pure logic in :core BargeIn.kt)
 // Every transport/audio event is fed to a BargeInController and the commands it
@@ -69,6 +76,64 @@ import kotlin.concurrent.thread
 /** THINKING = a response is in flight but no audio has arrived yet (tool call /
  *  model latency) — the screen shows "Thinking…" and offers Interrupt. */
 enum class VoiceState { CONNECTING, LISTENING, THINKING, SPEAKING, ERROR, CLOSED }
+
+/**
+ * The voice integrity guard's per-response bookkeeping — pure, so the "claim
+ * with no tool → corrective, capped, never loops" rule is unit-testable without
+ * a socket. Mirrors the web client's respTranscript / respToolCalled /
+ * respWasCorrection / nextRespToolBacked / correctionsLeft and iOS
+ * `VoiceIntegrityGuard` 1:1. NOT thread-safe: the client mutates it under its
+ * controller lock.
+ */
+class VoiceIntegrityGuard {
+    var transcript: String = ""
+        private set
+    var toolCalled: Boolean = false
+        private set
+    var wasCorrection: Boolean = false
+        private set
+    /** The reply AFTER a tool result is tool-backed. */
+    var nextResponseToolBacked: Boolean = false
+        private set
+    /** Per-session cap — never loop. */
+    var correctionsLeft: Int = 3
+        private set
+
+    fun responseCreated() {
+        transcript = ""
+        toolCalled = nextResponseToolBacked
+        nextResponseToolBacked = false
+    }
+
+    fun bargeIn() { transcript = "" }
+
+    fun transcriptDelta(d: String) { transcript += d }
+
+    /** A tool ran during this response (read-only tools don't make it "tool-backed"). */
+    fun toolDispatched(name: String) { if (name !in READ_ONLY_TOOLS) toolCalled = true }
+
+    fun toolFinished(name: String, result: String) {
+        nextResponseToolBacked = !result.startsWith("error") && name !in READ_ONLY_TOOLS
+    }
+
+    /** A cancelled/incomplete response (barge-in) is not a claim. */
+    fun responseCancelled() { wasCorrection = false }
+
+    /** Called on a COMPLETED response: true when a corrective must be sent. */
+    fun shouldCorrect(): Boolean {
+        if (wasCorrection) { wasCorrection = false; return false }
+        if (toolCalled || correctionsLeft <= 0) return false
+        if (!AssistantGuard.looksLikeActionClaim(transcript)) return false
+        correctionsLeft -= 1
+        wasCorrection = true
+        return true
+    }
+
+    companion object {
+        /** The corrective injected as a hidden user item (verbatim from the web / iOS). */
+        const val correctiveText = "(integrity check from the app, not the user: you claimed an action or said you would note something, but no tool ran — nothing actually happened. If it is still needed, call the right tool NOW, then say in a few words what you did (e.g. \"Added it now\") — no apology, no explanation. Never claim an action without its tool call.)"
+    }
+}
 
 class VoiceRealtimeClient(
     private val proxyUrl: String,          // wss://…workers.dev   (token added per-connect)
@@ -106,6 +171,8 @@ class VoiceRealtimeClient(
         private const val PRIMER_ITEM_ID = "a0e1f2d3c4b5a6978869504132231405"
         // Client event id on the primer delete, so ONLY its rejection is swallowed.
         private const val PRIMER_DELETE_EVENT = "evt_primer_delete_0001"
+        /** Coalescing window for the response.create after tool outputs (web/iOS: 120 ms). */
+        const val CONTINUE_DELAY_MS = 120L
     }
 
     @Volatile private var primerDeleted = false
@@ -133,6 +200,15 @@ class VoiceRealtimeClient(
         holdToTalk = audio.holdToTalkPref,
     ) { SystemClock.uptimeMillis() }
     private val tick = Runnable { dispatch(BargeInEvent.Tick) }
+
+    // Voice integrity guard — mutated ONLY under ctlLock (transcript deltas and
+    // barge-ins arrive through execute(), tool events from the IO coroutine).
+    private val guard = VoiceIntegrityGuard()
+    /** Tool calls already dispatched (both event shapes can fire for one call). */
+    private val handledCalls = HashSet<String>()
+    /** One coalesced response.create ~120 ms after the LAST tool output — a
+     *  response.create per parallel call races "already has an active response". */
+    private val continueRunnable = Runnable { send(buildJsonObject { put("type", "response.create") }) }
 
     /** Hold-to-talk is on for this session (orb = press-and-hold; VAD off). */
     val holdToTalk: Boolean get() = ctl.holdToTalk
@@ -180,6 +256,7 @@ class VoiceRealtimeClient(
         stopped = true
         open = false
         mainHandler.removeCallbacks(tick)
+        mainHandler.removeCallbacks(continueRunnable)
         scope.cancel() // a dead session must not keep running tools / mutating state
         val socket = ws
         ws = null
@@ -219,10 +296,12 @@ class VoiceRealtimeClient(
 
     private fun profileFor(route: VoiceRoute) = BargeInProfile.forRoute(route, speakerHalfDuplex)
 
-    /** Feed one event to the controller and execute what it asks for. */
-    private fun dispatch(event: BargeInEvent, payload: String? = null) {
-        if (stopped) return
-        synchronized(ctlLock) { execute(ctl.handle(event), payload) }
+    /** Feed one event to the controller and execute what it asks for. Returns
+     *  the commands so a caller can see e.g. whether a fresh response was
+     *  cancelled on the spot (false-start suppression). */
+    private fun dispatch(event: BargeInEvent, payload: String? = null): List<BargeInCommand> {
+        if (stopped) return emptyList()
+        return synchronized(ctlLock) { ctl.handle(event).also { execute(it, payload) } }
     }
 
     // Runs under ctlLock. `payload` is the base64 audio / caption text of the
@@ -238,11 +317,15 @@ class VoiceRealtimeClient(
                 mainHandler.postDelayed(tick, cmd.confirmMs)
             }
             BargeInCommand.Restore -> { mainHandler.removeCallbacks(tick); audio.restore() }
-            BargeInCommand.FlushPlayback -> audio.flushPlayback()
+            // A CANCEL (any command list carrying FlushPlayback) also resets the
+            // integrity guard's transcript — a cut-off reply is never scored.
+            BargeInCommand.FlushPlayback -> { audio.flushPlayback(); guard.bargeIn() }
             BargeInCommand.SendCancel -> send(buildJsonObject { put("type", "response.cancel") })
             is BargeInCommand.SetMuted -> Unit // the controller owns `muted`; deltas are filtered by it
             BargeInCommand.EnqueueAudio -> payload?.let { audio.enqueue(Base64.decode(it, Base64.NO_WRAP)) }
-            BargeInCommand.ShowCaption -> payload?.let { onCaption("assistant", it, false) }
+            // Only captions the controller accepts (not a cancelled reply's) count
+            // towards the spoken transcript the guard scores.
+            BargeInCommand.ShowCaption -> payload?.let { guard.transcriptDelta(it); onCaption("assistant", it, false) }
             // The screen clears the reply line on a "user" caption (new user turn).
             BargeInCommand.ClearCaption -> onCaption("user", "", true)
             // Hold-to-talk release: the frame being read when the finger lifted is
@@ -309,7 +392,13 @@ class VoiceRealtimeClient(
             when (ev["type"]?.jsonPrimitive?.contentOrNull) {
                 "input_audio_buffer.speech_started" -> dispatch(BargeInEvent.SpeechStarted)
                 "input_audio_buffer.speech_stopped" -> dispatch(BargeInEvent.SpeechStopped)
-                "response.created" -> dispatch(BargeInEvent.ResponseCreated(responseId(ev)))
+                "response.created" -> {
+                    val cmds = dispatch(BargeInEvent.ResponseCreated(responseId(ev)))
+                    // A response the controller killed on creation (reply to a
+                    // false-start blip) never starts a guard window: the reply
+                    // after a tool result stays tool-backed for the real one.
+                    if (cmds.none { it is BargeInCommand.SendCancel }) synchronized(ctlLock) { guard.responseCreated() }
+                }
                 "response.audio.delta" ->
                     ev["delta"]?.jsonPrimitive?.contentOrNull?.let { dispatch(BargeInEvent.AudioDelta(responseId(ev)), it) }
                 "response.audio_transcript.delta" ->
@@ -323,12 +412,35 @@ class VoiceRealtimeClient(
                 "response.done" -> {
                     deletePrimer()
                     val r = ev["response"]?.jsonObject
-                    dispatch(BargeInEvent.ResponseDone(responseId(ev), r?.get("status")?.jsonPrimitive?.contentOrNull))
+                    val id = responseId(ev)
+                    val status = r?.get("status")?.jsonPrimitive?.contentOrNull
+                    // A cancelled/incomplete response (barge-in) is not a claim:
+                    // never score it, and never inject a corrective mid-utterance.
+                    val cancelled = id != null && id == synchronized(ctlLock) { ctl.cancelledResponseId }
+                    if (!cancelled && (status == null || status == "completed")) checkFabrication()
+                    else synchronized(ctlLock) { guard.responseCancelled() }
+                    dispatch(BargeInEvent.ResponseDone(id, status))
                 }
                 // Audio finished streaming but the reply may still be playing/thinking
                 // (tool call) — the controller decides from response.done + drain.
                 "response.audio.done" -> deletePrimer()
-                "response.function_call_arguments.done" -> handleToolCall(webSocket, ev)
+                "response.function_call_arguments.done" -> handleToolCall(
+                    name = ev["name"]?.jsonPrimitive?.contentOrNull,
+                    callId = ev["call_id"]?.jsonPrimitive?.contentOrNull,
+                    arguments = ev["arguments"]?.jsonPrimitive?.contentOrNull,
+                )
+                // Some realtime backends deliver function calls (or their name)
+                // ONLY on the output_item event — dispatch from here too, deduped
+                // by call_id, or calls silently never execute while the model
+                // believes it acted (harness audit, 2026-09-01).
+                "response.output_item.done" -> {
+                    val item = ev["item"]?.jsonObject
+                    if (item?.get("type")?.jsonPrimitive?.contentOrNull == "function_call") handleToolCall(
+                        name = item["name"]?.jsonPrimitive?.contentOrNull,
+                        callId = item["call_id"]?.jsonPrimitive?.contentOrNull,
+                        arguments = item["arguments"]?.jsonPrimitive?.contentOrNull,
+                    )
+                }
                 "error" -> {
                     val errObj = ev["error"]?.jsonObject
                     val m = errObj?.get("message")?.jsonPrimitive?.contentOrNull
@@ -385,25 +497,58 @@ class VoiceRealtimeClient(
         ev["response_id"]?.jsonPrimitive?.contentOrNull
             ?: ev["response"]?.jsonObject?.get("id")?.jsonPrimitive?.contentOrNull
 
-    private fun handleToolCall(webSocket: WebSocket, ev: JsonObject) {
-        val name = ev["name"]?.jsonPrimitive?.contentOrNull ?: return
-        val callId = ev["call_id"]?.jsonPrimitive?.contentOrNull ?: return
+    /** Spoken claim of a completed action with NO write tool call in that
+     *  response → bounce one hidden corrective so the model acts for real and
+     *  corrects itself out loud. Capped per session; never bounces a
+     *  correction's own follow-up, so it cannot loop. */
+    private fun checkFabrication() {
+        val correct = synchronized(ctlLock) { guard.shouldCorrect() }
+        if (!correct) return
+        send(buildJsonObject {
+            put("type", "conversation.item.create")
+            putJsonObject("item") {
+                put("type", "message"); put("role", "user")
+                putJsonArray("content") { addJsonObject { put("type", "input_text"); put("text", VoiceIntegrityGuard.correctiveText) } }
+            }
+        })
+        send(buildJsonObject { put("type", "response.create") })
+    }
+
+    private fun handleToolCall(name: String?, callId: String?, arguments: String?) {
+        if (name == null || callId == null) return
+        val fresh = synchronized(ctlLock) {
+            if (!handledCalls.add(callId)) return@synchronized false   // both event shapes fired
+            // Read-only tools don't make a reply "tool-backed" — otherwise
+            // get_schedule + "Done, I moved it" sailed past the voice guard.
+            guard.toolDispatched(name)
+            true
+        }
+        if (!fresh) return
         val args = runCatching {
-            Json.parseToJsonElement(ev["arguments"]?.jsonPrimitive?.contentOrNull ?: "{}").jsonObject
+            Json.parseToJsonElement(arguments ?: "{}").jsonObject
         }.getOrDefault(JsonObject(emptyMap()))
         scope.launch {
             val result = runCatching { runTool(name, args) }.getOrElse { "error: ${it.message ?: "failed"}" }
-            // Feed the tool result back + ask the model to continue (speak).
-            webSocket.send(buildJsonObject {
+            // Feed the tool result back; the reply after it is tool-backed only
+            // when the tool really changed something.
+            send(buildJsonObject {
                 put("type", "conversation.item.create")
                 putJsonObject("item") {
                     put("type", "function_call_output")
                     put("call_id", callId)
                     put("output", result)
                 }
-            }.toString())
-            webSocket.send(buildJsonObject { put("type", "response.create") }.toString())
+            })
+            synchronized(ctlLock) { guard.toolFinished(name, result) }
+            scheduleContinue()
         }
+    }
+
+    /** One coalesced response.create ~120 ms after the last tool output. */
+    private fun scheduleContinue() {
+        if (stopped) return
+        mainHandler.removeCallbacks(continueRunnable)
+        mainHandler.postDelayed(continueRunnable, CONTINUE_DELAY_MS)
     }
 
     private fun sessionUpdate(): String = buildJsonObject {

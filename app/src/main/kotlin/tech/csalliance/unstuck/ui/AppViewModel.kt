@@ -65,6 +65,20 @@ import tech.csalliance.unstuck.sync.ToolFunction
 import tech.csalliance.unstuck.core.logic.ReceiptUndo
 import tech.csalliance.unstuck.ui.assistant.AppViewModelAssistantApi
 import tech.csalliance.unstuck.ui.assistant.AssistantApi
+import tech.csalliance.unstuck.ui.assistant.InterviewHost
+import tech.csalliance.unstuck.ui.assistant.FactsHost
+import tech.csalliance.unstuck.ui.assistant.GatewayActions
+import tech.csalliance.unstuck.ui.assistant.GatewayDerived
+import tech.csalliance.unstuck.ui.assistant.GatewayInputs
+import tech.csalliance.unstuck.ui.assistant.GatewayMemo
+import tech.csalliance.unstuck.ui.assistant.GatewayWrites
+import tech.csalliance.unstuck.ui.assistant.canonicalStruggles
+import tech.csalliance.unstuck.ui.assistant.deriveGateway
+import tech.csalliance.unstuck.core.logic.InterviewAutoOpenGate
+import tech.csalliance.unstuck.core.logic.Moment
+import tech.csalliance.unstuck.core.logic.MomentAction
+import tech.csalliance.unstuck.core.logic.MomentRun
+import tech.csalliance.unstuck.core.logic.addDaysIso
 import tech.csalliance.unstuck.core.logic.AssistantHarness
 import tech.csalliance.unstuck.core.logic.HarnessAsk
 import tech.csalliance.unstuck.core.logic.HarnessAskFailed
@@ -160,7 +174,7 @@ class AppViewModel(
     // from here instead of cofocus.open() — the offline/reconnect convergence
     // tests observe broadcasts/hellos without a Supabase client. Null in prod.
     private val coFocusChannelFactory: ((taskId: String) -> tech.csalliance.unstuck.sync.CoFocusChannel?)? = null,
-) : ViewModel() {
+) : ViewModel(), InterviewHost, FactsHost {
 
     private val store = graph.store
     private val write get() = writeOverride ?: graph.coordinator?.write
@@ -192,7 +206,7 @@ class AppViewModel(
     /** Active facts, newest first — fed from the store, so the assistant's saves, a
      *  hydrate from another device, a realtime tombstone and a Settings forget all
      *  land here. */
-    val profileFacts: StateFlow<List<ProfileFact>> by lazy { sf(profileFactsService.observeAll()) }
+    override val profileFacts: StateFlow<List<ProfileFact>> by lazy { sf(profileFactsService.observeAll()) }
     // Gateway per-account caches — declared up here, BEFORE the session-status
     // collector's init block: a StateFlow collect on Main.immediate can run its
     // lambda synchronously during construction, and that lambda reloads these.
@@ -202,20 +216,33 @@ class AppViewModel(
     private fun paKey(base: String, uid: String) = "$base.$uid"
     private val _rituals = MutableStateFlow(RitualPrefs.DEFAULTS)
     /** Which recurring PA moments run (Settings / interview picker / moments engine). */
-    val rituals: StateFlow<RitualPrefs> = _rituals.asStateFlow()
+    override val rituals: StateFlow<RitualPrefs> = _rituals.asStateFlow()
     private val _dismissedMoments = MutableStateFlow<List<String>>(emptyList())
     /** Moment ids dismissed on THIS device (newest 200). */
     val dismissedMoments: StateFlow<List<String>> = _dismissedMoments.asStateFlow()
     private val _interviewDone = MutableStateFlow(false)
     /** The get-to-know-you interview is done for this account (local flag, pinned
      *  from the server after every pull). */
-    val interviewDone: StateFlow<Boolean> = _interviewDone.asStateFlow()
+    override val interviewDone: StateFlow<Boolean> = _interviewDone.asStateFlow()
     private val _profileFactsHydrated = MutableStateFlow(false)
     /** "Profile facts hydrated once" — flips after the FIRST completed pull of this
      *  sign-in, once the server's interview flag + rituals have been applied. The
      *  gateway's auto-open gate waits on it before an empty memory means "never met". */
     val profileFactsHydrated: StateFlow<Boolean> = _profileFactsHydrated.asStateFlow()
     private var ritualsPushGen = 0
+    private val _struggles = MutableStateFlow<List<String>>(emptyList())
+    /** The account's onboarding struggles, canonical ("Starting", …) — the
+     *  moments engine + the assistant context read these. */
+    val struggles: StateFlow<List<String>> = _struggles.asStateFlow()
+    /** The gateway interview's one-shot auto-open decision (per account; reset
+     *  on (re)sign-in and the sign-out scrub). Declared up here — BEFORE the
+     *  init block that reloads the per-account state — so property
+     *  initialisation order can't hand reloadAssistantUserState a null. */
+    private var interviewAutoOpenGate = InterviewAutoOpenGate()
+    private val _momentDone = MutableStateFlow<String?>(null)
+    /** The ✓ confirmation after a moment action — a moment, not a mute button:
+     *  the card clears it after ~8 s so the NEXT undismissed moment can surface. */
+    val momentDone: StateFlow<String?> = _momentDone.asStateFlow()
 
     init { reloadAssistantUserState() }
     val pendingCount = store.pendingCount().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
@@ -2170,6 +2197,9 @@ class AppViewModel(
         }
         val uid = auth?.currentUserId
         if (uid != null && struggles.isNotEmpty()) {
+            // Cached locally first (the gateway + assistant context read them at
+            // once); the server row is the account's copy for every other device.
+            applyStruggles(uid, struggles)
             runCatching { graph.coordinator?.preferences?.setAdhdStruggles(uid, struggles) }
         }
         graph.onboarded = true
@@ -2391,24 +2421,29 @@ class AppViewModel(
      *  after a scrub). No account → defaults. */
     internal fun reloadAssistantUserState() {
         val uid = currentUid()
+        // A (re)sign-in is a fresh gateway: the one-shot auto-open decision is
+        // taken again for THIS account once its hydrate lands.
+        interviewAutoOpenGate = InterviewAutoOpenGate()
         if (uid == null) {
             _rituals.value = RitualPrefs.DEFAULTS
             _dismissedMoments.value = emptyList()
             _interviewDone.value = false
+            _struggles.value = emptyList()
             return
         }
         _rituals.value = PAPrefsLogic.decodeRituals(paPrefs.getString(paKey(PAPrefsLogic.RITUALS_KEY, uid), null))
         _dismissedMoments.value = PAPrefsLogic.parseDismissed(paPrefs.getString(paKey(PAPrefsLogic.DISMISSED_KEY, uid), null))
         _interviewDone.value = paPrefs.getBoolean(paKey(INTERVIEW_DONE_KEY, uid), false)
+        _struggles.value = decodeStruggles(paPrefs.getString(paKey(STRUGGLES_KEY, uid), null))
     }
 
     // rituals
 
-    fun setRitual(key: RitualKey, on: Boolean) = setRituals(_rituals.value.with(key, on))
+    override fun setRitual(key: RitualKey, on: Boolean) = setRituals(_rituals.value.with(key, on))
 
     /** A USER change (Settings toggle / the interview picker / the set_ritual tool):
      *  cache locally, flag pending, push to the account. */
-    fun setRituals(prefs: RitualPrefs) {
+    override fun setRituals(prefs: RitualPrefs) {
         val uid = currentUid()
         _rituals.value = prefs
         if (uid == null) return
@@ -2461,7 +2496,7 @@ class AppViewModel(
 
     /** The parked resume step, or null when nothing is persisted (iOS
      *  `InterviewMachine.parkedStep`). */
-    fun interviewParkedStep(maxStep: Int): Int? {
+    override fun interviewParkedStep(maxStep: Int): Int? {
         val uid = currentUid() ?: return null
         val raw = paPrefs.getString(paKey(INTERVIEW_STEP_KEY, uid), null) ?: return null
         return InterviewFlag.parseInterviewStep(raw, maxStep)
@@ -2472,12 +2507,12 @@ class AppViewModel(
         return paPrefs.contains(paKey(INTERVIEW_STEP_KEY, uid))
     }
 
-    fun setInterviewStep(step: Int) {
+    override fun setInterviewStep(step: Int) {
         val uid = currentUid() ?: return
         paPrefs.edit().putString(paKey(INTERVIEW_STEP_KEY, uid), step.toString()).apply()
     }
 
-    fun clearInterviewStep() {
+    override fun clearInterviewStep() {
         val uid = currentUid() ?: return
         paPrefs.edit().remove(paKey(INTERVIEW_STEP_KEY, uid)).apply()
     }
@@ -2485,7 +2520,7 @@ class AppViewModel(
     /** Every "the interview is done" path (I'm done, the rituals picker, reaching
      *  the end, the ≥1-fact auto-done): local flag + resume step dropped + the
      *  account (best-effort; a failed push is re-pushed by the next pull). */
-    fun markInterviewDone() {
+    override fun markInterviewDone() {
         val uid = currentUid() ?: return
         markInterviewDoneLocal(uid)
         pushInterviewDone(uid)
@@ -2515,6 +2550,128 @@ class AppViewModel(
         applyServerAssistantPrefs(uid, server)
     }
 
+    // ── gateway (the AI card on Today): brief + one moment + composer hand-off ──
+    // Port of iOS GatewayCard's engine wiring: the derived brief/moment is
+    // memoised on a MINUTE-keyed input (plan risk 11 — pickMoment runs
+    // derivePatterns over every block), moment actions write through the
+    // assistant's AssistantApi seam (the SAME path the tools take), and the
+    // composer hands its text to the Assistant sheet, which owns the thread.
+
+    /** True once the local profile-facts read has emitted at least once —
+     *  "no facts yet" and "nothing loaded yet" must not look the same to the
+     *  interview's auto-open gate. WhileSubscribed, like [profileFacts]. */
+    val profileFactsLoaded: StateFlow<Boolean> by lazy {
+        profileFactsService.observeAll().map { true }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+    }
+
+    private val gatewayMemo = GatewayMemo<GatewayInputs, GatewayDerived>()
+    /** Re-ticks each minute while collected: the brief ("…is the anchor") and
+     *  the time-gated moments (evening sweep at 17:30) must appear/refresh while
+     *  Today just sits open. */
+    private val gatewayMinute = flow { while (true) { emit(nowMs()); kotlinx.coroutines.delay(60_000) } }
+
+    private data class GatewayRows(
+        val tasks: List<TaskItem>, val blocks: List<CalBlock>, val sessions: List<Session>,
+        val reasons: List<ReasonLog>, val facts: List<ProfileFact>,
+    )
+    private data class GatewayPrefs(val struggles: List<String>, val rituals: RitualPrefs, val dismissed: List<String>)
+
+    /** The brief + the one moment for right now — memoised, recomputed only when
+     *  an input the engines read (or the minute) changes. */
+    val gateway: StateFlow<GatewayDerived> by lazy {
+        val rows = combine(tasks, blocks, sessions, reasonLogs, profileFacts) { t, b, s, r, f -> GatewayRows(t, b, s, r, f) }
+        val prefs = combine(_struggles, _rituals, _dismissedMoments) { s, r, d -> GatewayPrefs(s, r, d) }
+        combine(rows, prefs, gatewayMinute) { r, p, _ ->
+            val now = nowMs()
+            val key = GatewayInputs(
+                tasks = r.tasks, blocks = r.blocks, sessions = r.sessions, reasons = r.reasons, facts = r.facts,
+                struggles = p.struggles, rituals = p.rituals, dismissed = p.dismissed.toSet(),
+                todayIso = Clock.dateIso(now), minute = GatewayInputs.minute(now),
+            )
+            gatewayMemo.value(key) { deriveGateway(key, now) }
+        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), GatewayDerived.EMPTY)
+    }
+
+    /** How many times the gateway derivation actually ran (memo diagnostics). */
+    internal val gatewayComputeCount: Int get() = gatewayMemo.computeCount
+
+    /** Clear the confirmation — only if it's still the one we set (a newer
+     *  action's ✓ must not be wiped by an older timer). */
+    fun clearMomentDone(confirmation: String) {
+        if (_momentDone.value == confirmation) _momentDone.value = null
+    }
+
+    private fun settleMoment(id: String, confirmation: String?) {
+        dismissMoment(id)
+        _momentDone.value = confirmation
+    }
+
+    /** Run one moment action. Dismiss/chat settle at once; the writing actions
+     *  (carry / schedule / create) reduce purely ([GatewayActions]) and apply
+     *  through [assistantApi] — committed before the ✓ shows. */
+    fun runMomentAction(moment: Moment, action: MomentAction) {
+        when (val run = action.run) {
+            MomentRun.Dismiss -> settleMoment(moment.id, null)
+            is MomentRun.Chat -> { settleMoment(moment.id, null); openAssistantWith(run.message) }
+            is MomentRun.Schedule -> launchWrite {
+                val api = assistantApi
+                val w = GatewayActions.schedule(run.taskId, run.date, run.time, api.getTasks(), api.getBlocks(), api.todayIso(), newUuid())
+                // A vanished task → no writes and no ✓; the moment is stale, so it
+                // retires quietly instead of fabricating a block for a ghost.
+                applyGatewayWrites(api, w)
+                settleMoment(moment.id, w.confirmation)
+            }
+            is MomentRun.CreateTask -> launchWrite {
+                val api = assistantApi
+                val w = GatewayActions.createTask(run.name, run.estimateMin, newUuid(), api.nowIso())
+                applyGatewayWrites(api, w)
+                settleMoment(moment.id, w.confirmation)
+            }
+            is MomentRun.CarryTasks -> launchWrite {
+                val api = assistantApi
+                val today = api.todayIso()
+                val w = GatewayActions.carryTasks(run.taskIds, api.getTasks(), api.getBlocks(), today, addDaysIso(today, 1), api.nowIso())
+                // Nothing was on today to carry: no ✓, and the moment stays up
+                // (it wasn't acted on).
+                val confirmation = w.confirmation ?: return@launchWrite
+                applyGatewayWrites(api, w)
+                settleMoment(moment.id, confirmation)
+            }
+        }
+    }
+
+    private suspend fun applyGatewayWrites(api: AssistantApi, w: GatewayWrites) {
+        for (b in w.blocks) api.upsertBlock(b)
+        for (t in w.tasks) api.upsertTask(t)
+    }
+
+    /** "Open the Assistant sheet" requests from the gateway (the composer, a
+     *  chip, a chat moment) — MainScaffold presents the sheet; the message
+     *  itself is already on its way through [sendAssistant]'s queue. */
+    private val _assistantOpenRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val assistantOpenRequests: SharedFlow<Unit> = _assistantOpenRequests.asSharedFlow()
+
+    /** The gateway hand-off: the sheet owns the thread, so open it and send the
+     *  text through the same queue a typed message takes (never dropped). */
+    fun openAssistantWith(text: String) {
+        val t = text.trim()
+        if (t.isEmpty()) return
+        _assistantOpenRequests.tryEmit(Unit)
+        sendAssistant(t)
+    }
+
+    // interview auto-open — exactly once per account, and only after BOTH the
+    // local facts have been read AND the server hydrate has applied the
+    // account's interview flag (plan F9: a tester onboarded on the web must
+    // never be greeted as a stranger here).
+    /** Feed on every change (facts emission, hydrate flip). True exactly once —
+     *  the moment the interview should open by itself. */
+    fun evaluateInterviewAutoOpen(factsLoaded: Boolean, factCount: Int): Boolean =
+        interviewAutoOpenGate.evaluate(
+            hydrated = _profileFactsHydrated.value, factsLoaded = factsLoaded, factCount = factCount,
+            done = _interviewDone.value, hasResumeStep = hasInterviewResumeStep(),
+        )
+
     /** The pure-ish half of [reconcileAssistantPrefs] (tested directly): [server] =
      *  the row as read (null = no row: never onboarded anywhere). */
     internal fun applyServerAssistantPrefs(uid: String, server: PreferencesClient.ServerUserPrefs?) {
@@ -2531,7 +2688,35 @@ class AppViewModel(
         } else if (_interviewDone.value) {
             pushInterviewDone(uid)
         }
+        // Onboarding struggles: the server row is the account's truth (picked on
+        // any platform); canonicalised on the way in, cached per account so the
+        // moments engine + the assistant context read them offline too.
+        server?.adhd_struggles?.let { applyStruggles(uid, it) }
     }
+
+    /** The whole hydrate hand-off, in order: the account's prefs land, THEN
+     *  [profileFactsHydrated] flips — the gateway's auto-open gate decides on that
+     *  flip (plan F9). One entry for the pull collector and the tests. */
+    internal fun completeAssistantHydrate(uid: String, server: PreferencesClient.ServerUserPrefs?) {
+        applyServerAssistantPrefs(uid, server)
+        _profileFactsHydrated.value = true
+    }
+
+    /** The pull collector's version of the same hand-off: fetch + apply
+     *  (best-effort — offline leaves the caches untouched), THEN flip. */
+    private suspend fun hydrateAssistantPrefs(uid: String) {
+        runCatching { reconcileAssistantPrefs(uid) }
+        _profileFactsHydrated.value = true
+    }
+
+    private fun applyStruggles(uid: String, raw: List<String>) {
+        val canonical = canonicalStruggles(raw)
+        _struggles.value = canonical
+        paPrefs.edit().putString(paKey(STRUGGLES_KEY, uid), canonical.joinToString("\n")).apply()
+    }
+
+    private fun decodeStruggles(raw: String?): List<String> =
+        raw?.split('\n')?.filter { it.isNotBlank() }?.let(::canonicalStruggles) ?: emptyList()
 
     /** Sign-out: the assistant's memory is personal by definition — wipe the local
      *  rows (the server keeps the account's facts) and every gateway cache, so the
@@ -2543,17 +2728,20 @@ class AppViewModel(
         _rituals.value = RitualPrefs.DEFAULTS
         _dismissedMoments.value = emptyList()
         _interviewDone.value = false
+        _struggles.value = emptyList()
         _profileFactsHydrated.value = false
+        _momentDone.value = null
+        interviewAutoOpenGate = InterviewAutoOpenGate()
     }
 
     // profile facts (app-facing sugar over the service)
 
-    suspend fun saveProfileFact(category: ProfileFactCategory, fact: String, source: ProfileFactSource, whenIso: String? = null): ProfileFact? =
+    override suspend fun saveProfileFact(category: ProfileFactCategory, fact: String, source: ProfileFactSource, whenIso: String?): ProfileFact? =
         profileFactsService.save(category, fact, source, whenIso)
 
-    suspend fun forgetProfileFact(id: String): Boolean = profileFactsService.remove(id)
+    override suspend fun forgetProfileFact(id: String): Boolean = profileFactsService.remove(id)
 
-    suspend fun forgetAllProfileFacts() = profileFactsService.clear()
+    override suspend fun forgetAllProfileFacts() = profileFactsService.clear()
 
     /** The name they asked to be called, if any (beats the account name). */
     fun preferredName(): String? = ProfileFactsLogic.preferredName(profileFacts.value)
@@ -3032,8 +3220,7 @@ class AppViewModel(
                     // profileFactsHydrated flips: the gateway's auto-open gate
                     // decides on that flip, and an already-onboarded user (done on
                     // the web, few synced facts) must never be greeted as a stranger.
-                    runCatching { reconcileAssistantPrefs(uid) }
-                    _profileFactsHydrated.value = true
+                    hydrateAssistantPrefs(uid)
                     runCatching { reconcileOnboarded(uid) }
                 }
             }
@@ -3046,6 +3233,8 @@ class AppViewModel(
         /** Gateway interview keys (web STORAGE_KEYS.GATEWAY_INTERVIEW_DONE / _STEP vocabulary). */
         internal const val INTERVIEW_DONE_KEY = "unstuck-gateway-interview-done"
         internal const val INTERVIEW_STEP_KEY = "unstuck-gateway-interview-step"
+        /** Per-account cache of `user_preferences.adhd_struggles` (canonical, newline-joined). */
+        internal const val STRUGGLES_KEY = "unstuck-adhd-struggles"
         private val ISO: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
         private val EXPORT_JSON = Json { prettyPrint = true; encodeDefaults = true }

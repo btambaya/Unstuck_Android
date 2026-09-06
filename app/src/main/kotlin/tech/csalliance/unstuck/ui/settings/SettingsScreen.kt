@@ -76,6 +76,8 @@ import tech.csalliance.unstuck.ui.feedback.FeedbackSheet
 import tech.csalliance.unstuck.ui.tour.TourAnchorIds
 import tech.csalliance.unstuck.ui.tour.TourEvents
 import tech.csalliance.unstuck.ui.tour.tourAnchor
+import tech.csalliance.unstuck.ui.assistant.FactsPanelContent
+import tech.csalliance.unstuck.ui.assistant.FactsPanelCopy
 
 enum class SettingsSection(val title: String, val eyebrow: String) {
     ACCOUNT("Your account.", "SETTINGS · ACCOUNT"),
@@ -84,6 +86,9 @@ enum class SettingsSection(val title: String, val eyebrow: String) {
     SOUND("Quiet by default.", "SETTINGS · SOUND"),
     A11Y("Adjust to your brain.", "SETTINGS · ACCESSIBILITY"),
     INTERFACE("How things look.", "SETTINGS · INTERFACE"),
+    /** The assistant's memory — every fact it has learned, editable and
+     *  deletable, plus which recurring moments it runs (web/iOS FactsPanel). */
+    MEMORY(FactsPanelCopy.TITLE, "SETTINGS · MEMORY"),
     BACKUP("Your data is yours.", "SETTINGS · BACKUP"),
     AREAS("One list. The whole life.", "SETTINGS · AREAS"),
     TAGS("Your tag vocabulary.", "SETTINGS · TAGS"),
@@ -91,7 +96,8 @@ enum class SettingsSection(val title: String, val eyebrow: String) {
 
 private val HUB = listOf(
     "Account" to SettingsSection.ACCOUNT, "People" to SettingsSection.PEOPLE, "Focus" to SettingsSection.FOCUS, "Sound" to SettingsSection.SOUND,
-    "Accessibility" to SettingsSection.A11Y, "Interface" to SettingsSection.INTERFACE, "Backup" to SettingsSection.BACKUP,
+    "Accessibility" to SettingsSection.A11Y, "Interface" to SettingsSection.INTERFACE,
+    FactsPanelCopy.NAV_TITLE to SettingsSection.MEMORY, "Backup" to SettingsSection.BACKUP,
     "Areas" to SettingsSection.AREAS, "Tags" to SettingsSection.TAGS,
 )
 
@@ -132,6 +138,7 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
                 SettingsSection.TAGS -> TagsContent(vm)
                 SettingsSection.ACCOUNT -> AccountContent(vm)
                 SettingsSection.PEOPLE -> ConnectionsContent(vm)
+                SettingsSection.MEMORY -> FactsPanelContent(vm)
                 SettingsSection.FOCUS -> SettingsCard {
                     SegRow("Default focus length", listOf("15", "25", "45"), s.focusDefaultMin.toString()) { v ->
                         vm.updateSettings { it.copy(focusDefaultMin = v.toIntOrNull() ?: 25) }

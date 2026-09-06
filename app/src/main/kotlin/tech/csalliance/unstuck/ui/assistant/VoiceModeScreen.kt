@@ -60,7 +60,9 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import tech.csalliance.unstuck.SettingsStore
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
@@ -150,7 +152,14 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
         starting = true
         val epoch = startEpoch
         viewModelScope.launch {
-            val prompt = runCatching { vm.voiceInstructionsAsync() to vm.voiceOpeningAsync() }.getOrNull()
+            // viewModelScope is Main.immediate; the builders are suspending but
+            // decode whole Room tables on the caller's dispatcher — hop to
+            // Default so the prompt build never runs on the main thread. The
+            // opening carries the first-contact interview branch (no saved
+            // facts yet) and the name-once / no-name rules from the builder.
+            val prompt = runCatching {
+                withContext(Dispatchers.Default) { vm.voiceInstructionsAsync() to vm.voiceOpeningAsync() }
+            }.getOrNull()
             starting = false
             if (epoch != startEpoch || sessionActive) return@launch   // ended (or restarted) while reading
             if (prompt == null) { fail("Couldn't start voice — try again."); return@launch }

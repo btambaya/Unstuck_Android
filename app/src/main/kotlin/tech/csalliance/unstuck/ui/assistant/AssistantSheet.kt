@@ -155,11 +155,9 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     val listState = rememberLazyListState()
 
     // Tool steps, the harness's hidden guard bounce (the fabricated claim + the
-    // corrective it answers) and the cut-off hint never render — the user never
-    // saw them, so the retry must read like a first answer.
-    val display = messages.filterIndexed { i, m ->
-        (m.role == "user" || m.role == "assistant") && !m.content.isNullOrBlank() && !isHiddenHarnessTurn(messages, i)
-    }
+    // corrective it answers), the cut-off hint and the model's per-round
+    // narration on tool_calls rounds never render (see visibleAssistantTurns).
+    val display = visibleAssistantTurns(messages)
     val hasHistory = display.isNotEmpty() || queued.isNotEmpty()
 
     // Flatten to rows so day dividers and receipts are first-class list items
@@ -504,6 +502,22 @@ private fun ReceiptCard(row: ThreadRow.ReceiptItem, onUndo: () -> Unit) {
         }
     }
 }
+
+/** The DISPLAY filter (1:1 with web lib/assistant/display.ts + iOS
+ *  AssistantModel.displayTurns). The persisted thread keeps every round — the
+ *  model needs its own tool_calls narration and the hidden bounces next
+ *  request — but a person sees only their bubbles, each turn's FINAL reply
+ *  (with its receipts) and the local check-in lines. Hidden: tool turns, the
+ *  guard bounce + the claim it answers, the cut-off hint, empty turns, and
+ *  every assistant round that CARRIES tool_calls — its text ("I'll get your
+ *  lists…", "Let me try the correct tool:") is the model narrating its next
+ *  step, which rendered as one bubble per round (tester round, iOS
+ *  2026-09-06: four bubbles for one question). */
+internal fun visibleAssistantTurns(messages: List<ChatMessage>): List<ChatMessage> =
+    messages.filterIndexed { i, m ->
+        (m.role == "user" || m.role == "assistant") && !m.content.isNullOrBlank() &&
+            m.toolCalls.isNullOrEmpty() && !isHiddenHarnessTurn(messages, i)
+    }
 
 /** The harness's hidden turns: the corrective bounce / cut-off hint (user role)
  *  and the fabricated claim the corrective answers (the assistant turn right

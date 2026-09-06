@@ -83,7 +83,7 @@ object AssistantHarnessRules {
     const val MAX_MODEL_WINDOW = ASSISTANT_MAX_MODEL_WINDOW
 
     /** Reads never disarm the fabrication guard and earn no receipt. */
-    val READ_ONLY_TOOLS: Set<String> = setOf("get_schedule", "get_tasks", "get_captures", "get_insights", "get_calls")
+    val READ_ONLY_TOOLS: Set<String> = setOf("get_schedule", "get_tasks", "get_captures", "get_lists", "get_insights", "get_calls")
 
     /** Tools that only NAVIGATE — no data changes, no staged card. Neither a
      *  write (they must not disarm the guard) nor "nothing changed" (the

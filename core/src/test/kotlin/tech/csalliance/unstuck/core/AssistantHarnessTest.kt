@@ -288,7 +288,7 @@ class AssistantHarnessTest {
     }
 
     @Test fun `the rules expose the contract's tool classes`() {
-        assertEquals(setOf("get_schedule", "get_tasks", "get_captures", "get_insights", "get_calls"), AssistantHarnessRules.READ_ONLY_TOOLS)
+        assertEquals(setOf("get_schedule", "get_tasks", "get_captures", "get_lists", "get_insights", "get_calls"), AssistantHarnessRules.READ_ONLY_TOOLS)
         assertEquals(setOf("open_screen"), AssistantHarnessRules.NAVIGATION_TOOLS)
         assertEquals(5, AssistantHarnessRules.MAX_ROUNDS)
         assertTrue(AssistantHarnessRules.writeToolSucceeded(listOf(HarnessToolCall("1", "share_task", "{}") to "ok: staged")))

@@ -31,7 +31,7 @@ private fun p(name: String, type: String, desc: String) = ToolProp(name, type, d
 private fun arr(name: String, itemType: String, desc: String) =
     ToolProp(name, "array", desc, buildJsonObject { put("type", itemType) })
 
-/** The 56 contract tools (base + profile + voice surfaces), in contract order. */
+/** The 57 contract tools (base + profile + voice surfaces), in contract order. */
 val ASSISTANT_TOOL_SPECS: List<ToolSpec> = listOf(
     ToolSpec("create_task", "Create a task.", listOf("name"), listOf(
         p("name", "string", "Task title."),
@@ -110,6 +110,9 @@ val ASSISTANT_TOOL_SPECS: List<ToolSpec> = listOf(
         p("body", "string", "The thought, verbatim."), p("tag", "string", "follow-up | idea | edit | question | distraction (default idea)."), p("taskId", "string", "Optional task it belongs to."),
     )),
     ToolSpec("get_captures", "List open captures in the inbox.", emptyList(), listOf(p("tag", "string", "Optional tag filter."))),
+    ToolSpec("get_lists", "Read the user's lists with their items and ids — use before answering \"what's in my lists\".", emptyList(), listOf(
+        p("listId", "string", "Optional list id to read in full."), p("includeArchived", "boolean", "Include archived lists (default false)."),
+    )),
     ToolSpec("promote_capture", "Turn a capture into a task.", listOf("captureId"), listOf(p("captureId", "string", "Capture id."))),
     ToolSpec("resolve_capture", "Mark a capture handled (leaves the inbox).", listOf("captureId"), listOf(p("captureId", "string", "Capture id."))),
     ToolSpec("delete_capture", "Delete a capture.", listOf("captureId"), listOf(p("captureId", "string", "Capture id."))),

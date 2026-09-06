@@ -317,7 +317,7 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
                             Box(
                                 place.height((WHOUR * (b.durationMinutes / 60f)).coerceAtLeast(13.dp))
                                     .clip(RoundedCornerShape(3.dp)).background(fill)
-                                    // Shared: dashed outline + owner-led label; tap → the read-only
+                                    // Shared: dashed outline + task-led label ("task · owner"); tap → the read-only
                                     // shared detail sheet (never the own-task detail, never create).
                                     .then(
                                         when {
@@ -371,7 +371,11 @@ private fun MonthView(vm: AppViewModel, onPickDay: (String) -> Unit) {
     val dows = listOf("M", "T", "W", "T", "F", "S", "S")
     val todayIso = Clock.todayIso()
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
+    // The month title + paging, the legend and the weekday row stay PINNED above the
+    // grid (as the Day view pins its date header) — only the grid scrolls, so paging
+    // months or reading a weekday column never needs a scroll back up. (Was one
+    // scrolling Column around everything: the header scrolled away with the grid.)
+    Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(ym.month.name.lowercase().replaceFirstChar { it.uppercase() } + " " + ym.year, style = UFont.serifItalic(24), color = c.ink, modifier = Modifier.weight(1f))
             Text("‹", style = UFont.serifItalic(24), color = c.ink2, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { ym = ym.minusMonths(1) }.padding(horizontal = 10.dp, vertical = 2.dp))
@@ -389,47 +393,51 @@ private fun MonthView(vm: AppViewModel, onPickDay: (String) -> Unit) {
         Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
             dows.forEach { Box(Modifier.weight(1f), contentAlignment = Alignment.Center) { Text(it, style = UFont.mono(10), color = c.ink4) } }
         }
-        Card(Modifier.fillMaxWidth(), radius = 18) {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                cells.chunked(7).forEach { week ->
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
-                        week.forEach { d ->
-                            if (d == null) {
-                                Box(Modifier.weight(1f).aspectRatio(1f))
-                            } else {
-                                val iso = d.toString()
-                                val v = byDay[iso] ?: 0
-                                val t = (v.toFloat() / max).coerceIn(0f, 1f)
-                                val isToday = iso == todayIso
-                                Box(
-                                    Modifier.weight(1f).aspectRatio(1f).clip(RoundedCornerShape(7.dp))
-                                        .background(if (isToday) c.coral else if (v == 0) c.bg2 else lerp(c.bg2, c.primary, 0.2f + 0.6f * t))
-                                        // Tap a day → open it in Day view.
-                                        .clickable(role = androidx.compose.ui.semantics.Role.Button) { onPickDay(iso) },
-                                    contentAlignment = Alignment.Center,
-                                ) {
-                                    val onDark = isToday || t > 0.5f
-                                    val ownHere = iso in ownPlannedDays
-                                    val sharedHere = iso in sharedPlannedDays
-                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                        Text("${d.dayOfMonth}", style = UFont.sans(11, FontWeight.SemiBold), color = if (onDark) c.bg else c.ink2, textAlign = TextAlign.Center)
-                                        // ● own blocks planned · ○ shared blocks (the owner's slot).
-                                        if (ownHere || sharedHere) {
-                                            val dot = if (onDark) c.bg else c.primaryDeep
-                                            Row(Modifier.padding(top = 1.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
-                                                if (ownHere) Box(Modifier.size(4.dp).clip(CircleShape).background(dot))
-                                                if (sharedHere) Box(Modifier.size(4.dp).clip(CircleShape).border(1.dp, dot, CircleShape))
+        Column(Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState())) {
+            Card(Modifier.fillMaxWidth(), radius = 18) {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    cells.chunked(7).forEach { week ->
+                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                            week.forEach { d ->
+                                if (d == null) {
+                                    Box(Modifier.weight(1f).aspectRatio(1f))
+                                } else {
+                                    val iso = d.toString()
+                                    val v = byDay[iso] ?: 0
+                                    val t = (v.toFloat() / max).coerceIn(0f, 1f)
+                                    val isToday = iso == todayIso
+                                    Box(
+                                        Modifier.weight(1f).aspectRatio(1f).clip(RoundedCornerShape(7.dp))
+                                            .background(if (isToday) c.coral else if (v == 0) c.bg2 else lerp(c.bg2, c.primary, 0.2f + 0.6f * t))
+                                            // Tap a day → open it in Day view.
+                                            .clickable(role = androidx.compose.ui.semantics.Role.Button) { onPickDay(iso) },
+                                        contentAlignment = Alignment.Center,
+                                    ) {
+                                        val onDark = isToday || t > 0.5f
+                                        val ownHere = iso in ownPlannedDays
+                                        val sharedHere = iso in sharedPlannedDays
+                                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                            Text("${d.dayOfMonth}", style = UFont.sans(11, FontWeight.SemiBold), color = if (onDark) c.bg else c.ink2, textAlign = TextAlign.Center)
+                                            // ● own blocks planned · ○ shared blocks (the owner's slot).
+                                            if (ownHere || sharedHere) {
+                                                val dot = if (onDark) c.bg else c.primaryDeep
+                                                Row(Modifier.padding(top = 1.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
+                                                    if (ownHere) Box(Modifier.size(4.dp).clip(CircleShape).background(dot))
+                                                    if (sharedHere) Box(Modifier.size(4.dp).clip(CircleShape).border(1.dp, dot, CircleShape))
+                                                }
                                             }
                                         }
                                     }
                                 }
                             }
+                            repeat(7 - week.size) { Box(Modifier.weight(1f).aspectRatio(1f)) }
                         }
-                        repeat(7 - week.size) { Box(Modifier.weight(1f).aspectRatio(1f)) }
                     }
                 }
             }
+            // Room for the floating assistant bubble, so the last week's Sat/Sun cells
+            // can scroll fully out from under it.
+            Box(Modifier.padding(36.dp)) {}
         }
-        Box(Modifier.padding(24.dp)) {}
     }
 }

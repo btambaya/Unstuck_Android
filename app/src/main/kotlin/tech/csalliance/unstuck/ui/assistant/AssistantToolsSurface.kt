@@ -250,6 +250,30 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             "ok: ${open.size} open capture${if (open.size == 1) "" else "s"}:\n${if (lines.isEmpty()) "(inbox empty)" else lines.joinToString("\n")}"
         }
 
+        "get_lists" -> {
+            // READ — the full set (context.lists carries only the first 12
+            // unarchived), one list in full, or the archived ones. There was no
+            // list-reading tool at all: the model guessed names for three rounds
+            // (tester round, iOS 2026-09-06). Result text 1:1 with tools.ts.
+            val wantId = args.str("listId")
+            val one = wantId?.let { findList(it, api, scratch) }
+            if (wantId != null && one == null) return "error: list not found"
+            val includeArchived = args.bool("includeArchived") ?: false
+            val lists = if (one != null) listOf(one) else api.getCollections().filter { includeArchived || it.archived != true }
+            if (lists.isEmpty()) return "ok: no lists yet"
+            val itemCap = if (one != null) 100 else 10
+            val lines = ArrayList<String>()
+            for (c in lists.take(20)) {
+                val done = c.items.count { it.done == true }
+                lines += "- \"${c.name}\" [id=${c.id}] — ${c.items.size - done} open${if (done > 0) ", $done done" else ""}${if (c.archived == true) " · archived" else ""}"
+                if (c.items.isEmpty()) { lines += "  (empty)"; continue }
+                for (i in c.items.take(itemCap)) lines += "  - ${i.body}${if (i.done == true) " (done)" else ""} [id=${i.id}]"
+                if (c.items.size > itemCap) lines += "  … and ${c.items.size - itemCap} more — get_lists listId=${c.id} for all"
+            }
+            if (lists.size > 20) lines += "… and ${lists.size - 20} more lists"
+            "ok: ${lists.size} list${if (lists.size == 1) "" else "s"}:\n${lines.joinToString("\n")}"
+        }
+
         "promote_capture" -> {
             val id = args.str("captureId")
             val c = api.getCaptures().firstOrNull { it.id == id } ?: return "error: capture not found"

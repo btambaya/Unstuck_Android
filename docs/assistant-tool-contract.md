@@ -14,7 +14,7 @@ This is the port spec for iOS and Android. The server prompt is **shared by ever
 1. **Executor is the only writer.** Every change goes through the same hook/store the UI uses (same sync, realtime, cascades). Result strings come from the executor, never from the model.
 2. **Tool loop.** Send messages + context → if the reply has `tool_calls`, execute each, append a `tool` message with the result, repeat (cap N rounds). Truncated tool-call JSON (finish_reason=length) → tell the model to split the call.
 3. **Fabrication guard.** If the reply has no tool calls, no write tool succeeded this turn, and the text *claims* an action (`looksLikeActionClaim`), hide that reply and bounce once with a hidden user-role message: `(integrity check from the app — not the user. The user did NOT see your last message. No tool was called THIS turn. If you are describing something done in an earlier turn, answer plainly without claiming to have just done it; if a new action is needed, call the right tool NOW. Then answer as if for the first time: no apology, no "I said", no "I didn\` If the retry's tool ran, strip any leftover self-correction (`stripSelfCorrection`) — the user never saw the claim.
-4. **Read-only tools** (get_schedule, get_tasks, get_captures, get_insights, get_calls) never count as "acted".
+4. **Read-only tools** (get_schedule, get_tasks, get_captures, get_lists, get_insights, get_calls) never count as "acted".
 5. **Receipts** are derived from execution (`deriveReceipt`), shown under the reply, with Undo where listed below. Never synthesise "Done" the model did not say.
 6. **Honest fallbacks.** Empty final text → the first receipt's label, or "Hmm, I lost my thread there — nothing was changed." Exhausted rounds → say what went through and what did not.
 7. **Deterministic saves.** "Don't use my name" / "call me X" are saved by the app (`detectStylePreference`) before the model sees the message; `share_task` only stages a confirm card; `delete_*` and `cancel_focus` need a spoken/typed confirmation per the prompt.
@@ -29,7 +29,7 @@ Conditional: `time`, `done`, `preferredName`, `nameUse`, `struggle`, `focusWindo
 
 Notes: `tasks` ≤ 60 open tasks with their NEXT live block (`scheduledDate/Time`), `week` ≤ 60 blocks, `lists` ≤ 12 × 25 items with ids, `captures` ≤ 12 open (ids), `people` = circle members with status, `focus` = the live session, `upcoming` = precomputed dates for tomorrow/each weekday/next Monday (the model must COPY these), `todayFree` = free windows for the rest of today.
 
-## Tools (56)
+## Tools (57)
 
 `*` = required argument. "Surface" says where the schema lives: **base** = shared server `TOOLS`, **profile** = server `PROFILE_TOOLS` (web today), **voice** = client `VOICE_TOOLS` (realtime). Result strings are templates: `${…}` are runtime values.
 
@@ -64,6 +64,7 @@ Notes: `tasks` ≤ 60 open tasks with their NEXT live block (`scheduledDate/Time
 | `cancel_focus` | profile · voice | write | Abandon the running focus session without logging it. | (none) | `error: no focus session is running`<br>`ok: cancelled the focus session (nothing logged). To finish and LOG a session, the user taps Done on the focus screen.` | yes (undo: delete_capture) |
 | `add_capture` | profile · voice | write | Save a capture (a passing thought) to the inbox — 'capture', NOT 'captcha'. | body*: string — The thought, verbatim.<br>tag: string — follow-up \| idea \| edit \| question \| distraction (default idea).<br>taskId: string — Optional task it belongs to. | `error: body required`<br>`ok: captured id=${c.id} [${tag}] "${c.body}"${t ?` | yes (undo: delete_capture) |
 | `get_captures` | profile · voice | read | List open captures in the inbox. | tag: string — Optional tag filter. | `- [${c.tag}] ${c.body} (id=${c.id}${t ?`<br>`ok: ${open.length} open capture${open.length === 1 ? '' : 's'}:\n${lines.join('\n') \|\| '(inbox empty)'}` | — |
+| `get_lists` | profile · voice | read | Read the user's lists with their items and ids — use before answering "what's in my lists". | listId: string — Optional list id to read in full.<br>includeArchived: boolean — Include archived lists (default false). | `error: list not found`<br>`ok: no lists yet`<br>`ok: ${lists.length} list${lists.length === 1 ? '' : 's'}:\n${lines.join('\n')}` | — |
 | `promote_capture` | profile · voice | write | Turn a capture into a task. | captureId*: string — Capture id. | `error: capture not found`<br>`ok: promoted capture to task id=${newId} name="${c.body}"` | yes (undo: delete_task) |
 | `resolve_capture` | profile · voice | write | Mark a capture handled (leaves the inbox). | captureId*: string — Capture id. | `error: capture not found`<br>`ok: resolved capture "${c.body}"` | yes |
 | `delete_capture` | profile · voice | write | Delete a capture. | captureId*: string — Capture id. | `error: capture not found`<br>`ok: deleted capture "${c.body}"` | yes |

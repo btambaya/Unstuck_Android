@@ -48,9 +48,9 @@ class ContractDiffTest {
         return out
     }
 
-    @Test fun `the contract lists 56 tools and the registry has exactly those`() {
+    @Test fun `the contract lists 57 tools and the registry has exactly those`() {
         val doc = parse(contract())
-        assertEquals(56, doc.size)
+        assertEquals(57, doc.size)
         assertEquals(doc.map { it.name }.toSet(), ASSISTANT_TOOL_NAMES)
         assertEquals("no duplicate specs", ASSISTANT_TOOL_SPECS.size, ASSISTANT_TOOL_NAMES.size)
     }
@@ -82,7 +82,7 @@ class ContractDiffTest {
 
     @Test fun `the voice schema carries every tool with the OpenAI function shape`() {
         val tools = voiceToolsJson()
-        assertEquals(56, tools.size)
+        assertEquals(57, tools.size)
         val names = tools.map { it.jsonObject["name"]!!.jsonPrimitive.content }.toSet()
         assertEquals(ASSISTANT_TOOL_NAMES, names)
         for (t in tools) {

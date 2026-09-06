@@ -709,6 +709,29 @@ class AssistantToolsTest {
         assertEquals("ok: 0 open captures:\n(inbox empty)", makeApi().run("get_captures"))
     }
 
+    @Test fun `get_lists reads lists with counts, items and ids, caps items at 10, honours listId and includeArchived`() = runTest {
+        assertEquals("ok: no lists yet", makeApi().run("get_lists"))
+        fun item(id: String, body: String, done: Boolean? = null) = CollectionItem(id, body, null, done, "2026-08-25T09:00:00.000Z")
+        val big = (1..12).map { item("i$it", "item $it") }
+        val h = makeApi {
+            collections += ItemCollection("l1", "Shopping", "indigo", null, listOf(item("i1", "milk"), item("i2", "eggs", done = true)), 0)
+            collections += ItemCollection("l2", "Old", "coral", null, emptyList(), 1, archived = true)
+            collections += ItemCollection("l3", "Big", "green", null, big, 2)
+        }
+        val ten = big.take(10).joinToString("\n") { "  - ${it.body} [id=${it.id}]" }
+        assertEquals(
+            "ok: 2 lists:\n- \"Shopping\" [id=l1] — 1 open, 1 done\n  - milk [id=i1]\n  - eggs (done) [id=i2]\n" +
+                "- \"Big\" [id=l3] — 12 open\n$ten\n  … and 2 more — get_lists listId=l3 for all",
+            h.run("get_lists"),
+        )
+        val archived = h.run("get_lists", "includeArchived" to true)
+        assertTrue(archived, archived.startsWith("ok: 3 lists:\n"))
+        assertTrue(archived, archived.contains("- \"Old\" [id=l2] — 0 open · archived\n  (empty)"))
+        assertEquals("ok: 1 list:\n- \"Big\" [id=l3] — 12 open\n" + big.joinToString("\n") { "  - ${it.body} [id=${it.id}]" }, h.run("get_lists", "listId" to "l3"))
+        assertEquals("error: list not found", h.run("get_lists", "listId" to "zz"))
+        assertTrue("a read never disarms the fabrication guard", "get_lists" in READ_ONLY_TOOLS)
+    }
+
     @Test fun `promote_capture creates a task from the body, links and archives the capture`() = runTest {
         val h = makeApi { captures += capture("c1", "Buy milk") }
         val r = h.run("promote_capture", "captureId" to "c1")
@@ -1051,7 +1074,9 @@ class AssistantToolsTest {
     @Test fun `call tools say so when calls are unavailable and unknown tools error`() = runTest {
         val h = makeApi()
         assertEquals(CallToolLogic.UNAVAILABLE, h.run("get_calls"))
-        assertEquals("error: unknown tool make_coffee", h.run("make_coffee"))
+        val unknown = h.run("make_coffee")
+        assertTrue(unknown, unknown.startsWith("error: unknown tool \"make_coffee\" — available: add_capture, add_to_list, archive_list, "))
+        assertTrue("names every real tool, so the model picks one next round", unknown.contains(", get_lists,"))
     }
 
     @Test fun `request_call books a standalone call, refuses a duplicate label, get_calls lists it, cancel_call cancels`() = runTest {

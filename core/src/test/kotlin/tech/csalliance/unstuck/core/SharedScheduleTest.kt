@@ -249,7 +249,10 @@ class SharedScheduleTest {
         assertEquals(listOf("earlier", "early", "late"), live.map { it.blockId })
     }
 
-    @Test fun `sharedBlockLabel leads with the owner`() {
-        assertEquals("anna · London weekend", sharedBlockLabel(block("b1", today)))
+    @Test fun `sharedBlockLabel leads with the task and the owner is the suffix`() {
+        assertEquals("London weekend · anna", sharedBlockLabel(block("b1", today)))
+        // A narrow chip can ask for the task alone; a blank title never yields an empty chip.
+        assertEquals("London weekend", sharedBlockLabel(block("b1", today), compact = true))
+        assertEquals("Shared task · anna", sharedBlockLabel(block("b1", today).copy(title = "  ")))
     }
 }

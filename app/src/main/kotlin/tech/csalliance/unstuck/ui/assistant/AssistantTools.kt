@@ -55,7 +55,7 @@ import java.time.ZoneId
 
 /** Tools that never change anything — a success here must NOT count as "the
  *  assistant acted" for either fabrication guard (text or voice). */
-val READ_ONLY_TOOLS: Set<String> = setOf("get_schedule", "get_tasks", "get_captures", "get_insights", "get_calls")
+val READ_ONLY_TOOLS: Set<String> = setOf("get_schedule", "get_tasks", "get_captures", "get_lists", "get_insights", "get_calls")
 
 /** Entities created THIS turn/session, so a later call (schedule_task after
  *  create_task) can reference them by id before the optimistic write has
@@ -208,8 +208,15 @@ suspend fun runAssistantTool(name: String, args: ToolArgs, api: AssistantApi, sc
     runCoreTool(name, args, api, scratch)?.let { return it }
     runSurfaceTool(name, args, api, scratch)?.let { return it }
     runCallTool(name, args, api, scratch)?.let { return it }
-    return "error: unknown tool $name"
+    return unknownToolResult(name)
 }
+
+/** Every tool the executor knows (the registry mirrors the executor 1:1), so
+ *  an unknown-tool result names the real options — the model picks one next
+ *  round instead of guessing again (three narrated guesses at a list-reading
+ *  tool, tester round 2026-09-06). Same wording on web + iOS. */
+fun unknownToolResult(name: String): String =
+    "error: unknown tool \"$name\" — available: ${ASSISTANT_TOOL_NAMES.sorted().joinToString(", ")}"
 
 /** The base (pre-2026-09-02) tools: tasks, schedule, lists, profile, sharing. */
 private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi, scratch: TurnScratch): String? {

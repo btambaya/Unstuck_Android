@@ -13,7 +13,7 @@ import androidx.compose.ui.unit.dp
 
 /** Dashed rounded outline — the calendars' "this block is someone else's" mark on a
  *  shared block (migration 052). Own blocks keep their solid 1dp border, so the two
- *  read differently at a glance even before the owner-led label. Draws inside the
+ *  read differently at a glance even before the "· owner" suffix on the label. Draws inside the
  *  bounds (half the stroke inset) so the clip never eats the dashes. */
 fun Modifier.dashedBorder(color: Color, width: Dp, radius: Dp): Modifier = drawBehind {
     val w = width.toPx()

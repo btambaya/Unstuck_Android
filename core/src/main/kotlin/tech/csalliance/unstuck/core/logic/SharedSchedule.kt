@@ -241,5 +241,13 @@ fun liveSharedBlocks(blocks: List<SharedBlock>): List<SharedBlock> =
     blocks.filter { !it.skipped && it.kind != "external" }
         .sortedWith(compareBy({ it.date }, { it.startTime }))
 
-/** "Anna · London weekend" — the owner leads so a glance says whose it is. */
-fun sharedBlockLabel(b: SharedBlock): String = "${shareFirstName(b.ownerName)} · ${b.title}"
+/** "London weekend · Anna" — the TASK leads, the owner is a suffix. Every calendar
+ *  chip is one clipped line and a week column is narrow, so whatever comes first is
+ *  all that survives: owner-first left a recipient reading "anna odu · L…" with no
+ *  idea what was planned (the dashed outline already says it's someone else's).
+ *  `compact` drops the owner entirely for a surface with no room for a suffix.
+ *  Same rule on web (`sharedBlockLabel`) + iOS (UnstuckCore `sharedBlockLabel`). */
+fun sharedBlockLabel(b: SharedBlock, compact: Boolean = false): String {
+    val task = b.title.trim().ifEmpty { "Shared task" }
+    return if (compact) task else "$task · ${shareFirstName(b.ownerName)}"
+}

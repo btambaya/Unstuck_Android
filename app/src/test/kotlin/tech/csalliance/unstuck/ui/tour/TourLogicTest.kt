@@ -668,22 +668,94 @@ class TourLogicTest {
         fun step(id: String) = FULL_STEPS.first { it.id == id }
         // Targeted + no-target steps: lockdown regardless of the settings state.
         for (id in listOf("today", "first-action", "focus", "reentry", "welcome", "calendar", "captures")) {
-            assertTrue(tourScrimConsumesInput(step(id), settingsOpen = false))
-            assertTrue(tourScrimConsumesInput(step(id), settingsOpen = true))
+            for (open in listOf(null) + SettingsSection.values()) assertTrue(tourScrimConsumesInput(step(id), openSection = open))
         }
-        assertTrue(tourScrimConsumesInput(ESSENTIAL_STEPS.first { it.id == "capture" }, settingsOpen = false))
+        assertTrue(tourScrimConsumesInput(ESSENTIAL_STEPS.first { it.id == "capture" }, openSection = null))
         // The assistant step CONSUMES input: its sheet renders in its OWN
         // window ABOVE the blockers, so it stays interactive while open —
         // same as the reentry step; the app beneath stays locked.
-        assertTrue(tourScrimConsumesInput(step("assistant"), settingsOpen = false))
-        assertTrue(tourScrimConsumesInput(step("assistant"), settingsOpen = true))
-        // Settings steps: the exemption is LIVE, not per-step — interactive
-        // only while the surface is actually open (nav stack contains
-        // Settings); closing it mid-step re-applies the lockdown.
-        assertFalse(tourScrimConsumesInput(step("notifications"), settingsOpen = true))
-        assertFalse(tourScrimConsumesInput(step("personalization"), settingsOpen = true))
-        assertTrue(tourScrimConsumesInput(step("notifications"), settingsOpen = false))
-        assertTrue(tourScrimConsumesInput(step("personalization"), settingsOpen = false))
+        assertTrue(tourScrimConsumesInput(step("assistant"), openSection = null))
+        assertTrue(tourScrimConsumesInput(step("assistant"), openSection = SettingsSection.FOCUS))
+        // Settings steps: the exemption is LIVE, not per-step, and SCOPED to
+        // the step's OWN section — interactive only while that SettingsSub
+        // route is topmost; closing it mid-step re-applies the lockdown.
+        assertFalse(tourScrimConsumesInput(step("notifications"), openSection = SettingsSection.FOCUS))
+        assertFalse(tourScrimConsumesInput(step("personalization"), openSection = SettingsSection.INTERFACE))
+        assertTrue(tourScrimConsumesInput(step("notifications"), openSection = null))
+        assertTrue(tourScrimConsumesInput(step("personalization"), openSection = null))
+    }
+
+    @Test
+    fun settingsExemptionNeverUnlocksTheAccountOrAnyOtherSection() {
+        // The lockdown hole: with the whole Settings surface exempt, one back
+        // tap from the spotlighted section reached the hub → Account → Sign
+        // out / Delete my account / Export from inside a guided demo. Now ONLY
+        // the step's own section is exempt; the hub (openSection = null) and
+        // every other section stay locked.
+        val notifications = FULL_STEPS.first { it.id == "notifications" }
+        val personalization = FULL_STEPS.first { it.id == "personalization" }
+        assertEquals(SettingsSection.FOCUS, tourSettingsSection(notifications.section))
+        assertEquals(SettingsSection.INTERFACE, tourSettingsSection(personalization.section))
+        for (section in SettingsSection.values()) {
+            assertEquals(
+                "notifications step: only FOCUS is exempt (got $section)",
+                section != SettingsSection.FOCUS,
+                tourScrimConsumesInput(notifications, openSection = section),
+            )
+            assertEquals(
+                "personalization step: only INTERFACE is exempt (got $section)",
+                section != SettingsSection.INTERFACE,
+                tourScrimConsumesInput(personalization, openSection = section),
+            )
+        }
+        // The danger section is locked on BOTH settings steps, explicitly.
+        assertTrue(tourScrimConsumesInput(notifications, openSection = SettingsSection.ACCOUNT))
+        assertTrue(tourScrimConsumesInput(personalization, openSection = SettingsSection.ACCOUNT))
+        assertTrue(tourScrimConsumesInput(notifications, openSection = SettingsSection.BACKUP))
+        // The hub itself (no SettingsSub topmost) is locked too.
+        assertTrue(tourScrimConsumesInput(notifications, openSection = null))
+    }
+
+    @Test
+    fun appContentIsHiddenFromAccessibilityWheneverTheTourHoldsTheLock() {
+        val today = ESSENTIAL_STEPS.first { it.id == "today" }
+        val assistant = ESSENTIAL_STEPS.first { it.id == "assistant" }
+        val notifications = ESSENTIAL_STEPS.first { it.id == "notifications" }
+        // A welcome/resume card up → hidden regardless of the running policy.
+        assertTrue(tourHidesAppContent(cardUp = true, running = false, policy = null))
+        // Not running, no card → nothing hidden.
+        assertFalse(tourHidesAppContent(cardUp = false, running = false, policy = null))
+        // Running with a consuming scrim (display-only cutout) → hidden: a
+        // screen reader must not be able to activate the spotlighted hero.
+        assertTrue(tourHidesAppContent(false, true, tourLockdownPolicy(today, openSection = null, overlayAboveTour = false)))
+        // The assistant/reentry cutout is interactive by touch, but the
+        // content beneath is still hidden (the panel's CTA opens the sheet).
+        assertTrue(tourHidesAppContent(false, true, tourLockdownPolicy(assistant, openSection = null, overlayAboveTour = false)))
+        // A focus takeover above the tour → full blocker → hidden.
+        assertTrue(tourHidesAppContent(false, true, tourLockdownPolicy(today, openSection = null, overlayAboveTour = true)))
+        // The ONE reachable frame — the step's own settings section, live and
+        // exempt — stays reachable by screen reader too.
+        assertFalse(tourHidesAppContent(false, true, tourLockdownPolicy(notifications, openSection = SettingsSection.FOCUS, overlayAboveTour = false)))
+        // …but not when the user has popped to the hub / another section.
+        assertTrue(tourHidesAppContent(false, true, tourLockdownPolicy(notifications, openSection = null, overlayAboveTour = false)))
+        assertTrue(tourHidesAppContent(false, true, tourLockdownPolicy(notifications, openSection = SettingsSection.ACCOUNT, overlayAboveTour = false)))
+    }
+
+    @Test
+    fun foregroundReturnRepresentsTheSurfaceButNeverRestartsNarration() {
+        // A step change does everything: navigate, reset per-step state, and
+        // (re)load the narration.
+        assertEquals(
+            TourPresentation(navigate = true, resetStepState = true, reloadAudio = true),
+            tourPresentation(TourPresentTrigger.STEP_CHANGE),
+        )
+        // Returning to the foreground (navEpoch) only re-navigates: a paused
+        // or finished narration must not blare again from 0:00, and the demo
+        // capture sheet keeps its half-typed text.
+        assertEquals(
+            TourPresentation(navigate = true, resetStepState = false, reloadAudio = false),
+            tourPresentation(TourPresentTrigger.FOREGROUND_RETURN),
+        )
     }
 
     @Test
@@ -713,15 +785,15 @@ class TourLogicTest {
         // Normal frames follow the per-step rules — no degrade.
         assertEquals(
             TourLockdownPolicy(consumeInput = true, cutoutInteractive = false, degradeToFullBlocker = false),
-            tourLockdownPolicy(today, settingsOpen = false, overlayAboveTour = false),
+            tourLockdownPolicy(today, openSection = null, overlayAboveTour = false),
         )
         assertEquals(
             TourLockdownPolicy(consumeInput = true, cutoutInteractive = true, degradeToFullBlocker = false),
-            tourLockdownPolicy(assistant, settingsOpen = false, overlayAboveTour = false),
+            tourLockdownPolicy(assistant, openSection = null, overlayAboveTour = false),
         )
         assertEquals(
             TourLockdownPolicy(consumeInput = false, cutoutInteractive = false, degradeToFullBlocker = false),
-            tourLockdownPolicy(notifications, settingsOpen = true, overlayAboveTour = false),
+            tourLockdownPolicy(notifications, openSection = SettingsSection.FOCUS, overlayAboveTour = false),
         )
         // A Focus takeover above the anchored surface: EVERY step degrades to
         // the whisper scrim + one full-screen blocker — no stale hole can leak
@@ -729,7 +801,7 @@ class TourLogicTest {
         for (s in FULL_STEPS + ESSENTIAL_STEPS) {
             assertEquals(
                 TourLockdownPolicy(consumeInput = true, cutoutInteractive = false, degradeToFullBlocker = true),
-                tourLockdownPolicy(s, settingsOpen = true, overlayAboveTour = true),
+                tourLockdownPolicy(s, openSection = SettingsSection.FOCUS, overlayAboveTour = true),
             )
         }
     }

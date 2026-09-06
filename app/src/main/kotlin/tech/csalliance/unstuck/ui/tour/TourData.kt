@@ -1,9 +1,13 @@
 package tech.csalliance.unstuck.ui.tour
 
 import android.content.Context
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import tech.csalliance.unstuck.ui.settings.SettingsSection
 
 // Guided onboarding tour — step data, canned Q&A, persistence, and the pure
 // placement rules. A VERBATIM port of the web components/tour/tour-data.ts
@@ -346,6 +350,22 @@ object TourEvents {
     private val _restarts = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     val restarts: SharedFlow<Unit> = _restarts.asSharedFlow()
     fun requestRestart() { _restarts.tryEmit(Unit) }
+
+    /** LIVE: a tour run is up (TourHost RUNNING). Published for surfaces the
+     *  tour can never be allowed to reach even through a lockdown exemption —
+     *  Settings keeps Sign out / Delete my account / Export (+ the account
+     *  edits) disabled while this is true. Compose state; reset when the host
+     *  leaves composition (sign-out). */
+    var running by mutableStateOf(false)
+        internal set
+
+    /** LIVE: the app content beneath the tour is locked THIS frame (a card is
+     *  up, or the run's scrim is consuming input). MainScaffold clears the
+     *  semantics of the underlying content while true, so a screen reader can
+     *  neither traverse nor ACTIVATE anything under the scrim — the pointer
+     *  blockers alone never stopped accessibility clicks. */
+    var contentLocked by mutableStateOf(false)
+        internal set
 }
 
 /* ============================================================
@@ -507,19 +527,21 @@ fun tourMoreAudioResName(stepId: String): String = tourAudioResName(stepId) + "_
  * #4 Spotlight-only lockdown: while the tour runs, ONLY the spotlighted
  * element (the scrim cut-out, where interactive — see [tourCutoutInteractive])
  * and the tour panel are interactive — the dim scrim panels swallow taps AND
- * scrolls. EXCEPTION — LIVE, not per-step: a step that OPENED a surface as its
- * subject keeps that surface interactive only while it is actually open:
+ * scrolls. EXCEPTION — LIVE, not per-step, and SCOPED to the step's subject:
  *  • the assistant step's sheet renders in its OWN window ABOVE the blockers,
  *    so it stays interactive regardless — the scrim keeps consuming input
  *    beneath it (same as the reentry step);
- *  • settings-view steps pass the live "settings surface still open" state
- *    (the nav stack contains Settings) — open → no blockers, the surface stays
- *    interactive; the moment the user closes it mid-step the lockdown
- *    re-applies (the tour panel stays reachable above the blockers — never a
- *    full-app unlock).
+ *  • settings-view steps pass the settings SECTION currently on top of the nav
+ *    stack ([openSection], null when no SettingsSub route is topmost). The
+ *    exemption applies ONLY while the step's OWN section (the spotlighted
+ *    Focus / Interface screen — [tourSettingsSection]) is the topmost route:
+ *    popping back to the Settings hub, or into any other section (Account:
+ *    Sign out / Delete my account / Export; Backup; People…), re-applies the
+ *    lockdown immediately (the tour panel stays reachable above the blockers
+ *    — never a full-app unlock, never the whole Settings surface).
  */
-fun tourScrimConsumesInput(step: TourStep, settingsOpen: Boolean): Boolean =
-    !(step.view == TourView.SETTINGS && settingsOpen)
+fun tourScrimConsumesInput(step: TourStep, openSection: SettingsSection?): Boolean =
+    !(step.view == TourView.SETTINGS && openSection != null && openSection == tourSettingsSection(step.section))
 
 /** Cutout policy (cross-platform decision): the scrim cut-out is INTERACTIVE
  *  only on the assistant/reentry steps — their cutout is the assistant bubble,
@@ -544,16 +566,52 @@ data class TourLockdownPolicy(
     val degradeToFullBlocker: Boolean,
 )
 
-fun tourLockdownPolicy(step: TourStep, settingsOpen: Boolean, overlayAboveTour: Boolean): TourLockdownPolicy =
+fun tourLockdownPolicy(step: TourStep, openSection: SettingsSection?, overlayAboveTour: Boolean): TourLockdownPolicy =
     if (overlayAboveTour) {
         TourLockdownPolicy(consumeInput = true, cutoutInteractive = false, degradeToFullBlocker = true)
     } else {
         TourLockdownPolicy(
-            consumeInput = tourScrimConsumesInput(step, settingsOpen),
+            consumeInput = tourScrimConsumesInput(step, openSection),
             cutoutInteractive = tourCutoutInteractive(step),
             degradeToFullBlocker = false,
         )
     }
+
+/**
+ * Accessibility lockdown (pure): whether the app content BENEATH the tour must
+ * be hidden from screen readers this frame. The pointer blockers never stopped
+ * TalkBack — an accessibility click invokes the node's semantics action
+ * directly, so a user could traverse under the scrim and ACTIVATE the
+ * display-only spotlighted hero (minting a real focus session mid-tour), the
+ * bottom nav, the FAB… Hidden whenever a tour card is up, or the run's scrim is
+ * consuming input. The ONE frame the content is reachable by touch — the
+ * step's own settings section, live and exempt — stays reachable by screen
+ * reader too (consumeInput=false). The assistant/reentry cutout (the bubble) is
+ * hidden along with the rest: the panel's own primary CTA opens the same
+ * sheet, so nothing is lost.
+ */
+fun tourHidesAppContent(cardUp: Boolean, running: Boolean, policy: TourLockdownPolicy?): Boolean =
+    cardUp || (running && policy?.consumeInput == true)
+
+/**
+ * What a step (re)presentation does, by trigger (pure). A STEP change
+ * navigates, resets the per-step state (pause-confirm, ask focus, two-tap
+ * assistant, demo capture sheet) and (re)loads narration. A FOREGROUND return
+ * only re-presents the surface: MainScaffold's ON_STOP reset put the app back
+ * on Today while the tour kept RUNNING on its step, so the step must
+ * re-navigate — but the narration is NOT touched (a deliberately paused or
+ * finished clip must never restart from 0:00 at full volume; the audio
+ * controller's "pausing a step never force-resumes THAT step" rule), and the
+ * demo capture sheet keeps its half-typed text.
+ */
+enum class TourPresentTrigger { STEP_CHANGE, FOREGROUND_RETURN }
+
+data class TourPresentation(val navigate: Boolean, val resetStepState: Boolean, val reloadAudio: Boolean)
+
+fun tourPresentation(trigger: TourPresentTrigger): TourPresentation = when (trigger) {
+    TourPresentTrigger.STEP_CHANGE -> TourPresentation(navigate = true, resetStepState = true, reloadAudio = true)
+    TourPresentTrigger.FOREGROUND_RETURN -> TourPresentation(navigate = true, resetStepState = false, reloadAudio = false)
+}
 
 /** #6: the focus + capture steps present the tour's own DEMO focus surface
  *  (under the panel/spotlight, over the scrim) — never the real one. */

@@ -123,6 +123,23 @@ object FocusCopilot {
 
     const val OVERRUN_CAP = 2
 
+    // --- TTS sequencing (pure timing helper for the wiring layer) ---
+
+    /**
+     * How long the wiring may wait for the platform TTS "utterance finished"
+     * callback before assuming it will never come, in milliseconds. The listen
+     * window for a QUESTION milestone must open only AFTER the line has been
+     * spoken (otherwise the recognizer transcribes the coach's own "…stop, or
+     * keep going?" and resolves it to Stop), so this is deliberately generous:
+     * a slow engine must finish before it fires. ~150 wpm ≈ 400 ms/word, padded
+     * to 450 ms/word plus a fixed 2.5 s allowance for engine start-up latency;
+     * floor 3 s, ceiling 20 s. Pure and identical across platforms.
+     */
+    fun speechFallbackMs(text: String): Long {
+        val words = text.trim().split(Regex("\\s+")).count { it.isNotBlank() }
+        return (words * 450L + 2_500L).coerceIn(3_000L, 20_000L)
+    }
+
     // --- spoken lines ({n} = whole minutes) ---
 
     /** The line spoken for [milestone] given the block [estimateMin] and the

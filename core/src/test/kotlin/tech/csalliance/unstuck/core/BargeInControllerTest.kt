@@ -336,6 +336,28 @@ class BargeInControllerTest {
     }
 
     @Test
+    fun `hold-to-talk empty-buffer commit error is non-fatal, open-mic buffer error is reported`() {
+        // Too-short press: commit rejected ("buffer too small") — back to the hold
+        // prompt, NOT a dead ERROR screen (mic, socket and comm mode are all live).
+        val c = controller(holdToTalk = true)
+        c.handle(BargeInEvent.PttDown)
+        val up = c.handle(BargeInEvent.PttUp)
+        assertTrue(up.contains(BargeInCommand.Ui(BargeInUi.THINKING)))
+        val out = c.handle(BargeInEvent.Error("input_audio_buffer commit failed: buffer too small"))
+        assertFalse(out.has<BargeInCommand.ReportError>())
+        assertTrue(out.contains(BargeInCommand.Ui(BargeInUi.LISTENING)))
+        assertEquals(BargeInUi.LISTENING, c.ui)
+        // Still in hold mode; the next press works as usual.
+        assertTrue(c.handle(BargeInEvent.PttDown).contains(BargeInCommand.ForceGate(true)))
+        assertTrue(BargeInController.isEmptyBufferError("Buffer is empty"))
+        assertFalse(BargeInController.isEmptyBufferError("invalid_request_error"))
+        // Open mic: a buffer error is a real protocol fault and IS surfaced.
+        val o = controller()
+        val err = o.handle(BargeInEvent.Error("buffer too small"))
+        assertEquals(1, err.count<BargeInCommand.ReportError>())
+    }
+
+    @Test
     fun `auto-suggest hold-to-talk after 3 false barge-ins within 2 minutes`() {
         val c = controller()
         speaking(c)

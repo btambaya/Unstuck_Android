@@ -1,7 +1,10 @@
 package tech.csalliance.unstuck.ui.assistant
 
 import android.annotation.SuppressLint
+import android.content.BroadcastReceiver
 import android.content.Context
+import android.content.Intent
+import android.content.IntentFilter
 import android.media.AudioAttributes
 import android.media.AudioDeviceCallback
 import android.media.AudioDeviceInfo
@@ -18,9 +21,11 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import androidx.core.content.ContextCompat
 import tech.csalliance.unstuck.SettingsStore
 import tech.csalliance.unstuck.core.logic.BargeInController
 import tech.csalliance.unstuck.core.logic.BargeInProfile
+import tech.csalliance.unstuck.core.logic.HoldToTalkLatch
 import tech.csalliance.unstuck.core.logic.RmsGate
 import tech.csalliance.unstuck.core.logic.VoiceRoute
 import java.nio.ByteBuffer
@@ -53,7 +58,13 @@ import kotlin.concurrent.thread
 //    written − head ≤ 0, then a 300 ms tail) — NOT from write() returning, which
 //    only means "buffered". That is the playback_drained event.
 // 5. Duck = track.setVolume(0.25) (-12 dB) with a short ramp; restore = 1.0.
-class VoiceAudioEngine(private val context: Context) {
+// 6. Hold-to-talk release is applied by the CAPTURE thread at the next frame
+//    boundary (HoldToTalkLatch), so the frame being read when the finger lifted
+//    is still appended and the commit queued with afterCaptureDrain() follows it.
+//
+// `open` so the realtime client's unit tests can substitute a fake engine
+// (no AudioRecord/AudioTrack under Robolectric); production always uses this class.
+open class VoiceAudioEngine(private val context: Context) {
     companion object {
         const val IN_RATE = 16_000
         const val OUT_RATE = 24_000
@@ -149,12 +160,7 @@ class VoiceAudioEngine(private val context: Context) {
                 echoProne = target == null || target.type == AudioDeviceInfo.TYPE_BUILTIN_SPEAKER
             }
         } else {
-            @Suppress("DEPRECATION")
-            runCatching {
-                val onHeadset = am.isWiredHeadsetOn || am.isBluetoothScoOn || am.isBluetoothA2dpOn
-                if (!onHeadset) am.isSpeakerphoneOn = true
-                echoProne = !onHeadset
-            }
+            applyRoutePreS()
         }
         if (!initial && before != echoProne) {
             recalibrate = true // the mic's acoustic floor changed with the route
@@ -162,10 +168,110 @@ class VoiceAudioEngine(private val context: Context) {
         }
     }
 
+    // ── pre-S (API 26–30) routing ──
+    // VOICE_COMMUNICATION audio never rides A2DP: a connected Bluetooth headset
+    // only carries the call once a SCO link is up. So a BT headset is treated as
+    // LOW_ECHO ONLY after ACTION_SCO_AUDIO_STATE_UPDATED reports CONNECTED; until
+    // then (and if SCO fails) we stay hands-free on the loudspeaker rather than
+    // silently talking into the earpiece with the built-in mic.
+    private var scoReceiver: BroadcastReceiver? = null
+    @Volatile private var scoStarted = false
+    @Volatile private var scoConnected = false
+    @Volatile private var scoFailed = false
+
+    @Suppress("DEPRECATION")
+    private fun applyRoutePreS() {
+        runCatching {
+            val wired = am.isWiredHeadsetOn
+            // isBluetoothA2dpOn can read false once we're in MODE_IN_COMMUNICATION
+            // (A2DP isn't a voice route), so also look at the attached output devices.
+            val btPresent = am.isBluetoothA2dpOn || am.isBluetoothScoOn ||
+                runCatching { am.getDevices(AudioManager.GET_DEVICES_OUTPUTS) }.getOrNull()
+                    ?.any { it.type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP || it.type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO } == true
+            when {
+                wired -> {
+                    stopSco()
+                    am.isSpeakerphoneOn = false
+                    echoProne = false
+                }
+                btPresent && scoConnected -> {
+                    am.isSpeakerphoneOn = false
+                    echoProne = false
+                }
+                btPresent && !scoFailed && am.isBluetoothScoAvailableOffCall -> {
+                    // Ask for the SCO link; loudspeaker meanwhile (the receiver flips
+                    // the route to the headset the moment the link is up).
+                    if (!scoStarted) {
+                        scoStarted = true
+                        registerScoReceiver()
+                        am.startBluetoothSco()
+                    }
+                    am.isSpeakerphoneOn = true
+                    echoProne = true
+                }
+                else -> {
+                    am.isSpeakerphoneOn = true
+                    echoProne = true
+                }
+            }
+        }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun registerScoReceiver() {
+        if (scoReceiver != null) return
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(ctx: Context?, intent: Intent?) {
+                if (!commActive) return
+                when (intent?.getIntExtra(AudioManager.EXTRA_SCO_AUDIO_STATE, AudioManager.SCO_AUDIO_STATE_ERROR)) {
+                    AudioManager.SCO_AUDIO_STATE_CONNECTED -> {
+                        runCatching { am.isBluetoothScoOn = true }
+                        scoConnected = true
+                        applyRoute()
+                    }
+                    AudioManager.SCO_AUDIO_STATE_ERROR -> {
+                        scoFailed = true
+                        scoConnected = false
+                        runCatching { am.isBluetoothScoOn = false }
+                        applyRoute()
+                    }
+                    AudioManager.SCO_AUDIO_STATE_DISCONNECTED -> {
+                        // The sticky initial DISCONNECTED (and the CONNECTING→…
+                        // sequence) precede CONNECTED; only a drop AFTER we were
+                        // connected means the headset went away.
+                        if (scoConnected) {
+                            scoConnected = false
+                            scoFailed = true
+                            runCatching { am.isBluetoothScoOn = false }
+                            applyRoute()
+                        }
+                    }
+                }
+            }
+        }
+        runCatching {
+            ContextCompat.registerReceiver(
+                context, r, IntentFilter(AudioManager.ACTION_SCO_AUDIO_STATE_UPDATED),
+                null, mainHandler, ContextCompat.RECEIVER_NOT_EXPORTED,
+            )
+        }.onSuccess { scoReceiver = r }
+    }
+
+    @Suppress("DEPRECATION")
+    private fun stopSco() {
+        if (scoStarted) {
+            scoStarted = false
+            runCatching { am.stopBluetoothSco() }
+            runCatching { am.isBluetoothScoOn = false }
+        }
+        scoConnected = false
+    }
+
     private fun registerRouteCallback() {
         if (deviceCallback != null) return
         val cb = object : AudioDeviceCallback() {
-            override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>?) { if (commActive) applyRoute() }
+            // A new device may be a headset that can carry SCO — allow a fresh attempt.
+            override fun onAudioDevicesAdded(added: Array<out AudioDeviceInfo>?) { if (commActive) { scoFailed = false; applyRoute() } }
             override fun onAudioDevicesRemoved(removed: Array<out AudioDeviceInfo>?) { if (commActive) applyRoute() }
         }
         runCatching { am.registerAudioDeviceCallback(cb, mainHandler) }
@@ -178,7 +284,13 @@ class VoiceAudioEngine(private val context: Context) {
         deviceCallback?.let { runCatching { am.unregisterAudioDeviceCallback(it) } }
         deviceCallback = null
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) runCatching { am.clearCommunicationDevice() }
-        else @Suppress("DEPRECATION") runCatching { am.isSpeakerphoneOn = false }
+        else {
+            stopSco()
+            scoReceiver?.let { runCatching { context.unregisterReceiver(it) } }
+            scoReceiver = null
+            scoFailed = false
+            @Suppress("DEPRECATION") runCatching { am.isSpeakerphoneOn = false }
+        }
         focusRequest?.let { runCatching { am.abandonAudioFocusRequest(it) } }
         focusRequest = null
         runCatching { am.mode = savedMode }
@@ -195,17 +307,45 @@ class VoiceAudioEngine(private val context: Context) {
     // Gate control flags, written by the owner, consumed on the capture thread
     // (the RmsGate itself is only ever touched there).
     @Volatile private var recalibrate = false
-    @Volatile private var gateForced = false
     /** Hold-to-talk: when true, frames are appended ONLY while the orb is pressed. */
     @Volatile var holdToTalk = false
-    @Volatile private var pttPressed = false
+    /** Press applies now; release at the next frame boundary (see file header §6). */
+    private val latch = HoldToTalkLatch()
+    /** The read loop is running (distinct from [capturing], which is the STOP flag —
+     *  a loop that died on a read error leaves capturing=true until stopCapture). */
+    @Volatile private var captureLoopAlive = false
 
     /** Hold-to-talk press/release: force the gate open (flushes the 300 ms pre-roll)
-     *  or release it. While released in hold mode nothing is appended at all. */
-    fun forceGate(open: Boolean) { pttPressed = open; gateForced = open }
+     *  or release it. A release is applied by the capture thread AFTER the frame in
+     *  flight is appended, so the tail of the utterance is never cut. While released
+     *  in hold mode nothing is appended at all. */
+    open fun forceGate(open: Boolean) {
+        if (open) latch.press() else latch.release()
+        if (!captureLoopAlive) latch.releaseNow().forEach { runCatching { it() } }
+    }
+
+    /** Run [block] once every frame captured while the orb was held has been handed
+     *  to onFrame — on the capture thread, right behind the last append (this is
+     *  where hold-to-talk's commit goes). Runs immediately when no capture loop is
+     *  alive, so a dead mic can't strand the caller. */
+    open fun afterCaptureDrain(block: () -> Unit) {
+        latch.afterDrain(block)
+        if (!captureLoopAlive) latch.releaseNow().forEach { runCatching { it() } }
+    }
+
+    /** Every startCapture failure goes through here: no dangling comm mode / focus /
+     *  speakerphone, and the owner ALWAYS hears about it (a silent return would let
+     *  the session proceed to "Listening…" with a dead microphone). */
+    private fun bailCapture(rec: AudioRecord?) {
+        releaseEffects()
+        rec?.let { runCatching { it.release() } }
+        record = null
+        exitCommMode()
+        onCaptureError?.invoke()
+    }
 
     @SuppressLint("MissingPermission")
-    fun startCapture(onFrame: (ByteArray) -> Unit) {
+    open fun startCapture(onFrame: (ByteArray) -> Unit) {
         if (capturing) return
         if (!enterCommMode()) { onCaptureError?.invoke(); return }
         val frameBytes = IN_RATE / 10 * 2 // 100ms mono pcm16 = 3200 bytes
@@ -216,71 +356,83 @@ class VoiceAudioEngine(private val context: Context) {
                 AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT,
                 maxOf(minBuf, frameBytes * 2),
             )
-        }.getOrNull() ?: return
-        if (rec.state != AudioRecord.STATE_INITIALIZED) { runCatching { rec.release() }; return }
+        }.getOrNull()
+        // Constructor threw / init failed: the mic is held elsewhere or the OEM
+        // refuses VOICE_COMMUNICATION capture in this mode.
+        if (rec == null || rec.state != AudioRecord.STATE_INITIALIZED) { bailCapture(rec); return }
         record = rec
         enableEffects(rec.audioSessionId)
         runCatching { rec.startRecording() }
         if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
             // Mic is held by another app (or start failed): bail instead of letting
             // the read loop spin on error codes at full CPU.
-            releaseEffects()
-            runCatching { rec.release() }
-            record = null
-            onCaptureError?.invoke()
+            bailCapture(rec)
             return
         }
         capturing = true
+        captureLoopAlive = true
         captureThread = thread(name = "voice-capture") {
             val buf = ByteArray(frameBytes)
             val sub = ShortArray(RmsGate.SUB_FRAME_SAMPLES)
             val gate = RmsGate()
             // Worst case per 100 ms read: 5 live sub-frames + the 300 ms pre-roll.
             val out = ByteBuffer.allocate((RmsGate.PRE_ROLL_SUB_FRAMES + 6) * SUB_FRAME_BYTES).order(ByteOrder.LITTLE_ENDIAN)
-            while (capturing) {
-                val n = rec.read(buf, 0, buf.size)
-                if (n < 0) { // recorder died (e.g. mic stolen) — fatal, don't spin
-                    if (capturing) onCaptureError?.invoke()
-                    break
-                }
-                if (n <= 0) continue
-                if (recalibrate) { recalibrate = false; gate.reset() }
-                if (gate.forcedOpen != gateForced) gate.forceOpen(gateForced)
+            try {
+                while (capturing) {
+                    // Frame boundary: the previous read (the one the finger may have
+                    // lifted during) is already appended — apply a pending hold-to-talk
+                    // release now and run what was waiting for that audio (the commit).
+                    for (d in latch.frameBoundary()) runCatching { d() }
+                    val n = rec.read(buf, 0, buf.size)
+                    if (n < 0) { // recorder died (e.g. mic stolen) — fatal, don't spin
+                        if (capturing) onCaptureError?.invoke()
+                        break
+                    }
+                    if (n <= 0) continue
+                    if (recalibrate) { recalibrate = false; gate.reset() }
+                    val pttPressed = latch.pressed
+                    if (gate.forcedOpen != pttPressed) gate.forceOpen(pttPressed)
 
-                val prof = profile
-                val playing = playbackQueued()
-                // Hard half-duplex fallback profile: drop mic frames while the model
-                // plays (+tail) and swallow gate events — residual echo must reach
-                // neither the server nor the barge-in controller on this route.
-                val dropForEcho = !prof.assistedDuplex && echoProne && playing
-                // Hold-to-talk while released: append nothing (null VAD needs no
-                // silence) and never let energy open the gate — the press does that,
-                // flushing the pre-roll the gate keeps filling meanwhile.
-                val dropReleased = holdToTalk && !pttPressed
-                val margin = if (dropReleased) NEVER_OPEN_MARGIN_DB else prof.gateMargin(playing)
-                val respActive = responseActive
+                    val prof = profile
+                    val playing = playbackQueued()
+                    // Hard half-duplex fallback profile: drop mic frames while the model
+                    // plays (+tail) and swallow gate events — residual echo must reach
+                    // neither the server nor the barge-in controller on this route.
+                    val dropForEcho = !prof.assistedDuplex && echoProne && playing
+                    // Hold-to-talk while released: append nothing (null VAD needs no
+                    // silence) and never let energy open the gate — the press does that,
+                    // flushing the pre-roll the gate keeps filling meanwhile.
+                    val dropReleased = holdToTalk && !pttPressed
+                    val margin = if (dropReleased) NEVER_OPEN_MARGIN_DB else prof.gateMargin(playing)
+                    val respActive = responseActive
 
-                out.clear()
-                var opened = false
-                var closed = false
-                var off = 0
-                while (off + SUB_FRAME_BYTES <= n) {
-                    ByteBuffer.wrap(buf, off, SUB_FRAME_BYTES).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(sub)
-                    val g = gate.process(sub, margin, playing, respActive)
-                    // Serialize NOW: an open gate hands back `sub` itself, which the
-                    // next iteration overwrites (pre-roll entries are private copies).
-                    for (f in g.emit) for (s in f) out.putShort(s)
-                    opened = opened || g.opened
-                    closed = closed || g.closed
-                    off += SUB_FRAME_BYTES
+                    out.clear()
+                    var opened = false
+                    var closed = false
+                    var off = 0
+                    while (off + SUB_FRAME_BYTES <= n) {
+                        ByteBuffer.wrap(buf, off, SUB_FRAME_BYTES).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(sub)
+                        val g = gate.process(sub, margin, playing, respActive)
+                        // Serialize NOW: an open gate hands back `sub` itself, which the
+                        // next iteration overwrites (pre-roll entries are private copies).
+                        for (f in g.emit) for (s in f) out.putShort(s)
+                        opened = opened || g.opened
+                        closed = closed || g.closed
+                        off += SUB_FRAME_BYTES
+                    }
+                    if (dropForEcho || dropReleased) continue
+                    if (!holdToTalk) {
+                        if (opened) onGateOpen?.invoke()
+                        if (closed) onGateClose?.invoke()
+                    }
+                    if (out.position() == 0) continue // still calibrating (first 500 ms)
+                    onFrame(out.array().copyOf(out.position()))
                 }
-                if (dropForEcho || dropReleased) continue
-                if (!holdToTalk) {
-                    if (opened) onGateOpen?.invoke()
-                    if (closed) onGateClose?.invoke()
-                }
-                if (out.position() == 0) continue // still calibrating (first 500 ms)
-                onFrame(out.array().copyOf(out.position()))
+            } finally {
+                captureLoopAlive = false
+                // Nothing will ever drain now: release whatever is waiting so a
+                // commit queued in the same instant the mic died isn't lost.
+                for (d in latch.releaseNow()) runCatching { d() }
             }
         }
     }
@@ -298,7 +450,7 @@ class VoiceAudioEngine(private val context: Context) {
         runCatching { agc?.release() }; agc = null
     }
 
-    fun stopCapture() {
+    open fun stopCapture() {
         capturing = false
         captureThread?.join(300); captureThread = null
         releaseEffects()
@@ -327,13 +479,13 @@ class VoiceAudioEngine(private val context: Context) {
     @Volatile private var gainTarget = 1f
 
     /** Model audio still queued, buffered in the track, or inside the post-drain tail. */
-    fun playbackQueued(): Boolean = playing && (queue.isNotEmpty() || drainPending)
+    open fun playbackQueued(): Boolean = playing && (queue.isNotEmpty() || drainPending)
 
     /** True while the model's audio is (or just was) playing — gates the mic on the
      *  hard half-duplex fallback profile. */
-    fun outputBusy(): Boolean = playbackQueued()
+    open fun outputBusy(): Boolean = playbackQueued()
 
-    fun startPlayback() {
+    open fun startPlayback() {
         if (playing) return
         if (!enterCommMode()) return // capture's bail surfaces the error
         val minBuf = AudioTrack.getMinBufferSize(OUT_RATE, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT)
@@ -408,13 +560,13 @@ class VoiceAudioEngine(private val context: Context) {
         }
     }
 
-    fun enqueue(pcm: ByteArray) {
+    open fun enqueue(pcm: ByteArray) {
         if (playing && pcm.isNotEmpty()) { drainPending = true; queue.offer(pcm) }
     }
 
     /** Barge-in: drop queued audio + cut current playback immediately. Called from the
      *  WS reader thread; serialized against the playback thread's write() via trackLock. */
-    fun flushPlayback() {
+    open fun flushPlayback() {
         queue.clear()
         synchronized(trackLock) {
             // flush() resets the head position to 0 — restart our frame count with it.
@@ -426,10 +578,10 @@ class VoiceAudioEngine(private val context: Context) {
     }
 
     /** Duck the reply to -12 dB (×0.25) while a possible barge-in is confirmed. */
-    fun duck() = rampGain(BargeInController.DUCK_GAIN, BargeInController.DUCK_RAMP_MS)
+    open fun duck() = rampGain(BargeInController.DUCK_GAIN, BargeInController.DUCK_RAMP_MS)
 
     /** Back to unity for the rest of this reply / the next one. */
-    fun restore() = rampGain(1f, BargeInController.RESTORE_RAMP_MS)
+    open fun restore() = rampGain(1f, BargeInController.RESTORE_RAMP_MS)
 
     // AudioTrack has no built-in ramp; 4 evenly spaced steps on the main handler
     // (setVolume is thread-safe). A newer target cancels an in-flight ramp.
@@ -445,7 +597,7 @@ class VoiceAudioEngine(private val context: Context) {
         }
     }
 
-    fun stopPlayback() {
+    open fun stopPlayback() {
         playing = false
         queue.offer(poison)
         playThread?.interrupt(); playThread?.join(300); playThread = null
@@ -457,5 +609,5 @@ class VoiceAudioEngine(private val context: Context) {
         queue.clear()
     }
 
-    fun shutdown() { stopCapture(); stopPlayback(); exitCommMode() }
+    open fun shutdown() { stopCapture(); stopPlayback(); exitCommMode() }
 }

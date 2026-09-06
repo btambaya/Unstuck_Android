@@ -2,6 +2,8 @@ package tech.csalliance.unstuck.ui.focus
 
 import android.content.Context
 import android.media.AudioManager
+import android.os.Handler
+import android.os.Looper
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
@@ -11,6 +13,19 @@ import tech.csalliance.unstuck.core.logic.FocusEffect
 import tech.csalliance.unstuck.core.logic.FocusMilestone
 import tech.csalliance.unstuck.surface.AmbientAudio
 import tech.csalliance.unstuck.ui.assistant.SpeechSurface
+
+/** The ambient-loop ducking seam: [AmbientAudio] in production, a recorder in
+ *  unit tests (so "ambient is restored after every speak" is assertable). */
+interface AmbientDucker {
+    fun duck()
+    fun unduck()
+}
+
+/** Production ducker — the focus screen's ambient loop. */
+object AmbientAudioDucker : AmbientDucker {
+    override fun duck() = AmbientAudio.duck()
+    override fun unduck() = AmbientAudio.unduck()
+}
 
 /**
  * Hands-Free Focus Copilot — Phase 1 controller (:app wiring).
@@ -25,6 +40,17 @@ import tech.csalliance.unstuck.ui.assistant.SpeechSurface
  * saveCapture). It ducks the ambient loop while speaking/listening and restores
  * it after.
  *
+ * TTS SEQUENCING (the coach must never hear itself): the listen window opens
+ * ONLY from the speech surface's per-utterance completion — never at the same
+ * instant the question starts playing — so the recognizer cannot transcribe
+ * "…stop, or keep going?" and resolve the coach's own voice to Stop. A
+ * generous fallback timer ([FocusCopilot.speechFallbackMs]) covers an engine
+ * that never reports completion; a missing/refused engine completes at once
+ * (VoiceController). The TTS init race (first line of a session buffered until
+ * the engine is ready) is covered by the same mechanism: the completion is
+ * attached to the buffered utterance and fires only once it was actually
+ * spoken.
+ *
  * Guardrails (all enforced here):
  *  - ZERO LLM/network: this class has NO assistant/network dependency. The only
  *    "brain" is the pure FocusCopilot; effects route through plain callbacks.
@@ -33,7 +59,12 @@ import tech.csalliance.unstuck.ui.assistant.SpeechSurface
  *    indicator the UI shows.
  *  - Cadence respected, no double-fire (the fired set / overrun count gate it),
  *    overrun capped at 2, keepGoing suppresses overrun.
+ *  - A milestone never fires on top of a live listen window, a live push-to-talk
+ *    CAPTURE window, or a line still being spoken — it is DEFERRED (left
+ *    unfired) so the next quiet tick delivers it, never dropped.
  *  - Doesn't speak if muted / on a call / disabled.
+ *  - Ambient ducking is ALWAYS restored: speak-only lines restore on completion,
+ *    question lines hand over to the listen window which restores on close.
  *  - FAIL-SAFE: every TTS/STT/permission call is wrapped — any failure degrades
  *    silently to the existing visual buttons and NEVER stops/corrupts the timer.
  *  - No voice command deletes data (only stop/extend/keepGoing/capture).
@@ -59,6 +90,10 @@ class FocusCopilotController(
     // Push-to-talk capture result — wired to a transient on-screen confirm
     // ("Captured." / "Didn't catch that."). Optional; pure local callback.
     private val onCaptureResult: (CaptureResult) -> Unit = {},
+    private val ambient: AmbientDucker = AmbientAudioDucker,
+    /** Main-thread scheduler for the speech-completion fallback (tests drive
+     *  it through Robolectric's paused looper). */
+    private val handler: Handler = Handler(Looper.getMainLooper()),
 ) {
     /** Outcome of a push-to-talk capture window, for the transient UI confirm. */
     enum class CaptureResult { SAVED, EMPTY }
@@ -73,6 +108,10 @@ class FocusCopilotController(
     var capturing by mutableStateOf(false)
         private set
 
+    /** True while a coach line is being spoken (until the speech surface reports
+     *  completion, or the fallback fires). Milestones defer behind it. */
+    val speaking: Boolean get() = pendingSpeech != null
+
     /** True if the on-device speech recognizer is available (gates the button). */
     val captureAvailable: Boolean get() = runCatching { voice.sttAvailable }.getOrDefault(false)
 
@@ -81,6 +120,11 @@ class FocusCopilotController(
     private var overrunCount = 0
     private var keepGoing = false
     private var lastSpokenAtSec = -100 // throttle so two milestones don't talk over each other
+
+    /** The single in-flight utterance's continuation + its fallback timer.
+     *  QUEUE_FLUSH semantics: a newer line replaces (and silently drops) it. */
+    private class PendingSpeech(val then: () -> Unit) { lateinit var fallback: Runnable }
+    private var pendingSpeech: PendingSpeech? = null
 
     /** Reset for a fresh session (or on pause/end teardown). Idempotent. */
     fun reset() {
@@ -95,9 +139,10 @@ class FocusCopilotController(
     fun stopAll() {
         listening = false
         capturing = false
+        cancelPendingSpeech()
         runCatching { voice.stopListening() }
         runCatching { voice.stopSpeaking() }
-        runCatching { AmbientAudio.unduck() }
+        runCatching { ambient.unduck() }
     }
 
     /**
@@ -117,7 +162,11 @@ class FocusCopilotController(
         voiceReplies: Boolean,
     ) = runCatching {
         if (!enabled) return@runCatching
-        if (listening) return@runCatching // never start a new prompt mid-listen
+        // Never start a new prompt mid-listen, mid-CAPTURE (a milestone must not
+        // destroy the user's dictation recognizer, dictate the coach's line into
+        // it, or parse the dictation as a command), or mid-speech. The due
+        // milestone stays unfired and lands on the next quiet tick.
+        if (listening || capturing || speaking) return@runCatching
         val due = FocusCopilot.dueMilestone(estimateMin, level, focusedSec, fired, overrunCount, keepGoing)
             ?: return@runCatching
         // Don't talk on top of a just-spoken line (defensive against bunched ticks).
@@ -132,11 +181,12 @@ class FocusCopilotController(
         markFired(due)
 
         val line = FocusCopilot.line(due, estimateMin, focusedSec)
-        speak(line)
-
-        // Statements (HALFWAY) are speak-only. Questions optionally open the mic.
+        // Statements (HALFWAY) are speak-only. Questions optionally open the mic —
+        // ONLY once the line has actually been spoken (see the header).
         if (due.isQuestion && voiceReplies) {
-            openListenWindow(focusedSec)
+            speak(line, then = { openListenWindow() })
+        } else {
+            speak(line)
         }
     }.getOrElse {
         // Any failure: degrade silently — the focus timer + visual buttons are unaffected.
@@ -177,36 +227,41 @@ class FocusCopilotController(
      *  - The transcript is fed ONLY to the pure [FocusCopilot.captureFromTranscript]
      *    and then to [onCapture]; it is NEVER run through [parseCommand], stored, or
      *    transmitted. (So "I should stop procrastinating" saves verbatim.)
+     *  - A coach line still being spoken is cut first (the user's tap wins), so
+     *    the dictation never transcribes the coach's voice.
      */
     fun toggleCapture() = runCatching {
         if (capturing) { cancelCapture(); return@runCatching }
         if (listening) return@runCatching // don't fight a live voice-reply window
         if (!voice.sttAvailable) return@runCatching
+        cancelPendingSpeech()
+        runCatching { voice.stopSpeaking() }
         capturing = true
-        AmbientAudio.duck()
+        ambient.duck()
         voice.startListening(
             onPartial = { /* live transcript — shown nowhere, never stored */ },
             onFinal = { text -> handleCaptureTranscript(text) },
             onDone = {
-                // Always restore on close (ok / error / timeout / cancel).
+                // Always restore on close (ok / error / timeout / cancel) — unless
+                // the confirm ack is already speaking (it restores on completion).
                 capturing = false
-                runCatching { AmbientAudio.unduck() }
+                if (!speaking) runCatching { ambient.unduck() }
             },
         )
     }.getOrElse {
         // Any failure: degrade silently — the focus timer is unaffected.
         capturing = false
-        runCatching { AmbientAudio.unduck() }
+        runCatching { ambient.unduck() }
     }
 
     /** Cancel an in-flight capture window without saving anything. */
     fun cancelCapture() = runCatching {
         capturing = false
         runCatching { voice.stopListening() }
-        runCatching { AmbientAudio.unduck() }
+        runCatching { ambient.unduck() }
     }.getOrElse {
         capturing = false
-        runCatching { AmbientAudio.unduck() }
+        runCatching { ambient.unduck() }
     }
 
     /**
@@ -229,31 +284,63 @@ class FocusCopilotController(
 
     // --- voice plumbing (all fail-safe) ---
 
-    private fun speak(text: String) = runCatching {
+    /**
+     * Speak [text] with the ambient ducked, then run [then] ONCE when the speech
+     * surface reports the utterance finished — or when the fallback timer fires
+     * first (an engine that never calls back). The default continuation restores
+     * the ambient loop, so a speak-only line can never leave it ducked. A newer
+     * speak() supersedes an older one (its continuation is dropped, mirroring
+     * QUEUE_FLUSH); [stopAll] cancels outright.
+     */
+    private fun speak(text: String, then: () -> Unit = { runCatching { ambient.unduck() } }) = runCatching {
         if (text.isBlank()) return@runCatching
-        AmbientAudio.duck()
-        voice.speak(text)
-        // We don't get a reliable TTS-done callback through VoiceController; the
-        // ambient is restored when the listen window closes, or here for speak-only.
-    }.getOrElse { runCatching { AmbientAudio.unduck() } }
+        cancelPendingSpeech()
+        ambient.duck()
+        val pending = PendingSpeech(then)
+        val complete: () -> Unit = {
+            // Only the CURRENT utterance's completion counts — a superseded or
+            // cancelled one is a no-op (its timer was removed; a late engine
+            // callback for it lands here and is ignored).
+            if (pendingSpeech === pending) {
+                pendingSpeech = null
+                handler.removeCallbacks(pending.fallback)
+                runCatching { pending.then() }
+            }
+        }
+        pending.fallback = Runnable { complete() }
+        pendingSpeech = pending
+        handler.postDelayed(pending.fallback, FocusCopilot.speechFallbackMs(text))
+        voice.speak(text) { complete() }
+    }.getOrElse {
+        cancelPendingSpeech()
+        runCatching { ambient.unduck() }
+    }
 
-    private fun openListenWindow(@Suppress("UNUSED_PARAMETER") atSec: Int) = runCatching {
-        if (!voice.sttAvailable) { runCatching { AmbientAudio.unduck() }; return@runCatching }
+    /** Drop the in-flight continuation + its timer without running it. */
+    private fun cancelPendingSpeech() {
+        pendingSpeech?.let { runCatching { handler.removeCallbacks(it.fallback) } }
+        pendingSpeech = null
+    }
+
+    private fun openListenWindow() = runCatching {
+        if (!voice.sttAvailable) { runCatching { ambient.unduck() }; return@runCatching }
         listening = true
-        AmbientAudio.duck()
+        ambient.duck()
         voice.startListening(
             onPartial = { /* live transcript — shown nowhere, never stored */ },
             onFinal = { text -> handleUtterance(text) },
             onDone = {
-                // Always restore on close (ok or error/timeout). The recognizer's own
-                // end-of-speech / error timeout bounds the window to a few seconds.
+                // Always restore on close (ok or error/timeout) — unless an ack is
+                // already speaking (it restores on completion). The recognizer's
+                // own end-of-speech / error timeout bounds the window to a few
+                // seconds.
                 listening = false
-                runCatching { AmbientAudio.unduck() }
+                if (!speaking) runCatching { ambient.unduck() }
             },
         )
     }.getOrElse {
         listening = false
-        runCatching { AmbientAudio.unduck() }
+        runCatching { ambient.unduck() }
     }
 
     private fun markFired(m: FocusMilestone) {

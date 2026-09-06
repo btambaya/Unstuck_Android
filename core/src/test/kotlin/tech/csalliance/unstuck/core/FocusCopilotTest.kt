@@ -458,6 +458,24 @@ class FocusCopilotTest {
         assertEquals("done with the easy part", FocusCopilot.captureFromTranscript("done with the easy part"))
     }
 
+    @Test fun speechFallbackMs_isGenerousAndBounded() {
+        // The listen window may only open AFTER the question was spoken, so the
+        // fallback (used only when the TTS "done" callback never arrives) must
+        // comfortably outlast a slow engine: 9 words → 9*450 + 2500 = 6550 ms.
+        assertEquals(6_550L, FocusCopilot.speechFallbackMs("That's your block. Add five, stop, or keep going?"))
+        // Floor 3 s (a one-word ack still waits for engine start-up latency).
+        assertEquals(3_000L, FocusCopilot.speechFallbackMs("Captured."))
+        assertEquals(3_000L, FocusCopilot.speechFallbackMs(""))
+        // Ceiling 20 s — a pathological line can't stall the session for good.
+        assertEquals(20_000L, FocusCopilot.speechFallbackMs(List(80) { "word" }.joinToString(" ")))
+        // Every real milestone line waits longer than a normal reading of it.
+        for (m in FocusMilestone.values()) {
+            val line = FocusCopilot.line(m, 25, 25 * 60)
+            val words = line.split(" ").size
+            assertTrue(FocusCopilot.speechFallbackMs(line) > words * 400L)
+        }
+    }
+
     @Test fun coreModule_hasNoNetworkOrLlmDependency() {
         // Structural guarantee: :core declares no Android / Supabase / HTTP /
         // assistant dependency (see core/build.gradle.kts — only kotlinx

@@ -237,7 +237,9 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
         if (granted) startMic() else micPermission.launch(Manifest.permission.RECORD_AUDIO)
     }
 
-    var voiceOpen by remember { mutableStateOf(false) }
+    // Saveable so a configuration change (rotation / fold / theme / locale)
+    // brings the voice screen back onto its still-live session (VoiceSessionHolder).
+    var voiceOpen by rememberSaveable { mutableStateOf(false) }
     if (voiceOpen) VoiceModeScreen(vm) { voiceOpen = false }
 
     Column(Modifier.fillMaxWidth().fillMaxHeight(0.86f).imePadding()) {

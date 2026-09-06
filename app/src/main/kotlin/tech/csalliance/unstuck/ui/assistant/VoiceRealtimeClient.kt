@@ -88,6 +88,8 @@ class VoiceRealtimeClient(
     private val onSuggestHoldToTalk: () -> Unit = {},
     /** Devices whose AEC leaves enough echo to self-trigger fall back to hard half-duplex on the speaker. */
     private val speakerHalfDuplex: Boolean = false,
+    /** Test seam: where sockets come from (production = the shared OkHttpClient). */
+    private val socketFactory: WebSocket.Factory = http,
 ) {
     companion object {
         // One client for ALL voice sessions — each OkHttpClient owns a dispatcher
@@ -110,9 +112,17 @@ class VoiceRealtimeClient(
 
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val mainHandler = Handler(Looper.getMainLooper())
-    private var ws: WebSocket? = null
+    @Volatile private var ws: WebSocket? = null
     @Volatile private var open = false
     @Volatile private var stopped = false
+
+    /** The socket is up (session.update sent) and stop() hasn't run. A server-side
+     *  error leaves this true — the session is still usable (the screen keeps the
+     *  orb gesture on that basis). */
+    val isOpen: Boolean get() = open && !stopped
+
+    /** stop() has run (by the UI, focus loss, or a capture failure) — a new session needs a new client. */
+    val isStopped: Boolean get() = stopped
 
     // The barge-in state machine. Events arrive from the WS reader thread, the
     // capture thread (gate), the playback thread (drain), the main thread (route
@@ -150,11 +160,19 @@ class VoiceRealtimeClient(
                 put("audio", Base64.encodeToString(frame, Base64.NO_WRAP))
             }.toString())
         }
+        // A synchronous capture failure (mic held by another app, focus denied
+        // during a call) has already stop()ped us from inside onCaptureError:
+        // never dial — the proxy session would open with nobody able to close it
+        // (a "Listening…" zombie holding one of the user's concurrent-session slots).
+        if (stopped) return
         val req = Request.Builder()
             .url(proxyUrl.replace(Regex("\\?.*$"), "") + "?model=" + model)
             .header("Authorization", "Bearer $token")
             .build()
-        ws = http.newWebSocket(req, listener)
+        val socket = socketFactory.newWebSocket(req, listener)
+        ws = socket
+        // stop() raced the dial (it saw ws == null): tear this one down ourselves.
+        if (stopped) { ws = null; runCatching { socket.cancel() } }
     }
 
     fun stop() {
@@ -227,7 +245,12 @@ class VoiceRealtimeClient(
             BargeInCommand.ShowCaption -> payload?.let { onCaption("assistant", it, false) }
             // The screen clears the reply line on a "user" caption (new user turn).
             BargeInCommand.ClearCaption -> onCaption("user", "", true)
-            BargeInCommand.CommitAndRespond -> {
+            // Hold-to-talk release: the frame being read when the finger lifted is
+            // still in the capture thread — commit only once it has been appended
+            // (the engine runs this on that thread, right behind the last append),
+            // so the tail of the utterance is never cut and a short tap still sends
+            // the audio it covered.
+            BargeInCommand.CommitAndRespond -> audio.afterCaptureDrain {
                 send(buildJsonObject { put("type", "input_audio_buffer.commit") })
                 send(buildJsonObject { put("type", "response.create") })
             }
@@ -252,6 +275,10 @@ class VoiceRealtimeClient(
 
     private val listener = object : WebSocketListener() {
         override fun onOpen(webSocket: WebSocket, response: Response) {
+            // stop() ran while the handshake was in flight (capture failed, focus
+            // lost, user left): the socket it couldn't see must not become a live
+            // session nobody owns — close it here instead of greeting into the void.
+            if (stopped) { runCatching { webSocket.close(1000, "bye") }; return }
             open = true
             webSocket.send(sessionUpdate())
             audio.startPlayback()
@@ -320,7 +347,9 @@ class VoiceRealtimeClient(
         }
 
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
-            open = false; mainHandler.removeCallbacks(tick); audio.shutdown()
+            open = false
+            if (stopped) return // already torn down by stop(); keep its CLOSED, don't paint an ERROR over it
+            mainHandler.removeCallbacks(tick); audio.shutdown()
             val code = response?.code
             val body = runCatching { response?.body?.string() }.getOrNull()
             val msg = when {
@@ -332,7 +361,9 @@ class VoiceRealtimeClient(
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
-            open = false; mainHandler.removeCallbacks(tick); audio.shutdown(); onState(VoiceState.CLOSED)
+            open = false
+            if (stopped) return // stop() already shut audio down and reported CLOSED
+            mainHandler.removeCallbacks(tick); audio.shutdown(); onState(VoiceState.CLOSED)
         }
     }
 

@@ -47,6 +47,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -240,8 +241,11 @@ private fun BackupContent(vm: AppViewModel) {
         if (uri != null) runCatching { (context.contentResolver.openOutputStream(uri) ?: error("no output stream")).use { it.write(vm.exportJson().toByteArray()) } }
             .fold({ msg = "Exported."; msgErr = false }, { msg = "Export failed."; msgErr = true })
     }
+    // Guided tour: never reachable mid-run (the lockdown exemption is scoped to
+    // the step's own section, and this row stays disabled even so).
+    val tourRunning = TourEvents.running
     SettingsCard {
-        SettingRow("Export everything", "A full JSON snapshot of your data.", last = true) { exporter.launch("unstuck-export.json") }
+        SettingRow("Export everything", "A full JSON snapshot of your data.", last = true, enabled = !tourRunning) { exporter.launch("unstuck-export.json") }
     }
     Text("Your data is yours — export a complete copy any time.", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 10.dp))
     msg?.let { Text(it, style = UFont.sans(12), color = if (msgErr) c.red else c.green, modifier = Modifier.padding(top = 8.dp)) }
@@ -268,10 +272,16 @@ private fun AccountContent(vm: AppViewModel) {
         }
     }
 
+    // Guided tour lockdown: while a run is up, the account edits and the
+    // danger rows (Export / Delete / Sign out) are DISABLED — the tour's
+    // settings-step exemption is scoped to the spotlighted section, and even a
+    // path into Account (hub → Account, a deep link) must never expose a real
+    // destructive action from inside a guided demo. "Product tour" stays live.
+    val tourRunning = TourEvents.running
     SettingsCard {
-        SettingRow("Display name", vm.currentName ?: "Set a name") { showName = true }
+        SettingRow("Display name", vm.currentName ?: "Set a name", enabled = !tourRunning) { showName = true }
         SettingRow("Signed in", vm.currentEmail ?: "—")   // static info — no tap
-        SettingRow(if (vm.hasPassword) "Change password" else "Add a password", "Update your sign-in password") { showPassword = true }
+        SettingRow(if (vm.hasPassword) "Change password" else "Add a password", "Update your sign-in password", enabled = !tourRunning) { showPassword = true }
         // Guided tour re-entry for EVERY account (the auto-offer only arms for
         // accounts that onboard after the tour shipped). TourHost routes this
         // through resumeDecision: a paused/unfinished run offers the resume
@@ -279,9 +289,9 @@ private fun AccountContent(vm: AppViewModel) {
         // welcome card.
         SettingRow("Product tour", "Resume or replay the guided tour") { TourEvents.requestRestart() }
         SettingRow("Send feedback", "Bugs, ideas, anything — straight to the team.") { feedbackOpen = true }
-        SettingRow("Export everything", "One-shot JSON snapshot") { exporter.launch("unstuck-export.json") }
-        SettingRow("Delete my account", "Permanently removes your data") { showDelete = true }
-        SettingRow("Sign out", "End this session", last = true) { vm.signOut() }
+        SettingRow("Export everything", "One-shot JSON snapshot", enabled = !tourRunning) { exporter.launch("unstuck-export.json") }
+        SettingRow("Delete my account", "Permanently removes your data", enabled = !tourRunning) { showDelete = true }
+        SettingRow("Sign out", "End this session", last = true, enabled = !tourRunning) { vm.signOut() }
     }
     msg?.let { Text(it, style = UFont.sans(12), color = if (msgErr) c.red else c.green, modifier = Modifier.padding(top = 10.dp)) }
 
@@ -578,17 +588,31 @@ private fun SettingsCard(content: @Composable () -> Unit) {
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp))) { content() }
 }
 
+/** One tappable settings row. [enabled]=false renders it inert — no click
+ *  handler at all (not a swallowed one), dimmed, marked disabled for screen
+ *  readers, with an honest sub-line saying why (the guided tour is running). */
 @Composable
-private fun SettingRow(label: String, sub: String?, last: Boolean = false, onClick: (() -> Unit)? = null) {
+private fun SettingRow(label: String, sub: String?, last: Boolean = false, enabled: Boolean = true, onClick: (() -> Unit)? = null) {
     val c = UTheme.colors
-    Row(Modifier.fillMaxWidth().then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier).padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
+    val active = enabled && onClick != null
+    val shownSub = if (!enabled && onClick != null) TOUR_LOCKED_ROW_SUB else sub
+    Row(
+        Modifier.fillMaxWidth()
+            .then(if (active) Modifier.clickable(onClick = onClick!!) else Modifier)
+            .then(if (!enabled) Modifier.semantics { disabled() } else Modifier)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
         Column(Modifier.weight(1f)) {
-            Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
-            if (sub != null) Text(sub, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 4.dp))
+            Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = if (enabled) c.ink else c.ink3)
+            if (shownSub != null) Text(shownSub, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 4.dp))
         }
     }
     if (!last) Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
 }
+
+/** The sub-line a tour-locked row shows in place of its own. */
+internal const val TOUR_LOCKED_ROW_SUB = "Paused while the guided tour is running"
 
 @Composable
 private fun ToggleRow(label: String, value: Boolean, last: Boolean = false, onChange: (Boolean) -> Unit) {

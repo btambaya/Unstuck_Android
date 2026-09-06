@@ -1,22 +1,30 @@
 package tech.csalliance.unstuck.ui
 
+import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
+import java.time.Duration
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import tech.csalliance.unstuck.core.logic.CopilotLevel
+import tech.csalliance.unstuck.core.logic.FocusCopilot
 import tech.csalliance.unstuck.ui.assistant.SpeechSurface
+import tech.csalliance.unstuck.ui.focus.AmbientDucker
 import tech.csalliance.unstuck.ui.focus.FocusCopilotController
 
 // Robolectric guardrail tests for the FocusCopilotController (:app wiring).
 // The pure scheduling/parsing is covered headless in :core; here we verify the
 // safety contract: feature-off => no TTS/STT, a throwing speaker NEVER breaks
 // the tick (fail-safe), the mic only opens for question milestones when voice
-// replies are on, and effects route through pure callbacks (no LLM/network).
+// replies are on, the mic opens ONLY after the question has actually been
+// spoken (the coach must never transcribe its own TTS), a milestone never
+// fires over a live capture, ambient ducking is always restored, and effects
+// route through pure callbacks (no LLM/network).
 // Stock Application (NOT the production UnstuckApp, which would build a Supabase
 // client at startup). The controller only needs a Context for ringer/call state.
 @RunWith(RobolectricTestRunner::class)
@@ -25,7 +33,9 @@ class FocusCopilotControllerTest {
 
     private val app = ApplicationProvider.getApplicationContext<android.content.Context>()
 
-    /** Records every interaction so tests can assert exactly what was/ wasn't called. */
+    /** Records every interaction so tests can assert exactly what was/ wasn't
+     *  called. Speech completion is EXPLICIT ([finishSpeaking]) — like the real
+     *  engine, nothing is "done" until the utterance has actually played. */
     private open class FakeSpeech(override val sttAvailable: Boolean = true) : SpeechSurface {
         val spoken = mutableListOf<String>()
         var listenStarts = 0
@@ -33,6 +43,7 @@ class FocusCopilotControllerTest {
         var speakStops = 0
         private var onFinalCb: ((String) -> Unit)? = null
         private var onDoneCb: (() -> Unit)? = null
+        private var speechDone: (() -> Unit)? = null
 
         override fun startListening(onPartial: (String) -> Unit, onFinal: (String) -> Unit, onDone: () -> Unit) {
             listenStarts++
@@ -40,12 +51,22 @@ class FocusCopilotControllerTest {
             onDoneCb = onDone
         }
         override fun stopListening() { listenStops++ }
-        override fun speak(text: String) { spoken += text }
-        override fun stopSpeaking() { speakStops++ }
+        override fun speak(text: String, onDone: (() -> Unit)?) { spoken += text; speechDone = onDone }
+        override fun stopSpeaking() { speakStops++; speechDone = null }
 
+        /** The engine finished the current utterance (UtteranceProgressListener.onDone). */
+        fun finishSpeaking() { val d = speechDone; speechDone = null; d?.invoke() }
         /** Simulate the recognizer returning a final transcript then closing. */
         fun deliver(utterance: String) { onFinalCb?.invoke(utterance); onDoneCb?.invoke() }
         fun close() { onDoneCb?.invoke() }
+    }
+
+    /** Records the ambient duck/unduck sequence. */
+    private class FakeAmbient : AmbientDucker {
+        val calls = mutableListOf<String>()
+        override fun duck() { calls += "duck" }
+        override fun unduck() { calls += "unduck" }
+        val restored: Boolean get() = calls.lastOrNull() == "unduck"
     }
 
     /** Captures the effect callbacks (the only path effects can take — pure, local). */
@@ -58,7 +79,7 @@ class FocusCopilotControllerTest {
         val captureResults = mutableListOf<FocusCopilotController.CaptureResult>()
     }
 
-    private fun controller(speech: SpeechSurface, fx: Effects) = FocusCopilotController(
+    private fun controller(speech: SpeechSurface, fx: Effects, ambient: AmbientDucker = FakeAmbient()) = FocusCopilotController(
         context = app,
         voice = speech,
         onExtend = { fx.extended = it },
@@ -66,7 +87,11 @@ class FocusCopilotControllerTest {
         onStop = { fx.stopped = true },
         onCapture = { fx.captured = it; fx.captureCount++ },
         onCaptureResult = { fx.captureResults += it },
+        ambient = ambient,
     )
+
+    /** Advance the main looper (the speech-completion fallback timer). */
+    private fun advanceMs(ms: Long) = shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(ms))
 
     // ---------- feature OFF → never touches TTS/STT ----------
 
@@ -98,6 +123,7 @@ class FocusCopilotControllerTest {
         val s = FakeSpeech()
         val c = controller(s, Effects())
         c.onTick(estimateMin = 5, level = CopilotLevel.CALM, focusedSec = 5 * 60, enabled = true, voiceReplies = true)
+        s.finishSpeaking()
         assertEquals(1, s.listenStarts)
         assertTrue("indicator on while listening", c.listening)
         s.close()
@@ -110,6 +136,7 @@ class FocusCopilotControllerTest {
         // Coach 25-min: HALFWAY @12:30 is a STATEMENT (speak-only).
         c.onTick(estimateMin = 25, level = CopilotLevel.COACH, focusedSec = 13 * 60, enabled = true, voiceReplies = true)
         assertTrue(s.spoken.any { it.startsWith("Halfway there") })
+        s.finishSpeaking()
         assertEquals("statement must not open the mic", 0, s.listenStarts)
         assertFalse(c.listening)
     }
@@ -121,6 +148,7 @@ class FocusCopilotControllerTest {
         val fx = Effects()
         val c = controller(s, fx)
         c.onTick(estimateMin = 5, level = CopilotLevel.CALM, focusedSec = 5 * 60, enabled = true, voiceReplies = true)
+        s.finishSpeaking()
         s.deliver("add ten")
         assertEquals(10, fx.extended)
         assertTrue("acks the extend", s.spoken.any { it == "Added 10 minutes." })
@@ -131,6 +159,7 @@ class FocusCopilotControllerTest {
         val fx = Effects()
         val c = controller(s, fx)
         c.onTick(estimateMin = 5, level = CopilotLevel.CALM, focusedSec = 5 * 60, enabled = true, voiceReplies = true)
+        s.finishSpeaking()
         s.deliver("I'm done")
         assertTrue(fx.stopped)
     }
@@ -140,6 +169,7 @@ class FocusCopilotControllerTest {
         val fx = Effects()
         val c = controller(s, fx)
         c.onTick(estimateMin = 5, level = CopilotLevel.CALM, focusedSec = 5 * 60, enabled = true, voiceReplies = true)
+        s.finishSpeaking()
         s.deliver("note call the bank")
         assertEquals("call the bank", fx.captured)
     }
@@ -150,8 +180,10 @@ class FocusCopilotControllerTest {
         val c = controller(s, fx)
         // Coach 10-min: AT_TIME @10:00 (question) → say "keep going".
         c.onTick(estimateMin = 10, level = CopilotLevel.COACH, focusedSec = 10 * 60, enabled = true, voiceReplies = true)
+        s.finishSpeaking()
         s.deliver("keep going")
         assertTrue(fx.keepGoing)
+        s.finishSpeaking()   // the ack is done — nothing is speaking, so the guard isn't what suppresses overrun
         val spokenBefore = s.spoken.size
         // +5 over would normally fire OVERRUN; keepGoing must suppress it.
         c.onTick(estimateMin = 10, level = CopilotLevel.COACH, focusedSec = 15 * 60, enabled = true, voiceReplies = true)
@@ -163,6 +195,7 @@ class FocusCopilotControllerTest {
         val fx = Effects()
         val c = controller(s, fx)
         c.onTick(estimateMin = 5, level = CopilotLevel.CALM, focusedSec = 5 * 60, enabled = true, voiceReplies = true)
+        s.finishSpeaking()
         s.deliver("what time is it")
         assertEquals(null, fx.extended)
         assertFalse(fx.stopped); assertFalse(fx.keepGoing); assertEquals(null, fx.captured)
@@ -175,6 +208,7 @@ class FocusCopilotControllerTest {
         val c = controller(s, Effects())
         // Two ticks past AT_TIME (Calm 5-min): only one spoken line.
         c.onTick(5, CopilotLevel.CALM, 5 * 60, enabled = true, voiceReplies = false)
+        s.finishSpeaking()
         c.onTick(5, CopilotLevel.CALM, 5 * 60 + 30, enabled = true, voiceReplies = false)
         assertEquals(1, s.spoken.size)
     }
@@ -185,8 +219,10 @@ class FocusCopilotControllerTest {
         val s = FakeSpeech()
         val c = controller(s, Effects())
         c.onTick(25, CopilotLevel.COACH, 13 * 60, enabled = true, voiceReplies = true) // HALFWAY statement (no mic)
+        s.finishSpeaking()
         // Open a mic window via AT_TIME... but first reach a question.
         c.onTick(25, CopilotLevel.COACH, 20 * 60, enabled = true, voiceReplies = true) // T_MINUS_5 question → mic opens
+        s.finishSpeaking()
         assertEquals(1, s.listenStarts)
         assertTrue(c.listening)
         // Another tick while listening must NOT start a second recognizer.
@@ -199,6 +235,7 @@ class FocusCopilotControllerTest {
         val c = controller(s, Effects())
         c.onTick(5, CopilotLevel.CALM, 5 * 60, enabled = true, voiceReplies = true)
         assertEquals(1, s.spoken.size) // still speaks the question
+        s.finishSpeaking()
         assertEquals(0, s.listenStarts)
         assertFalse(c.listening)
     }
@@ -210,7 +247,7 @@ class FocusCopilotControllerTest {
         override fun startListening(onPartial: (String) -> Unit, onFinal: (String) -> Unit, onDone: () -> Unit) =
             throw RuntimeException("boom-listen")
         override fun stopListening() = throw RuntimeException("boom-stoplisten")
-        override fun speak(text: String): Unit = throw RuntimeException("boom-speak")
+        override fun speak(text: String, onDone: (() -> Unit)?): Unit = throw RuntimeException("boom-speak")
         override fun stopSpeaking() = throw RuntimeException("boom-stopspeak")
     }
 
@@ -246,6 +283,7 @@ class FocusCopilotControllerTest {
         val fx = Effects()
         val c = controller(s, fx)
         c.onTick(5, CopilotLevel.CALM, 5 * 60, enabled = true, voiceReplies = true)
+        s.finishSpeaking()
         s.deliver("add five")
         assertEquals(5, fx.extended) // resolved & dispatched with zero network calls
     }
@@ -258,6 +296,164 @@ class FocusCopilotControllerTest {
         c.reset()
         c.onTick(5, CopilotLevel.CALM, 5 * 60, enabled = true, voiceReplies = false)
         assertEquals("AT_TIME fires again for the new session", 2, s.spoken.size)
+    }
+
+    // ========== TTS sequencing: the coach must never hear itself ==========
+
+    @Test fun question_micOpensOnlyAfterTheLineWasActuallySpoken() {
+        // The bug: the recognizer opened at the same instant the question started
+        // playing, transcribed "…stop, or keep going?" and resolved it to Stop —
+        // the coach's own voice ended the user's block. The window must wait for
+        // the utterance's completion (also covers the TTS init race: the first
+        // line of a session is buffered until the engine is ready, and its
+        // completion fires only once it was really spoken).
+        val s = FakeSpeech()
+        val fx = Effects()
+        val c = controller(s, fx)
+        c.onTick(estimateMin = 5, level = CopilotLevel.CALM, focusedSec = 5 * 60, enabled = true, voiceReplies = true)
+        assertEquals(1, s.spoken.size)
+        assertTrue(s.spoken[0].contains("stop"))          // the line itself contains a stop word
+        assertEquals("mic must stay closed while the line plays", 0, s.listenStarts)
+        assertTrue(c.speaking)
+        assertFalse(c.listening)
+        s.finishSpeaking()
+        assertEquals("mic opens from the completion callback", 1, s.listenStarts)
+        assertFalse(c.speaking)
+        assertTrue(c.listening)
+        assertFalse("the coach's own line was never parsed", fx.stopped)
+    }
+
+    @Test fun question_fallbackOpensMicWhenTheEngineNeverReportsCompletion() {
+        val s = FakeSpeech()
+        val c = controller(s, Effects())
+        c.onTick(estimateMin = 5, level = CopilotLevel.CALM, focusedSec = 5 * 60, enabled = true, voiceReplies = true)
+        val line = s.spoken[0]
+        val fallback = FocusCopilot.speechFallbackMs(line)
+        advanceMs(fallback - 200)
+        assertEquals("not before the fallback", 0, s.listenStarts)
+        advanceMs(300)
+        assertEquals("fallback opened the mic", 1, s.listenStarts)
+        assertTrue(c.listening)
+        // A late engine completion for the same utterance is a no-op (no 2nd mic).
+        s.finishSpeaking()
+        assertEquals(1, s.listenStarts)
+    }
+
+    @Test fun stopAllWhileSpeaking_dropsTheContinuation_noMicLater() {
+        // Pause / leave mid-line: neither the engine's late completion nor the
+        // fallback timer may open a mic afterwards.
+        val s = FakeSpeech()
+        val c = controller(s, Effects())
+        c.onTick(estimateMin = 5, level = CopilotLevel.CALM, focusedSec = 5 * 60, enabled = true, voiceReplies = true)
+        c.stopAll()
+        assertFalse(c.speaking)
+        s.finishSpeaking()
+        advanceMs(30_000)
+        assertEquals(0, s.listenStarts)
+        assertFalse(c.listening)
+    }
+
+    @Test fun noNewMilestoneWhileALineIsStillSpeaking_deferredNotDropped() {
+        val s = FakeSpeech()
+        val c = controller(s, Effects())
+        // Coach 25-min: HALFWAY speaking; a tick that is ALSO past T-5 must wait.
+        c.onTick(25, CopilotLevel.COACH, 13 * 60, enabled = true, voiceReplies = false)
+        assertEquals(1, s.spoken.size)
+        c.onTick(25, CopilotLevel.COACH, 20 * 60, enabled = true, voiceReplies = false)
+        assertEquals("deferred behind the live line", 1, s.spoken.size)
+        s.finishSpeaking()
+        c.onTick(25, CopilotLevel.COACH, 20 * 60 + 2, enabled = true, voiceReplies = false)
+        assertEquals("delivered on the next quiet tick", 2, s.spoken.size)
+        assertTrue(s.spoken[1].startsWith("Five minutes left"))
+    }
+
+    // ========== a milestone never fires over a live CAPTURE ==========
+
+    @Test fun milestoneDuringCapture_isDeferred_dictationSurvives_neverParsed() {
+        // The bug: AT_TIME fired mid-dictation, destroyed the capture recognizer
+        // (capturing stuck true, dictation lost) and the new window heard "stop by
+        // the bank" → Stop. Now the milestone waits for the capture to close.
+        val s = FakeSpeech()
+        val fx = Effects()
+        val c = controller(s, fx)
+        c.toggleCapture()
+        assertTrue(c.capturing)
+        c.onTick(estimateMin = 5, level = CopilotLevel.CALM, focusedSec = 5 * 60, enabled = true, voiceReplies = true)
+        assertEquals("no line spoken over the dictation", 0, s.spoken.size)
+        assertEquals("the capture recognizer was not replaced", 1, s.listenStarts)
+        assertTrue(c.capturing)
+        s.deliver("remember to stop by the bank")
+        assertEquals("remember to stop by the bank", fx.captured)
+        assertFalse("dictation never parsed as a command", fx.stopped)
+        assertFalse(c.capturing)
+        s.finishSpeaking()   // "Captured." ack
+        // The deferred milestone lands on the next quiet tick.
+        c.onTick(estimateMin = 5, level = CopilotLevel.CALM, focusedSec = 5 * 60 + 3, enabled = true, voiceReplies = true)
+        assertTrue(s.spoken.any { it.startsWith("That's your block") })
+    }
+
+    @Test fun captureTapWhileCoachIsSpeaking_cutsTheLineFirst() {
+        // A deliberate tap wins: the line is cut so the dictation can't
+        // transcribe the coach's voice, and its continuation is dropped.
+        val s = FakeSpeech()
+        val c = controller(s, Effects())
+        c.onTick(25, CopilotLevel.COACH, 13 * 60, enabled = true, voiceReplies = true)   // HALFWAY speaking
+        assertTrue(c.speaking)
+        c.toggleCapture()
+        assertEquals(1, s.speakStops)
+        assertFalse(c.speaking)
+        assertTrue(c.capturing)
+        assertEquals(1, s.listenStarts)
+    }
+
+    // ========== ambient ducking is always restored ==========
+
+    @Test fun speakOnly_ambientRestoredWhenTheLineFinishes() {
+        // The bug: with voice replies OFF (the default) HALFWAY ducked the loop to
+        // 0.12 and nothing ever restored it for the rest of the session.
+        val s = FakeSpeech()
+        val amb = FakeAmbient()
+        val c = controller(s, Effects(), amb)
+        c.onTick(25, CopilotLevel.COACH, 13 * 60, enabled = true, voiceReplies = false)
+        assertEquals("ducked while speaking", "duck", amb.calls.last())
+        s.finishSpeaking()
+        assertTrue("restored on completion", amb.restored)
+    }
+
+    @Test fun speakOnly_ambientRestoredByTheFallbackWhenNoCompletionArrives() {
+        val s = FakeSpeech()
+        val amb = FakeAmbient()
+        val c = controller(s, Effects(), amb)
+        c.onTick(5, CopilotLevel.CALM, 5 * 60, enabled = true, voiceReplies = false)
+        assertFalse(amb.restored)
+        advanceMs(FocusCopilot.speechFallbackMs(s.spoken[0]) + 100)
+        assertTrue(amb.restored)
+    }
+
+    @Test fun questionWithReply_ambientRestoredAfterTheAck() {
+        val s = FakeSpeech()
+        val amb = FakeAmbient()
+        val fx = Effects()
+        val c = controller(s, fx, amb)
+        c.onTick(5, CopilotLevel.CALM, 5 * 60, enabled = true, voiceReplies = true)
+        s.finishSpeaking()                 // → mic opens (still ducked)
+        assertFalse(amb.restored)
+        s.deliver("add five")              // → ack "Added 5 minutes." starts; the window closes
+        assertEquals(5, fx.extended)
+        assertFalse("still ducked while the ack plays", amb.restored)
+        s.finishSpeaking()
+        assertTrue("restored once the ack is done", amb.restored)
+    }
+
+    @Test fun captureConfirm_ambientRestoredAfterTheAck() {
+        val s = FakeSpeech()
+        val amb = FakeAmbient()
+        val c = controller(s, Effects(), amb)
+        c.toggleCapture()
+        s.deliver("call the bank")         // "Captured." starts
+        assertFalse(amb.restored)
+        s.finishSpeaking()
+        assertTrue(amb.restored)
     }
 
     // ========== Push-to-talk capture (Phase 1.5) ==========
@@ -330,8 +526,9 @@ class FocusCopilotControllerTest {
         val s = FakeSpeech()
         val fx = Effects()
         val c = controller(s, fx)
-        // Open a Phase-1 voice-reply mic window first.
+        // Open a Phase-1 voice-reply mic window first (the question must finish playing).
         c.onTick(5, CopilotLevel.CALM, 5 * 60, enabled = true, voiceReplies = true)
+        s.finishSpeaking()
         assertEquals(1, s.listenStarts)
         assertTrue(c.listening)
         // A capture tap must not start a second recognizer mid voice-reply window.

@@ -30,6 +30,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableIntStateOf
@@ -43,6 +44,7 @@ import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.isTraversalGroup
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
@@ -150,12 +152,14 @@ fun TourHost(
     /** A pushed route / sheet / focus overlay is up — the auto-shown welcome
      *  and resume cards wait for a quiet Today (never ambush mid-task). */
     overlayActive: Boolean,
-    /** LIVE settings-surface state (the nav stack contains Settings) — the
-     *  settings steps' lockdown exemption follows THIS, not the step id: the
-     *  surface is interactive while open; the moment the user closes it
-     *  mid-step the lockdown re-applies (panel still reachable — never a
-     *  full-app unlock). */
-    settingsSurfaceOpen: Boolean,
+    /** LIVE: the settings SECTION on top of the nav stack (null = no
+     *  SettingsSub route is topmost — the hub, or no settings at all). The
+     *  settings steps' lockdown exemption follows THIS, scoped to the step's
+     *  OWN section: the spotlighted screen is interactive while it is the
+     *  topmost route; popping to the hub or into another section (Account's
+     *  Sign out / Delete / Export…) re-applies the lockdown at once (panel
+     *  still reachable — never a full-app or full-Settings unlock). */
+    openSettingsSection: SettingsSection?,
     /** The Focus takeover is up ABOVE the anchored surface (same window,
      *  never tour-driven — e.g. a notification deep link or a partner-started
      *  shared session). While RUNNING the spotlight degrades to the whisper
@@ -347,23 +351,38 @@ fun TourHost(
 
     // Drive the app for the current step: navigate + side effects, persist
     // progress, (re)load narration. Re-runs on resume as well, re-presenting
-    // the step's surface — and on navEpoch (foreground return), because
-    // MainScaffold's ON_STOP reset put the app back on Today while the tour
-    // kept RUNNING on its step.
-    LaunchedEffect(running, step.id, mode, navEpoch) {
-        pauseConfirmArmed = false   // a (re)presented step starts un-armed
-        demoSheetForStep = null     // any step (re)presentation / pause / exit closes the demo sheet
+    // the step's surface. (tourPresentation(STEP_CHANGE).)
+    LaunchedEffect(running, step.id, mode) {
+        val plan = tourPresentation(TourPresentTrigger.STEP_CHANGE)
+        if (plan.resetStepState) {
+            pauseConfirmArmed = false   // a (re)presented step starts un-armed
+            demoSheetForStep = null     // any step (re)presentation / pause / exit closes the demo sheet
+        }
         if (!running) {
             audio.release()   // pausing/exiting stops narration immediately
             return@LaunchedEffect
         }
-        askFocused = false   // a re-presented step starts with the keyboard down
-        assistantOpenedForStep = null   // re-arm the two-tap on every (re)entry
-        tourNavigate(step, nav)
+        if (plan.resetStepState) {
+            askFocused = false   // a re-presented step starts with the keyboard down
+            assistantOpenedForStep = null   // re-arm the two-tap on every (re)entry
+        }
+        if (plan.navigate) tourNavigate(step, nav)
         store.patch { it.copy(started = true, mode = mode, mediaMode = mediaMode, index = index) }
         // Auto-play each NEW step in Listen mode; Read never touches audio.
-        if (mediaMode == TourMediaMode.LISTEN) audio.load(step.id, step.narration, autoPlay = true, speed = speed)
-        else audio.release()
+        if (plan.reloadAudio) {
+            if (mediaMode == TourMediaMode.LISTEN) audio.load(step.id, step.narration, autoPlay = true, speed = speed)
+            else audio.release()
+        }
+    }
+    // Foreground return (navEpoch): MainScaffold's ON_STOP reset put the app
+    // back on Today while the tour kept RUNNING on its step — re-present the
+    // step's SURFACE only. Narration is deliberately untouched (a paused or
+    // finished clip must never blare again from 0:00), and the demo capture
+    // sheet keeps its text. (tourPresentation(FOREGROUND_RETURN).)
+    LaunchedEffect(navEpoch) {
+        if (navEpoch == 0 || !running) return@LaunchedEffect
+        val plan = tourPresentation(TourPresentTrigger.FOREGROUND_RETURN)
+        if (plan.navigate) tourNavigate(step, nav)
     }
 
     // Light ticker for the narration progress bar.
@@ -376,6 +395,25 @@ fun TourHost(
 
     // The auto-shown cards wait for a quiet Today; explicit opens show anywhere.
     val cardGate = explicit || (currentTab == "today" && !overlayActive)
+
+    // ── Publish the LIVE lockdown state for the rest of the app ──────────
+    // `running` keeps the Settings danger/account rows disabled even inside
+    // the exempt section; `contentLocked` has MainScaffold clear the semantics
+    // of everything beneath the tour (screen readers could otherwise traverse
+    // and ACTIVATE the real UI under the scrim — the pointer blockers never
+    // intercepted accessibility clicks). Written after composition; a same-
+    // value write doesn't invalidate, so no recomposition loop. Reset when the
+    // host leaves composition (sign-out).
+    val cardUp = (phase == TourPhase.WELCOME || phase == TourPhase.PAUSED) && cardGate
+    val livePolicy = if (running) tourLockdownPolicy(step, openSection = openSettingsSection, overlayAboveTour = focusOverlayActive) else null
+    val contentLocked = tourHidesAppContent(cardUp = cardUp, running = running, policy = livePolicy)
+    SideEffect {
+        TourEvents.running = running
+        TourEvents.contentLocked = contentLocked
+    }
+    DisposableEffect(Unit) {
+        onDispose { TourEvents.running = false; TourEvents.contentLocked = false }
+    }
 
     // Back gesture: running → the inline PAUSE CONFIRM (round-2 #5 — never
     // straight to the app: the first back arms the footer confirm, a second
@@ -444,9 +482,12 @@ fun TourHost(
             // belt — a Focus takeover above the anchored surface degrades the
             // spotlight to the whisper scrim + ONE full-screen blocker (no
             // stale hole; only the panel stays interactive).
-            val lockdown = tourLockdownPolicy(step, settingsOpen = settingsSurfaceOpen, overlayAboveTour = focusOverlayActive)
+            val lockdown = livePolicy ?: tourLockdownPolicy(step, openSection = openSettingsSection, overlayAboveTour = focusOverlayActive)
             val targetRect = if (lockdown.degradeToFullBlocker) null else TourAnchors.resolve(step.target, step.fallbacks)
-            BoxWithConstraints(Modifier.fillMaxSize()) {
+            // A traversal group: with the app content beneath hidden from
+            // accessibility (TourEvents.contentLocked), screen-reader focus
+            // stays inside the tour — demo surface, panel, demo sheet.
+            BoxWithConstraints(Modifier.fillMaxSize().semantics { isTraversalGroup = true }) {
                 val density = LocalDensity.current
                 val screenH = constraints.maxHeight.toFloat()
                 // Round-2 #6: the focus/capture steps present the tour's own

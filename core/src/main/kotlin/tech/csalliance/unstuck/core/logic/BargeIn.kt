@@ -166,6 +166,12 @@ class BargeInController(
          *  has an active response") — both benign for us. */
         fun isBenignError(message: String?): Boolean =
             message?.lowercase()?.contains("active response") == true
+
+        /** Hold-to-talk: a press too short to capture anything (or one that landed
+         *  inside the gate's calibration) makes the commit fail — "buffer too small" /
+         *  "buffer is empty". Not an error state: the next press just works (iOS parity). */
+        fun isEmptyBufferError(message: String?): Boolean =
+            message?.lowercase()?.contains("buffer") == true
     }
 
     var profile: BargeInProfile = profile
@@ -263,14 +269,19 @@ class BargeInController(
                 out += BargeInCommand.CommitAndRespond
                 setUi(BargeInUi.THINKING, out)
             }
-            is BargeInEvent.Error -> {
-                if (isBenignError(event.message)) {
+            is BargeInEvent.Error -> when {
+                isBenignError(event.message) -> {
                     responseActive = false
                     if (duckedSince != null && !playbackQueued) restore(out)
                     setUi(if (playbackQueued) BargeInUi.SPEAKING else BargeInUi.LISTENING, out)
-                } else {
-                    out += BargeInCommand.ReportError(event.message?.takeIf { it.isNotBlank() } ?: "Voice error")
                 }
+                // A too-short press committed nothing: the session is intact (mic,
+                // socket, comm mode all live), so go back to the hold prompt instead
+                // of a dead ERROR screen. Only in hold mode — in open-mic mode a
+                // buffer error is a real protocol fault and is surfaced.
+                holdToTalk && isEmptyBufferError(event.message) ->
+                    setUi(if (speaking) BargeInUi.SPEAKING else BargeInUi.LISTENING, out)
+                else -> out += BargeInCommand.ReportError(event.message?.takeIf { it.isNotBlank() } ?: "Voice error")
             }
         }
         return out
@@ -406,6 +417,61 @@ class BargeInController(
         if (ui == state) return
         ui = state
         out += BargeInCommand.Ui(state)
+    }
+}
+
+/**
+ * Hold-to-talk press/release sequencing for the capture path (spec §8).
+ *
+ * The orb's press and release arrive on the UI thread while the capture thread
+ * is blocked inside a ~100 ms `AudioRecord.read`. A press applies IMMEDIATELY
+ * (the next frame the thread processes is forced open + pre-roll flushed). A
+ * release is only REQUESTED: the capture thread applies it at the next frame
+ * boundary, i.e. AFTER the frame that was being read when the finger lifted has
+ * been appended — so the tail of every utterance survives and a tap shorter
+ * than one read still uploads the audio it covered. Work that must follow the
+ * released audio (the `input_audio_buffer.commit`) is queued with [afterDrain]
+ * and run by the capture thread at that same boundary, on the same thread that
+ * appends frames, so the commit can never overtake the audio on the wire.
+ *
+ * Thread-safe: press/release/afterDrain come from any thread, [frameBoundary]
+ * from the capture thread. No Android.
+ */
+class HoldToTalkLatch {
+    @Volatile var pressed: Boolean = false
+        private set
+    @Volatile private var releaseRequested = false
+    private val drains = ArrayList<() -> Unit>(2)
+    private val lock = Any()
+
+    /** Orb down: applies now. A release still pending from the previous press is
+     *  cancelled (its drains still run at the next boundary). */
+    fun press() { synchronized(lock) { releaseRequested = false; pressed = true } }
+
+    /** Orb up: applied by the capture thread at the next [frameBoundary]. */
+    fun release() { synchronized(lock) { if (pressed) releaseRequested = true } }
+
+    /** Run [block] on the capture thread once the frame in flight has been appended
+     *  (or at once via [releaseNow] when there is no capture thread to wait for). */
+    fun afterDrain(block: () -> Unit) { synchronized(lock) { drains += block } }
+
+    /** True while a release is waiting for the frame in flight. */
+    val releasePending: Boolean get() = releaseRequested
+
+    /**
+     * Capture thread, at the start of each read: apply a pending release and hand
+     * back the drains to run. Called BEFORE the next read so the frame just
+     * appended is the last one of the press.
+     */
+    fun frameBoundary(): List<() -> Unit> = synchronized(lock) {
+        if (releaseRequested) { releaseRequested = false; pressed = false }
+        if (drains.isEmpty()) emptyList() else ArrayList(drains).also { drains.clear() }
+    }
+
+    /** No capture thread is alive (capture failed / stopped): apply everything now. */
+    fun releaseNow(): List<() -> Unit> = synchronized(lock) {
+        releaseRequested = false; pressed = false
+        if (drains.isEmpty()) emptyList() else ArrayList(drains).also { drains.clear() }
     }
 }
 

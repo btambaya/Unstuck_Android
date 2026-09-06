@@ -29,6 +29,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
@@ -64,6 +65,7 @@ import tech.csalliance.unstuck.ui.tasks.TasksScreen
 import tech.csalliance.unstuck.ui.today.TodayScreen
 import tech.csalliance.unstuck.core.logic.isTemplate
 import tech.csalliance.unstuck.ui.tour.TourAnchorIds
+import tech.csalliance.unstuck.ui.tour.TourEvents
 import tech.csalliance.unstuck.ui.tour.TourHost
 import tech.csalliance.unstuck.ui.tour.TourNav
 import tech.csalliance.unstuck.ui.tour.tourAnchor
@@ -90,16 +92,36 @@ private sealed interface Route {
 // Feedback is no longer a sheet here: it moved to Settings -> Account -> Send
 // feedback (web parity), so the bubble is a pure assistant surface.
 private sealed interface Sheet {
-    data object Avatar : Sheet
-    data object Areas : Sheet
-    data object Assistant : Sheet
+    /** Stable id so the OPEN sheet can be saved across a configuration change. */
+    val key: String
+    data object Avatar : Sheet { override val key = "avatar" }
+    data object Areas : Sheet { override val key = "areas" }
+    data object Assistant : Sheet { override val key = "assistant" }
+
+    companion object {
+        fun of(key: String?): Sheet? = when (key) {
+            Avatar.key -> Avatar
+            Areas.key -> Areas
+            Assistant.key -> Assistant
+            else -> null
+        }
+    }
 }
 
 @Composable
 fun MainScaffold(vm: AppViewModel) {
     var tab by rememberSaveable { mutableStateOf("today") }
     val stack = remember { mutableStateListOf<Route>() }
-    var sheet by remember { mutableStateOf<Sheet?>(null) }
+    // rememberSaveable, NOT remember: a configuration change (rotation, fold,
+    // dark-mode / locale flip) recreates the activity, and a plain `remember`
+    // dropped the open sheet — which closed the Assistant, so its saveable
+    // `voiceOpen` never got composed and the LIVE Talk session held by
+    // VoiceSessionHolder (a ViewModel, which DOES survive) was ended by the
+    // holder's re-attach grace. Restoring the sheet is what keeps the call up.
+    var sheet by rememberSaveable(stateSaver = listSaver<Sheet?, String>(
+        save = { s -> if (s == null) emptyList() else listOf(s.key) },
+        restore = { l -> Sheet.of(l.firstOrNull()) },
+    )) { mutableStateOf<Sheet?>(null) }
     var showNewTask by rememberSaveable { mutableStateOf(false) }
     var newTaskPrefill by rememberSaveable(stateSaver = listSaver(
         save = { p -> if (p == null) emptyList() else listOf(p.first, p.second) },
@@ -253,6 +275,19 @@ fun MainScaffold(vm: AppViewModel) {
     BackHandler(enabled = focusTask == null && !sheetOpen && stack.isEmpty() && tab != "today") { tab = "today" }
 
     Box(Modifier.fillMaxSize().background(c.bg)) {
+        // ── Guided-tour accessibility lockdown ──────────────────────────
+        // While the tour holds the lock (a card is up, or the running scrim
+        // consumes input) EVERYTHING beneath it — tabs, chrome, pushed routes,
+        // the Focus takeover — is cleared from the semantics tree. The pointer
+        // blockers only ever swallowed touches: TalkBack could still traverse
+        // under the scrim and ACTIVATE the real UI (an accessibility click
+        // invokes the node's action directly — e.g. the display-only
+        // spotlighted Start-Next hero minting a real focus session). Lifted
+        // for the one legitimately-interactive frame (the settings step's own
+        // section, live and exempt). Own-window sheets/dialogs are unaffected
+        // (they're closed by the step presentation and unreachable anyway).
+        val tourContentLocked = TourEvents.contentLocked
+        Box(Modifier.fillMaxSize().then(if (tourContentLocked) Modifier.clearAndSetSemantics {} else Modifier)) {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
             Box(Modifier.weight(1f)) {
                 when (tab) {
@@ -394,6 +429,7 @@ fun MainScaffold(vm: AppViewModel) {
             val fresh = if (focusShared != null) t else tasks.firstOrNull { it.id == t.id } ?: t
             FocusScreen(vm, fresh, onClose = { focusTask = null; focusAutoCapture = false; focusShared = null }, autoCapture = focusAutoCapture, sharedLevel = focusShared)
         }
+        }   // end of the tour-lockable app content
 
         // ── Guided tour — mounted LAST so its spotlight + panel overlay every
         // screen (tabs, pushed routes, even the Focus takeover). Its nav
@@ -406,9 +442,11 @@ fun MainScaffold(vm: AppViewModel) {
             currentTab = tab,
             overlayActive = stack.isNotEmpty() || sheetOpen || focusTask != null || sharedDetail != null,
             // LIVE opened-surface state for the settings steps' lockdown
-            // exemption: interactive only while a Settings route is actually
-            // on the stack — closing it mid-step re-applies the lockdown.
-            settingsSurfaceOpen = stack.any { it is Route.Settings || it is Route.SettingsSub },
+            // exemption, SCOPED to the step's own section: interactive only
+            // while that SettingsSub route is topmost — popping to the hub or
+            // into another section (Account's Sign out / Delete / Export…)
+            // re-applies the lockdown.
+            openSettingsSection = (stack.lastOrNull() as? Route.SettingsSub)?.section,
             // The Focus takeover renders in THIS window above the anchored
             // surface (and is never tour-driven) — while it's up the running
             // spotlight degrades to a full-screen blocker (no stale hole).

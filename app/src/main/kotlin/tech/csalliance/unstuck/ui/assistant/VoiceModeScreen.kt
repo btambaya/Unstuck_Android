@@ -1,6 +1,9 @@
 package tech.csalliance.unstuck.ui.assistant
 
 import android.Manifest
+import android.app.Activity
+import android.content.Context
+import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
@@ -53,11 +56,156 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.ViewModel
 import androidx.lifecycle.compose.LifecycleEventEffect
+import androidx.lifecycle.viewmodel.compose.viewModel
 import tech.csalliance.unstuck.SettingsStore
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+
+/**
+ * The live Talk session, hosted OUTSIDE the composition so a configuration
+ * change (rotation, fold/unfold, dark-mode or locale switch — MainActivity
+ * declares no configChanges) never tears the call down: the Activity is
+ * recreated, the composition is rebuilt, and [VoiceModeScreen] simply
+ * re-attaches to the same engine/client/state. Scoped to the Activity's
+ * ViewModelStore (the same owner AppViewModel lives in).
+ *
+ * Lifecycle contract:
+ *  - [ensureStarted] starts a session only when none is live (re-attach is a no-op);
+ *  - [detach] on a plain dispose ends the session; on a config change it arms a
+ *    short re-attach deadline instead — if no screen comes back (the host didn't
+ *    restore the sheet), the session is ended rather than left as a headless call;
+ *  - [end] is the ONLY real teardown (user left, focus lost, backgrounded).
+ */
+class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
+    private val main = Handler(Looper.getMainLooper())
+    private val settingsStore = SettingsStore(appContext)
+
+    var state by mutableStateOf(VoiceState.CONNECTING); private set
+    var caption by mutableStateOf(""); private set
+    var note by mutableStateOf<String?>(null); private set
+    // Hold-to-talk: the engine + client read the pref once per session (the
+    // engine's snapshot is what the client's controller was built from); this
+    // mirrors it for the orb/label and flips with the noisy-room chip.
+    var holdToTalk by mutableStateOf(false); private set
+    // 3 false barge-ins inside 2 min → one-tap offer to switch to hold to talk.
+    var suggestHoldToTalk by mutableStateOf(false); private set
+
+    private var audio: VoiceAudioEngine? = null
+    // Compose state: the screen derives `live`/`canInterrupt` from it.
+    var client: VoiceRealtimeClient? by mutableStateOf(null); private set
+    private var attached = false
+    private val reattachDeadline = Runnable { if (!attached) end() }
+
+    /** A client exists and hasn't been stop()ped (CONNECTING counts — the dial is in flight). */
+    val sessionActive: Boolean get() = client?.let { !it.isStopped } == true
+
+    /** Screen composed. Cancels a pending re-attach deadline; a fresh (non-live)
+     *  holder is reset so a previous session's "Ended"/error never shows first. */
+    fun attach() {
+        attached = true
+        main.removeCallbacks(reattachDeadline)
+        if (!sessionActive) { state = VoiceState.CONNECTING; caption = ""; note = null; suggestHoldToTalk = false }
+    }
+
+    /** Screen leaving the composition. [changingConfigurations] = the Activity is
+     *  being recreated and the screen will re-attach in a moment. */
+    fun detach(changingConfigurations: Boolean) {
+        attached = false
+        if (!changingConfigurations) { end(); return }
+        main.removeCallbacks(reattachDeadline)
+        main.postDelayed(reattachDeadline, REATTACH_GRACE_MS)
+    }
+
+    fun switchToHoldToTalk() {
+        settingsStore.setVoiceHoldToTalk(true)
+        client?.setHoldToTalk(true)
+        holdToTalk = true
+        suggestHoldToTalk = false
+    }
+
+    fun fail(message: String) { note = message; state = VoiceState.ERROR }
+
+    /** Start a session unless one is live (re-attach after a config change). */
+    fun ensureStarted(vm: AppViewModel) {
+        if (sessionActive) return
+        val token = vm.voiceAccessToken()
+        if (token.isNullOrBlank()) { fail("Please sign in to use voice."); return }
+        if (!vm.voiceConfigured()) { fail("Voice isn't set up yet."); return }
+        note = null; caption = ""; state = VoiceState.CONNECTING
+        vm.resetVoiceScratch()
+        val engine = VoiceAudioEngine(appContext)
+        audio = engine
+        holdToTalk = engine.holdToTalkPref
+        suggestHoldToTalk = false
+        // Every callback is bound to THIS client and ignored once it is no longer
+        // the holder's current one — a late CLOSED/ERROR from an ended session must
+        // never paint over the next session's state.
+        lateinit var rc: VoiceRealtimeClient
+        fun current() = client === rc
+        rc = VoiceRealtimeClient(
+            proxyUrl = vm.voiceProxyUrl, token = token, model = vm.voiceModel,
+            instructions = vm.voiceInstructions(), tools = vm.voiceTools(), opening = vm.voiceOpening(),
+            audio = engine,
+            runTool = { name, args -> vm.runVoiceTool(name, args) },
+            onState = { s -> main.post { if (current()) state = s } },
+            onError = { msg -> main.post { if (current()) note = msg } },
+            onCaption = { role, text, done ->
+                main.post {
+                    if (!current()) return@post
+                    when {
+                        role == "user" -> caption = "" // new user turn → clear the reply line
+                        role == "assistant" && !done -> caption += text
+                    }
+                }
+            },
+            // Already posted to the main thread by the client.
+            onSuggestHoldToTalk = { if (current()) suggestHoldToTalk = true },
+        )
+        // Another app (most importantly an incoming phone call) took audio focus →
+        // end the session instead of talking over it. stop() reports CLOSED ("Ended").
+        engine.onFocusLost = { rc.stop() }
+        // May fire SYNCHRONOUSLY from inside rc.start() (mic held elsewhere): the
+        // client checks `stopped` after startCapture and never dials in that case.
+        engine.onCaptureError = {
+            rc.stop()
+            main.post { if (current()) fail("Couldn't access the microphone — it may be in use by another app.") }
+        }
+        client = rc
+        rc.start()
+    }
+
+    /** Real teardown. stop() tears audio down too (off the main thread); shutdown()
+     *  directly only covers the never-started case, where it's a cheap no-op sweep. */
+    fun end() {
+        main.removeCallbacks(reattachDeadline)
+        val rc = client
+        val engine = audio
+        client = null
+        audio = null
+        if (rc != null) {
+            rc.stop()
+            // rc's own CLOSED report is ignored now that it isn't current — say it here
+            // (an ON_STOP end leaves the screen up, and it must read "Ended").
+            state = VoiceState.CLOSED
+        } else engine?.shutdown()
+    }
+
+    override fun onCleared() { end() }
+
+    companion object {
+        /** How long a detached session waits for the recreated screen before ending itself. */
+        const val REATTACH_GRACE_MS = 2_000L
+    }
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
+}
 
 /**
  * Full-screen voice mode — live speech-to-speech with Qwen-Omni (through the
@@ -71,95 +219,63 @@ import tech.csalliance.unstuck.ui.AppViewModel
  *  - hold to talk (Settings › Interface, or the one-tap "Noisy room?" chip the
  *    client raises after 3 false barge-ins in 2 min): press and hold the orb to
  *    speak, release to send. The label shows the mode.
+ *
+ * The session itself lives in [VoiceSessionHolder] (a ViewModel), so this
+ * composable is disposable: rotation / fold / theme / locale changes rebuild it
+ * and it re-attaches to the live call.
  */
 @Composable
 fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
     val c = UTheme.colors
     val context = LocalContext.current
-    val main = remember { Handler(Looper.getMainLooper()) }
-    val audio = remember { VoiceAudioEngine(context) }
-    val settingsStore = remember { SettingsStore(context) }
+    val activity = remember(context) { context.findActivity() }
+    val appContext = context.applicationContext
+    val holder: VoiceSessionHolder = viewModel { VoiceSessionHolder(appContext) }
 
-    var state by remember { mutableStateOf(VoiceState.CONNECTING) }
-    var caption by remember { mutableStateOf("") }
-    var note by remember { mutableStateOf<String?>(null) }
-    var client by remember { mutableStateOf<VoiceRealtimeClient?>(null) }
-    // Hold-to-talk: the engine + client read the pref once per session (the
-    // engine's snapshot is what the client's controller was built from); this
-    // mirrors it for the orb/label and flips with the noisy-room chip.
-    var holdToTalk by remember { mutableStateOf(audio.holdToTalkPref) }
+    val state = holder.state
+    val caption = holder.caption
+    val note = holder.note
+    val holdToTalk = holder.holdToTalk
+    val suggestHoldToTalk = holder.suggestHoldToTalk
+    // Transient gesture state: a press in progress is released by the gesture's
+    // own finally{} when the composition goes away, so it needn't survive.
     var holding by remember { mutableStateOf(false) }
-    // 3 false barge-ins inside 2 min → one-tap offer to switch to hold to talk.
-    var suggestHoldToTalk by remember { mutableStateOf(false) }
-
-    fun switchToHoldToTalk() {
-        settingsStore.setVoiceHoldToTalk(true)
-        client?.setHoldToTalk(true)
-        holdToTalk = true
-        suggestHoldToTalk = false
-    }
-
-    fun startSession() {
-        val token = vm.voiceAccessToken()
-        if (token.isNullOrBlank()) { note = "Please sign in to use voice."; state = VoiceState.ERROR; return }
-        if (!vm.voiceConfigured()) { note = "Voice isn't set up yet."; state = VoiceState.ERROR; return }
-        note = null; state = VoiceState.CONNECTING
-        vm.resetVoiceScratch()
-        // Another app (most importantly an incoming phone call) took audio focus →
-        // end the session instead of talking over it. stop() reports CLOSED ("Ended").
-        audio.onFocusLost = { client?.stop() }
-        audio.onCaptureError = {
-            client?.stop()
-            main.post { note = "Couldn't access the microphone — it may be in use by another app."; state = VoiceState.ERROR }
-        }
-        val rc = VoiceRealtimeClient(
-            proxyUrl = vm.voiceProxyUrl, token = token, model = vm.voiceModel,
-            instructions = vm.voiceInstructions(), tools = vm.voiceTools(), opening = vm.voiceOpening(),
-            audio = audio,
-            runTool = { name, args -> vm.runVoiceTool(name, args) },
-            onState = { s -> main.post { state = s } },
-            onError = { msg -> main.post { note = msg } },
-            onCaption = { role, text, done ->
-                main.post {
-                    when {
-                        role == "user" -> caption = "" // new user turn → clear the reply line
-                        role == "assistant" && !done -> caption += text
-                    }
-                }
-            },
-            // Already posted to the main thread by the client.
-            onSuggestHoldToTalk = { suggestHoldToTalk = true },
-        )
-        client = rc
-        rc.start()
-    }
 
     val micPermission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) startSession() else { note = "Microphone access is needed for voice."; state = VoiceState.ERROR }
+        if (granted) holder.ensureStarted(vm) else holder.fail("Microphone access is needed for voice.")
     }
 
-    // stop() tears audio down too (off the main thread); shutdown() directly only
-    // covers the never-started case, where it's a cheap no-op sweep.
-    fun endSession() {
-        val rc = client
-        if (rc != null) rc.stop() else audio.shutdown()
+    // Attach/detach: a plain dispose (X / End / sheet closed) ends the call; a
+    // configuration change keeps it alive for the recreated screen. Declared
+    // BEFORE the start effect: attach() resets a non-live holder's stale state,
+    // and must not wipe a synchronous start failure (no token) reported below.
+    DisposableEffect(holder) {
+        holder.attach()
+        onDispose { holder.detach(changingConfigurations = activity?.isChangingConfigurations == true) }
     }
-
-    LaunchedEffect(Unit) {
+    LaunchedEffect(holder) {
+        if (holder.sessionActive) return@LaunchedEffect // re-attached to a live call
         val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-        if (granted) startSession() else micPermission.launch(Manifest.permission.RECORD_AUDIO)
+        if (granted) holder.ensureStarted(vm) else micPermission.launch(Manifest.permission.RECORD_AUDIO)
     }
-    DisposableEffect(Unit) { onDispose { endSession() } }
     // Graceful end on Home/lock — without a microphone foreground service Android
     // silences capture in the background, so a backgrounded session would be a
-    // one-way zombie call (speaker + socket + comm-mode left alive).
-    LifecycleEventEffect(Lifecycle.Event.ON_STOP) { endSession() }
+    // one-way zombie call (speaker + socket + comm-mode left alive). ON_STOP also
+    // fires during a config-change recreation — that one is NOT an exit.
+    LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
+        if (activity?.isChangingConfigurations != true) holder.end()
+    }
 
     Dialog(onDismissRequest = onClose, properties = DialogProperties(usePlatformDefaultWidth = false)) {
         // Keep the screen awake while the call is live so the lock screen doesn't
         // cut the session mid-conversation. (The dialog has its own window.)
         val view = LocalView.current
-        val live = state == VoiceState.LISTENING || state == VoiceState.THINKING || state == VoiceState.SPEAKING
+        // A server-side error (ERROR while the socket is still open) leaves the
+        // session usable — keep the orb's gesture so the user can talk again
+        // instead of a dead screen whose only exit is End. Transport failures
+        // close the socket, so they still fall out of `live`.
+        val live = state == VoiceState.LISTENING || state == VoiceState.THINKING || state == VoiceState.SPEAKING ||
+            (state == VoiceState.ERROR && holder.client?.isOpen == true)
         val sessionLive = state == VoiceState.CONNECTING || live
         DisposableEffect(sessionLive) {
             view.keepScreenOn = sessionLive
@@ -183,7 +299,7 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                 // flight or its speech is still playing (spec §6). The state
                 // transitions that flip `speaking` are the same ones that update
                 // `state`, so reading canInterrupt on recomposition is current.
-                val canInterrupt = (state == VoiceState.THINKING || state == VoiceState.SPEAKING) && client?.canInterrupt == true
+                val canInterrupt = (state == VoiceState.THINKING || state == VoiceState.SPEAKING) && holder.client?.canInterrupt == true
                 val orbGesture = when {
                     !live -> Modifier
                     // Hold to talk: press = cancel any reply + open the gate; release = send.
@@ -192,11 +308,11 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                         .pointerInput(Unit) {
                             detectTapGestures(onPress = {
                                 holding = true
-                                client?.pttDown()
-                                try { tryAwaitRelease() } finally { client?.pttUp(); holding = false }
+                                holder.client?.pttDown()
+                                try { tryAwaitRelease() } finally { holder.client?.pttUp(); holding = false }
                             })
                         }
-                    canInterrupt -> Modifier.clickable(role = Role.Button) { client?.interrupt() }
+                    canInterrupt -> Modifier.clickable(role = Role.Button) { holder.client?.interrupt() }
                         .semantics { contentDescription = "Interrupt assistant" }
                     else -> Modifier
                 }
@@ -226,7 +342,7 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                 if (canInterrupt) {
                     Box(
                         Modifier.clip(RoundedCornerShape(999.dp)).background(c.bg2)
-                            .clickable(role = Role.Button) { client?.interrupt() }
+                            .clickable(role = Role.Button) { holder.client?.interrupt() }
                             .padding(horizontal = 24.dp, vertical = 12.dp),
                     ) { Text("Interrupt", style = UFont.sans(15, FontWeight.SemiBold), color = c.ink) }
                 }
@@ -236,7 +352,7 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                 if (suggestHoldToTalk && !holdToTalk && live) {
                     Box(
                         Modifier.clip(RoundedCornerShape(999.dp)).background(c.bg2)
-                            .clickable(role = Role.Button) { switchToHoldToTalk() }
+                            .clickable(role = Role.Button) { holder.switchToHoldToTalk() }
                             .padding(horizontal = 18.dp, vertical = 10.dp),
                     ) { Text("Noisy room? Switch to hold to talk", style = UFont.sans(13, FontWeight.Medium), color = c.ink2) }
                 }

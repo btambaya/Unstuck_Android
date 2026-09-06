@@ -23,6 +23,9 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicBoolean
 import tech.csalliance.unstuck.core.logic.externalEventToBlock
+import tech.csalliance.unstuck.core.logic.incomingEventsToMirror
+import tech.csalliance.unstuck.core.logic.staleExternalBlockIds
+import tech.csalliance.unstuck.core.logic.wakeWindowSample
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.CalendarConnection
@@ -69,6 +72,7 @@ class SyncCoordinator(
     val feedback = FeedbackClient(client)
     val assistant = AssistantClient(client)
     private val loginTracker = LoginTrackerClient(client)
+    private val wakeWindow = WakeWindowClient(client)
 
     private val hydrator = Hydrator(gateway, store)
     private val flusher = OutboxFlusher(gateway, store)
@@ -133,6 +137,12 @@ class SyncCoordinator(
     /** Invoked (on the coordinator scope) right after the sign-out cache wipe, so the
      *  app layer can drop its own per-user device state in the same breath. */
     var onSignedOut: (() -> Unit)? = null
+
+    /** A shared-collection item edit the server REFUSED (queued `rpc` op → 4xx). The
+     *  optimistic local row has already been rolled back to the server's copy by the
+     *  time this emits; the UI shows the message. */
+    private val _collectionSyncErrors = MutableSharedFlow<String>(extraBufferCapacity = 4, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val collectionSyncErrors: SharedFlow<String> = _collectionSyncErrors
 
     // FLUSH-ON-ENQUEUE (the iOS `setOnEnqueue` seam). Every local write schedules a
     // debounced drain: a mid-session edit reaches the server within ~1.5 s instead of
@@ -288,6 +298,17 @@ class SyncCoordinator(
         write.pushCalBlockDelete = { pushBlockDelete(it) }
         // Flush-on-enqueue: every queued op arms the debounced drain.
         write.onEnqueue = { enqueueFlush.schedule() }
+        // A refused shared-collection RPC: ROLL BACK the optimistic row by re-pulling
+        // the collection from the server (its copy never had the edit), then surface
+        // it. The op itself is already dequeued (terminal).
+        flusher.onRpcRejected = { op, err ->
+            auth.currentUserId?.let { uid -> runCatching { hydrator.hydrateCollections(uid) } }
+            Log.w(TAG, "shared-list edit refused for ${op.recordId}: ${err.message}")
+            _collectionSyncErrors.tryEmit(
+                if (err.status == 403 || err.status == 401) "That change wasn't saved — you no longer have access to this list."
+                else "That change wasn't saved — the list may have been removed or changed.",
+            )
+        }
     }
 
     fun start() {
@@ -333,6 +354,21 @@ class SyncCoordinator(
     fun resumeRealtime() {
         realtimeLifecycle.resume()
         startForegroundNets()
+        auth.currentUserId?.let { uid -> scope.launch { maybeRecordWakeWindow(uid) } }
+    }
+
+    /** Wake-window calibration: the FIRST foreground of each local day writes one
+     *  wake_window_history row (upsert on (user_id, local_date), first-sample-wins).
+     *  Throttled per user + day in prefs so it's one cheap write a day; best-effort
+     *  (a failed write retries on the next foreground the same day). Nothing wrote
+     *  this table before, so the morning brief's auto mode was pinned to 08:00. */
+    internal suspend fun maybeRecordWakeWindow(uid: String, nowMs: Long = System.currentTimeMillis()) {
+        val sample = wakeWindowSample(nowMs, java.time.ZoneId.systemDefault())
+        val key = "wakeWindow.$uid"
+        if (prefs.getString(key, null) == sample.localDate) return
+        runCatching { wakeWindow.record(uid, sample) }
+            .onSuccess { prefs.edit().putString(key, sample.localDate).apply() }
+            .onFailure { Log.w(TAG, "wake_window_history write failed; will retry on next foreground", it) }
     }
 
     // --- Foreground safety nets: only run while the app is foregrounded. ---
@@ -442,9 +478,21 @@ class SyncCoordinator(
         true
     }.getOrElse { Log.w(TAG, "calendar connect failed", it); false }
 
-    /** Pull external events for [-7d, +30d] and reconcile them into local EXTERNAL blocks. */
+    // 429 back-off: no pulls until this instant (the provider / function rate-limited us).
+    @Volatile private var calendarBackoffUntilMs: Long = 0L
+
+    /** Pull external events for [-7d, +30d] and reconcile them into local EXTERNAL blocks.
+     *  The server reports per-connection FAILURES (`failures[]`, contract 2026-09) and
+     *  marks a connection `needs_reauth` on 401 / invalid_grant: a failed connection's
+     *  missing events are "unknown", never "deleted" — its blocks are kept — and on
+     *  429 we back off. (Before, a lapsed refresh token came back as `events: []` and
+     *  every meeting was reconciled away.) */
     suspend fun pullCalendar() {
         auth.currentUserId ?: return
+        if (System.currentTimeMillis() < calendarBackoffUntilMs) {
+            Log.i(TAG, "calendar pull skipped — backing off after a 429")
+            return
+        }
         val conns = runCatching { calendar.listConnections() }
             .onFailure { Log.w(TAG, "calendar listConnections failed", it) }.getOrNull() ?: return
         if (conns.isEmpty()) return
@@ -457,27 +505,44 @@ class SyncCoordinator(
         val zone = java.time.ZoneId.systemDefault()
         val fromIso = fromDate.atStartOfDay(zone).toInstant().toString()
         val toIso = toDate.plusDays(1).atStartOfDay(zone).toInstant().toString()
-        val events = runCatching { calendar.pullEvents(fromIso, toIso) }
-            .onFailure { Log.w(TAG, "calendar pullEvents failed", it) }.getOrNull() ?: return
-        // Don't mirror events we pushed ourselves — the originating task block already
-        // represents them (avoids a duplicate g_ block sitting next to the task block).
+        val resp = try {
+            calendar.pullEvents(fromIso, toIso)
+        } catch (e: CalendarRateLimited) {
+            backOffCalendar(); return
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(TAG, "calendar pullEvents failed", e); return
+        }
+        val failedConnIds = resp.failures.map { it.connectionId }.toSet()
+        if (resp.failures.any { it.status == 429 }) backOffCalendar()
+        if (resp.failures.isNotEmpty()) {
+            Log.w(TAG, "calendar pull: ${resp.failures.size} connection(s) failed — keeping their blocks: ${resp.failures}")
+            // Surface needs_reauth NOW (the bar offers "Reconnect Google") rather than
+            // on the next full hydrate: re-read the connection rows the server just stamped.
+            runCatching { calendar.listConnections() }.getOrNull()?.forEach { c ->
+                store.upsert(Tables.CALENDAR_CONNECTIONS, c, CalendarConnection.serializer(), c.id, c.connectedAt)
+            }
+        }
+        // Don't mirror events we pushed ourselves (the originating task block already
+        // represents them) nor all-day events (no lane on the time grid yet). The
+        // server stamps `allDay: true` — the old `contains('T')` check alone was dead
+        // because the server normalises all-day starts to an ISO instant.
         val ownEventIds = store.blocks().first()
             .filter { it.kind == CalBlockKind.TASK && !it.externalEventId.isNullOrBlank() }
             .mapNotNull { it.externalEventId }.toSet()
-        val blocks = events
-            .filter { it.id !in ownEventIds }
-            // Skip all-day events (date-only start, no 'T') — they'd collapse to 15-min
-            // 00:00 slivers stacked on the time grid. (A proper all-day lane is a follow-up.)
-            .filter { it.start.contains('T') }
-            .map { externalEventToBlock(it, it.calendarId) }
+        val blocks = incomingEventsToMirror(resp.events, ownEventIds).map { externalEventToBlock(it, it.calendarId) }
         val keep = blocks.map { it.id }.toSet()
         blocks.forEach { write.upsertCalBlock(it) }
-        // Reconcile deletions: drop in-window EXTERNAL blocks Google no longer returns.
-        val fromYmd = fromDate.toString()
-        val toYmd = toDate.toString()
-        store.blocks().first()
-            .filter { it.kind == CalBlockKind.EXTERNAL && it.date >= fromYmd && it.date <= toYmd && it.id !in keep }
-            .forEach { write.deleteCalBlock(it.id) }
+        // Reconcile deletions: drop in-window EXTERNAL blocks Google no longer returns —
+        // EXCEPT for connections whose fetch failed (unknown ≠ deleted).
+        staleExternalBlockIds(store.blocks().first(), keep, fromDate.toString(), toDate.toString(), failedConnIds)
+            .forEach { write.deleteCalBlock(it) }
+    }
+
+    private fun backOffCalendar() {
+        calendarBackoffUntilMs = System.currentTimeMillis() + CALENDAR_BACKOFF_MS
+        Log.w(TAG, "calendar rate-limited (429) — backing off ${CALENDAR_BACKOFF_MS / 1000}s")
     }
 
     /** Disconnect an account and immediately purge its connection row + external blocks. */
@@ -515,12 +580,20 @@ class SyncCoordinator(
         return fmt.format(start.toInstant()) to fmt.format(end.toInstant())
     }
 
-    /** PATCH if the block already has a Google event id, else INSERT and return
-     *  the new id (which WriteThrough persists on the block). No-op without a
-     *  Google connection or for non-task blocks. */
-    suspend fun pushBlockUpsert(block: CalBlock): String? {
+    /** PATCH if the block already has a Google event id, else INSERT. Returns the block
+     *  RE-STAMPED with the mapping (external_event_id + external_connection_id) when it
+     *  changed, else null. The connection id is stamped on every INSERT (contract
+     *  2026-09): the server's /disconnect cleanup and event_gone nulling select pushed
+     *  rows by it, so an unstamped block was invisible to them (a reconnect then pulled
+     *  every pushed block back as a duplicate `g_` meeting). A PATCH that comes back
+     *  404 / `event_gone` (deleted in Google, removed at disconnect) clears the stale id
+     *  and falls through to INSERT instead of patching a ghost forever. No-op without a
+     *  Google connection, for non-task blocks, or while the connection needs re-auth. */
+    suspend fun pushBlockUpsert(block: CalBlock): CalBlock? {
         if (block.kind != CalBlockKind.TASK) return null
         val conn = googleConn() ?: return null
+        if (conn.needsReauth) return null   // every call would 401 until the user reconnects
+        if (System.currentTimeMillis() < calendarBackoffUntilMs) return null
         // Always write task blocks to the user's PRIMARY calendar — selectedCalendarIds
         // can include read-only/subscribed calendars (which 403 on insert). "primary" is
         // Google's alias for the main, always-writable calendar.
@@ -528,14 +601,25 @@ class SyncCoordinator(
         val (start, end) = blockIsoRange(block)
         if (start.isEmpty()) return null
         val existing = block.externalEventId
-        return if (!existing.isNullOrBlank()) {
-            runCatching { calendar.patchEvent(existing, conn.id, calId, block.taskName, start, end) }
-                .onFailure { Log.w(TAG, "calendar push patch failed", it) }
-            existing
-        } else {
-            runCatching { calendar.insertEvent(conn.id, calId, block.taskName, start, end) }
-                .onFailure { Log.w(TAG, "calendar push insert failed", it) }.getOrNull()
+        if (!existing.isNullOrBlank()) {
+            try {
+                calendar.patchEvent(existing, conn.id, calId, block.taskName, start, end)
+                // Backfill the connection stamp on a block pushed by an older build.
+                return if (block.externalConnectionId != conn.id) block.copy(externalConnectionId = conn.id) else null
+            } catch (e: CalendarEventGone) {
+                Log.i(TAG, "calendar push: event $existing is gone — re-inserting")
+                // fall through to INSERT below
+            } catch (e: CalendarRateLimited) {
+                backOffCalendar(); return null
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                Log.w(TAG, "calendar push patch failed", e); return null
+            }
         }
+        val id = runCatching { calendar.insertEvent(conn.id, calId, block.taskName, start, end) }
+            .onFailure { Log.w(TAG, "calendar push insert failed", it) }.getOrNull() ?: return null
+        return block.copy(externalEventId = id, externalConnectionId = conn.id)
     }
 
     /** Delete the Google event a locally-removed task block mapped to. */
@@ -598,6 +682,7 @@ class SyncCoordinator(
                     startForegroundNets()
                     runCatching { pullCalendar() }   // ingest Google events if connected
                     maybeTrackLogin(uid)             // best-effort usage analytics (throttled)
+                    maybeRecordWakeWindow(uid)       // first input of the local day → wake-window calibration
                 }.onFailure { Log.w(TAG, "sync authenticated-branch step failed; sync stays alive", it) }
             }
             is SessionStatus.NotAuthenticated -> if (status.isSignOut) {
@@ -615,6 +700,8 @@ class SyncCoordinator(
     companion object {
         private const val TAG = "UnstuckSync"
         private const val KEY_PREV_USER = "unstuck.prevUserId"
+        // After a 429 from the calendar function / provider, no pulls or pushes for this long.
+        private const val CALENDAR_BACKOFF_MS = 5 * 60_000L
         // Foreground backstop pull cadence — cheap full hydrate; catches the
         // continuously-foregrounded case where no realtime socket event fires.
         private const val FOREGROUND_PULL_INTERVAL_MS = 60_000L

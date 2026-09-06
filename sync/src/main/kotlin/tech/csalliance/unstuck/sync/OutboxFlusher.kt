@@ -4,6 +4,9 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
 import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TaskItem
@@ -19,6 +22,11 @@ import tech.csalliance.unstuck.data.db.Tables
 // next reconnect/sign-in). Port of the iOS OutboxFlusher.swift.
 
 class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalStore) {
+
+    /** An outbox `rpc` op the server REFUSED (4xx): it has been dequeued (retrying
+     *  can't change the answer) — the app layer must roll the optimistic local write
+     *  back (re-pull the row) and tell the user. Never throws into the drain. */
+    var onRpcRejected: (suspend (op: OutboxEntity, error: RpcRejected) -> Unit)? = null
 
     // Per-op consecutive-failure tally (keyed by outbox seq). After FAIL_CAP
     // failures an op is QUARANTINED (dead-lettered) so it can't wedge its
@@ -86,6 +94,16 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
                     // the SyncWorker) is normal control flow, not a server rejection —
                     // abort without burning failCounts toward the poison-drop cap.
                     throw e
+                } catch (e: RpcRejected) {
+                    // TERMINAL: the server refused the RPC (RLS / not a member / gone).
+                    // Drop the op — there is no local row to preserve for an rpc op —
+                    // and hand the rollback to the app layer. Later ops on the same
+                    // row still run (each RPC is an independent idempotent step).
+                    println("[outbox] $rowKey rpc rejected (${e.status}): ${e.message} — dropping + rolling back")
+                    store.dequeue(op.seq); failCounts.remove(op.seq); progressed = true
+                    runCatching { onRpcRejected?.invoke(op, e) }
+                        .onFailure { println("[outbox] rpc rollback hook failed: $it") }
+                    continue
                 } catch (e: Throwable) {
                     println("[outbox] $rowKey failed: $e")
                     false
@@ -128,6 +146,37 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
     }
 
     companion object {
+        /** Outbox op kind for a queued RPC (vs "upsert" / "delete"). */
+        const val OP_RPC = "rpc"
+
+        /** Encode an rpc op payload: `{"fn": name, "params": {...}, "legacy"?: {fn, params}}`.
+         *  [legacy] is the pre-migration signature to fall back to when the server
+         *  says the primary function doesn't exist (PGRST202). */
+        fun encodeRpc(fn: String, params: JsonObject, legacy: Pair<String, JsonObject>? = null): String {
+            val m = mutableMapOf<String, kotlinx.serialization.json.JsonElement>("fn" to JsonPrimitive(fn), "params" to params)
+            legacy?.let { (lfn, lp) -> m["legacy"] = JsonObject(mapOf("fn" to JsonPrimitive(lfn), "params" to lp)) }
+            return JsonObject(m).toString()
+        }
+
+        fun decodeRpc(payload: String): Pair<String, JsonObject>? = decodeRpcCall(payload)?.let { it.first to it.second }
+
+        /** (fn, params, legacy?) */
+        internal fun decodeRpcCall(payload: String): Triple<String, JsonObject, Pair<String, JsonObject>?>? = runCatching {
+            val o = Json.parseToJsonElement(payload).jsonObject
+            val fn = (o["fn"] as? JsonPrimitive)?.contentOrNull ?: return null
+            val params = o["params"] as? JsonObject ?: JsonObject(emptyMap())
+            val legacy = (o["legacy"] as? JsonObject)?.let { l ->
+                val lfn = (l["fn"] as? JsonPrimitive)?.contentOrNull ?: return@let null
+                lfn to (l["params"] as? JsonObject ?: JsonObject(emptyMap()))
+            }
+            Triple(fn, params, legacy)
+        }.getOrNull()
+
+        /** PostgREST "function not found" (PGRST202 → 404): the server predates the
+         *  migration that introduced the primary signature. */
+        internal fun isFunctionMissing(e: RpcRejected): Boolean =
+            e.status == 404 && (e.message?.contains("PGRST202") == true || e.message?.contains("Could not find the function", ignoreCase = true) == true)
+
         private const val FAIL_CAP = 5
 
         /** Seqs of upsert ops that a LATER upsert for the same (table,id) makes
@@ -190,6 +239,19 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
             return
         }
         val payload = op.payload ?: return
+        if (op.op == OP_RPC) {
+            // Shared-collection item edit: an idempotent server-side RPC (upsert-by-id
+            // add / set flag / update / remove — a replay is a no-op), so it is safe to
+            // retry across drains exactly like a row upsert. Payload = {fn, params}.
+            val (fn, params, legacy) = decodeRpcCall(payload) ?: return
+            try {
+                gateway.rpc(fn, params)
+            } catch (e: RpcRejected) {
+                if (legacy != null && isFunctionMissing(e)) gateway.rpc(legacy.first, legacy.second) else throw e
+            }
+            return
+        }
         gateway.upsert(op.recordTable, Json.parseToJsonElement(payload).jsonObject, userId)
     }
+
 }

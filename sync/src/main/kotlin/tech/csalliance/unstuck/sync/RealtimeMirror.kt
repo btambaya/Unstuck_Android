@@ -152,15 +152,24 @@ class RealtimeMirror(
         }.launchIn(scope)
     }
 
-    /** collection_members for ME (filtered user_id=eq). Any insert/update/delete
-     *  → re-hydrate collections via [onChanged] (RLS decides which rows return).
-     *  Doesn't mirror rows itself — the membership lives in the collection's
-     *  members[]/myRole, refreshed by the hydrate. */
+    /** collection_members changes I can SEE — as a member (my own row: a new share
+     *  or a revocation) AND as an OWNER (someone joined / left / was removed from a
+     *  list I own). Deliberately UNFILTERED, like the collections channel: RLS
+     *  ("visible to member or owner") scopes INSERT/UPDATE delivery. The old
+     *  `user_id = me` filter never fired for the owner, so the owner's client didn't
+     *  learn its list was shared until the next full hydrate and kept whole-row
+     *  upserting the items JSONB over members' atomic RPC edits. Any event →
+     *  re-hydrate collections via [onChanged]; the membership lives in
+     *  members[]/myRole, refreshed by the hydrate. Known cost: Realtime can't apply
+     *  RLS to a DELETE (only the old row's PK is in the WAL), so a leave/remove
+     *  anywhere reaches every subscriber as one extra cheap collections pull — rare
+     *  (a membership change, not an edit) and harmless (RLS scopes the pull itself).
+     *  Belt-and-braces: migration 056 also bumps collections.updated_at on every
+     *  membership change, so the collections echo carries the owner's row too. */
     private suspend fun subscribeMembers(userId: String, onChanged: suspend () -> Unit) {
         val channel = client.channel("unstuck_collection_members_$userId")
         val flow = channel.postgresChangeFlow<PostgresAction>(schema = "public") {
             table = "collection_members"
-            filter("user_id", FilterOperator.EQ, userId)
         }
         val job = flow.onEach {
             runCatching { onChanged() }.onFailure { println("[realtime] collection_members refresh failed: $it") }

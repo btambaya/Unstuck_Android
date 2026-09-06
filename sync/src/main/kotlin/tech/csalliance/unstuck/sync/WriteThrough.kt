@@ -11,6 +11,7 @@ import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.TaskItem
 import kotlinx.coroutines.flow.first
+import kotlinx.serialization.json.JsonObject
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.OutboxEntity
 import tech.csalliance.unstuck.data.db.Tables
@@ -24,9 +25,12 @@ import tech.csalliance.unstuck.data.db.Tables
 class WriteThrough(private val store: LocalStore) {
 
     // Google Calendar push hooks — wired by SyncCoordinator. `pushCalBlock` returns
-    // the (new/existing) Google event id to persist on the block; both no-op when
-    // there's no Google connection. Kept as a seam so :data/:core stay Google-agnostic.
-    internal var pushCalBlock: (suspend (CalBlock) -> String?)? = null
+    // the block RE-STAMPED with the Google mapping (external_event_id AND
+    // external_connection_id — the server's /disconnect + event_gone cleanup select
+    // pushed rows by the connection id, so an unstamped block was invisible to
+    // them), or null when nothing changed / no Google connection. Kept as a seam so
+    // :data/:core stay Google-agnostic.
+    internal var pushCalBlock: (suspend (CalBlock) -> CalBlock?)? = null
     internal var pushCalBlockDelete: (suspend (CalBlock) -> Unit)? = null
 
     /** Fired after EVERY enqueued op (same seam as iOS `setOnEnqueue`). The
@@ -66,15 +70,29 @@ class WriteThrough(private val store: LocalStore) {
         val dependsOn = b.taskId?.let { if (isUuid(it)) it else null } // wait for parent task op
         enqueue("cal_blocks", b.id, "upsert", DbRowCodec.encodeCalBlock(b).toString(), dependsOn)
         // Mirror to Google (best-effort). An INSERT mints an event id we persist on the
-        // block so later edits PATCH the same event and a pull won't duplicate it.
+        // block (with the connection it lives on) so later edits PATCH the same event
+        // and a pull won't duplicate it; an event_gone PATCH re-inserts and re-stamps.
         val push = pushCalBlock ?: return
-        val eventId = push(b)
-        if (!eventId.isNullOrBlank() && eventId != b.externalEventId) {
-            val stamped = b.copy(externalEventId = eventId)
+        val stamped = push(b) ?: return
+        if (stamped.externalEventId != b.externalEventId || stamped.externalConnectionId != b.externalConnectionId) {
             store.upsert(Tables.CAL_BLOCKS, stamped, CalBlock.serializer(), stamped.id)
             enqueue("cal_blocks", stamped.id, "upsert", DbRowCodec.encodeCalBlock(stamped).toString(), dependsOn)
         }
     }
+
+    /** Queue an idempotent shared-collection item RPC (add / update / flag / remove /
+     *  promotion) through the OUTBOX instead of firing it and forgetting: an offline or
+     *  5xx failure retries on the next drain like any row write, and a server refusal
+     *  (RpcRejected) is surfaced via OutboxFlusher.onRpcRejected so the optimistic
+     *  local row is rolled back with a visible error. The caller has already applied
+     *  the optimistic local write. Keyed on the collection id so per-row ordering
+     *  (FIFO, blockedRows) holds across a list's edits. */
+    suspend fun enqueueCollectionRpc(collectionId: String, fn: String, params: JsonObject, legacy: Pair<String, JsonObject>? = null) {
+        enqueue(Tables.COLLECTIONS, collectionId, OutboxFlusher.OP_RPC, OutboxFlusher.encodeRpc(fn, params, legacy))
+    }
+
+    suspend fun enqueueCollectionRpc(collectionId: String, call: CollectionRpc) =
+        enqueueCollectionRpc(collectionId, call.fn, call.params, call.legacy?.let { it.fn to it.params })
 
     suspend fun upsertSession(s: Session) {
         store.upsert(Tables.SESSIONS, s, Session.serializer(), s.id, s.completedAt)
@@ -130,7 +148,12 @@ class WriteThrough(private val store: LocalStore) {
     }
     suspend fun deleteTag(id: String) = deleteLocalAndEnqueue(Tables.TAGS, id)
     suspend fun deleteLifeArea(id: String) = deleteLocalAndEnqueue(Tables.LIFE_AREAS, id)
-    suspend fun deleteCollection(id: String) = deleteLocalAndEnqueue(Tables.COLLECTIONS, id)
+    suspend fun deleteCollection(id: String) {
+        // A still-queued item RPC for a list being deleted would only be refused
+        // (and roll back a row that no longer exists) — drop it with the upserts.
+        cancelPendingRpcs(Tables.COLLECTIONS, id)
+        deleteLocalAndEnqueue(Tables.COLLECTIONS, id)
+    }
     suspend fun deleteSession(id: String) = deleteLocalAndEnqueue(Tables.SESSIONS, id)
     suspend fun deleteCapture(id: String) = deleteLocalAndEnqueue(Tables.CAPTURES, id)
     suspend fun deleteReasonLog(id: String) = deleteLocalAndEnqueue(Tables.REASON_LOGS, id)
@@ -146,6 +169,12 @@ class WriteThrough(private val store: LocalStore) {
     private suspend fun cancelPendingUpserts(table: String, id: String) {
         store.pending()
             .filter { it.recordTable == table && it.recordId == id && it.op == "upsert" }
+            .forEach { store.dequeue(it.seq) }
+    }
+
+    private suspend fun cancelPendingRpcs(table: String, id: String) {
+        store.pending()
+            .filter { it.recordTable == table && it.recordId == id && it.op == OutboxFlusher.OP_RPC }
             .forEach { store.dequeue(it.seq) }
     }
 

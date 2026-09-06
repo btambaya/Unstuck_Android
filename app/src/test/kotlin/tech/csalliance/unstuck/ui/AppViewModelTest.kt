@@ -553,14 +553,15 @@ class AppViewModelTest {
         )
     }
 
-    @Test fun addCollectionItem_sharedList_optimisticLocalWriteNoOutbox() = runTest(dispatcher) {
+    @Test fun addCollectionItem_sharedList_optimisticLocalWrite_andQueuedItemRpc() = runTest(dispatcher) {
         // Shared list (owned by someone else) → an item edit takes the
         // mutateCollectionItem path: an OPTIMISTIC local write (so the UI updates
-        // immediately) with NO outbox op — the server write is the atomic item RPC
-        // (CollectionShareClient), which is fire-and-forget here (no coordinator in
-        // a unit test). The regression this locks: a shared-list item edit must NOT
-        // ship the whole items JSONB through the outbox (which would clobber a
-        // concurrent member edit).
+        // immediately) plus the atomic item RPC queued through the OUTBOX as an `rpc`
+        // op (retried offline / on 5xx; a refusal rolls the row back). Two
+        // regressions locked: the edit must NOT ship the whole items JSONB as a
+        // whole-row upsert (it would clobber a concurrent member edit), and it must
+        // NOT be fire-and-forget (a failed RPC used to leave a phantom row that the
+        // next echo silently deleted).
         uid = "me"
         val shared = ItemCollection(id = "c2", name = "Trip", color = "teal", items = emptyList(), sortOrder = 0, ownerId = "someone-else", members = listOf("me"))
         seedCollection(shared)
@@ -573,10 +574,32 @@ class AppViewModelTest {
 
         val items = awaitCollection("c2") { it.items.isNotEmpty() }.items
         assertEquals("optimistic local append applied", "pack sunscreen", items.single().body)
-        assertFalse(
-            "shared item edit must NOT enqueue an outbox op (the item RPC is the server write)",
-            store.pending().any { it.recordTable == Tables.COLLECTIONS && it.recordId == "c2" },
-        )
+        val ops = store.pending().filter { it.recordTable == Tables.COLLECTIONS && it.recordId == "c2" }
+        assertEquals("exactly one queued op, and it is an rpc (never a whole-row upsert)", listOf("rpc"), ops.map { it.op })
+        val call = tech.csalliance.unstuck.sync.OutboxFlusher.decodeRpc(ops.single().payload!!)!!
+        assertEquals("collection_add_item", call.first)
+        val item = call.second["p_item"] as kotlinx.serialization.json.JsonObject
+        assertEquals("\"pack sunscreen\"", item["body"].toString())
+        assertEquals("\"c2\"", call.second["p_collection_id"].toString())
+    }
+
+    @Test fun toggleCollectionItemDone_sharedList_queuesTheFlagRpcWithTheNewValue() = runTest(dispatcher) {
+        uid = "me"
+        val item = CollectionItem("i1", "Milk", at = "2026-05-21T10:00:00.000Z")
+        val shared = ItemCollection(id = "c2", name = "Trip", color = "teal", items = listOf(item), sortOrder = 0, ownerId = "someone-else", members = listOf("me"))
+        seedCollection(shared)
+        val vm = vm()
+        subscribeReads(vm, vm.collections)
+
+        vm.toggleCollectionItemDone(shared, "i1")
+        advanceUntilIdle()
+
+        assertTrue(awaitCollection("c2") { it.items.single().done == true }.items.single().done == true)
+        val op = store.pending().single { it.recordTable == Tables.COLLECTIONS && it.recordId == "c2" }
+        val call = tech.csalliance.unstuck.sync.OutboxFlusher.decodeRpc(op.payload!!)!!
+        assertEquals("collection_set_item_flag", call.first)
+        assertEquals("\"done\"", call.second["p_flag"].toString())
+        assertEquals("true", call.second["p_value"].toString())
     }
 
     @Test fun addCollectionItem_soloList_appendsAndEnqueues() = runTest(dispatcher) {
@@ -1382,5 +1405,180 @@ class AppViewModelTest {
             "the mint finally reached the channel at its stamped floor cursor",
             fake.sent.any { it.rev == 1 && it.sessionId == "sid-1" && !it.ended },
         )
+    }
+
+    // -----------------------------------------------------------------------
+    // 2026-09 round 2: ledger accrual on a cold start, sign-out finalize,
+    // honest promote no-op
+    // -----------------------------------------------------------------------
+
+    @Test fun finishFocus_coldStart_emptyBadges_broadcastOwnerSession_accruesViaLedgerOnly() = runTest(dispatcher) {
+        // Owner side of a partner co-focus session, relaunched offline: the badge
+        // cache is EMPTY (no coordinator here — exactly the cold-start shape) but the
+        // live blob carries the rev stamp the announce wrote. The old code routed by
+        // the badges alone → direct totalFocused bump; the partner's finalize of the
+        // SAME session id also lands in the ledger → the task credited twice.
+        val t = task("t1", name = "Brief", estimateMin = 25, totalFocused = 120)
+        seedTask(t)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        store.setLiveSession(
+            LiveSession(
+                id = "sess-shared", taskId = "t1", sessionStart = nowMs - 600_000L, sessionEstimateMin = 25,
+                treatment = FocusTreatment.AMBIENT, priorAccumulatedSec = 0,
+                sharedSessionRev = 1, sharedSessionAtMs = nowMs - 600_000L,   // announced = shared-broadcast
+            ),
+        )
+        advanceUntilIdle()
+
+        vm.finishFocus(t, markDone = false)
+        advanceUntilIdle()
+
+        // Session row (insights) still written with the shared id…
+        val session = awaitSessions { it.isNotEmpty() }.single()
+        assertEquals("sess-shared", session.id)
+        assertEquals(600, session.actualSec)
+        // …but NO direct bump: the total accrues exclusively through the ledger.
+        assertEquals("no direct totalFocused bump on a shared-broadcast session", 120, loadTask("t1")!!.totalFocused)
+        assertFalse(
+            "no whole-row task upsert carrying a bumped total",
+            store.pending().any { it.recordTable == Tables.TASKS && it.op == "upsert" && it.payload!!.contains("\"total_focused\":720") },
+        )
+        // The ledger record is queued durably (no circle client → transient → persisted retry).
+        val raw = graph.settings.loadPendingSharedFocusRaw()
+        assertNotNull("ledger retry persisted", raw)
+        assertTrue(raw!!.contains("sess-shared"))
+        assertTrue(raw.contains("\"sec\":600"))
+        assertNull(store.getLiveSession())
+    }
+
+    @Test fun finishFocus_plainOwnSession_noStamps_stillDirectBump() = runTest(dispatcher) {
+        // Control: an un-broadcast own session keeps the direct bump (no ledger).
+        val t = task("t1", name = "Solo", estimateMin = 25, totalFocused = 0)
+        seedTask(t)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        store.setLiveSession(LiveSession(id = "s1", taskId = "t1", sessionStart = nowMs - 60_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT))
+        advanceUntilIdle()
+        vm.finishFocus(t, markDone = false)
+        advanceUntilIdle()
+        assertEquals(60, awaitTask("t1") { it.totalFocused == 60 }.totalFocused)
+        assertNull("no ledger record for a plain own session", graph.settings.loadPendingSharedFocusRaw())
+    }
+
+    @Test fun signOut_finalizesARunningOwnSession_intoTheOutbox() = runTest(dispatcher) {
+        // Sign-out used to wipe the live blob with the cache — elapsed minutes gone.
+        // Now an OWN session is finalized first (Session row + total into the outbox,
+        // which the coordinator's bounded drain lands or parks under the user).
+        val t = task("t1", name = "Draft", estimateMin = 25, totalFocused = 30)
+        seedTask(t)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        store.setLiveSession(LiveSession(id = "s-out", taskId = "t1", sessionStart = nowMs - 300_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT))
+        advanceUntilIdle()
+
+        vm.signOut()   // no coordinator in tests → the finalize runs, then auth (null) is skipped
+        advanceUntilIdle()
+
+        val session = awaitSessions { it.isNotEmpty() }.single()
+        assertEquals("s-out", session.id)
+        assertEquals(300, session.actualSec)
+        assertEquals(330, awaitTask("t1") { it.totalFocused == 330 }.totalFocused)
+        assertTrue(store.pending().any { it.recordTable == Tables.SESSIONS && it.recordId == "s-out" })
+        assertNull("live session cleared before the wipe", awaitLiveSession { it == null })
+    }
+
+    @Test fun signOut_leavesAPartnerCoFocusSessionAlone() = runTest(dispatcher) {
+        // A partner session is the ONE true shared session: ending it locally would
+        // broadcast `ended` and cut the partner off; the partner finalizes it via the
+        // ledger. So sign-out must not finalize (no Session row, no ledger record).
+        val t = task("t1", name = "Brief", estimateMin = 25, totalFocused = 0)
+        seedTask(t)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        store.setLiveSession(LiveSession(id = "sid-p", taskId = "t1", sessionStart = nowMs - 300_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT, sharedSessionRev = 2, sharedSessionAtMs = nowMs - 300_000L))
+        advanceUntilIdle()
+
+        vm.signOut()
+        advanceUntilIdle()
+
+        assertTrue(store.sessions().first().isEmpty())
+        assertNull(graph.settings.loadPendingSharedFocusRaw())
+        assertEquals(0, loadTask("t1")!!.totalFocused)
+    }
+
+    @Test fun startFocus_todaysOccurrence_overAPausedSessionOfYesterdaysOccurrence_rePointsAndStaysPaused() = runTest(dispatcher) {
+        // Contract (FOCUS b): start(occurrenceBlockId) must attach to THAT occurrence —
+        // never silently resume a paused session left over from an earlier occurrence
+        // of the same template and later tick the OLD day's block. Android's rule:
+        // re-point occurrenceBlockId at today's block, keep the session paused (the
+        // user resumes explicitly; opening Focus never resumes).
+        val template = task("tpl", name = "Run", recurrence = Recurrence.Daily(), totalFocused = 60)
+        val yesterday = CalBlock(id = "occY", taskId = "tpl", taskName = "Run", startTime = "07:00", durationMinutes = 30, date = "2026-05-21", kind = CalBlockKind.TASK)
+        val today = CalBlock(id = "occT", taskId = "tpl", taskName = "Run", startTime = "07:00", durationMinutes = 30, date = "2026-05-22", kind = CalBlockKind.TASK)
+        seedTask(template); seedBlock(yesterday); seedBlock(today)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        store.setLiveSession(
+            LiveSession(
+                id = "sessY", taskId = "tpl", sessionStart = nowMs - 600_000L, sessionEstimateMin = 30, treatment = FocusTreatment.AMBIENT,
+                priorAccumulatedSec = 60, occurrenceBlockId = "occY", paused = true, pausedAt = nowMs - 300_000L,
+            ),
+        )
+        advanceUntilIdle()
+
+        vm.startFocus(template.copy(id = "occT", recurrence = null))   // the projected TODAY row
+        advanceUntilIdle()
+
+        val live = awaitLiveSession { it?.occurrenceBlockId == "occT" }!!
+        assertEquals("same session — no re-mint", "sessY", live.id)
+        assertTrue("stays paused: opening Focus never resumes", live.paused)
+        assertTrue("no finalize of the old occurrence", store.sessions().first().isEmpty())
+
+        // Completing now ticks TODAY's block, not yesterday's.
+        vm.finishFocus(template.copy(id = "occT", recurrence = null), markDone = true)
+        advanceUntilIdle()
+        awaitBlock("occT") { it.done }
+        assertFalse("yesterday's occurrence untouched", loadBlock("occY")!!.done)
+    }
+
+    @Test fun assistant_promoteItemToTask_refusesAnInFlightPromotion() = runTest(dispatcher) {
+        // Web/iOS parity: the tool must not answer "ok: promoted" (and mint a receipt)
+        // when moveItemToTask's guard silently no-ops on an already-promoted, not-done item.
+        uid = "me"
+        val inFlight = CollectionItem("i1", "Buy milk", at = "2026-05-21T10:00:00.000Z", promoted = true, promotedDone = false, assignee = "Ada")
+        val col = ItemCollection(id = "c1", name = "Home", color = "indigo", items = listOf(inFlight), sortOrder = 0, ownerId = "me")
+        seedCollection(col)
+        val vm = vm()
+        subscribeReads(vm, vm.collections, vm.tasks)
+
+        val args = kotlinx.serialization.json.JsonObject(
+            mapOf(
+                "listId" to kotlinx.serialization.json.JsonPrimitive("c1"),
+                "itemId" to kotlinx.serialization.json.JsonPrimitive("i1"),
+                "mode" to kotlinx.serialization.json.JsonPrimitive("self"),
+            ),
+        )
+        val result = vm.runAssistantTool("promote_item_to_task", args, HashMap(), HashMap())
+        advanceUntilIdle()
+
+        assertEquals("error: \"Buy milk\" is already promoted \u2014 its task is still in flight", result)
+        assertTrue("no task was created", store.tasks().first().isEmpty())
+    }
+
+    @Test fun assistant_promoteItemToTask_promotesAFreshItem() = runTest(dispatcher) {
+        uid = "me"
+        val item = CollectionItem("i1", "Buy milk", at = "2026-05-21T10:00:00.000Z")
+        val col = ItemCollection(id = "c1", name = "Home", color = "indigo", items = listOf(item), sortOrder = 0, ownerId = "me")
+        seedCollection(col)
+        val vm = vm()
+        subscribeReads(vm, vm.collections, vm.tasks)
+        val args = kotlinx.serialization.json.JsonObject(
+            mapOf("listId" to kotlinx.serialization.json.JsonPrimitive("c1"), "itemId" to kotlinx.serialization.json.JsonPrimitive("i1")),
+        )
+        val result = vm.runAssistantTool("promote_item_to_task", args, HashMap(), HashMap())
+        advanceUntilIdle()
+        assertEquals("ok: promoted \"Buy milk\"", result)
+        assertEquals("Buy milk", awaitTasks { it.isNotEmpty() }.single().name)
     }
 }

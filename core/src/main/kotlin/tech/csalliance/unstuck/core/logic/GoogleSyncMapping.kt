@@ -76,3 +76,36 @@ fun blockToIsoRange(b: CalBlock): Pair<String, String> {
     val endInstant = startInstant.plusSeconds(b.durationMinutes.toLong() * 60)
     return ISO_UTC_MS.format(startInstant) to ISO_UTC_MS.format(endInstant)
 }
+
+/** An all-day (date-only) provider event. The server keeps the provider's flag as
+ *  `allDay: true` (contract 2026-09) AND may still ship a bare `YYYY-MM-DD` start
+ *  from an older deploy — both shapes count. All-day events have no place on the
+ *  time grid (they'd collapse to 00:00 slivers / 24h walls), so the pull skips them
+ *  until an all-day lane exists. */
+fun isAllDayEvent(ev: ExternalEvent): Boolean = ev.allDay == true || !ev.start.contains('T')
+
+/** The pulled events that become local EXTERNAL blocks: never the ones WE pushed
+ *  (the originating task block already represents them — [ownEventIds] are the
+ *  task blocks' external_event_ids) and never all-day events. Pure — the
+ *  SyncCoordinator pull is the only caller. */
+fun incomingEventsToMirror(events: List<ExternalEvent>, ownEventIds: Set<String>): List<ExternalEvent> =
+    events.filter { it.id !in ownEventIds && !isAllDayEvent(it) }
+
+/** Deletion reconcile after a pull: the in-window EXTERNAL blocks the provider no
+ *  longer returned ([keepIds] = what it DID return). Blocks whose connection is in
+ *  [failedConnectionIds] are KEPT — the server reported that connection's fetch as
+ *  failed (revoked token, 429, 5xx), so its empty result means "unknown", not
+ *  "deleted in Google". Without this a lapsed refresh token wiped every meeting. */
+fun staleExternalBlockIds(
+    local: List<CalBlock>,
+    keepIds: Set<String>,
+    fromYmd: String,
+    toYmd: String,
+    failedConnectionIds: Set<String>,
+): List<String> =
+    local.filter { b ->
+        b.kind == CalBlockKind.EXTERNAL &&
+            b.date >= fromYmd && b.date <= toYmd &&
+            b.id !in keepIds &&
+            b.externalConnectionId !in failedConnectionIds
+    }.map { it.id }

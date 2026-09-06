@@ -180,6 +180,11 @@ data class CalendarConnection(
     val colorSlot: Int,
     val lastSyncCursor: String? = null,
     val connectedAt: String,
+    // Server-set (migration 056): the refresh token was rejected (401 / invalid_grant)
+    // on the last pull — the bar offers "Reconnect Google" and pushes stop until the
+    // user re-consents. [lastError] is the server's short reason, for diagnostics.
+    val needsReauth: Boolean = false,
+    val lastError: String? = null,
 )
 
 @Serializable
@@ -190,6 +195,10 @@ data class ExternalEvent(
     val summary: String,
     val start: String,
     val end: String,
+    // Provider all-day event (date-only start). The server stamps this explicitly
+    // because it also normalises `start` to an ISO instant — so a `contains('T')`
+    // check alone can no longer tell an all-day event apart (it was dead code).
+    val allDay: Boolean? = null,
 )
 
 @Serializable

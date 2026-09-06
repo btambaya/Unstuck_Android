@@ -3,6 +3,7 @@ package tech.csalliance.unstuck.ui
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import io.github.jan.supabase.auth.auth
+import io.github.jan.supabase.auth.status.SessionSource
 import io.github.jan.supabase.auth.status.SessionStatus
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
@@ -71,6 +72,7 @@ import tech.csalliance.unstuck.core.logic.resolveShareRequest
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.SharedSessionState
 import tech.csalliance.unstuck.core.logic.addDaysIso
+import tech.csalliance.unstuck.core.logic.accruesViaSharedLedger
 import tech.csalliance.unstuck.core.logic.adoptable
 import tech.csalliance.unstuck.core.logic.applyCompletion
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
@@ -87,6 +89,7 @@ import tech.csalliance.unstuck.core.model.CoFocusState
 import tech.csalliance.unstuck.core.model.CoFocusTimer
 import tech.csalliance.unstuck.core.model.coFocusFirstName
 import tech.csalliance.unstuck.sync.CoFocusControl
+import tech.csalliance.unstuck.sync.CollectionRpcs
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.Capture
@@ -390,8 +393,10 @@ class AppViewModel(
         write?.upsertTask(applyCompletion(flipped, prior = task, nowISO = isoNow()))
         // Completing a task promoted from a shared collection item → flip the
         // shared item to "done by <name>" + notify the other members (best-effort).
-        if (flipped.done && !task.done && task.sourceCollectionId != null && task.sourceItemId != null) {
-            share?.taskDone(task.sourceCollectionId!!, task.sourceItemId!!, task.name, currentName ?: "Someone")
+        // UN-completing it → 'reopen': the item goes back to "<name>'s on it"
+        // (collection-task-done, contract 2026-09) instead of staying "done by ✓".
+        if (task.sourceCollectionId != null && task.sourceItemId != null && flipped.done != task.done) {
+            share?.taskDone(task.sourceCollectionId!!, task.sourceItemId!!, task.name, currentName ?: "Someone", action = if (flipped.done) "done" else "reopen")
         }
     }
 
@@ -409,6 +414,13 @@ class AppViewModel(
     /** Delete a task and cascade to its cal_blocks + captures (so realtime
      *  listeners don't pull orphans back), mirroring the web deleteTask. */
     fun deleteTask(id: String) = launchWrite {
+        // A loop-promoted task being deleted releases its shared item ('reopen') so
+        // the list doesn't show "<name>'s on it" forever with nobody able to re-promote.
+        tasks.value.firstOrNull { it.id == id }?.let { t ->
+            if (t.sourceCollectionId != null && t.sourceItemId != null) {
+                share?.taskDone(t.sourceCollectionId!!, t.sourceItemId!!, t.name, currentName ?: "Someone", action = "reopen")
+            }
+        }
         blocks.value.filter { it.taskId == id }.forEach { write?.deleteCalBlock(it.id) }
         captures.value.filter { it.taskId == id }.forEach { write?.deleteCapture(it.id) }
         write?.deleteTask(id)
@@ -1199,14 +1211,19 @@ class AppViewModel(
      *  applied same-session state means this side has re-exchanged with the channel. */
     private suspend fun applyIncomingShared(cur: LiveSession, msg: SharedSessionState, name: String) {
         val start = cur.sessionStart
+        // Display clamp (same as FocusTimer.adopt): a partner clock up to 2 min AHEAD
+        // (adoptable tolerates it) would otherwise put sessionStart in OUR future after
+        // their resume — the ring froze at 00:00 for the skew and the local finalize
+        // under-counted by it. The wire state (setSharedCurrent) stays as sent.
+        val startMs = minOf(msg.sessionStartMs, nowMs())
         // Echo guard BEFORE the write: the Room re-emission's fields will match.
         coFocusLastSent = maxOf(msg.rev, coFocusLastSent?.first ?: 0) to
-            CoFocusFields(msg.sessionStartMs, msg.paused, msg.pausedAtMs, msg.estimateMin)
+            CoFocusFields(startMs, msg.paused, msg.pausedAtMs, msg.estimateMin)
         coFocusSession?.setSharedCurrent(msg)
         coFocusSession?.setSuppressAnnounce(false)
         store.setLiveSession(
             cur.copy(
-                sessionStart = msg.sessionStartMs, paused = msg.paused, pausedAt = msg.pausedAtMs,
+                sessionStart = startMs, paused = msg.paused, pausedAt = msg.pausedAtMs,
                 sessionEstimateMin = msg.estimateMin,
                 // Cursor coherence (spec amendments, "Adopt fixes the cursors"): the
                 // LOCAL stamp pair follows the applied control too — on the Adopt arm
@@ -1231,13 +1248,13 @@ class AppViewModel(
             }
             cur.paused && !msg.paused -> {
                 // Remote resume: rebase the chronometer at the shifted start.
-                tech.csalliance.unstuck.surface.FocusTimerService.update(ctx, paused = false, startMs = msg.sessionStartMs)
+                tech.csalliance.unstuck.surface.FocusTimerService.update(ctx, paused = false, startMs = startMs)
                 tech.csalliance.unstuck.surface.PausedCheckinScheduler.cancel(ctx)
                 setTransientAttribution("$name resumed")
             }
             msg.estimateMin != cur.sessionEstimateMin -> setTransientAttribution("$name extended the session")
-            msg.sessionStartMs != start && !msg.paused ->
-                tech.csalliance.unstuck.surface.FocusTimerService.update(ctx, paused = false, startMs = msg.sessionStartMs)
+            startMs != start && !msg.paused ->
+                tech.csalliance.unstuck.surface.FocusTimerService.update(ctx, paused = false, startMs = startMs)
         }
     }
 
@@ -1514,10 +1531,13 @@ class AppViewModel(
         val prev = store.tasks().first().firstOrNull { it.id == cur.taskId } ?: return
         val sid = cur.id ?: newUuid()
         write?.upsertSession(Session(id = sid, taskId = prev.id, taskName = prev.name, estimateMin = prev.estimateMin, actualSec = elapsed, completedAt = isoNow()))
-        if (shareBadges.value[prev.id].orEmpty().any { it.level == ShareLevel.PARTNER }) {
+        if (accruesViaSharedLedger(cur, prev.id, shareBadges.value)) {
             // One-true-shared-session accrual: a partner-shared task's total accrues
             // EXCLUSIVELY via the ledger (exactly-once per session id — the partner may
-            // finalize the SAME session). Land the row writes first so the whole-row
+            // finalize the SAME session). Routed by the live blob's own markers (rev
+            // stamps) as well as the badge cache: on a cold start the badges RPC may
+            // not have resolved, and a direct bump here + the partner's ledger write
+            // credited the task twice. Land the row writes first so the whole-row
             // upsert can't clobber the server-side accrual, then log (durably: an
             // offline failure queues a persisted retry; a revoked share falls back to
             // the direct bump — see accrueSharedFocus).
@@ -1581,7 +1601,10 @@ class AppViewModel(
         // shared task accrues total_focused EXCLUSIVELY via the log_shared_focus ledger
         // (exactly-once by session id — the partner finalizes the SAME id), so the
         // direct += bump is SKIPPED here. The Session row (insights) is still written.
-        val partnerShared = shareBadges.value[realTask.id].orEmpty().any { it.level == ShareLevel.PARTNER }
+        // Decided from the live blob's own markers (rev stamps prove it was shared-
+        // broadcast) AND the badge cache — the cache alone is empty on a cold start /
+        // offline relaunch, which made the owner double-credit the task.
+        val partnerShared = accruesViaSharedLedger(live, realTask.id, shareBadges.value)
         val sid = live.id ?: newUuid()
         // Reuse the live-session id so captures taken during the session join back
         // to this Session row (the interruption histogram depends on it).
@@ -1721,15 +1744,20 @@ class AppViewModel(
     private fun mutateCollectionItem(
         id: String,
         transform: (ItemCollection) -> ItemCollection,
-        rpc: suspend (tech.csalliance.unstuck.sync.CollectionShareClient) -> Unit,
+        rpc: () -> tech.csalliance.unstuck.sync.CollectionRpc,
     ) = launchWrite {
         collectionMutex.withLock {
             val latest = store.collections().first().firstOrNull { it.id == id } ?: return@withLock
             val next = transform(latest)
             if (isShared(latest)) {
-                // Optimistic local write (no outbox — the RPC is the server write).
+                // Optimistic local write, then the atomic item RPC goes through the
+                // OUTBOX as an idempotent `rpc` op (offline / 5xx → retried on the next
+                // drain; a server refusal → the row is re-pulled and the user told —
+                // SyncCoordinator.collectionSyncErrors). It used to be fire-and-forget:
+                // a failed RPC left the optimistic row locally until the next echo /
+                // hydrate silently deleted it.
                 store.upsert(tech.csalliance.unstuck.data.db.Tables.COLLECTIONS, next, ItemCollection.serializer(), next.id)
-                share?.let { rpc(it) }
+                write?.enqueueCollectionRpc(id, rpc())
             } else {
                 write?.upsertCollection(next)
             }
@@ -1740,31 +1768,36 @@ class AppViewModel(
         val item = tech.csalliance.unstuck.core.model.CollectionItem(newUuid(), text, at = isoNow())
         mutateCollectionItem(col.id,
             { it.copy(items = it.items + item) },
-            { it.addItem(col.id, item.id, item.body, item.at) })
+            { CollectionRpcs.addItem(col.id, item.id, item.body, item.at) })
     }
     fun updateCollectionItemBody(col: ItemCollection, itemId: String, body: String) {
         val text = body.trim()
         mutateCollectionItem(col.id,
             { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(body = text) else it }) },
-            { it.updateItem(col.id, itemId, text) })
+            { CollectionRpcs.updateItem(col.id, itemId, text) })
     }
     fun toggleCollectionItemPin(col: ItemCollection, itemId: String) {
         var nextVal = false
         mutateCollectionItem(col.id,
             { c -> c.copy(items = c.items.map { if (it.id == itemId) { nextVal = !(it.pinned ?: false); it.copy(pinned = nextVal) } else it }) },
-            { it.setItemFlag(col.id, itemId, "pinned", nextVal) })
+            { CollectionRpcs.setItemFlag(col.id, itemId, "pinned", nextVal) })
     }
     fun toggleCollectionItemDone(col: ItemCollection, itemId: String) {
         var nextVal = false
         mutateCollectionItem(col.id,
             { c -> c.copy(items = c.items.map { if (it.id == itemId) { nextVal = !(it.done ?: false); it.copy(done = nextVal) } else it }) },
-            { it.setItemFlag(col.id, itemId, "done", nextVal) })
+            { CollectionRpcs.setItemFlag(col.id, itemId, "done", nextVal) })
     }
     fun removeCollectionItem(col: ItemCollection, itemId: String) {
         mutateCollectionItem(col.id,
             { c -> c.copy(items = c.items.filterNot { it.id == itemId }) },
-            { it.removeItem(col.id, itemId) })
+            { CollectionRpcs.removeItem(col.id, itemId) })
     }
+
+    /** Shared-list edits the server refused (rolled back already) — the detail
+     *  screen shows them. Empty flow when there's no sync engine (tests / demo). */
+    val collectionSyncErrors: kotlinx.coroutines.flow.Flow<String>
+        get() = graph.coordinator?.collectionSyncErrors ?: kotlinx.coroutines.flow.emptyFlow()
     fun renameCollection(col: ItemCollection, name: String) {
         val nm = name.trim(); if (nm.isNotEmpty()) mutateCollection(col.id) { it.copy(name = nm) }
     }
@@ -1779,7 +1812,7 @@ class AppViewModel(
     private fun markItemPromoted(col: ItemCollection, itemId: String, assignee: String, done: Boolean?, dueAt: String?) {
         mutateCollectionItem(col.id,
             { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(promoted = true, assignee = assignee, promotedDone = done, dueAt = dueAt) else it }) },
-            { it.setItemPromotion(col.id, itemId, assignee, done, dueAt) })
+            { CollectionRpcs.setItemPromotion(col.id, itemId, assignee, done, dueAt) })
     }
 
     /** Turn a collection item into a task. LOOP on a shared list links the task to
@@ -1812,15 +1845,32 @@ class AppViewModel(
 
     // --- collection sharing (edge function-backed) ---
     suspend fun shareCollection(collectionId: String, email: String, role: String): tech.csalliance.unstuck.sync.ShareOutcome {
-        val outcome = share?.share(collectionId, email, role) ?: tech.csalliance.unstuck.sync.ShareOutcome.ERROR
-        if (outcome == tech.csalliance.unstuck.sync.ShareOutcome.OK) graph.coordinator?.refreshCollections()
-        return outcome
+        val result = share?.shareDetailed(collectionId, email, role)
+            ?: tech.csalliance.unstuck.sync.CollectionShareClient.ShareResult(tech.csalliance.unstuck.sync.ShareOutcome.ERROR, null)
+        // The owner's own client must learn it is shared NOW: the server returns the
+        // membership rows, so set members[] immediately (isShared flips → item edits
+        // switch to the atomic RPCs instead of whole-row upserts that clobber members'
+        // edits), then refresh unconditionally — a pending INVITE changes the sheet too.
+        result.memberIds?.let { ids -> setCollectionMembersLocally(collectionId, ids) }
+        if (result.outcome != tech.csalliance.unstuck.sync.ShareOutcome.SELF) graph.coordinator?.refreshCollections()
+        return result.outcome
+    }
+    private suspend fun setCollectionMembersLocally(collectionId: String, memberIds: List<String>) {
+        collectionMutex.withLock {
+            val cur = store.collections().first().firstOrNull { it.id == collectionId } ?: return@withLock
+            val uid = currentUid()
+            val next = cur.copy(
+                members = memberIds.filter { it != cur.ownerId },
+                myRole = cur.myRole ?: if (cur.ownerId == null || cur.ownerId == uid) "owner" else null,
+            )
+            if (next != cur) store.upsert(tech.csalliance.unstuck.data.db.Tables.COLLECTIONS, next, ItemCollection.serializer(), next.id)
+        }
     }
     suspend fun unshareCollection(collectionId: String, userId: String) {
         share?.unshare(collectionId, userId); graph.coordinator?.refreshCollections()
     }
     suspend fun cancelCollectionInvite(collectionId: String, email: String) {
-        share?.cancelInvite(collectionId, email)
+        share?.cancelInvite(collectionId, email); graph.coordinator?.refreshCollections()
     }
     // Fire-and-forget on viewModelScope (not the screen's): the caller pops the
     // screen immediately, which would cancel a screen-scoped coroutine before the
@@ -1828,6 +1878,7 @@ class AppViewModel(
     fun leaveCollection(collectionId: String) = launchWrite {
         share?.leave(collectionId)
         store.delete(tech.csalliance.unstuck.data.db.Tables.COLLECTIONS, collectionId)   // lose access → drop locally
+        graph.coordinator?.refreshCollections()   // membership changed server-side — resync the rest
     }
     suspend fun listCollectionMembers(collectionId: String): List<tech.csalliance.unstuck.sync.CollectionMemberInfo> =
         share?.listMembers(collectionId) ?: emptyList()
@@ -2239,7 +2290,15 @@ class AppViewModel(
                     // session (forgot-password link) routes to set-new-password; magic-
                     // link / OAuth fall through to the normal app. One-shot probe so a
                     // later relaunch (Storage source) never re-triggers the screen.
-                    if (status is SessionStatus.Authenticated && graph.pendingRecoveryProbe.value) {
+                    // ONLY the code exchange itself (SessionSource.External) may consume
+                    // the probe: a link tapped while the app was killed with a session
+                    // stored arms the probe BEFORE the storage-restored session emits,
+                    // and that emission used to spend the probe against the OLD token —
+                    // the recovery session then landed on Today and the single-use link
+                    // was burned (RecoveryProbe.consumes).
+                    if (status is SessionStatus.Authenticated && graph.pendingRecoveryProbe.value &&
+                        RecoveryProbe.consumes(status.source)
+                    ) {
                         graph.pendingRecoveryProbe.value = false
                         if (isRecoverySession(status.session.accessToken)) {
                             graph.pendingPasswordRecovery.value = true
@@ -2421,7 +2480,7 @@ class AppViewModel(
         runCatching { Json.parseToJsonElement(s).jsonObject }.getOrDefault(JsonObject(emptyMap()))
 
     /** Execute one tool call → a short result string the model reads next turn. */
-    private suspend fun runAssistantTool(
+    internal suspend fun runAssistantTool(
         name: String, args: JsonObject,
         newTasks: HashMap<String, TaskItem>, newLists: HashMap<String, ItemCollection>,
     ): String {
@@ -2525,6 +2584,12 @@ class AppViewModel(
             "promote_item_to_task" -> {
                 val c = findList(str("listId")) ?: return "error: list not found"
                 val item = c.items.firstOrNull { it.id == str("itemId") } ?: return "error: item not found"
+                // Honest no-op (web/iOS parity): moveItemToTask silently guards an item
+                // whose task is still in flight — the old "ok: promoted" lied and
+                // minted a receipt for nothing.
+                if (item.promoted == true && item.promotedDone != true) {
+                    return "error: \"${item.body}\" is already promoted \u2014 its task is still in flight"
+                }
                 val mode = if (str("mode") == "loop") PromoteMode.LOOP else PromoteMode.SELF
                 moveItemToTask(c, item, mode, str("dueAt")); "ok: promoted \"${item.body}\""
             }
@@ -2833,9 +2898,28 @@ class AppViewModel(
     // Unregister this device's push token (while the JWT is still valid) then
     // sign out — prevents the previous user's pushes reaching the next user.
     fun signOut() = launchWrite {
+        // A running OWN focus session is finalized FIRST (Session row + totalFocused
+        // into the outbox, which the coordinator's bounded drain lands — or parks under
+        // this user for the next sign-in). The sign-out cache wipe (store.clearAll)
+        // used to discard the live blob outright, losing the elapsed minutes. Partner
+        // co-focus sessions are deliberately NOT ended here: the partner keeps the one
+        // true session and finalizes it via the ledger (same session id), and a local
+        // finalize would broadcast `ended` and cut them off.
+        finalizeOwnLiveSessionForSignOut()
         val c = graph.coordinator
         if (c == null) { auth?.signOut(); return@launchWrite }
         _parkedOnSignOut.value = c.signOutAndUnregister()
+    }
+
+    private suspend fun finalizeOwnLiveSessionForSignOut() {
+        val live = store.getLiveSession() ?: return
+        if (live.sessionStart == null) return
+        if (live.sharedTitle != null || accruesViaSharedLedger(live, live.taskId, shareBadges.value)) return
+        runCatching { finalizeDisplaced(live) }
+        store.setLiveSession(null)
+        val ctx = graph.appContext
+        runCatching { tech.csalliance.unstuck.surface.FocusTimerService.stop(ctx) }
+        runCatching { tech.csalliance.unstuck.surface.PausedCheckinScheduler.cancel(ctx) }
     }
 
     /** Serialise every user-owned collection into one JSON bundle (matches web exportAll). */

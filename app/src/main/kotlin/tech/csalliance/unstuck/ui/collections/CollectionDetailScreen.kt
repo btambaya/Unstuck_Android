@@ -97,6 +97,10 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     val shared = memberCount > 0 || !owner
     val archived = col.archived == true
     var showShare by remember { mutableStateOf(false) }
+    // A shared-list edit the server refused: the row was rolled back to the server's
+    // copy already (SyncCoordinator) — say so instead of letting it vanish silently.
+    var syncError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(Unit) { vm.collectionSyncErrors.collect { syncError = it } }
 
     // Move-to-task: solo list → straight to "for me"; shared list → ask via the chooser.
     fun startPromote(item: CollectionItem) {
@@ -171,6 +175,12 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                     style = UFont.sans(12, FontWeight.SemiBold), color = c.primaryDeep,
                     modifier = Modifier.padding(top = 8.dp, start = 2.dp),
                 )
+            }
+            syncError?.let { msg ->
+                Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Text(msg, style = UFont.sans(12), color = c.red, modifier = Modifier.weight(1f))
+                    Text("Dismiss", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { syncError = null }.padding(horizontal = 6.dp, vertical = 2.dp))
+                }
             }
         }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp).padding(bottom = 30.dp)) {

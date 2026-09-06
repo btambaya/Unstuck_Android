@@ -15,6 +15,10 @@ import io.ktor.http.contentType
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 // CollectionShareClient — the Android port of the web shared-collections plumbing
 // (use-collections.ts share/unshare/leave/listMembers + the atomic item RPCs).
@@ -50,6 +54,13 @@ class CollectionShareClient(private val client: SupabaseClient) {
     )
 
     @Serializable
+    private data class MemberRow(
+        @SerialName("user_id") val userId: String = "",
+        val email: String = "",
+        val role: String? = null,
+    )
+
+    @Serializable
     private data class ShareResponse(
         val ok: Boolean? = null,
         val invited: Boolean? = null,
@@ -57,14 +68,17 @@ class CollectionShareClient(private val client: SupabaseClient) {
         val role: String? = null,
         val email: String? = null,
         val error: String? = null,
+        // Contract 2026-09: `add` returns the collection's membership rows so the
+        // owner's client can flip the list to "shared" IMMEDIATELY (its own
+        // collection_members channel never fired for another user's row, so the
+        // owner kept whole-row upserting the items JSONB and clobbering members'
+        // atomic edits until the next full hydrate). Absent on an older server.
+        val members: List<MemberRow>? = null,
     )
 
-    @Serializable
-    private data class MemberRow(
-        @SerialName("user_id") val userId: String = "",
-        val email: String = "",
-        val role: String? = null,
-    )
+    /** Result of a share: the outcome + the membership the server returned (user ids,
+     *  owner excluded), or null when the server didn't return it. */
+    data class ShareResult(val outcome: ShareOutcome, val memberIds: List<String>?)
 
     @Serializable
     private data class PendingRow(val email: String = "", val role: String? = null)
@@ -99,9 +113,13 @@ class CollectionShareClient(private val client: SupabaseClient) {
     /** Share with an email. Existing account → member; otherwise pending invite + email.
      *  Maps the distinct server error codes (`self`, `not_found`) to their outcomes even
      *  when the function returns them at a 4xx status. */
-    suspend fun share(collectionId: String, email: String, role: String): ShareOutcome {
-        val r = callOrError(ShareBody("add", collectionId, email = email, role = role)) ?: return ShareOutcome.ERROR
-        return when {
+    suspend fun share(collectionId: String, email: String, role: String): ShareOutcome =
+        shareDetailed(collectionId, email, role).outcome
+
+    suspend fun shareDetailed(collectionId: String, email: String, role: String): ShareResult {
+        val r = callOrError(ShareBody("add", collectionId, email = email, role = role))
+            ?: return ShareResult(ShareOutcome.ERROR, null)
+        val outcome = when {
             r.error == "not_found" -> ShareOutcome.NOT_FOUND
             r.error == "self" -> ShareOutcome.SELF
             r.error != null -> ShareOutcome.ERROR
@@ -109,6 +127,7 @@ class CollectionShareClient(private val client: SupabaseClient) {
             r.ok == true -> ShareOutcome.OK
             else -> ShareOutcome.ERROR
         }
+        return ShareResult(outcome, r.members?.map { it.userId }?.filter { it.isNotBlank() })
     }
 
     /** Remove a joined member (owner-only). */
@@ -172,20 +191,23 @@ class CollectionShareClient(private val client: SupabaseClient) {
         @SerialName("p_value") val value: Boolean,
     )
 
+    // Direct (non-outbox) callers — THROW on failure so nothing is silently lost.
+    // The AppViewModel routes item edits through WriteThrough.enqueueCollectionRpc
+    // with the descriptors in [CollectionRpcs] instead (offline retry + rollback).
     suspend fun addItem(collectionId: String, id: String, body: String, at: String) {
-        runCatching { client.postgrest.rpc("collection_add_item", AddItemParams(collectionId, id, body, at)) }
+        client.postgrest.rpc("collection_add_item", AddItemParams(collectionId, id, body, at))
     }
 
     suspend fun updateItem(collectionId: String, itemId: String, body: String) {
-        runCatching { client.postgrest.rpc("collection_update_item", UpdateItemParams(collectionId, itemId, body)) }
+        client.postgrest.rpc("collection_update_item", UpdateItemParams(collectionId, itemId, body))
     }
 
     suspend fun removeItem(collectionId: String, itemId: String) {
-        runCatching { client.postgrest.rpc("collection_remove_item", ItemRefParams(collectionId, itemId)) }
+        client.postgrest.rpc("collection_remove_item", ItemRefParams(collectionId, itemId))
     }
 
     suspend fun setItemFlag(collectionId: String, itemId: String, flag: String, value: Boolean) {
-        runCatching { client.postgrest.rpc("collection_set_item_flag", FlagParams(collectionId, itemId, flag, value)) }
+        client.postgrest.rpc("collection_set_item_flag", FlagParams(collectionId, itemId, flag, value))
     }
 
     // ── Move-to-task accountability ────────────────────────────────────────
@@ -200,7 +222,7 @@ class CollectionShareClient(private val client: SupabaseClient) {
 
     /** Mark a SHARED item as promoted (assignee + optional pending/done + by-time). */
     suspend fun setItemPromotion(collectionId: String, itemId: String, assignee: String, done: Boolean?, dueAt: String?) {
-        runCatching { client.postgrest.rpc("collection_set_item_promotion", PromotionParams(collectionId, itemId, assignee, done, dueAt)) }
+        client.postgrest.rpc("collection_set_item_promotion", PromotionParams(collectionId, itemId, assignee, done, dueAt))
     }
 
     @Serializable
@@ -215,18 +237,71 @@ class CollectionShareClient(private val client: SupabaseClient) {
         }
     }
 
+    // `action` has NO default (kotlinx omits default-valued fields — encodeDefaults
+    // off — and the server would then treat every call as 'done').
     @Serializable
-    private data class TaskDoneBody(val collectionId: String, val itemId: String, val taskName: String, val by: String)
+    private data class TaskDoneBody(val collectionId: String, val itemId: String, val taskName: String, val by: String, val action: String)
 
     /** The assignee completed a promoted task → flip the shared item to done +
-     *  notify the other members (server-side; best-effort). */
-    suspend fun taskDone(collectionId: String, itemId: String, taskName: String, by: String) {
+     *  notify the other members (server-side; best-effort). [action] 'reopen'
+     *  (task deleted / un-completed by its assignee) releases the item back to open
+     *  — contract 2026-09 — so a loop-promoted item is never stuck "done by ✓" /
+     *  "<name>'s on it" forever. Only the assignee (or the owner) may flip it. */
+    suspend fun taskDone(collectionId: String, itemId: String, taskName: String, by: String, action: String = "done") {
         runCatching {
             client.functions.invoke("collection-task-done") {
                 method = HttpMethod.Post
                 contentType(ContentType.Application.Json)
-                setBody(TaskDoneBody(collectionId, itemId, taskName, by))
+                setBody(TaskDoneBody(collectionId, itemId, taskName, by, action))
             }
         }
     }
+}
+
+/** A queued shared-collection RPC: function name + JSON params (the `p_*` wire
+ *  names the migrations define). Built by [CollectionRpcs]; queued by
+ *  WriteThrough.enqueueCollectionRpc; applied by OutboxFlusher via SyncRemote.rpc.
+ *  Every function is idempotent server-side (add is UPSERT-BY-ID, migration 056),
+ *  so an outbox replay after a partial failure is a no-op. */
+data class CollectionRpc(val fn: String, val params: JsonObject, val legacy: CollectionRpc? = null)
+
+object CollectionRpcs {
+    private fun obj(vararg pairs: Pair<String, JsonElement>) = JsonObject(mapOf(*pairs))
+    private fun s(v: String?): JsonElement = if (v == null) JsonNull else JsonPrimitive(v)
+
+    /** Migration 056: `collection_add_item(p_collection_id, p_item jsonb)` is
+     *  UPSERT-BY-ID (a replay of the same client id after a lost ack is a no-op,
+     *  never a duplicate). A pre-056 server (PGRST202 — function not found) gets the
+     *  legacy blind-append signature via [CollectionRpc.legacy]. */
+    fun addItem(collectionId: String, id: String, body: String, at: String) = CollectionRpc(
+        "collection_add_item",
+        obj("p_collection_id" to s(collectionId), "p_item" to obj("id" to s(id), "body" to s(body), "at" to s(at))),
+        legacy = CollectionRpc(
+            "collection_add_item",
+            obj("p_collection_id" to s(collectionId), "p_id" to s(id), "p_body" to s(body), "p_at" to s(at)),
+        ),
+    )
+
+    fun updateItem(collectionId: String, itemId: String, body: String) = CollectionRpc(
+        "collection_update_item",
+        obj("p_collection_id" to s(collectionId), "p_item_id" to s(itemId), "p_body" to s(body)),
+    )
+
+    fun removeItem(collectionId: String, itemId: String) = CollectionRpc(
+        "collection_remove_item",
+        obj("p_collection_id" to s(collectionId), "p_item_id" to s(itemId)),
+    )
+
+    fun setItemFlag(collectionId: String, itemId: String, flag: String, value: Boolean) = CollectionRpc(
+        "collection_set_item_flag",
+        obj("p_collection_id" to s(collectionId), "p_item_id" to s(itemId), "p_flag" to s(flag), "p_value" to JsonPrimitive(value)),
+    )
+
+    fun setItemPromotion(collectionId: String, itemId: String, assignee: String, done: Boolean?, dueAt: String?) = CollectionRpc(
+        "collection_set_item_promotion",
+        obj(
+            "p_collection_id" to s(collectionId), "p_item_id" to s(itemId), "p_assignee" to s(assignee),
+            "p_done" to (done?.let { JsonPrimitive(it) } ?: JsonNull), "p_due_at" to s(dueAt),
+        ),
+    )
 }

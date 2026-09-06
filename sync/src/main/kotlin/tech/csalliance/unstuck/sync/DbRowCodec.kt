@@ -207,11 +207,15 @@ internal data class CalendarConnectionRow(
     @SerialName("color_slot") val colorSlot: Int,
     @SerialName("last_sync_cursor") val lastSyncCursor: String?,
     @SerialName("connected_at") val connectedAt: String,
+    // Migration 056 — defaulted so a pre-056 server row (no column) still decodes.
+    @SerialName("needs_reauth") val needsReauth: Boolean = false,
+    @SerialName("last_error") val lastError: String? = null,
 ) {
     constructor(c: CalendarConnection) : this(
         c.id, c.provider, c.accountEmail, c.displayName, c.selectedCalendarIds, c.colorSlot, c.lastSyncCursor, c.connectedAt,
+        c.needsReauth, c.lastError,
     )
-    fun toModel() = CalendarConnection(id, provider, accountEmail, displayName, selectedCalendarIds, colorSlot, lastSyncCursor, connectedAt)
+    fun toModel() = CalendarConnection(id, provider, accountEmail, displayName, selectedCalendarIds, colorSlot, lastSyncCursor, connectedAt, needsReauth, lastError)
 }
 
 /** Encode/decode the PostgREST row shape. Encoders return a [JsonObject] so

@@ -1,5 +1,6 @@
 package tech.csalliance.unstuck.sync
 
+import kotlinx.coroutines.flow.first
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
@@ -108,15 +109,32 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
             // Per-row tolerant decode (see replace()): a single bad collection row
             // mustn't drop the user's entire list of collections.
             val base = gateway.fetchAll(Tables.COLLECTIONS).mapNotNull { runCatching { DbRowCodec.decodeCollection(it) }.getOrNull() }
-            val memberRows = runCatching { gateway.fetchAll("collection_members") }.getOrDefault(emptyList())
+            // The membership select is a SEPARATE request: when it alone fails
+            // (timeout, transient 5xx) the collections replace must NOT strip every
+            // row's members[]/myRole — that flipped each shared list back to "solo"
+            // (the owner resumed whole-row upserts over members' atomic edits, and a
+            // member's list lost its role until the next pull). Carry the LOCAL
+            // membership over per id instead (the realtime mergeKeep rule); a row
+            // we've never seen stays unknown → read-only for a non-owner.
+            val memberRows = runCatching { gateway.fetchAll("collection_members") }
+                .onFailure { println("[hydrate] collection_members failed, keeping local membership: $it") }
+                .getOrNull()
+            val local = if (memberRows == null) store.collections().first().associateBy { it.id } else emptyMap()
             val byColl = HashMap<String, MutableList<Pair<String, String>>>()   // collectionId -> [(userId, role)]
-            for (m in memberRows) {
+            for (m in memberRows.orEmpty()) {
                 val cid = (m["collection_id"] as? JsonPrimitive)?.contentOrNull ?: continue
                 val uid = (m["user_id"] as? JsonPrimitive)?.contentOrNull ?: continue
                 val role = (m["role"] as? JsonPrimitive)?.contentOrNull ?: "editor"
                 byColl.getOrPut(cid) { mutableListOf() }.add(uid to role)
             }
             val enriched = base.map { c ->
+                if (memberRows == null) {
+                    val prev = local[c.id]
+                    return@map c.copy(
+                        members = prev?.members.orEmpty(),
+                        myRole = prev?.myRole ?: (if (c.ownerId == userId) "owner" else null),
+                    )
+                }
                 val ms = byColl[c.id].orEmpty()
                 val myRole = if (c.ownerId == userId) "owner" else ms.firstOrNull { it.first == userId }?.second
                 c.copy(members = ms.map { it.first }, myRole = myRole)

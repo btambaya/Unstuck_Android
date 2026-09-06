@@ -1,6 +1,7 @@
 package tech.csalliance.unstuck.sync
 
 import io.github.jan.supabase.SupabaseClient
+import io.github.jan.supabase.auth.SignOutScope
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.providers.Google
 import io.github.jan.supabase.auth.providers.builtin.Email
@@ -107,8 +108,12 @@ class AuthService(private val client: SupabaseClient) {
     val hasPassword: Boolean
         get() = client.auth.currentUserOrNull()?.identities?.any { it.provider == "email" } ?: false
 
-    suspend fun signOut() {
-        runCatching { client.auth.signOut() }
+    /** Sign THIS device out only. The SDK default is scope=global, which revoked the
+     *  account's sessions on EVERY device — and the reactive sign-out on those devices
+     *  destroyed their in-progress focus session while the Settings row promises
+     *  "End this session". A "sign out everywhere" action would pass GLOBAL explicitly. */
+    suspend fun signOut(scope: SignOutScope = SignOutScope.LOCAL) {
+        runCatching { client.auth.signOut(scope) }
     }
 
     val currentUserId: String? get() = client.auth.currentUserOrNull()?.id

@@ -139,10 +139,30 @@ private fun CalendarSyncBar(vm: AppViewModel) {
             } else {
                 // All connected accounts (not just the first); busy feedback on Sync now;
                 // Disconnect confirms first (it's destructive — drops all synced events).
-                Text(if (busy) "Syncing…" else conns.joinToString(", ") { "Synced · ${it.accountEmail}" }, style = UFont.sans(12), color = c.ink3, modifier = Modifier.weight(1f))
-                Text("Sync now", style = UFont.sans(12, FontWeight.Medium), color = if (busy) c.ink3 else c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(enabled = !busy) {
-                    scope.launch { busy = true; error = null; runCatching { vm.syncCalendar() }.onFailure { error = "Sync failed. Try again." }; busy = false }
-                }.padding(horizontal = 8.dp, vertical = 4.dp))
+                // A connection the server flagged needs_reauth (refresh token revoked /
+                // expired — pulls 401) shows "Needs reconnect" + a Reconnect action that
+                // re-runs consent; its meetings are kept meanwhile (never reconciled away).
+                val needsReauth = conns.any { it.needsReauth }
+                Text(
+                    if (busy) "Syncing…" else conns.joinToString(", ") { (if (it.needsReauth) "Needs reconnect · " else "Synced · ") + it.accountEmail },
+                    style = UFont.sans(12), color = if (needsReauth) c.red else c.ink3, modifier = Modifier.weight(1f),
+                )
+                if (needsReauth) {
+                    Text("Reconnect Google", style = UFont.sans(12, FontWeight.Medium), color = if (busy) c.ink3 else c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(enabled = !busy) {
+                        scope.launch {
+                            busy = true; error = null
+                            val url = vm.beginGoogleConnect()
+                            busy = false
+                            if (url == null) error = "Couldn't reach Google. Check your connection and try again."
+                            else runCatching { CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url)) }
+                                .onFailure { error = "No browser available to open Google sign-in." }
+                        }
+                    }.padding(horizontal = 8.dp, vertical = 4.dp))
+                } else {
+                    Text("Sync now", style = UFont.sans(12, FontWeight.Medium), color = if (busy) c.ink3 else c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(enabled = !busy) {
+                        scope.launch { busy = true; error = null; runCatching { vm.syncCalendar() }.onFailure { error = "Sync failed. Try again." }; busy = false }
+                    }.padding(horizontal = 8.dp, vertical = 4.dp))
+                }
                 Text("Disconnect", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { confirmDisconnect = true }.padding(horizontal = 8.dp, vertical = 4.dp))
             }
         }

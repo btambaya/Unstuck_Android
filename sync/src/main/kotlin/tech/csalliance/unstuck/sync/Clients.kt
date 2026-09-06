@@ -3,6 +3,8 @@ package tech.csalliance.unstuck.sync
 import io.github.jan.supabase.SupabaseClient
 import io.github.jan.supabase.functions.functions
 import io.github.jan.supabase.postgrest.from
+import io.github.jan.supabase.postgrest.postgrest
+import io.github.jan.supabase.postgrest.rpc
 import io.github.jan.supabase.postgrest.query.Columns
 import io.github.jan.supabase.postgrest.query.filter.FilterOperator
 import io.ktor.client.call.body
@@ -184,4 +186,31 @@ class CapturesClient(private val client: SupabaseClient) {
         client.from("captures")
             .select(Columns.list("id")) { filter { filterNot("archived_at", FilterOperator.IS, "null") } }
             .decodeList<IdRow>().map { it.id }.toSet()
+}
+
+/** wake_window_history (migration 015): one row per (user, local day) with the
+ *  day's FIRST app input as local HH:MM — the sample calibrate_wake_windows medians
+ *  to time the morning brief. Writes through `record_wake_window` (migration 056:
+ *  keeps the EARLIEST sample of the day, derives the weekday server-side); a
+ *  pre-056 server (function missing → 404) gets a direct first-wins upsert. */
+class WakeWindowClient(private val client: SupabaseClient) {
+    @Serializable private data class RpcParams(val p_local_date: String, val p_first_input_local: String)
+    @Serializable private data class Row(
+        val user_id: String,
+        val local_date: String,
+        val first_input_local: String,
+        val weekday: Int,
+    )
+
+    suspend fun record(userId: String, sample: tech.csalliance.unstuck.core.logic.WakeWindowSample) {
+        try {
+            client.postgrest.rpc("record_wake_window", RpcParams(sample.localDate, sample.firstInputLocal))
+        } catch (e: io.ktor.client.plugins.ResponseException) {
+            if (e.response.status.value != 404) throw e
+            client.from("wake_window_history").upsert(Row(userId, sample.localDate, sample.firstInputLocal, sample.weekday)) {
+                onConflict = "user_id,local_date"
+                ignoreDuplicates = true
+            }
+        }
+    }
 }

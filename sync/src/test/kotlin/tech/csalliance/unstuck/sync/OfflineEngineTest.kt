@@ -18,6 +18,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.OutboxEntity
@@ -50,6 +51,16 @@ class OfflineEngineTest {
             upserts.add(table to row.toString())
         }
         override suspend fun delete(table: String, id: String) { deletes.add(table to id) }
+        // rpc: record calls; `rejectRpc` throws RpcRejected (terminal), `failRpc` a
+        // transient RuntimeException (retried).
+        var rejectRpc: Int? = null
+        var failRpc = false
+        val rpcs = mutableListOf<Pair<String, JsonObject>>()
+        override suspend fun rpc(fn: String, params: JsonObject) {
+            rejectRpc?.let { throw RpcRejected(it, "refused") }
+            if (failRpc) throw RuntimeException("simulated 5xx")
+            rpcs.add(fn to params)
+        }
     }
 
     private fun task(id: String, updatedAt: String, name: String = "T") = TaskItem(
@@ -318,6 +329,179 @@ class OfflineEngineTest {
         val after = store.pending().single()
         assertEquals("nothing to merge: payload untouched", before.payload, after.payload)
         assertEquals(before.base, after.base)
+    }
+
+    // --- shared-collection item RPCs through the OUTBOX (2026-09 round 2) -------
+    // Item writes on SHARED lists used to be fire-and-forget: a failed RPC (offline,
+    // 5xx, RLS no-op) left the optimistic row locally and the next echo/hydrate
+    // silently deleted it. They now queue as idempotent `rpc` ops.
+
+    @Test fun collectionRpc_isQueuedThroughTheOutbox_andFlushedViaTheGateway() = runTest {
+        val remote = FakeRemote()
+        val write = WriteThrough(store)
+        val rpc = CollectionRpcs.addItem("c1", "i1", "Milk", "2026-05-21T10:00:00.000Z")
+        write.enqueueCollectionRpc("c1", rpc.fn, rpc.params)
+        val op = store.pending().single()
+        assertEquals(OutboxFlusher.OP_RPC, op.op)
+        assertEquals(Tables.COLLECTIONS, op.recordTable)
+        assertEquals("c1", op.recordId)
+        OutboxFlusher(remote, store).flush("me")
+        assertTrue("op dequeued after a successful rpc", store.pending().isEmpty())
+        val (fn, params) = remote.rpcs.single()
+        assertEquals("collection_add_item", fn)
+        // Migration 056 shape: UPSERT-BY-ID on p_item.id (a replay is idempotent).
+        val item = params["p_item"] as JsonObject
+        assertEquals("\"i1\"", item["id"].toString())
+        assertEquals("\"Milk\"", item["body"].toString())
+    }
+
+    @Test fun collectionRpc_addItem_fallsBackToTheLegacySignatureOnAPre056Server() = runTest {
+        val remote = object : SyncRemote {
+            val calls = mutableListOf<Pair<String, JsonObject>>()
+            override suspend fun fetchAll(table: String): List<JsonObject> = emptyList()
+            override suspend fun upsert(table: String, row: JsonObject, userId: String) {}
+            override suspend fun delete(table: String, id: String) {}
+            override suspend fun rpc(fn: String, params: JsonObject) {
+                calls.add(fn to params)
+                if ("p_item" in params) throw RpcRejected(404, "PGRST202: Could not find the function public.collection_add_item(p_collection_id, p_item)")
+            }
+        }
+        val write = WriteThrough(store)
+        write.enqueueCollectionRpc("c1", CollectionRpcs.addItem("c1", "i1", "Milk", "2026-05-21T10:00:00.000Z"))
+        var rolledBack = false
+        OutboxFlusher(remote, store).apply { onRpcRejected = { _, _ -> rolledBack = true } }.flush("me")
+        assertEquals(2, remote.calls.size)
+        assertEquals("\"i1\"", remote.calls[1].second["p_id"].toString())
+        assertTrue("landed via the legacy signature — dequeued, no rollback", store.pending().isEmpty())
+        assertFalse(rolledBack)
+    }
+
+    @Test fun collectionRpc_transientFailure_staysQueuedForRetry() = runTest {
+        val remote = FakeRemote().apply { failRpc = true }
+        val write = WriteThrough(store)
+        val rpc = CollectionRpcs.setItemFlag("c1", "i1", "done", true)
+        write.enqueueCollectionRpc("c1", rpc.fn, rpc.params)
+        val flusher = OutboxFlusher(remote, store)
+        flusher.flush("me")
+        assertEquals("a 5xx / offline failure keeps the op for the next drain", 1, store.pending().size)
+        remote.failRpc = false
+        flusher.flush("me")
+        assertTrue(store.pending().isEmpty())
+        assertEquals("collection_set_item_flag", remote.rpcs.single().first)
+    }
+
+    @Test fun collectionRpc_serverRefusal_isTerminal_dequeuedAndRolledBackViaHook() = runTest {
+        val remote = FakeRemote().apply { rejectRpc = 403 }
+        val write = WriteThrough(store)
+        val rpc = CollectionRpcs.removeItem("c1", "i1")
+        write.enqueueCollectionRpc("c1", rpc.fn, rpc.params)
+        // A later op on the SAME list must still run (each RPC is an independent step).
+        remote.rejectRpc = null
+        val rpc2 = CollectionRpcs.updateItem("c1", "i2", "Eggs")
+        write.enqueueCollectionRpc("c1", rpc2.fn, rpc2.params)
+        remote.rejectRpc = 403
+        val rolledBack = mutableListOf<Pair<String, Int>>()
+        val flusher = OutboxFlusher(remote, store).apply {
+            onRpcRejected = { op, err ->
+                rolledBack.add(op.recordId to err.status)
+                remote.rejectRpc = null   // the second op is then accepted
+            }
+        }
+        flusher.flush("me")
+        assertEquals(listOf("c1" to 403), rolledBack)
+        assertTrue("both ops gone: the refused one dropped, the next one landed", store.pending().isEmpty())
+        assertEquals("collection_update_item", remote.rpcs.single().first)
+    }
+
+    @Test fun deleteCollection_cancelsItsQueuedRpcs() = runTest {
+        val write = WriteThrough(store)
+        val rpc = CollectionRpcs.addItem("c1", "i1", "Milk", "2026-05-21T10:00:00.000Z")
+        write.enqueueCollectionRpc("c1", rpc.fn, rpc.params)
+        write.deleteCollection("c1")
+        val ops = store.pending()
+        assertEquals(listOf("delete"), ops.map { it.op })
+    }
+
+    @Test fun rpcPayload_roundTrips() {
+        val params = JsonObject(mapOf("p_collection_id" to JsonPrimitive("c1"), "p_value" to JsonPrimitive(true)))
+        val decoded = OutboxFlusher.decodeRpc(OutboxFlusher.encodeRpc("collection_set_item_flag", params))
+        assertEquals("collection_set_item_flag", decoded?.first)
+        assertEquals(params, decoded?.second)
+        assertNull(OutboxFlusher.decodeRpc("not json"))
+    }
+
+    // --- Google push stamping (2026-09 round 2) ---------------------------------
+
+    @Test fun writeThrough_persistsTheConnectionStampFromAPush_andEnqueuesTheStampedRow() = runTest {
+        val write = WriteThrough(store)
+        // The coordinator's push returns the block re-stamped with BOTH ids on INSERT.
+        // (a real connection id is a uuid — the row codec nulls anything else, since the
+        // server column is `uuid`)
+        val connId = "8b1f2c3d-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+        write.pushCalBlock = { b -> b.copy(externalEventId = "evt-1", externalConnectionId = connId) }
+        val t = task("t1", updatedAt = "2026-05-21T10:00:00.000Z")
+        store.upsert(Tables.TASKS, t, TaskItem.serializer(), t.id, t.updatedAt)
+        write.upsertCalBlock(tech.csalliance.unstuck.core.model.CalBlock(id = "b1", taskId = "t1", taskName = "T", startTime = "09:00", durationMinutes = 25, date = "2026-05-21"))
+        val stored = store.blocks().first().single()
+        assertEquals("evt-1", stored.externalEventId)
+        assertEquals(connId, stored.externalConnectionId)
+        val last = store.pending().last { it.recordTable == Tables.CAL_BLOCKS }
+        assertTrue("the queued row carries the connection id", last.payload!!.contains("\"external_connection_id\":\"$connId\""))
+    }
+
+    @Test fun writeThrough_noRestampWhenThePushReturnsNull() = runTest {
+        val write = WriteThrough(store)
+        write.pushCalBlock = { null }
+        write.upsertCalBlock(tech.csalliance.unstuck.core.model.CalBlock(id = "b1", taskId = "t1", taskName = "T", startTime = "09:00", durationMinutes = 25, date = "2026-05-21", externalEventId = "evt-1"))
+        assertEquals("one upsert only — nothing changed", 1, store.pending().count { it.recordTable == Tables.CAL_BLOCKS })
+    }
+
+    // --- collections hydrate: a failed membership select keeps local membership ---
+
+    private fun collectionServerRow(c: ItemCollection, ownerId: String): JsonObject =
+        JsonObject(DbRowCodec.encodeCollection(c) + ("user_id" to JsonPrimitive(ownerId)))
+
+    @Test fun hydrateCollections_membersSelectFails_keepsLocalMembersAndRole() = runTest {
+        // Two shared lists cached locally with their membership: one I own (shared
+        // with u2) and one shared WITH me (I'm an editor). The collections select
+        // succeeds but the collection_members select throws (timeout / 5xx).
+        val mine = ItemCollection(id = "c1", name = "Trip", color = "teal", items = emptyList(), sortOrder = 0, ownerId = "me", members = listOf("u2"), myRole = "owner")
+        val theirs = ItemCollection(id = "c2", name = "Home", color = "indigo", items = emptyList(), sortOrder = 1, ownerId = "u3", members = listOf("me"), myRole = "editor")
+        store.upsert(Tables.COLLECTIONS, mine, ItemCollection.serializer(), mine.id)
+        store.upsert(Tables.COLLECTIONS, theirs, ItemCollection.serializer(), theirs.id)
+        val remote = object : SyncRemote {
+            override suspend fun fetchAll(table: String): List<JsonObject> = when (table) {
+                Tables.COLLECTIONS -> listOf(collectionServerRow(mine.copy(name = "Trip 2026"), "me"), collectionServerRow(theirs, "u3"))
+                "collection_members" -> throw RuntimeException("simulated timeout")
+                else -> emptyList()
+            }
+            override suspend fun upsert(table: String, row: JsonObject, userId: String) {}
+            override suspend fun delete(table: String, id: String) {}
+            override suspend fun rpc(fn: String, params: JsonObject) {}
+        }
+        Hydrator(remote, store).hydrateCollections("me")
+        val after = store.collections().first().associateBy { it.id }
+        // The server's row content still lands…
+        assertEquals("Trip 2026", after["c1"]!!.name)
+        // …but the membership is carried over, not stripped (the old code flipped
+        // both lists back to "solo": the owner resumed whole-row upserts over
+        // members' atomic edits; the member lost its editor role).
+        assertEquals(listOf("u2"), after["c1"]!!.members)
+        assertEquals("owner", after["c1"]!!.myRole)
+        assertEquals(listOf("me"), after["c2"]!!.members)
+        assertEquals("editor", after["c2"]!!.myRole)
+    }
+
+    @Test fun hydrateCollections_membersSelectSucceeds_isAuthoritative() = runTest {
+        // Control: a SUCCESSFUL (empty) membership select really does clear the
+        // membership — the carry-over only applies to a failed select.
+        val mine = ItemCollection(id = "c1", name = "Trip", color = "teal", items = emptyList(), sortOrder = 0, ownerId = "me", members = listOf("u2"), myRole = "owner")
+        store.upsert(Tables.COLLECTIONS, mine, ItemCollection.serializer(), mine.id)
+        val remote = FakeRemote().apply { serverRows[Tables.COLLECTIONS] = listOf(collectionServerRow(mine, "me")) }
+        Hydrator(remote, store).hydrateCollections("me")
+        val c1 = store.collections().first().single()
+        assertEquals(emptyList<String>(), c1.members)
+        assertEquals("owner", c1.myRole)
     }
 
     // Build a server-shaped row JsonObject (DbRowCodec encodes the row; decodeTask

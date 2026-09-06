@@ -1,0 +1,203 @@
+> Task :sync:preBuild UP-TO-DATE
+> Task :core:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :design:preBuild UP-TO-DATE
+> Task :data:preBuild UP-TO-DATE
+> Task :sync:preReleaseBuild UP-TO-DATE
+> Task :data:preReleaseBuild UP-TO-DATE
+> Task :design:preReleaseBuild UP-TO-DATE
+> Task :data:writeReleaseAarMetadata UP-TO-DATE
+> Task :sync:writeReleaseAarMetadata UP-TO-DATE
+> Task :data:generateReleaseResValues UP-TO-DATE
+> Task :sync:generateReleaseResValues UP-TO-DATE
+> Task :design:writeReleaseAarMetadata UP-TO-DATE
+> Task :sync:generateReleaseResources UP-TO-DATE
+> Task :data:generateReleaseResources UP-TO-DATE
+> Task :design:generateReleaseResValues UP-TO-DATE
+> Task :design:generateReleaseResources UP-TO-DATE
+> Task :data:packageReleaseResources UP-TO-DATE
+> Task :sync:packageReleaseResources UP-TO-DATE
+> Task :sync:extractDeepLinksRelease UP-TO-DATE
+> Task :data:extractDeepLinksRelease UP-TO-DATE
+> Task :design:packageReleaseResources UP-TO-DATE
+> Task :data:processReleaseManifest UP-TO-DATE
+> Task :sync:processReleaseManifest UP-TO-DATE
+> Task :design:extractDeepLinksRelease UP-TO-DATE
+> Task :design:processReleaseManifest UP-TO-DATE
+> Task :sync:parseReleaseLocalResources UP-TO-DATE
+> Task :data:parseReleaseLocalResources UP-TO-DATE
+> Task :design:parseReleaseLocalResources UP-TO-DATE
+> Task :app:buildKotlinToolingMetadata UP-TO-DATE
+> Task :data:generateReleaseRFile UP-TO-DATE
+> Task :app:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:preBuild UP-TO-DATE
+> Task :data:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :app:preReleaseBuild UP-TO-DATE
+> Task :design:generateReleaseRFile UP-TO-DATE
+> Task :sync:generateReleaseRFile UP-TO-DATE
+> Task :sync:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :design:checkKotlinGradlePluginConfigurationErrors SKIPPED
+> Task :sync:javaPreCompileRelease UP-TO-DATE
+> Task :sync:extractProguardFiles UP-TO-DATE
+> Task :sync:prepareLintJarForPublish UP-TO-DATE
+> Task :sync:mergeReleaseJniLibFolders UP-TO-DATE
+> Task :sync:mergeReleaseNativeLibs NO-SOURCE
+> Task :sync:stripReleaseDebugSymbols NO-SOURCE
+> Task :sync:copyReleaseJniLibsProjectAndLocalJars UP-TO-DATE
+> Task :sync:extractDeepLinksForAarRelease UP-TO-DATE
+> Task :sync:mergeReleaseShaders UP-TO-DATE
+> Task :sync:compileReleaseShaders NO-SOURCE
+> Task :sync:generateReleaseAssets UP-TO-DATE
+> Task :sync:packageReleaseAssets UP-TO-DATE
+> Task :sync:prepareReleaseArtProfile UP-TO-DATE
+> Task :sync:writeReleaseLintModelMetadata UP-TO-DATE
+> Task :sync:copyReleaseJniLibsProjectOnly UP-TO-DATE
+> Task :data:javaPreCompileRelease UP-TO-DATE
+> Task :data:extractProguardFiles UP-TO-DATE
+> Task :data:prepareLintJarForPublish UP-TO-DATE
+> Task :data:mergeReleaseJniLibFolders UP-TO-DATE
+> Task :data:mergeReleaseNativeLibs NO-SOURCE
+> Task :data:stripReleaseDebugSymbols NO-SOURCE
+> Task :app:generateReleaseBuildConfig
+> Task :data:copyReleaseJniLibsProjectAndLocalJars UP-TO-DATE
+> Task :data:extractDeepLinksForAarRelease UP-TO-DATE
+> Task :data:mergeReleaseShaders UP-TO-DATE
+> Task :data:compileReleaseShaders NO-SOURCE
+> Task :data:generateReleaseAssets UP-TO-DATE
+> Task :data:packageReleaseAssets UP-TO-DATE
+> Task :data:prepareReleaseArtProfile UP-TO-DATE
+> Task :data:writeReleaseLintModelMetadata UP-TO-DATE
+> Task :data:copyReleaseJniLibsProjectOnly UP-TO-DATE
+> Task :core:compileKotlin UP-TO-DATE
+> Task :core:compileJava NO-SOURCE
+> Task :core:processResources NO-SOURCE
+> Task :core:classes UP-TO-DATE
+> Task :core:jar UP-TO-DATE
+> Task :app:checkReleaseAarMetadata UP-TO-DATE
+> Task :data:kspReleaseKotlin UP-TO-DATE
+> Task :design:compileReleaseKotlin UP-TO-DATE
+> Task :design:javaPreCompileRelease UP-TO-DATE
+> Task :app:generateReleaseResValues UP-TO-DATE
+> Task :design:compileReleaseJavaWithJavac NO-SOURCE
+> Task :app:processReleaseGoogleServices UP-TO-DATE
+> Task :design:bundleLibCompileToJarRelease UP-TO-DATE
+> Task :design:bundleLibRuntimeToJarRelease UP-TO-DATE
+> Task :data:compileReleaseKotlin UP-TO-DATE
+> Task :design:processReleaseJavaRes UP-TO-DATE
+> Task :app:mapReleaseSourceSetPaths UP-TO-DATE
+> Task :design:createFullJarRelease UP-TO-DATE
+> Task :app:generateReleaseResources UP-TO-DATE
+> Task :design:extractProguardFiles UP-TO-DATE
+> Task :data:compileReleaseJavaWithJavac UP-TO-DATE
+> Task :data:bundleLibCompileToJarRelease UP-TO-DATE
+> Task :data:bundleLibRuntimeToJarRelease UP-TO-DATE
+> Task :data:processReleaseJavaRes UP-TO-DATE
+> Task :data:createFullJarRelease UP-TO-DATE
+> Task :app:mergeReleaseResources UP-TO-DATE
+> Task :app:packageReleaseResources UP-TO-DATE
+> Task :app:parseReleaseLocalResources UP-TO-DATE
+> Task :design:generateReleaseLintModel UP-TO-DATE
+> Task :design:prepareLintJarForPublish UP-TO-DATE
+> Task :design:mergeReleaseJniLibFolders UP-TO-DATE
+> Task :design:mergeReleaseNativeLibs NO-SOURCE
+> Task :app:createReleaseCompatibleScreenManifests
+> Task :design:stripReleaseDebugSymbols NO-SOURCE
+> Task :app:extractDeepLinksRelease UP-TO-DATE
+> Task :design:copyReleaseJniLibsProjectAndLocalJars UP-TO-DATE
+> Task :design:extractDeepLinksForAarRelease UP-TO-DATE
+> Task :sync:compileReleaseKotlin UP-TO-DATE
+> Task :sync:compileReleaseJavaWithJavac NO-SOURCE
+> Task :sync:bundleLibCompileToJarRelease UP-TO-DATE
+> Task :sync:bundleLibRuntimeToJarRelease UP-TO-DATE
+> Task :sync:processReleaseJavaRes UP-TO-DATE
+> Task :sync:createFullJarRelease UP-TO-DATE
+> Task :design:extractReleaseAnnotations UP-TO-DATE
+> Task :design:mergeReleaseGeneratedProguardFiles UP-TO-DATE
+> Task :design:mergeReleaseConsumerProguardFiles UP-TO-DATE
+> Task :design:mergeReleaseShaders UP-TO-DATE
+> Task :design:compileReleaseShaders NO-SOURCE
+> Task :sync:extractReleaseAnnotations
+> Task :design:generateReleaseAssets UP-TO-DATE
+> Task :data:generateReleaseLintModel
+> Task :sync:mergeReleaseGeneratedProguardFiles UP-TO-DATE
+> Task :design:packageReleaseAssets UP-TO-DATE
+> Task :design:prepareReleaseArtProfile UP-TO-DATE
+> Task :design:mergeReleaseJavaResource UP-TO-DATE
+> Task :design:syncReleaseLibJars UP-TO-DATE
+> Task :design:bundleReleaseLocalLintAar UP-TO-DATE
+> Task :design:lintVitalAnalyzeRelease UP-TO-DATE
+> Task :data:extractReleaseAnnotations
+> Task :design:writeReleaseLintModelMetadata UP-TO-DATE
+> Task :data:mergeReleaseGeneratedProguardFiles UP-TO-DATE
+> Task :data:mergeReleaseConsumerProguardFiles UP-TO-DATE
+> Task :data:mergeReleaseJavaResource UP-TO-DATE
+> Task :data:syncReleaseLibJars UP-TO-DATE
+> Task :data:bundleReleaseLocalLintAar UP-TO-DATE
+> Task :design:generateReleaseLintVitalModel UP-TO-DATE
+> Task :design:copyReleaseJniLibsProjectOnly UP-TO-DATE
+> Task :design:exportReleaseConsumerProguardFiles UP-TO-DATE
+> Task :sync:generateReleaseLintModel
+> Task :sync:mergeReleaseConsumerProguardFiles UP-TO-DATE
+> Task :sync:mergeReleaseJavaResource UP-TO-DATE
+> Task :sync:syncReleaseLibJars UP-TO-DATE
+> Task :sync:bundleReleaseLocalLintAar UP-TO-DATE
+> Task :data:generateReleaseLintVitalModel
+> Task :data:exportReleaseConsumerProguardFiles UP-TO-DATE
+> Task :sync:generateReleaseLintVitalModel
+> Task :sync:exportReleaseConsumerProguardFiles UP-TO-DATE
+> Task :app:processReleaseMainManifest
+> Task :app:processReleaseManifest
+> Task :app:javaPreCompileRelease UP-TO-DATE
+> Task :app:extractProguardFiles UP-TO-DATE
+> Task :app:mergeReleaseJniLibFolders UP-TO-DATE
+> Task :app:mergeReleaseNativeLibs UP-TO-DATE
+> Task :app:stripReleaseDebugSymbols UP-TO-DATE
+> Task :app:extractReleaseNativeSymbolTables UP-TO-DATE
+> Task :app:mergeReleaseNativeDebugMetadata NO-SOURCE
+> Task :app:checkReleaseDuplicateClasses UP-TO-DATE
+> Task :app:mergeReleaseArtProfile UP-TO-DATE
+> Task :app:mergeReleaseStartupProfile UP-TO-DATE
+> Task :app:mergeReleaseShaders UP-TO-DATE
+> Task :app:compileReleaseShaders NO-SOURCE
+> Task :app:generateReleaseAssets UP-TO-DATE
+> Task :app:mergeReleaseAssets UP-TO-DATE
+> Task :app:compressReleaseAssets UP-TO-DATE
+> Task :app:extractReleaseVersionControlInfo
+> Task :app:collectReleaseDependencies UP-TO-DATE
+> Task :app:sdkReleaseDependencyData UP-TO-DATE
+> Task :app:validateSigningRelease UP-TO-DATE
+> Task :app:writeReleaseAppMetadata UP-TO-DATE
+> Task :app:writeReleaseSigningConfigVersions UP-TO-DATE
+> Task :app:processReleaseManifestForPackage
+> Task :app:processReleaseResources
+> Task :app:convertLinkedResourcesToProtoRelease
+> Task :data:lintVitalAnalyzeRelease
+> Task :sync:lintVitalAnalyzeRelease
+> Task :app:compileReleaseKotlin
+w: file:///Users/ahmadtambaya/Desktop/projects/unstuck_android/app/src/main/kotlin/tech/csalliance/unstuck/ui/assistant/AssistantSheet.kt:401:57 'val Icons.Outlined.VolumeUp: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Outlined.VolumeUp.
+w: file:///Users/ahmadtambaya/Desktop/projects/unstuck_android/app/src/main/kotlin/tech/csalliance/unstuck/ui/assistant/AssistantSheet.kt:401:86 'val Icons.Outlined.VolumeOff: ImageVector' is deprecated. Use the AutoMirrored version at Icons.AutoMirrored.Outlined.VolumeOff.
+
+> Task :app:compileReleaseJavaWithJavac
+> Task :app:generateReleaseLintVitalReportModel
+> Task :app:mergeReleaseGeneratedProguardFiles UP-TO-DATE
+> Task :app:processReleaseJavaRes UP-TO-DATE
+> Task :app:mergeReleaseJavaResource
+> Task :app:expandReleaseArtProfileWildcards
+> Task :app:lintVitalAnalyzeRelease
+> Task :app:minifyReleaseWithR8
+> Task :app:lintVitalReportRelease
+> Task :app:lintVitalRelease
+> Task :app:compileReleaseArtProfile
+> Task :app:shrinkReleaseRes
+> Task :app:convertShrunkResourcesToBinaryRelease
+> Task :app:optimizeReleaseResources
+> Task :app:packageRelease
+> Task :app:createReleaseApkListingFileRedirect
+> Task :app:assembleRelease
+
+> Task :app:appDistributionUploadRelease
+View this release in the Firebase console: https://console.firebase.google.com/project/unstuck-46e8c/appdistribution/app/android:io.unstucknow.app/releases/2ben7ar81v5s8?utm_source=gradle
+Share this release with testers who have access: https://appdistribution.firebase.google.com/testerapps/1:806563895083:android:26d9fa661bf5944a39976e/releases/2ben7ar81v5s8?utm_source=gradle
+Download the release binary (link expires in 1 hour): https://firebaseappdistribution.googleapis.com/app-binary-downloads/projects/806563895083/apps/1:806563895083:android:26d9fa661bf5944a39976e/releases/2ben7ar81v5s8/binaries/9eca2b128451620932048301834d7363bd9f3497240ba092e03c9bb20e326a00/app.apk?utm_source=gradle&token=AEbaB5wAAAAAap0EgiBE91B0bCahZTHRauy_cG-J_GkPm8uzrlKpOKC-g78vZ0dzw8sqmswtaB2WFEuFX7EI83OXqOLYi4_RkmUW9aIAmDNMOxioEI97SIyUCBtz5E5OjGBR5yvWV6eYRGYyzTxrpWtEGABghAnHIYi0KvW-8hB_5CJunv6cSpv4DctfcqjFP81gEOntMsJwSCJ60jsp2MIW6jwq6iNo2VTKAd3fWdc2MHb19AW68IsDiGLoBdYBkYjO0ezvXvn67TPuwwSfvZtYHsZLHfz5eXhfFqiIesbcXJr4rB45xMAqY-Cd16fAZVoNbyv1HeW_Y2SUSHIQCWWc0BC7iRiaZ2EvL4I
+
+BUILD SUCCESSFUL in 49m 16s
+159 actionable tasks: 32 executed, 127 up-to-date

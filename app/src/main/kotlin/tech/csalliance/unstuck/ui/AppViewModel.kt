@@ -55,6 +55,17 @@ import kotlinx.serialization.json.putJsonArray
 import tech.csalliance.unstuck.AppGraph
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.sync.AssistantResult
+import tech.csalliance.unstuck.sync.PreferencesClient
+import tech.csalliance.unstuck.sync.ProfileFactsService
+import tech.csalliance.unstuck.core.logic.InterviewFlag
+import tech.csalliance.unstuck.core.logic.PAPrefsLogic
+import tech.csalliance.unstuck.core.logic.ProfileFactsLogic
+import tech.csalliance.unstuck.core.logic.ReceiptIcon
+import tech.csalliance.unstuck.core.logic.RitualKey
+import tech.csalliance.unstuck.core.logic.RitualPrefs
+import tech.csalliance.unstuck.core.model.ProfileFact
+import tech.csalliance.unstuck.core.model.ProfileFactCategory
+import tech.csalliance.unstuck.core.model.ProfileFactSource
 import tech.csalliance.unstuck.sync.ChatMessage
 import tech.csalliance.unstuck.sync.ToolCall
 import tech.csalliance.unstuck.core.logic.DivergenceResolution
@@ -165,6 +176,41 @@ class AppViewModel(
     val connections = sf(store.connections())
     val liveSession: StateFlow<LiveSession?> =
         store.liveSession().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    // --- the assistant's memory (gateway A0) ---
+    // Local Room is the always-on source of truth; the server `profile_facts` table
+    // syncs through the outbox (push), the Hydrator (pull + tombstones) and the
+    // RealtimeMirror (live). An unconfigured graph (no coordinator) runs local-only.
+    val profileFactsService: ProfileFactsService by lazy { ProfileFactsService(store, write) }
+    /** Active facts, newest first — fed from the store, so the assistant's saves, a
+     *  hydrate from another device, a realtime tombstone and a Settings forget all
+     *  land here. */
+    val profileFacts: StateFlow<List<ProfileFact>> by lazy { sf(profileFactsService.observeAll()) }
+    // Gateway per-account caches — declared up here, BEFORE the session-status
+    // collector's init block: a StateFlow collect on Main.immediate can run its
+    // lambda synchronously during construction, and that lambda reloads these.
+    private val paPrefs by lazy {
+        graph.appContext.getSharedPreferences("unstuck.pa", android.content.Context.MODE_PRIVATE)
+    }
+    private fun paKey(base: String, uid: String) = "$base.$uid"
+    private val _rituals = MutableStateFlow(RitualPrefs.DEFAULTS)
+    /** Which recurring PA moments run (Settings / interview picker / moments engine). */
+    val rituals: StateFlow<RitualPrefs> = _rituals.asStateFlow()
+    private val _dismissedMoments = MutableStateFlow<List<String>>(emptyList())
+    /** Moment ids dismissed on THIS device (newest 200). */
+    val dismissedMoments: StateFlow<List<String>> = _dismissedMoments.asStateFlow()
+    private val _interviewDone = MutableStateFlow(false)
+    /** The get-to-know-you interview is done for this account (local flag, pinned
+     *  from the server after every pull). */
+    val interviewDone: StateFlow<Boolean> = _interviewDone.asStateFlow()
+    private val _profileFactsHydrated = MutableStateFlow(false)
+    /** "Profile facts hydrated once" — flips after the FIRST completed pull of this
+     *  sign-in, once the server's interview flag + rituals have been applied. The
+     *  gateway's auto-open gate waits on it before an empty memory means "never met". */
+    val profileFactsHydrated: StateFlow<Boolean> = _profileFactsHydrated.asStateFlow()
+    private var ritualsPushGen = 0
+
+    init { reloadAssistantUserState() }
     val pendingCount = store.pendingCount().stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
 
     val configured = graph.configured
@@ -2285,7 +2331,11 @@ class AppViewModel(
                     // must only be touched on the main thread. Hop explicitly.
                     if (status is SessionStatus.NotAuthenticated && status.isSignOut) {
                         withContext(Dispatchers.Main.immediate) { clearAssistant() }
+                        scrubAssistantUserState()
                     }
+                    // A (re)sign-in: this account's cached rituals / dismissals /
+                    // interview flag replace whatever the previous one left in memory.
+                    if (status is SessionStatus.Authenticated) reloadAssistantUserState()
                     // A just-exchanged auth-callback session: classify it. A "recovery"
                     // session (forgot-password link) routes to set-new-password; magic-
                     // link / OAuth fall through to the normal app. One-shot probe so a
@@ -2307,6 +2357,201 @@ class AppViewModel(
                 }
             }
         }
+    }
+
+    // ── gateway per-account state: rituals, moment dismissals, interview flag ──
+    // Same vocabulary as the web's localStorage / iOS UserDefaults keys
+    // (PAPrefsLogic.*_KEY), suffixed PER ACCOUNT (`<key>.<uid>`, the
+    // captureArchiveMigrated(uid) pattern) so a second account on this phone never
+    // inherits the first one's setup; the whole file is scrubbed at sign-out on top.
+    // Rituals are account-wide (`user_preferences.pa_rituals`, migration 053): the
+    // local copy is a cache that wins until the first hydrate, after which the
+    // server wins — unless a toggle made here hasn't been pushed yet (pending), in
+    // which case the hydrate re-pushes it instead of pulling the older value over
+    // it. Moment DISMISSALS stay device-local by design. The interview flag
+    // (`assistant_interview_done_at`, migration 052) is pinned from the server on
+    // every pull and pushed up when finished here.
+
+    /** Re-read this account's cached gateway state (construction, a (re)sign-in,
+     *  after a scrub). No account → defaults. */
+    internal fun reloadAssistantUserState() {
+        val uid = currentUid()
+        if (uid == null) {
+            _rituals.value = RitualPrefs.DEFAULTS
+            _dismissedMoments.value = emptyList()
+            _interviewDone.value = false
+            return
+        }
+        _rituals.value = PAPrefsLogic.decodeRituals(paPrefs.getString(paKey(PAPrefsLogic.RITUALS_KEY, uid), null))
+        _dismissedMoments.value = PAPrefsLogic.parseDismissed(paPrefs.getString(paKey(PAPrefsLogic.DISMISSED_KEY, uid), null))
+        _interviewDone.value = paPrefs.getBoolean(paKey(INTERVIEW_DONE_KEY, uid), false)
+    }
+
+    // rituals
+
+    fun setRitual(key: RitualKey, on: Boolean) = setRituals(_rituals.value.with(key, on))
+
+    /** A USER change (Settings toggle / the interview picker / the set_ritual tool):
+     *  cache locally, flag pending, push to the account. */
+    fun setRituals(prefs: RitualPrefs) {
+        val uid = currentUid()
+        _rituals.value = prefs
+        if (uid == null) return
+        paPrefs.edit()
+            .putString(paKey(PAPrefsLogic.RITUALS_KEY, uid), PAPrefsLogic.encodeRituals(prefs))
+            .putBoolean(paKey(PAPrefsLogic.PENDING_PUSH_KEY, uid), true)
+            .apply()
+        pushRituals(uid, prefs)
+    }
+
+    /** True while a ritual toggle made here hasn't reached `pa_rituals` yet. */
+    internal fun ritualsPendingPush(uid: String): Boolean = paPrefs.getBoolean(paKey(PAPrefsLogic.PENDING_PUSH_KEY, uid), false)
+
+    private fun pushRituals(uid: String, prefs: RitualPrefs) {
+        val prefsClient = graph.coordinator?.preferences ?: return
+        ritualsPushGen += 1
+        val gen = ritualsPushGen
+        viewModelScope.launch {
+            val ok = runCatching { prefsClient.setRituals(uid, prefs) }.isSuccess
+            if (ok && currentUid() == uid && ritualsPushGen == gen) {
+                paPrefs.edit().remove(paKey(PAPrefsLogic.PENDING_PUSH_KEY, uid)).apply()
+            }
+        }
+    }
+
+    /** The account's rituals as the server has them (hydrate): replace the cache
+     *  without firing the push, and clear any pending-push flag — the server is the
+     *  truth from here on. */
+    internal fun applyServerRituals(uid: String, prefs: RitualPrefs) {
+        _rituals.value = prefs
+        paPrefs.edit()
+            .putString(paKey(PAPrefsLogic.RITUALS_KEY, uid), PAPrefsLogic.encodeRituals(prefs))
+            .remove(paKey(PAPrefsLogic.PENDING_PUSH_KEY, uid))
+            .apply()
+    }
+
+    // moment dismissals (device-local)
+
+    fun dismissMoment(momentId: String) {
+        val next = PAPrefsLogic.appendDismissed(_dismissedMoments.value, momentId)
+        if (next === _dismissedMoments.value) return
+        _dismissedMoments.value = next
+        val uid = currentUid() ?: return
+        paPrefs.edit().putString(paKey(PAPrefsLogic.DISMISSED_KEY, uid), PAPrefsLogic.encodeDismissed(next)).apply()
+    }
+
+    fun isMomentDismissed(momentId: String): Boolean = momentId in _dismissedMoments.value
+
+    // interview flag + resume step
+
+    /** The parked resume step, or null when nothing is persisted (iOS
+     *  `InterviewMachine.parkedStep`). */
+    fun interviewParkedStep(maxStep: Int): Int? {
+        val uid = currentUid() ?: return null
+        val raw = paPrefs.getString(paKey(INTERVIEW_STEP_KEY, uid), null) ?: return null
+        return InterviewFlag.parseInterviewStep(raw, maxStep)
+    }
+
+    fun hasInterviewResumeStep(): Boolean {
+        val uid = currentUid() ?: return false
+        return paPrefs.contains(paKey(INTERVIEW_STEP_KEY, uid))
+    }
+
+    fun setInterviewStep(step: Int) {
+        val uid = currentUid() ?: return
+        paPrefs.edit().putString(paKey(INTERVIEW_STEP_KEY, uid), step.toString()).apply()
+    }
+
+    fun clearInterviewStep() {
+        val uid = currentUid() ?: return
+        paPrefs.edit().remove(paKey(INTERVIEW_STEP_KEY, uid)).apply()
+    }
+
+    /** Every "the interview is done" path (I'm done, the rituals picker, reaching
+     *  the end, the ≥1-fact auto-done): local flag + resume step dropped + the
+     *  account (best-effort; a failed push is re-pushed by the next pull). */
+    fun markInterviewDone() {
+        val uid = currentUid() ?: return
+        markInterviewDoneLocal(uid)
+        pushInterviewDone(uid)
+    }
+
+    private fun markInterviewDoneLocal(uid: String) {
+        _interviewDone.value = true
+        paPrefs.edit()
+            .putBoolean(paKey(INTERVIEW_DONE_KEY, uid), true)
+            .remove(paKey(INTERVIEW_STEP_KEY, uid))
+            .apply()
+    }
+
+    private fun pushInterviewDone(uid: String) {
+        val prefsClient = graph.coordinator?.preferences ?: return
+        val at = isoNow()
+        viewModelScope.launch { runCatching { prefsClient.markInterviewDone(uid, at) } }
+    }
+
+    /** After every completed pull: read the account's interview flag + rituals and
+     *  pin the local caches. Best-effort — offline / the column not deployed yet
+     *  leave everything untouched (unknown ≠ "not done"), retried on the next pull. */
+    private suspend fun reconcileAssistantPrefs(uid: String) {
+        val prefsClient = graph.coordinator?.preferences ?: return
+        val server = runCatching { prefsClient.fetchUserPrefs(uid) }.getOrElse { return }
+        if (currentUid() != uid) return   // account changed mid-flight
+        applyServerAssistantPrefs(uid, server)
+    }
+
+    /** The pure-ish half of [reconcileAssistantPrefs] (tested directly): [server] =
+     *  the row as read (null = no row: never onboarded anywhere). */
+    internal fun applyServerAssistantPrefs(uid: String, server: PreferencesClient.ServerUserPrefs?) {
+        // Rituals: a pending local toggle re-pushes; otherwise the server wins.
+        if (ritualsPendingPush(uid)) {
+            pushRituals(uid, _rituals.value)
+        } else {
+            server?.rituals?.let { applyServerRituals(uid, it) }
+        }
+        // Interview flag: server done ⇒ pin local (and drop a half-way resume step —
+        // they finished elsewhere); local done but server not ⇒ push it up.
+        if (InterviewFlag.interviewDoneFromServer(server?.assistant_interview_done_at)) {
+            markInterviewDoneLocal(uid)
+        } else if (_interviewDone.value) {
+            pushInterviewDone(uid)
+        }
+    }
+
+    /** Sign-out: the assistant's memory is personal by definition — wipe the local
+     *  rows (the server keeps the account's facts) and every gateway cache, so the
+     *  next account on this device is greeted, not silently skipped. Same breath as
+     *  [clearAssistant]. */
+    internal suspend fun scrubAssistantUserState() {
+        runCatching { profileFactsService.wipeLocal() }
+        runCatching { paPrefs.edit().clear().apply() }
+        _rituals.value = RitualPrefs.DEFAULTS
+        _dismissedMoments.value = emptyList()
+        _interviewDone.value = false
+        _profileFactsHydrated.value = false
+    }
+
+    // profile facts (app-facing sugar over the service)
+
+    suspend fun saveProfileFact(category: ProfileFactCategory, fact: String, source: ProfileFactSource, whenIso: String? = null): ProfileFact? =
+        profileFactsService.save(category, fact, source, whenIso)
+
+    suspend fun forgetProfileFact(id: String): Boolean = profileFactsService.remove(id)
+
+    suspend fun forgetAllProfileFacts() = profileFactsService.clear()
+
+    /** The name they asked to be called, if any (beats the account name). */
+    fun preferredName(): String? = ProfileFactsLogic.preferredName(profileFacts.value)
+
+    /** True when they've asked not to be addressed by name. */
+    fun noNamePreference(): Boolean = ProfileFactsLogic.noNamePreference(profileFacts.value)
+
+    /** "Don't use my name" / "call me X" saved deterministically from the user's own
+     *  words before the model sees them; the receipt is attached to the closing turn. */
+    private suspend fun saveStylePreference(userText: String): Receipt? {
+        val pref = ProfileFactsLogic.detectStylePreference(userText) ?: return null
+        val stored = profileFactsService.saveStylePreference(pref) ?: return null
+        return Receipt(ReceiptIcon.PENCIL, "Noted: ${stored.fact}")
     }
 
     // ONE endless thread (redesign 2026-08-02): DISPLAY history persists long
@@ -2402,7 +2647,11 @@ class AppViewModel(
         persistAssistant()
         assistantJob = viewModelScope.launch {
             try {
-                when (val result = assistantTurn(assistantHistory)) {
+                // "Don't use my name" / "call me X" are saved by the APP before the
+                // model sees the message (web + iOS parity: the model kept promising
+                // to remember without saving); the receipt makes it visible.
+                val styleReceipt = saveStylePreference(userText)
+                when (val result = assistantTurn(assistantHistory, listOfNotNull(styleReceipt))) {
                     is AssistantTurn.Reply -> _assistantReplies.tryEmit(result.text)
                     is AssistantTurn.Error -> _assistantError.value = result.code
                 }
@@ -2413,7 +2662,7 @@ class AppViewModel(
         }
     }
 
-    private suspend fun assistantTurn(history: MutableList<ChatMessage>): AssistantTurn {
+    private suspend fun assistantTurn(history: MutableList<ChatMessage>, initialReceipts: List<Receipt> = emptyList()): AssistantTurn {
         val a = assistant ?: return AssistantTurn.Error("not_configured")
         // Scratch for entities created mid-turn (the live StateFlows lag the
         // optimistic write), so a later tool call can reference them by id.
@@ -2422,7 +2671,7 @@ class AppViewModel(
         // Deterministic receipts for everything this turn actually changed —
         // derived from the tool name + args + the executor's own result string,
         // never from the model's prose. Attached to the CLOSING assistant turn.
-        val receipts = mutableListOf<Receipt>()
+        val receipts = mutableListOf<Receipt>().apply { addAll(initialReceipts) }
         var iterations = 0
         while (iterations < 5) {
             iterations++
@@ -2942,6 +3191,12 @@ class AppViewModel(
                     val uid = auth?.currentUserId ?: return@collect
                     runCatching { reconcileNotificationPrefs(uid) }
                     runCatching { reconcileCaptureArchive(uid) }
+                    // The account's interview flag + rituals land BEFORE
+                    // profileFactsHydrated flips: the gateway's auto-open gate
+                    // decides on that flip, and an already-onboarded user (done on
+                    // the web, few synced facts) must never be greeted as a stranger.
+                    runCatching { reconcileAssistantPrefs(uid) }
+                    _profileFactsHydrated.value = true
                     runCatching { reconcileOnboarded(uid) }
                 }
             }
@@ -2951,6 +3206,9 @@ class AppViewModel(
     companion object {
         private const val NOTIF_PREF_LEVEL = "level"
         private const val NOTIF_PREF_LEAD = "lead"
+        /** Gateway interview keys (web STORAGE_KEYS.GATEWAY_INTERVIEW_DONE / _STEP vocabulary). */
+        internal const val INTERVIEW_DONE_KEY = "unstuck-gateway-interview-done"
+        internal const val INTERVIEW_STEP_KEY = "unstuck-gateway-interview-step"
         private val ISO: DateTimeFormatter =
             DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
         private val EXPORT_JSON = Json { prettyPrint = true; encodeDefaults = true }

@@ -17,6 +17,7 @@ import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.LifeArea
+import tech.csalliance.unstuck.core.model.ProfileFact
 import tech.csalliance.unstuck.core.model.ReasonLog
 import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TagRow
@@ -88,6 +89,14 @@ class RealtimeMirror(
         subscribe(Tables.LIFE_AREAS, userId,
             { o -> val m = DbRowCodec.decodeLifeArea(o); store.upsert(Tables.LIFE_AREAS, m, LifeArea.serializer(), m.id) },
             { id -> store.delete(Tables.LIFE_AREAS, id) })
+        // profile_facts (migration 055: in the publication, replica identity FULL so
+        // an UPDATE to active=false carries the whole row): a "forget" on another
+        // device arrives as an UPDATE and is saved as a local tombstone, which every
+        // read filters out. Same updated_at last-write-wins guard as tasks so a stale
+        // echo can't clobber a newer local save.
+        subscribe(Tables.PROFILE_FACTS, userId,
+            { o -> val m = DbRowCodec.decodeProfileFact(o); store.upsertIfNewer(Tables.PROFILE_FACTS, m, ProfileFact.serializer(), m.id, m.updatedAt) },
+            { id -> store.delete(Tables.PROFILE_FACTS, id) })
         // Membership changes for ME — a new share or a revocation. Re-hydrate
         // collections so the freshly-shared list appears / the revoked one drops.
         subscribeMembers(userId, onMembersChanged)

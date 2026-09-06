@@ -20,6 +20,9 @@ import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.LifeArea
 import tech.csalliance.unstuck.core.model.Objective
 import tech.csalliance.unstuck.core.model.Priority
+import tech.csalliance.unstuck.core.model.ProfileFact
+import tech.csalliance.unstuck.core.model.ProfileFactCategory
+import tech.csalliance.unstuck.core.model.ProfileFactSource
 import tech.csalliance.unstuck.core.model.ReasonAction
 import tech.csalliance.unstuck.core.model.ReasonLog
 import tech.csalliance.unstuck.core.model.Recurrence
@@ -218,6 +221,26 @@ internal data class CalendarConnectionRow(
     fun toModel() = CalendarConnection(id, provider, accountEmail, displayName, selectedCalendarIds, colorSlot, lastSyncCursor, connectedAt, needsReauth, lastError)
 }
 
+/** `profile_facts` (migration 050) — the assistant's memory. The wire shape the
+ *  web writes: snake_case `when_iso` / `created_at` / `updated_at`, `active`
+ *  ALWAYS sent (a forget is an upsert with active=false — the tombstone), and
+ *  `when_iso` as an explicit null when cleared. `source` / `active` default on
+ *  decode so a sparse server row still reads. user_id is attached by the gateway. */
+@Serializable
+internal data class ProfileFactRow(
+    val id: String,
+    val category: ProfileFactCategory,
+    val fact: String,
+    val source: ProfileFactSource = ProfileFactSource.CHAT,
+    @SerialName("when_iso") val whenIso: String? = null,
+    val active: Boolean = true,
+    @SerialName("created_at") val createdAt: String,
+    @SerialName("updated_at") val updatedAt: String,
+) {
+    constructor(f: ProfileFact) : this(f.id, f.category, f.fact, f.source, f.whenIso, f.active, f.createdAt, f.updatedAt)
+    fun toModel() = ProfileFact(id, category, fact, source, whenIso, active, createdAt, updatedAt)
+}
+
 /** Encode/decode the PostgREST row shape. Encoders return a [JsonObject] so
  *  the gateway can inject user_id while preserving explicit JSON nulls. */
 internal object DbRowCodec {
@@ -236,6 +259,7 @@ internal object DbRowCodec {
     fun encodeCollection(c: ItemCollection) = obj(CollectionRow.serializer(), CollectionRow(c))
     fun encodeTag(t: TagRow) = obj(TagDbRow.serializer(), TagDbRow(t))
     fun encodeLifeArea(a: LifeArea) = obj(LifeAreaDbRow.serializer(), LifeAreaDbRow(a))
+    fun encodeProfileFact(f: ProfileFact) = obj(ProfileFactRow.serializer(), ProfileFactRow(f))
 
     fun decodeTask(o: JsonObject) = rowJson.decodeFromJsonElement(TaskRow.serializer(), o).toModel()
     fun decodeSession(o: JsonObject) = rowJson.decodeFromJsonElement(SessionRow.serializer(), o).toModel()
@@ -252,4 +276,5 @@ internal object DbRowCodec {
     fun decodeTag(o: JsonObject) = rowJson.decodeFromJsonElement(TagDbRow.serializer(), o).toModel()
     fun decodeLifeArea(o: JsonObject) = rowJson.decodeFromJsonElement(LifeAreaDbRow.serializer(), o).toModel()
     fun decodeConnection(o: JsonObject) = rowJson.decodeFromJsonElement(CalendarConnectionRow.serializer(), o).toModel()
+    fun decodeProfileFact(o: JsonObject) = rowJson.decodeFromJsonElement(ProfileFactRow.serializer(), o).toModel()
 }

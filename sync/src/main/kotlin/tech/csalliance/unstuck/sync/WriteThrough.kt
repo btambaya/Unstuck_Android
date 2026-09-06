@@ -6,6 +6,7 @@ import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.LifeArea
+import tech.csalliance.unstuck.core.model.ProfileFact
 import tech.csalliance.unstuck.core.model.ReasonLog
 import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TagRow
@@ -128,6 +129,19 @@ class WriteThrough(private val store: LocalStore) {
     suspend fun upsertLifeArea(a: LifeArea) {
         store.upsert(Tables.LIFE_AREAS, a, LifeArea.serializer(), a.id)
         enqueue("life_areas", a.id, "upsert", DbRowCodec.encodeLifeArea(a).toString())
+    }
+
+    /** Optimistic local save of a profile fact + push. A soft delete ("forget")
+     *  is the SAME op with `active=false` — an upsert on `id` that tombstones the
+     *  server row (the web does an UPDATE; the result is identical, and this also
+     *  tombstones a row the server never received). profile_facts never
+     *  hard-deletes. Any older queued upsert for the fact is dropped first so the
+     *  outbox carries ONE op per fact — its latest state — regardless of how two
+     *  rapid saves (a refine right after a save) interleave with the drain. */
+    suspend fun upsertProfileFact(f: ProfileFact) {
+        store.upsert(Tables.PROFILE_FACTS, f, ProfileFact.serializer(), f.id, f.updatedAt)
+        cancelPendingUpserts(Tables.PROFILE_FACTS, f.id)
+        enqueue(Tables.PROFILE_FACTS, f.id, "upsert", DbRowCodec.encodeProfileFact(f).toString())
     }
 
     suspend fun deleteTask(id: String) = deleteLocalAndEnqueue(Tables.TASKS, id)

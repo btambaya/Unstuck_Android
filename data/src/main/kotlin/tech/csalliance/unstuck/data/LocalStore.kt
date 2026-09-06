@@ -13,6 +13,7 @@ import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.LifeArea
 import tech.csalliance.unstuck.core.model.LiveSession
+import tech.csalliance.unstuck.core.model.ProfileFact
 import tech.csalliance.unstuck.core.model.ReasonLog
 import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TagRow
@@ -73,6 +74,9 @@ class LocalStore(private val db: UnstuckDatabase) {
     fun tags(): Flow<List<TagRow>> = observe(Tables.TAGS, TagRow.serializer())
     fun lifeAreas(): Flow<List<LifeArea>> = observe(Tables.LIFE_AREAS, LifeArea.serializer())
     fun connections(): Flow<List<CalendarConnection>> = observe(Tables.CALENDAR_CONNECTIONS, CalendarConnection.serializer())
+    /** Every profile_facts row INCLUDING tombstones (`active=false`) — callers
+     *  that read facts filter on `active` (ProfileFactsService does). */
+    fun profileFacts(): Flow<List<ProfileFact>> = observe(Tables.PROFILE_FACTS, ProfileFact.serializer())
 
     suspend fun <T> snapshot(table: String, ser: KSerializer<T>): List<T> =
         records.get(table).mapNotNull { runCatching { json.decodeFromString(ser, it.data) }.getOrNull() }

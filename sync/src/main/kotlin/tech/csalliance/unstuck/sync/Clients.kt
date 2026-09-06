@@ -13,6 +13,12 @@ import io.ktor.http.ContentType
 import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import tech.csalliance.unstuck.core.logic.PAPrefsLogic
+import tech.csalliance.unstuck.core.logic.RitualPrefs
 import java.util.TimeZone
 
 // PushClient (FCM register) + NotificationsClient (recap / paused-checkin) +
@@ -104,22 +110,80 @@ class PreferencesClient(private val client: SupabaseClient) {
         client.from("user_preferences").upsert(StrugglesRow(userId, struggles)) { onConflict = "user_id" }
     }
 
-    /** The server's copy of the onboarding / interview state (user_preferences). Both
-     *  nullable: an account that never onboarded has no row at all. */
+    /** The server's copy of the onboarding / interview / PA state (user_preferences).
+     *  All nullable: an account that never onboarded has no row at all, and a column
+     *  that was never set on any device is null. */
     @Serializable
     data class ServerUserPrefs(
         val adhd_struggles: List<String>? = null,
+        /** Migration 052 — when the get-to-know-you interview finished on ANY platform. */
         val assistant_interview_done_at: String? = null,
-    )
+        /** Migration 053 — `{morning, evening, friday, sunday}` jsonb; parse with
+         *  [PAPrefsLogic.parseRitualPrefs] (missing keys → defaults, null → none). */
+        val pa_rituals: JsonObject? = null,
+    ) {
+        /** The account's ritual toggles, or null when never set anywhere. */
+        val rituals: RitualPrefs? get() = PAPrefsLogic.parseRitualPrefs(pa_rituals)
+    }
 
     /** Read back the account-wide onboarding signals so a second account on the same
      *  device (or a fresh install) reconciles `onboarded` from the SERVER rather than a
-     *  device-global flag. Null = no row (never onboarded anywhere) — and ALSO null on a
-     *  transport error, so callers treat null as "unknown", never as "not onboarded". */
+     *  device-global flag — plus the interview flag + PA rituals the gateway pins its
+     *  local caches from after every pull. Null = no row (never onboarded anywhere) —
+     *  and ALSO null on a transport error, so callers treat null as "unknown", never as
+     *  "not onboarded" / "not done". */
     suspend fun fetchUserPrefs(userId: String): ServerUserPrefs? =
         client.from("user_preferences")
-            .select(Columns.list("adhd_struggles", "assistant_interview_done_at")) { filter { eq("user_id", userId) } }
+            .select(Columns.list("adhd_struggles", "assistant_interview_done_at", PAPrefsLogic.RITUALS_COLUMN)) { filter { eq("user_id", userId) } }
             .decodeSingleOrNull<ServerUserPrefs>()
+
+    // ── PA rituals (migration 053: `user_preferences.pa_rituals jsonb`) ─────────
+    // Rows below are built as JsonObjects on purpose: the supabase-kt Json omits
+    // default-valued fields, so a `@Serializable RitualPrefs(morning = true)` would
+    // drop `morning` from the payload and the server would keep a stale value.
+
+    /** Persist the ritual toggles (`{"morning":bool,"evening":bool,"friday":bool,"sunday":bool}`)
+     *  account-wide — upsert on user_id like the other prefs writers (a bare UPDATE on
+     *  a missing prefs row is a silent zero-row no-op; same lesson as the web). */
+    suspend fun setRituals(userId: String, prefs: RitualPrefs) {
+        val row = buildJsonObject {
+            put("user_id", userId)
+            put(PAPrefsLogic.RITUALS_COLUMN, PAPrefsLogic.ritualsJson(prefs))
+        }
+        client.from("user_preferences").upsert(row) { onConflict = "user_id" }
+    }
+
+    // ── interview flag (migration 052) ──────────────────────────────────────────
+
+    /** Mirror "the get-to-know-you interview is done" to the ACCOUNT —
+     *  `user_preferences.assistant_interview_done_at` — so no other device re-asks
+     *  (the web + iOS write the same column). [atIso] = the ISO-8601 instant. Throws
+     *  while the column doesn't exist yet (PGRST204) — callers are best-effort and
+     *  the next hydrate re-pushes. */
+    suspend fun markInterviewDone(userId: String, atIso: String) {
+        val row = buildJsonObject {
+            put("user_id", userId)
+            put("assistant_interview_done_at", atIso)
+        }
+        client.from("user_preferences").upsert(row) { onConflict = "user_id" }
+    }
+
+    // ── usable minutes (migration 007) ──────────────────────────────────────────
+
+    /** Mirror the usable-minutes budget (Settings / the assistant's
+     *  `set_usable_minutes`) to user_preferences — upsert on user_id, like the web
+     *  `setUsableMinutes`. A null value is NOT sent, so that column keeps what it
+     *  had (PostgREST updates only the columns present). Columns:
+     *  usable_minutes_per_day / usable_minutes_weekend (check 1…1440 — callers
+     *  validate). */
+    suspend fun setUsableMinutes(userId: String, perDay: Int?, weekend: Int?) {
+        val row = buildJsonObject {
+            put("user_id", userId)
+            if (perDay != null) put("usable_minutes_per_day", JsonPrimitive(perDay))
+            if (weekend != null) put("usable_minutes_weekend", JsonPrimitive(weekend))
+        }
+        client.from("user_preferences").upsert(row) { onConflict = "user_id" }
+    }
 
     @Serializable private data class NotifPrefsRow(
         val user_id: String,

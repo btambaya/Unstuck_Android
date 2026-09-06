@@ -16,6 +16,7 @@ import tech.csalliance.unstuck.core.model.CalendarConnection
 import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.LifeArea
+import tech.csalliance.unstuck.core.model.ProfileFact
 import tech.csalliance.unstuck.core.model.ReasonLog
 import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TagRow
@@ -98,6 +99,13 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
         replace(Tables.LIFE_AREAS, LifeArea.serializer(), { it.id }) { DbRowCodec.decodeLifeArea(it) }
         replace(Tables.CALENDAR_CONNECTIONS, CalendarConnection.serializer(), { it.id }, { it.connectedAt }) { DbRowCodec.decodeConnection(it) }
         hydrateCalBlocks()
+        // profile_facts — the assistant's cross-device memory. Server tombstones
+        // (active=false) land as local tombstones so "forget" propagates everywhere
+        // and nothing resurrects; a local save / forget whose push hasn't landed
+        // (still-queued upsert) survives the replace exactly like every other
+        // table, so an offline "Noted" can't vanish until the flush. Mirrors the
+        // web hydrateProfileFacts (remote wins on shared ids, local-only pushed).
+        replace(Tables.PROFILE_FACTS, ProfileFact.serializer(), { it.id }, { it.updatedAt }) { DbRowCodec.decodeProfileFact(it) }
     }
 
     /** Collections + their membership. RLS returns own AND shared-with-me rows;

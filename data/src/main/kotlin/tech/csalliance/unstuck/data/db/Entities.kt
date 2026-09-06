@@ -16,6 +16,9 @@ object Tables {
     const val TAGS = "tags"
     const val LIFE_AREAS = "life_areas"
     const val CALENDAR_CONNECTIONS = "calendar_connections"
+    /** The assistant's memory (migration 050). Rows with `active=false` are
+     *  soft-delete tombstones and stay in the store (every read filters them). */
+    const val PROFILE_FACTS = "profile_facts"
 }
 
 /** One synced row, stored as a JSON blob of the domain model. Composite key

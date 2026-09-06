@@ -7,6 +7,14 @@
 - **26 Android-only capabilities** — 16 platform-inherent · 5 feature-level · 5 Android-UI-for-shared-backend.
 - **11 are web-port candidates** (feature-level or shared-backend with user value) — the rest are OS-bound (notifications, exact alarms, foreground service, home-screen widget, permission prompts) and can't meaningfully port.
 
+## 2026-09-06 addendum — AI gateway port (v0.5.0)
+
+The AI gateway (profile-facts memory, 56-tool assistant, gateway card on Today, 7-question interview, Settings › Memory "What Unstuck knows") is a **parity port** from web + iOS — nothing in it is Android-only, so the rollup above is unchanged. The only Android-specific pieces are OS-bound and are **not** web-port candidates:
+
+- **Call ring via FCM data push** (`surface/Push.kt` `CallPush` / `CallRing`) — the server's `kind=call` high-priority data push renders as a HIGH-importance `CATEGORY_CALL` notification with an `unstuck://call/<id>` deep link. Full-screen intent + foreground-service voice call = phase C1 (pending). Web has no ring surface (a closed tab can't ring); iOS uses PushKit + CallKit.
+- **Per-uid SharedPreferences cache** for rituals / dismissed moments / interview step — the iOS `UserDefaults` twin, scrubbed on sign-out; the server (`user_preferences.pa_rituals`, `profile_facts`) stays the source of truth.
+- **Voice tool schema generated from the Kotlin registry** (`ui/assistant/VoiceToolSchema.kt`) so Talk mode and chat can't drift — an implementation detail, not a feature gap.
+
 ## ⭐ Web-port candidates (Android leads — consider for web)
 
 These exist on Android but not web, and either the backend is already shared or they're portable product concepts:

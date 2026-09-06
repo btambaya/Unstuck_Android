@@ -66,6 +66,12 @@ data class ToolFunction(
 data class AssistantReply(
     val content: String? = null,
     @SerialName("tool_calls") val toolCalls: List<ToolCall>? = null,
+    /** The upstream's finish reason ("stop" | "length" | "tool_calls" | …), lifted
+     *  from the edge fn's TOP-LEVEL `finish_reason` — it is NOT part of the nested
+     *  `assistant` object's wire shape (@Transient), so a persisted/decoded reply
+     *  carries null. "length" ⇒ the harness sends the cut-off hint instead of
+     *  inferring truncation from bad tool JSON (iOS AssistantClient parity). */
+    @kotlinx.serialization.Transient val finishReason: String? = null,
 )
 
 /** The EXACT shape the model expects — the client-only fields on [ChatMessage]
@@ -88,11 +94,20 @@ private data class AssistantRequest(
     val context: JsonElement,
 )
 
+/** The edge fn body: `{ assistant, finish_reason, usage }` or `{ error }`. */
 @Serializable
-private data class AssistantResponse(
+internal data class AssistantResponse(
     val assistant: AssistantReply? = null,
     val error: String? = null,
-)
+    @SerialName("finish_reason") val finishReason: String? = null,
+) {
+    /** The reply with the top-level finish reason attached (null when absent). */
+    fun toResult(): AssistantResult = when {
+        error != null -> AssistantResult.Err(error)
+        assistant != null -> AssistantResult.Ok(assistant.copy(finishReason = finishReason))
+        else -> AssistantResult.Err("empty")
+    }
+}
 
 /** Outcome of one round-trip: the assistant turn, or an error code for the UI. */
 sealed interface AssistantResult {
@@ -116,11 +131,7 @@ class AssistantClient(private val client: SupabaseClient) {
                     contentType(ContentType.Application.Json)
                     setBody(AssistantRequest(wire, context))
                 }.body()
-                when {
-                    resp.error != null -> AssistantResult.Err(resp.error)
-                    resp.assistant != null -> AssistantResult.Ok(resp.assistant)
-                    else -> AssistantResult.Err("empty")
-                }
+                resp.toResult()
             }
             r.getOrNull()?.let { return it }
             last = r.exceptionOrNull()

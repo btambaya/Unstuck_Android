@@ -87,10 +87,22 @@ private val YearMonthSaver = Saver<java.time.YearMonth, String>(
 )
 
 @Composable
-fun CalendarScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (SharedWithMe) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, onNotifications: () -> Unit, notifUnread: Int, avatarInitials: String, onCreateAt: (String, String) -> Unit) {
+fun CalendarScreen(
+    vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (SharedWithMe) -> Unit, onSearch: () -> Unit,
+    onMenu: () -> Unit, onAvatar: () -> Unit, onNotifications: () -> Unit, notifUnread: Int, avatarInitials: String,
+    onCreateAt: (String, String) -> Unit,
+    /** One-shot Day/Week/Month request from the assistant's `open_screen` (week | month). */
+    requestedView: String? = null,
+    onViewApplied: () -> Unit = {},
+) {
     val c = UTheme.colors
     // Saveable so the chosen Day/Week/Month tab survives rotation / process death.
     var view by rememberSaveable { mutableStateOf("Day") }
+    // Applied then cleared by the caller, so returning to Calendar later keeps
+    // whatever the user last picked rather than replaying the old request.
+    LaunchedEffect(requestedView) {
+        if (requestedView != null) { view = requestedView; onViewApplied() }
+    }
     // A day tapped in Month view → switch to Day view focused on it. Saveable so the
     // jump survives rotation; consumed by DayGridScreen via its initialDate.
     var jumpDate by rememberSaveable { mutableStateOf<String?>(null) }

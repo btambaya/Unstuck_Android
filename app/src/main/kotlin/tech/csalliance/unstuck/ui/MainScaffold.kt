@@ -48,7 +48,6 @@ import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.design.component.BottomNavBar
 import tech.csalliance.unstuck.design.component.NavSpec
 import tech.csalliance.unstuck.design.theme.UTheme
-import tech.csalliance.unstuck.ui.assistant.AssistantDestination
 import tech.csalliance.unstuck.ui.calendar.CalendarScreen
 import tech.csalliance.unstuck.ui.collections.CollectionDetailScreen
 import tech.csalliance.unstuck.ui.collections.CollectionsScreen
@@ -123,6 +122,9 @@ fun MainScaffold(vm: AppViewModel) {
         restore = { l -> Sheet.of(l.firstOrNull()) },
     )) { mutableStateOf<Sheet?>(null) }
     var showNewTask by rememberSaveable { mutableStateOf(false) }
+    // Set by `open_screen week|month|calendar` — CalendarScreen owns its Day/Week/Month
+    // tab, so this is a one-shot request it consumes (null again) on arrival.
+    var calendarView by rememberSaveable { mutableStateOf<String?>(null) }
     var newTaskPrefill by rememberSaveable(stateSaver = listSaver(
         save = { p -> if (p == null) emptyList() else listOf(p.first, p.second) },
         restore = { l -> if (l.size == 2) l[0] to l[1] else null },
@@ -202,6 +204,37 @@ fun MainScaffold(vm: AppViewModel) {
         )
     }
 
+    // ── the assistant's 12 screens (contract `open_screen`) ────────────────
+    // ONE resolver for both entry points — the `open_screen` tool (which
+    // arrives as an unstuck:// deep link) and the sheet's context-strip chips —
+    // so a tool call and a chip can never land on different screens. Without
+    // it every screen but Today fell through the deep-link router's
+    // `else -> today` while the tool still answered `ok: opened calendar`.
+    fun goAssistantScreen(screen: String, id: String? = null) {
+        stack.clear()
+        when (screen) {
+            "tasks" -> { tab = "tasks"; if (id != null) push(Route.Detail(id)) }
+            "calendar", "day", "week", "month" -> {
+                calendarView = when (screen) { "week" -> "Week"; "month" -> "Month"; else -> "Day" }
+                tab = "calendar"
+            }
+            "lists", "collections" -> { tab = "lists"; if (id != null) push(Route.Collection(id)) }
+            // Focus is an overlay, not a tab: it resolves through the live session's
+            // task. No session → Today (the tool only opens what exists).
+            "focus" -> {
+                tab = "today"
+                liveSession?.taskId?.let { sid -> tasks.firstOrNull { it.id == sid } }?.let { openFocus(it) }
+            }
+            "insights" -> { tab = "today"; push(Route.Insights(false)) }
+            "captures", "inbox" -> { tab = "today"; push(Route.Inbox) }
+            "settings" -> { tab = "today"; push(Route.Settings) }
+            "people" -> { tab = "today"; push(Route.SettingsSub(SettingsSection.PEOPLE)) }
+            "areas" -> { tab = "today"; push(Route.SettingsSub(SettingsSection.AREAS)) }
+            "notifications" -> { tab = "today"; openNotifs() }
+            else -> tab = "today"
+        }
+    }
+
     // Restore the live-focus foreground service from the persisted session after
     // process death — independent of whether the user is on the Focus screen.
     // The service is START_NOT_STICKY and was only armed from FocusScreen, so a
@@ -258,6 +291,21 @@ fun MainScaffold(vm: AppViewModel) {
                 }
             }
             dl == "unstuck://collections" -> { tab = "lists"; stack.clear() }   // a shared collection
+            dl.startsWith("unstuck://collections/") -> goAssistantScreen("lists", dl.removePrefix("unstuck://collections/"))
+            dl == "unstuck://tasks/all" -> goAssistantScreen("tasks")
+            // The assistant's open_screen links (AssistantToolsAppModel.assistantScreenLink).
+            // Everything but today/task/collections used to fall through to Today
+            // while the tool still answered `ok: opened <screen>`.
+            dl == "unstuck://calendar" -> goAssistantScreen("calendar")
+            dl == "unstuck://calendar/week" -> goAssistantScreen("week")
+            dl == "unstuck://calendar/month" -> goAssistantScreen("month")
+            dl == "unstuck://focus" -> goAssistantScreen("focus")
+            dl == "unstuck://insights" -> goAssistantScreen("insights")
+            dl == "unstuck://captures" -> goAssistantScreen("captures")
+            dl == "unstuck://settings" -> goAssistantScreen("settings")
+            dl == "unstuck://settings/people" -> goAssistantScreen("people")
+            dl == "unstuck://settings/areas" -> goAssistantScreen("areas")
+            dl == "unstuck://notifications" -> goAssistantScreen("notifications")
             // Today hosts the "Shared with you" + "Delegated" sections, so the sharing
             // pings (unstuck://tasks: task_share / shared_task_done / shared_session_*)
             // land there alongside unstuck://today, /recap, /brief.
@@ -305,7 +353,7 @@ fun MainScaffold(vm: AppViewModel) {
                         onOpenShared = { sharedDetail = it },
                     )
                     "tasks" -> TasksScreen(vm, activeArea = activeArea, onClearArea = { activeArea = null }, onAreaPick = { activeArea = it }, onOpen = { push(Route.Detail(it.id)) }, onOpenShared = { sharedDetail = it }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
-                    "calendar" -> CalendarScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onOpenShared = { sharedDetail = it }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials, onCreateAt = { d, t -> newTaskPrefill = d to t; showNewTask = true })
+                    "calendar" -> CalendarScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onOpenShared = { sharedDetail = it }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials, onCreateAt = { d, t -> newTaskPrefill = d to t; showNewTask = true }, requestedView = calendarView, onViewApplied = { calendarView = null })
                     "lists" -> CollectionsScreen(vm, onOpen = { push(Route.Collection(it)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
                 }
             }
@@ -404,16 +452,9 @@ fun MainScaffold(vm: AppViewModel) {
                 // The context strip's pieces are real jumps: NEXT -> Tasks,
                 // USABLE -> Calendar, PAUSED -> the live focus session (Focus is
                 // an overlay here, not a tab, so it resolves through the task).
-                onNavigate = { dest ->
-                    when (dest) {
-                        AssistantDestination.TASKS -> { tab = "tasks"; stack.clear() }
-                        AssistantDestination.CALENDAR -> { tab = "calendar"; stack.clear() }
-                        AssistantDestination.FOCUS ->
-                            vm.liveSession.value?.taskId
-                                ?.let { id -> tasks.firstOrNull { it.id == id } }
-                                ?.let { focusTask = it }
-                    }
-                },
+                // Same resolver as `open_screen`, so a chip and a tool call can
+                // never land on different screens.
+                onNavigate = { dest -> goAssistantScreen(dest.screen, dest.id) },
                 onDismiss = { sheet = null },
             )
             null -> {}

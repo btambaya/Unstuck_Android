@@ -75,7 +75,15 @@ class AssistantMemoryHooksTest {
     private fun kotlinx.coroutines.test.TestScope.settleTurn(vm: AppViewModel) {
         repeat(300) {
             advanceUntilIdle()
-            if (!vm.assistantSending.value) return
+            if (!vm.assistantSending.value) {
+                // The flag flips INSIDE the turn's `finally`, so the job's own
+                // completion is still resuming from a real Dispatchers.Default
+                // thread. Give it a beat and drain again, or teardown's
+                // resetMain() races it ("Main is used concurrently with setting it").
+                Thread.sleep(25)
+                advanceUntilIdle()
+                return
+            }
             Thread.sleep(10)
         }
         error("assistant turn never settled")

@@ -1,0 +1,676 @@
+package tech.csalliance.unstuck.ui.assistant
+
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.intOrNull
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
+import tech.csalliance.unstuck.core.logic.IsoDate
+import tech.csalliance.unstuck.core.logic.ProfileFactsLogic
+import tech.csalliance.unstuck.core.logic.WEEKDAY_NAMES_CAP
+import tech.csalliance.unstuck.core.logic.hmToMin
+import tech.csalliance.unstuck.core.logic.jsDayOfWeek
+import tech.csalliance.unstuck.core.logic.rejectPastDate
+import tech.csalliance.unstuck.core.logic.rejectPastTime
+import tech.csalliance.unstuck.core.logic.ReceiptArgs
+import tech.csalliance.unstuck.core.logic.bumpMoveCount
+import tech.csalliance.unstuck.core.logic.isTaskBlock
+import tech.csalliance.unstuck.core.logic.materializeOccurrences
+import tech.csalliance.unstuck.core.logic.newUuid
+import tech.csalliance.unstuck.core.logic.regenerateForTask
+import tech.csalliance.unstuck.core.logic.resolveShareRequest
+import tech.csalliance.unstuck.core.model.CalBlock
+import tech.csalliance.unstuck.core.model.CalBlockKind
+import tech.csalliance.unstuck.core.model.ItemCollection
+import tech.csalliance.unstuck.core.model.Recurrence
+import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.time.Time
+import tech.csalliance.unstuck.sync.CallRequest
+import tech.csalliance.unstuck.sync.CallsClient
+import tech.csalliance.unstuck.sync.ProfileFactSaveError
+import java.time.Instant
+import java.time.LocalDate
+import java.time.LocalDateTime
+import java.time.ZoneId
+
+// Assistant tool executor — the CLIENT half of the shared assistant contract
+// (docs/assistant-tool-contract.md, vendored). The `assistant` edge function
+// owns the tool SCHEMAS and the prompt; this file executes the calls through
+// the same write paths the UI uses, returning the contract's exact result
+// strings (`ok: …` / `error: …`) — the server prompt reads them, so wording is
+// not ours to change. 1:1 port of lib/assistant/tools.ts `runAssistantTool`
+// and iOS AssistantTools.swift (the base tools + the call tools live here; the
+// 2026-09-02 app-surface tools in AssistantToolsSurface.kt).
+//
+// Written against [AssistantApi] (not AppViewModel) so it runs unchanged in
+// unit tests against an in-memory fake, and in the app against
+// AppViewModelAssistantApi. Both the text harness and the realtime voice
+// session dispatch through it.
+
+/** Tools that never change anything — a success here must NOT count as "the
+ *  assistant acted" for either fabrication guard (text or voice). */
+val READ_ONLY_TOOLS: Set<String> = setOf("get_schedule", "get_tasks", "get_captures", "get_insights", "get_calls")
+
+/** Entities created THIS turn/session, so a later call (schedule_task after
+ *  create_task) can reference them by id before the optimistic write has
+ *  propagated back through the store. */
+class TurnScratch {
+    val newTasks = HashMap<String, TaskItem>()
+    val newLists = HashMap<String, ItemCollection>()
+    fun clear() { newTasks.clear(); newLists.clear() }
+}
+
+/** Typed accessors over the model's JSON arguments. `str` treats blank as
+ *  absent (matching the web helpers) and returns the raw string otherwise. */
+class ToolArgs(val raw: JsonObject = JsonObject(emptyMap())) {
+    companion object {
+        fun parse(json: String): ToolArgs = ToolArgs(parseToolArgs(json))
+    }
+
+    val isEmpty: Boolean get() = raw.isEmpty()
+    fun has(k: String): Boolean = raw.containsKey(k)
+    fun isNull(k: String): Boolean = raw[k] is JsonNull
+
+    fun str(k: String): String? = (raw[k] as? JsonPrimitive)?.takeIf { it.isString }?.contentOrNull?.takeIf { it.isNotBlank() }
+    fun int(k: String): Int? {
+        val p = raw[k] as? JsonPrimitive ?: return null
+        if (p.isString) return p.content.trim().toIntOrNull()
+        return p.intOrNull ?: p.doubleOrNull?.takeIf { it.isFinite() }?.let { Math.round(it).toInt() }
+    }
+    fun bool(k: String): Boolean? = (raw[k] as? JsonPrimitive)?.booleanOrNull
+    fun strList(k: String): List<String>? = (raw[k] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.takeIf { p -> p.isString }?.contentOrNull }
+    fun intList(k: String): List<Int>? = (raw[k] as? JsonArray)?.mapNotNull { e ->
+        (e as? JsonPrimitive)?.let { it.intOrNull ?: it.doubleOrNull?.let { d -> Math.round(d).toInt() } }
+    }
+    fun objList(k: String): List<ToolArgs>? = (raw[k] as? JsonArray)?.mapNotNull { (it as? JsonObject)?.let(::ToolArgs) }
+
+    /** The slice the receipt derivation reads. */
+    val receiptArgs: ReceiptArgs
+        get() = ReceiptArgs(taskId = str("taskId"), date = str("date"), startTime = str("startTime"), later = bool("later"), kind = str("kind"))
+}
+
+fun parseToolArgs(s: String): JsonObject =
+    runCatching { Json.parseToJsonElement(s).jsonObject }.getOrDefault(JsonObject(emptyMap()))
+
+// ── shared helpers (tools.ts module-private functions) ──
+
+/** Resolve a task id: scratch map first (the live store lags the optimistic
+ *  write), then the live store. */
+suspend fun findTask(id: String?, api: AssistantApi, scratch: TurnScratch): TaskItem? {
+    if (id == null) return null
+    scratch.newTasks[id]?.let { return it }
+    return api.getTasks().firstOrNull { it.id == id }
+}
+
+suspend fun findList(id: String?, api: AssistantApi, scratch: TurnScratch): ItemCollection? {
+    if (id == null) return null
+    scratch.newLists[id]?.let { return it }
+    return api.getCollections().firstOrNull { it.id == id }
+}
+
+/** The task's NEXT live block (today or later, not done/skipped), by date+time
+ *  — the same anchor scheduleTask moves. */
+fun nextLiveBlock(blocks: List<CalBlock>, today: String, taskId: String): CalBlock? =
+    blocks.filter { it.taskId == taskId && !it.done && !it.skipped && it.date >= today }
+        .sortedBy { it.date + it.startTime }
+        .firstOrNull()
+
+suspend fun nextLiveBlock(api: AssistantApi, taskId: String): CalBlock? = nextLiveBlock(api.getBlocks(), api.todayIso(), taskId)
+
+private suspend fun rejectPastDate(api: AssistantApi, date: String): String? = rejectPastDate(api.todayIso(), date)
+
+private suspend fun rejectPastTime(api: AssistantApi, date: String, startTime: String?): String? =
+    rejectPastTime(api.getBlocks(), api.todayIso(), date, startTime, api.nowHM())
+
+private fun localMidnightMs(iso: String): Long =
+    runCatching { LocalDate.parse(iso).atStartOfDay(ZoneId.systemDefault()).toInstant().toEpochMilli() }
+        .getOrDefault(Time.startOfDayMillis(System.currentTimeMillis()))
+
+/** Place (or move) the anchor block for a task at date+time, materialising the
+ *  recurrence horizon when the task repeats. Returns the time the block landed
+ *  on (callers report it honestly). */
+private suspend fun scheduleTask(api: AssistantApi, task: TaskItem, date: String, startTime: String?): String {
+    val blocks = api.getBlocks()
+    val today = api.todayIso()
+    // The anchor to move is the task's NEXT LIVE block — first-in-array grabbed
+    // an old done/skipped occurrence on real accounts (tester round, 2026-09-01).
+    val live = blocks.filter { it.taskId == task.id && !it.done && !it.skipped }.sortedBy { it.date + it.startTime }
+    val anchor = live.firstOrNull { it.date >= today } ?: live.lastOrNull()
+    // Moving keeps the task's current time; a FIRST-EVER scheduling with no
+    // time is refused upstream (the caller asks the user instead of guessing).
+    val anchorTime = anchor?.startTime?.takeIf { it.isNotEmpty() }
+    val time = startTime ?: anchorTime ?: "09:00"
+    if (anchor != null) {
+        api.upsertBlock(anchor.copy(date = date, startTime = time))
+        // Every UI reschedule bumps move_count (the slip detector's input).
+        if (anchor.date != date) {
+            val fresh = api.getTasks().firstOrNull { it.id == task.id } ?: task
+            api.upsertTask(bumpMoveCount(fresh, api.nowIso()))
+        }
+    } else {
+        api.upsertBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = time,
+            durationMinutes = task.estimateMin, date = date, kind = CalBlockKind.TASK))
+    }
+    val rec = task.recurrence
+    if (rec != null) {
+        // Only fill dates that DON'T already carry a block for this task.
+        val taken = blocks.filter { it.taskId == task.id }.map { it.date }.toSet()
+        for (occ in materializeOccurrences(rec, localMidnightMs(date), time)) {
+            if (occ.date == date || occ.date in taken) continue
+            api.upsertBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = occ.startTime,
+                durationMinutes = task.estimateMin, date = occ.date, kind = CalBlockKind.TASK))
+        }
+    }
+    return time
+}
+
+/** Read tool: the schedule for a range, as text the model can quote from. */
+private suspend fun renderSchedule(api: AssistantApi, range: String): String {
+    val today = api.todayIso()
+    val monday = IsoDate.mondayOf(today)
+    val (from, to) = when (range) {   // inclusive from, exclusive to
+        "today" -> today to tech.csalliance.unstuck.core.logic.addDaysIso(today, 1)
+        "tomorrow" -> tech.csalliance.unstuck.core.logic.addDaysIso(today, 1) to tech.csalliance.unstuck.core.logic.addDaysIso(today, 2)
+        "next_week" -> tech.csalliance.unstuck.core.logic.addDaysIso(monday, 7) to tech.csalliance.unstuck.core.logic.addDaysIso(monday, 14)
+        else -> monday to tech.csalliance.unstuck.core.logic.addDaysIso(monday, 7)
+    }
+    val tasks = api.getTasks().associateBy { it.id }
+    val blocks = api.getBlocks().filter { it.date >= from && it.date < to }.sortedBy { it.date + it.startTime }
+    val lines = ArrayList<String>()
+    var d = from
+    while (d < to) {
+        val day = WEEKDAY_NAMES_CAP[jsDayOfWeek(d)]
+        val items = blocks.filter { it.date == d }.map { b ->
+            val t = b.taskId?.let { tasks[it] }
+            val done = if (t?.done == true || b.done) " (done)" else if (b.skipped) " (skipped)" else ""
+            val ext = if (b.kind == CalBlockKind.EXTERNAL) " [calendar event — not movable here]" else ""
+            val name = b.taskName.ifEmpty { t?.name ?: "?" }
+            "${b.startTime.ifEmpty { "anytime" }} $name$done$ext"
+        }
+        lines += "$day $d${if (d == today) " (TODAY)" else ""}: ${if (items.isEmpty()) "—" else items.joinToString("; ")}"
+        d = tech.csalliance.unstuck.core.logic.addDaysIso(d, 1)
+    }
+    return "ok:\n" + lines.joinToString("\n")
+}
+
+// ── the executor ──
+
+/** Execute one tool call. Returns a short result string the model reads on the
+ *  next turn ("ok: created task id=… name=…" / "error: …"). Never throws for a
+ *  bad argument — the harness turns a thrown executor into `error: …`. */
+suspend fun runAssistantTool(name: String, args: ToolArgs, api: AssistantApi, scratch: TurnScratch): String {
+    runCoreTool(name, args, api, scratch)?.let { return it }
+    runSurfaceTool(name, args, api, scratch)?.let { return it }
+    runCallTool(name, args, api, scratch)?.let { return it }
+    return "error: unknown tool $name"
+}
+
+/** The base (pre-2026-09-02) tools: tasks, schedule, lists, profile, sharing. */
+private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi, scratch: TurnScratch): String? {
+    val now = api::nowIso
+
+    return when (name) {
+        "create_task" -> {
+            val nm = args.str("name") ?: return "error: name required"
+            val t = TaskItem(
+                id = newUuid(), name = nm, estimateMin = args.int("estimateMin") ?: 25, totalFocused = 0, done = false,
+                tags = args.strList("tags"), lifeArea = args.str("lifeArea"),
+                firstPhysicalAction = args.str("firstPhysicalAction"), later = args.bool("later") ?: false,
+                dueAt = args.str("dueAt"), createdAt = now(), updatedAt = now(),
+            )
+            api.upsertTask(t)
+            scratch.newTasks[t.id] = t
+            "ok: created task id=${t.id} name=\"${t.name}\""
+        }
+
+        "schedule_task" -> {
+            val t = findTask(args.str("taskId"), api, scratch) ?: return "error: task not found"
+            val date = args.str("date") ?: return "error: date required"
+            val startTime = args.str("startTime")
+            rejectPastDate(api, date)?.let { return it }
+            // No time given AND the task has never had one: don't guess — ask,
+            // suggesting a slot (Ahmad, 2026-09-01: "when confused, prompt").
+            val own = api.getBlocks().firstOrNull { it.taskId == t.id && !it.done && !it.skipped && it.startTime.isNotEmpty() }
+            if (startTime == null && own == null) {
+                return "error: needs a time — \"${t.name}\" has no time yet and the user gave none. Do NOT pick one: ask ONE short question offering a suggestion (e.g. \"Friday — 9am, or a time you prefer?\"), then schedule when they answer."
+            }
+            rejectPastTime(api, date, startTime ?: own?.startTime)?.let { return it }
+            val landed = scheduleTask(api, t, date, startTime)
+            "ok: scheduled \"${t.name}\" $date $landed${if (startTime == null) " (kept its existing time — say so)" else ""}"
+        }
+
+        "update_task" -> {
+            val t = findTask(args.str("taskId"), api, scratch) ?: return "error: task not found"
+            // Scheduling args used to be SILENTLY dropped while still returning ok
+            // (harness audit, 2026-09-01). Refuse loudly instead.
+            if (args.has("date") || args.has("startTime") || args.has("scheduledDate") || args.has("scheduledTime")) {
+                return "error: update_task cannot change the schedule — use schedule_task(taskId, date, startTime?) instead"
+            }
+            val upd = t.copy(
+                name = args.str("name") ?: t.name,
+                estimateMin = args.int("estimateMin") ?: t.estimateMin,
+                lifeArea = args.str("lifeArea") ?: t.lifeArea,
+                tags = args.strList("tags") ?: t.tags,
+                firstPhysicalAction = args.str("firstPhysicalAction") ?: t.firstPhysicalAction,
+                // "make that due Friday" was unreachable (inventory 2026-09-02)
+                dueAt = if (args.isNull("dueAt")) null else (args.str("dueAt") ?: t.dueAt),
+                updatedAt = now(),
+            )
+            api.upsertTask(upd)
+            scratch.newTasks[upd.id] = upd
+            // A new estimate resizes the live block, like the calendar editor does.
+            if (upd.estimateMin != t.estimateMin) {
+                nextLiveBlock(api, t.id)?.let { api.upsertBlock(it.copy(durationMinutes = upd.estimateMin)) }
+            }
+            "ok: updated \"${upd.name}\""
+        }
+
+        "set_task_later" -> {
+            val t = findTask(args.str("taskId"), api, scratch) ?: return "error: task not found"
+            val wantLater = args.bool("later") ?: true
+            // Never ok: for a no-op — the receipt ("Moved to Later") would describe
+            // a change that didn't happen (web parity).
+            val isLater = t.later ?: false
+            if (wantLater && isLater) return "error: \"${t.name}\" is already in Later — nothing changed"
+            if (!wantLater && !isLater) return "error: \"${t.name}\" is not in Later — nothing changed"
+            val upd = t.copy(later = wantLater, updatedAt = now())
+            api.upsertTask(upd)
+            scratch.newTasks[t.id] = upd
+            "ok"
+        }
+
+        "set_task_recurrence" -> {
+            val t = findTask(args.str("taskId"), api, scratch) ?: return "error: task not found"
+            val kind = args.str("kind")
+            // F1: an unrecognized kind used to silently CLEAR the recurrence and report ok.
+            if (kind != null && kind !in listOf("daily", "weekly", "monthly", "none")) {
+                return "error: unknown recurrence kind \"$kind\" — use daily, weekly, monthly, or none"
+            }
+            val until = args.str("until")
+            val rec: Recurrence? = when (kind) {
+                "daily" -> Recurrence.Daily(until)
+                "weekly" -> Recurrence.Weekly(args.intList("daysOfWeek") ?: emptyList(), until)
+                "monthly" -> Recurrence.Monthly(until)
+                else -> null
+            }
+            val upd = t.copy(recurrence = rec, updatedAt = now())
+            api.upsertTask(upd)
+            scratch.newTasks[t.id] = upd
+            // Regenerate future blocks off the existing anchor, if scheduled.
+            val blocks = api.getBlocks()
+            val anchor = blocks.filter { it.taskId == t.id && isTaskBlock(it) }.minWithOrNull(compareBy({ it.date }, { it.startTime }))
+            if (anchor != null) {
+                val plan = regenerateForTask(upd, rec, blocks, api.todayIso(), anchor.startTime, localMidnightMs(anchor.date))
+                for (b in plan.toUpsert) api.upsertBlock(b)
+                for (id in plan.toDelete) api.deleteBlock(id)
+            }
+            "ok"
+        }
+
+        "complete_task" -> {
+            val t = findTask(args.str("taskId"), api, scratch) ?: return "error: task not found"
+            // Already done → error, not ok: an "ok: completed" receipt's Undo would
+            // REOPEN something the user finished earlier (web parity).
+            if (t.done) return "error: \"${t.name}\" is already done — nothing changed"
+            val upd = t.copy(done = true, completedAt = now(), updatedAt = now())
+            api.upsertTask(upd)
+            scratch.newTasks[t.id] = upd
+            // F8: id in the result — the receipt's undo must target THIS task.
+            "ok: completed \"${t.name}\" id=${t.id}"
+        }
+
+        "create_tasks" -> {
+            // Bulk brain-dump — ten spoken tasks must land as ONE call.
+            val items = args.objList("tasks")?.takeIf { it.isNotEmpty() } ?: return "error: tasks required"
+            val made = ArrayList<Pair<String, String>>()
+            val needsTime = ArrayList<String>()
+            for (it in items.take(25)) {
+                val nm = it.str("name") ?: continue
+                val t = TaskItem(id = newUuid(), name = nm, estimateMin = it.int("estimateMin") ?: 25, totalFocused = 0, done = false,
+                    lifeArea = it.str("lifeArea"), later = false, createdAt = now(), updatedAt = now())
+                api.upsertTask(t)
+                scratch.newTasks[t.id] = t
+                val date = it.str("date")
+                val startTime = it.str("startTime")
+                // Date + time → schedule. Date WITHOUT time → do NOT invent 09:00:
+                // create it unscheduled and tell the model to ask ONE question.
+                val past = date?.let { d -> rejectPastDate(api, d) ?: rejectPastTime(api, d, startTime) }
+                when {
+                    past != null -> needsTime += "\"${t.name}\" — " + past.removePrefix("error: ")
+                    date != null && startTime != null -> scheduleTask(api, t, date, startTime)
+                    date != null -> needsTime += "\"${t.name}\" ($date)"
+                }
+                made += t.id to t.name
+            }
+            if (made.isEmpty()) return "error: no valid tasks in the list"
+            val ask = if (needsTime.isEmpty()) "" else
+                " NOTE: ${needsTime.joinToString(", ")} ${if (needsTime.size == 1) "has" else "have"} a day but no time — left unscheduled. Ask ONE question suggesting a time for them, then schedule_task each."
+            "ok: created ${made.size} tasks ids=${made.joinToString(",") { it.first }} — ${made.joinToString(", ") { "\"${it.second}\"" }}.$ask"
+        }
+
+        "complete_tasks" -> {
+            // Bulk close — "close all my tasks" must be ONE reliable call.
+            val ids = args.strList("taskIds") ?: emptyList()
+            if (ids.isEmpty()) return "error: taskIds required"
+            // Report only the ids we ACTUALLY flipped — the receipt's undo re-opens exactly these.
+            val flipped = ArrayList<String>()
+            for (id in ids) {
+                val t = findTask(id, api, scratch) ?: continue
+                if (t.done) continue
+                val upd = t.copy(done = true, completedAt = now(), updatedAt = now())
+                api.upsertTask(upd)
+                scratch.newTasks[t.id] = upd
+                flipped += t.id
+            }
+            if (flipped.isEmpty()) return "error: no matching open tasks"
+            "ok: completed ${flipped.size} tasks ids=${flipped.joinToString(",")}"
+        }
+
+        "delete_task" -> {
+            val t = findTask(args.str("taskId"), api, scratch) ?: return "error: task not found"
+            for (b in api.getBlocks().filter { it.taskId == t.id }) api.deleteBlock(b.id)
+            // Mirror the UI: a deleted task takes its captures with it (else orphans).
+            for (c in api.getCaptures().filter { it.taskId == t.id }) api.removeCapture(c.id)
+            api.removeTask(t.id)
+            scratch.newTasks.remove(t.id)
+            "ok: deleted \"${t.name}\""
+        }
+
+        "create_list" -> {
+            val nm = args.str("name") ?: return "error: name required"
+            val color = args.str("color") ?: "indigo"
+            val id = api.addCollection(nm, color) ?: return "error: could not create list"
+            scratch.newLists[id] = ItemCollection(id = id, name = nm, color = color, subtitle = null, items = emptyList(), sortOrder = 0)
+            "ok: created list id=$id name=\"$nm\""
+        }
+
+        "add_to_list" -> {
+            val c = findList(args.str("listId"), api, scratch) ?: return "error: list not found"
+            if (scratch.newLists[c.id] == null && !api.canEditCollection(c.id)) {
+                return "error: you only have view access to \"${c.name}\" — can't add to it"
+            }
+            val body = args.str("body") ?: return "error: body required"
+            api.addCollectionItem(c.id, body)
+            "ok: added to \"${c.name}\""
+        }
+
+        "promote_item_to_task" -> {
+            val c = findList(args.str("listId"), api, scratch) ?: return "error: list not found"
+            val itemId = args.str("itemId")
+            val item = c.items.firstOrNull { it.id == itemId } ?: return "error: item not found"
+            // The list UI skips an item whose task is already in flight — saying
+            // "ok: promoted" over that no-op would be a lie.
+            if (item.promoted == true && item.promotedDone != true) {
+                return "error: \"${item.body}\" is already promoted — its task is still in flight"
+            }
+            val shared = c.members.isNotEmpty() || c.myRole == "editor" || c.myRole == "viewer"
+            val loop = args.str("mode") == "loop" && shared
+            api.promoteItemToTask(c.id, item.id, loop, if (loop) args.str("dueAt") else null)
+            "ok: promoted \"${item.body}\""
+        }
+
+        "save_profile_fact" -> {
+            val fact = args.str("fact") ?: return "error: fact required"
+            // The injection filter guards MODEL-written saves — a planted
+            // instruction here would live in every future prompt.
+            if (ProfileFactsLogic.isInstructionLike(fact)) {
+                return "error: that does not look like a fact I can store — only durable notes about you, not instructions"
+            }
+            try {
+                val stored = api.saveProfileFact(args.str("category"), fact, args.str("whenIso"))
+                "ok: remembered id=${stored.id} [${stored.category.raw}] \"${stored.fact}\""
+            } catch (e: ProfileFactSaveError.Empty) {
+                "error: that does not look like a fact I can store — only durable notes about you, not instructions"
+            } catch (e: ProfileFactSaveError.InstructionLike) {
+                "error: that does not look like a fact I can store — only durable notes about you, not instructions"
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Throwable) {
+                // A store failure (or no store yet) is NOT "not a fact" — the model
+                // should retry, not rephrase.
+                "error: couldn't save that just now — try again"
+            }
+        }
+
+        "get_schedule" -> renderSchedule(api, args.str("range") ?: "week")
+
+        "share_task" -> {
+            // NEVER shares here: sharing sends the user's content to another
+            // person, so it always waits for an on-screen confirm tap.
+            val res = resolveShareRequest(
+                taskId = args.str("taskId"), taskName = args.str("taskName"),
+                person = args.str("person"), level = args.str("level"),
+                tasks = scratch.newTasks.values.toList() + api.getTasks(), people = api.getShareCandidates(), newId = ::newUuid,
+            )
+            res.pending?.let { api.stageShare(it) }
+            res.message
+        }
+
+        else -> null
+    }
+}
+
+// ── calls ("Unstuck calls you") — request_call / cancel_call / update_call / get_calls ──
+// Result strings are the WEB contract byte-for-byte (lib/assistant/tools.ts +
+// docs/assistant-tool-contract.md); the past-date / past-time refusals are the
+// SHARED strings (rejectPastDate / rejectPastTime). Port of iOS CallTools.swift.
+
+object CallToolLogic {
+    val names: Set<String> = setOf("request_call", "cancel_call", "update_call", "get_calls")
+    const val MAX_NOTES = 20
+    const val MAX_NOTE_LENGTH = 300
+    const val DEFAULT_LEAD_MIN = 15
+    private const val WINDOW_START_MIN = 6 * 60
+    private const val WINDOW_END_MIN = 23 * 60
+
+    /** Compare-and-set miss: the row was cancelled / rang / finished between the read and the write. */
+    const val CHANGED_UNDERNEATH = "error: that call changed underneath me — get_calls and try again"
+    const val IN_PROGRESS = "error: that call is in progress right now — I can change its notes or label, but not its time; snooze_call or book another with request_call"
+    const val UNAVAILABLE = "error: calls aren't available right now — sign in on the phone first"
+    const val NETWORK = "error: couldn't reach the server — try again"
+
+    /** notes: an array of strings, or one string split on NEWLINES only (a
+     *  note may contain ";"). Trimmed, blanks dropped, 300 chars × 20 (web). */
+    fun notes(args: ToolArgs, k: String): List<String> {
+        val raw: List<String> = args.strList(k) ?: args.str(k)?.lines() ?: emptyList()
+        return raw.map { it.trim() }.filter { it.isNotEmpty() }.map { it.take(MAX_NOTE_LENGTH) }.take(MAX_NOTES)
+    }
+
+    fun notesCount(n: Int): String = "$n note${if (n == 1) "" else "s"}"
+
+    /** schedule_task-style split args → "YYYY-MM-DD HH:MM". */
+    fun joinDateTime(args: ToolArgs): String? {
+        val time = args.str("startTime") ?: args.str("time")
+        val date = args.str("date")
+        return when {
+            date != null && time != null -> "$date $time"
+            date == null && time != null -> time
+            else -> null
+        }
+    }
+
+    /** 'YYYY-MM-DD HH:MM' (or with a 'T'), a bare 'HH:MM' (today), or an ISO
+     *  instant — in the user's LOCAL time → epoch ms. Null when unparseable. */
+    fun parseWhen(raw: String, nowMs: Long, zone: ZoneId = ZoneId.systemDefault()): Long? {
+        val s = raw.trim()
+        Regex("^(\\d{4}-\\d{2}-\\d{2})[ T](\\d{2}:\\d{2})$").find(s)?.let { m ->
+            return localToMs(m.groupValues[1], m.groupValues[2], zone)
+        }
+        Regex("^(\\d{2}:\\d{2})$").find(s)?.let { m ->
+            return localToMs(Instant.ofEpochMilli(nowMs).atZone(zone).toLocalDate().toString(), m.groupValues[1], zone)
+        }
+        return Time.parseMillis(s)
+    }
+
+    private fun localToMs(date: String, hm: String, zone: ZoneId): Long? = runCatching {
+        LocalDateTime.of(LocalDate.parse(date), java.time.LocalTime.parse(hm)).atZone(zone).toInstant().toEpochMilli()
+    }.getOrNull()
+
+    /** "YYYY-MM-DD" local. */
+    fun ymd(ms: Long, zone: ZoneId = ZoneId.systemDefault()): String = Instant.ofEpochMilli(ms).atZone(zone).toLocalDate().toString()
+    /** "HH:MM" local. */
+    fun hhmm(ms: Long, zone: ZoneId = ZoneId.systemDefault()): String =
+        Instant.ofEpochMilli(ms).atZone(zone).let { "%02d:%02d".format(it.hour, it.minute) }
+    /** "YYYY-MM-DD HH:MM" local. */
+    fun fmt(ms: Long?, zone: ZoneId = ZoneId.systemDefault()): String = if (ms == null) "?" else "${ymd(ms, zone)} ${hhmm(ms, zone)}"
+
+    fun blockStartMs(b: CalBlock, zone: ZoneId = ZoneId.systemDefault()): Long? =
+        if (b.startTime.isBlank()) null else localToMs(b.date, b.startTime, zone)
+
+    /** Past-date / past-time (the SHARED refusals) then the server window →
+     *  the error string, or null when fine. */
+    fun timeGuard(callAtMs: Long, today: String, nowHM: String, blocks: List<CalBlock>, zone: ZoneId = ZoneId.systemDefault()): String? {
+        val date = ymd(callAtMs, zone)
+        rejectPastDate(today, date)?.let { return it }
+        rejectPastTime(blocks, today, date, hhmm(callAtMs, zone), nowHM)?.let { return it }
+        val min = hmToMin(hhmm(callAtMs, zone))
+        if (min < WINDOW_START_MIN || min > WINDOW_END_MIN) {
+            return "error: calls can only be booked between 06:00 and 23:00 — suggest a time inside that window"
+        }
+        return null
+    }
+
+    /** One live call per anchor — the web rule exactly: with a task, any live
+     *  call for that task; without, a case-insensitive label match. */
+    fun duplicate(live: List<CallRequest>, taskId: String?, label: String?): CallRequest? {
+        val rows = live.filter { it.isLive }
+        if (taskId != null) return rows.firstOrNull { it.taskId == taskId }
+        val l = label?.trim()?.lowercase()?.takeIf { it.isNotEmpty() } ?: return null
+        return rows.firstOrNull { it.label.trim().lowercase() == l }
+    }
+
+    /** get_calls (web format): one line per call — soonest first, ≤20 lines —
+     *  showing the EFFECTIVE time, the task it rings for, and its state. */
+    fun formatCalls(rows: List<CallRequest>, taskName: (String) -> String?, zone: ZoneId = ZoneId.systemDefault()): String {
+        if (rows.isEmpty()) return "ok: no calls booked"
+        val lines = rows.take(20).map { r ->
+            val sb = StringBuilder("- ${fmt(r.effectiveAtMs, zone)} \"${r.label}\" (${notesCount(r.notes.size)})")
+            r.taskId?.let(taskName)?.let { sb.append(" for \"$it\"") }
+            if (r.status == "snoozed") sb.append(" · snoozed") else if (r.status == "calling") sb.append(" · ringing now")
+            sb.append(" [id=${r.id}]").toString()
+        }
+        return "ok: ${rows.size} upcoming call${if (rows.size == 1) "" else "s"}:\n" + lines.joinToString("\n")
+    }
+}
+
+/** Dispatch a call tool through the executor's state + scratch. Null ⇒ not a call tool. */
+suspend fun runCallTool(name: String, args: ToolArgs, api: AssistantApi, scratch: TurnScratch): String? {
+    if (name !in CallToolLogic.names) return null
+    val store = api.callStore() ?: return CallToolLogic.UNAVAILABLE
+    val userId = api.currentUserId() ?: return CallToolLogic.UNAVAILABLE
+    return try {
+        when (name) {
+            "request_call" -> requestCall(args, api, scratch, store, userId)
+            "cancel_call" -> cancelCall(args, store)
+            "update_call" -> updateCall(args, api, store)
+            else -> getCalls(api, scratch, store)
+        }
+    } catch (e: kotlinx.coroutines.CancellationException) {
+        throw e
+    } catch (e: Throwable) {
+        CallToolLogic.NETWORK
+    }
+}
+
+private suspend fun requestCall(args: ToolArgs, api: AssistantApi, scratch: TurnScratch, store: AssistantCallStore, userId: String): String {
+    val nowMs = api.nowMs()
+    val taskId = args.str("taskId")
+    val whenRaw = args.str("when") ?: CallToolLogic.joinDateTime(args)
+    val notes = CallToolLogic.notes(args, "notes")
+    var label = args.str("label")?.take(120)
+
+    var task: TaskItem? = null
+    if (taskId != null) {
+        val t = findTask(taskId, api, scratch) ?: return "error: task not found"
+        task = t
+        if (label == null) label = t.name.take(120)
+    }
+    if (label.isNullOrEmpty()) return "error: label required — say what the call is about (e.g. \"speak to James\")"
+
+    val callAt: Long
+    var blockId: String? = null
+    var leadMin: Int? = null
+    if (whenRaw != null) {
+        callAt = CallToolLogic.parseWhen(whenRaw, nowMs)
+            ?: return "error: when must be 'YYYY-MM-DD HH:MM' in the user's local time (got \"$whenRaw\")"
+    } else if (task != null) {
+        val lead = (args.int("leadMin") ?: CallToolLogic.DEFAULT_LEAD_MIN).coerceIn(0, 1440)
+        val block = nextLiveBlock(api, task.id)
+        val start = block?.let { CallToolLogic.blockStartMs(it) }
+        if (block == null || start == null) return "error: \"${task.name}\" has no upcoming slot — schedule_task it first, or give a time with when"
+        callAt = start - lead * 60_000L
+        if (callAt - nowMs < -30_000L) {
+            return "error: $lead min before \"${task.name}\" (${CallToolLogic.fmt(callAt)}) is already past — give a time with when instead"
+        }
+        blockId = block.id
+        leadMin = lead
+    } else {
+        return "error: needs a time — ask ONE short question suggesting one (e.g. \"3pm today, or a time you prefer?\"), then book when they answer"
+    }
+
+    CallToolLogic.timeGuard(callAt, api.todayIso(), api.nowHM(), api.getBlocks())?.let { return it }
+
+    val live = store.liveCalls()
+    CallToolLogic.duplicate(live, task?.id, label)?.let { dup ->
+        return "error: a call is already booked for \"${dup.label}\" at ${CallToolLogic.fmt(dup.callAtMs ?: callAt)} id=${dup.id} — update_call or cancel_call it"
+    }
+    val row = store.book(userId, task?.id, blockId, callAt, leadMin, label, notes)
+    return "ok: call booked ${CallToolLogic.fmt(callAt)} \"$label\" (${CallToolLogic.notesCount(notes.size)}) id=${row.id}"
+}
+
+private suspend fun cancelCall(args: ToolArgs, store: AssistantCallStore): String {
+    val id = args.str("callId") ?: args.str("id") ?: return "error: callId required — use get_calls to find it"
+    val row = store.call(id) ?: return "error: call not found — use get_calls"
+    if (!row.isLive) return "error: that call is already ${row.status}"
+    val cancelled = store.cancelCall(id) ?: return CallToolLogic.CHANGED_UNDERNEATH
+    return "ok: cancelled the call about \"${cancelled.label}\" (${CallToolLogic.fmt(cancelled.callAtMs)})"
+}
+
+private suspend fun updateCall(args: ToolArgs, api: AssistantApi, store: AssistantCallStore): String {
+    val nowMs = api.nowMs()
+    val id = args.str("callId") ?: args.str("id") ?: return "error: callId required — use get_calls to find it"
+    val row = store.call(id) ?: return "error: call not found — use get_calls"
+    if (!row.isEditable) return "error: that call is already ${row.status} — book a new one with request_call"
+    // A JSON null or an absent key leaves the notes untouched; only a real array/string replaces them.
+    val notes: List<String>? = if (args.has("notes") && !args.isNull("notes")) CallToolLogic.notes(args, "notes") else null
+    val label = args.str("label")?.take(120)
+    val whenRaw = args.str("when") ?: CallToolLogic.joinDateTime(args)
+    val lead = args.int("leadMin")
+    if (notes == null && label == null && whenRaw == null && lead == null) return "error: nothing to change — give notes and/or when"
+    if (row.isInProgress && (whenRaw != null || lead != null)) return CallToolLogic.IN_PROGRESS
+
+    var callAt: Long? = null
+    var leadPatch: CallsClient.Patch<Int?>? = null
+    var blockPatch: CallsClient.Patch<String?>? = null
+    if (whenRaw != null) {
+        callAt = CallToolLogic.parseWhen(whenRaw, nowMs)
+            ?: return "error: when must be 'YYYY-MM-DD HH:MM' in the user's local time (got \"$whenRaw\")"
+        leadPatch = CallsClient.Patch(null)    // a standalone time drops the block anchor
+        blockPatch = CallsClient.Patch(null)
+    } else if (lead != null) {
+        val taskId = row.taskId ?: return "error: this call isn't anchored to a task — give a time instead"
+        val block = nextLiveBlock(api, taskId)
+        val start = block?.let { CallToolLogic.blockStartMs(it) }
+        if (block == null || start == null) return "error: the task has no scheduled time any more — schedule_task it first"
+        callAt = start - lead * 60_000L
+        leadPatch = CallsClient.Patch(lead)
+        blockPatch = CallsClient.Patch(block.id)
+    }
+    if (callAt != null) CallToolLogic.timeGuard(callAt, api.todayIso(), api.nowHM(), api.getBlocks())?.let { return it }
+
+    val r = store.patch(id, callAt, blockPatch, leadPatch, label, notes) ?: return CallToolLogic.CHANGED_UNDERNEATH
+    return "ok: updated call \"${r.label}\" — ${CallToolLogic.fmt(r.callAtMs)}, ${CallToolLogic.notesCount(r.notes.size)} id=${r.id}"
+}
+
+private suspend fun getCalls(api: AssistantApi, scratch: TurnScratch, store: AssistantCallStore): String {
+    val rows = store.liveCalls().sortedBy { it.callAtMs ?: Long.MAX_VALUE }
+    if (rows.isEmpty()) return "ok: no calls booked"
+    val tasks = scratch.newTasks.values.toList() + api.getTasks()
+    return CallToolLogic.formatCalls(rows, taskName = { id -> tasks.firstOrNull { it.id == id }?.name })
+}

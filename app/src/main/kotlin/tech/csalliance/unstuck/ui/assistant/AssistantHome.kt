@@ -48,8 +48,20 @@ import java.time.ZoneId
 // hidden when not applicable. Everything here is computed from the local stores:
 // the LLM is only called when the user actually sends something.
 
-/** Where a context-strip chip jumps to. Resolved by MainScaffold. */
-enum class AssistantDestination { TASKS, CALENDAR, FOCUS }
+/** Where a context-strip chip — or the assistant's `open_screen` tool — jumps
+ *  to. Resolved by MainScaffold. [screen] is the contract's vocabulary (today |
+ *  tasks | calendar | week | month | focus | insights | lists | captures |
+ *  settings | people | notifications) and [id] an optional task / list id; the
+ *  three named constants are the strip's own jumps. */
+data class AssistantDestination(val screen: String, val id: String? = null) {
+    companion object {
+        val TASKS = AssistantDestination("tasks")
+        val CALENDAR = AssistantDestination("calendar")
+        val FOCUS = AssistantDestination("focus")
+        /** The contract's 12 screens. */
+        val SCREENS = listOf("today", "tasks", "calendar", "week", "month", "focus", "insights", "lists", "captures", "settings", "people", "notifications")
+    }
+}
 
 data class AssistantPanelContext(
     val nextName: String? = null,

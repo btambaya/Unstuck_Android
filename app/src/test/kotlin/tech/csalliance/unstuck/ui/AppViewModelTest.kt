@@ -1581,4 +1581,31 @@ class AppViewModelTest {
         assertEquals("ok: promoted \"Buy milk\"", result)
         assertEquals("Buy milk", awaitTasks { it.isNotEmpty() }.single().name)
     }
+
+    @Test fun assistant_undoReceipt_revertsABulkCompletion() = runTest(dispatcher) {
+        // complete_tasks / create_tasks receipts carry their targets in
+        // ReceiptUndo.ids (`id` stays empty). Reading only `id` made Undo a
+        // silent no-op — the tasks stayed done while the receipt still offered it.
+        seedTask(task("a", "Call mum", done = true))
+        seedTask(task("b", "Bins", done = true))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks)
+        vm.assistantHistory.add(
+            tech.csalliance.unstuck.sync.ChatMessage(
+                role = "assistant", content = "Completed 2 tasks", id = "m1",
+                receipts = listOf(
+                    tech.csalliance.unstuck.core.logic.Receipt(
+                        tech.csalliance.unstuck.core.logic.ReceiptIcon.CHECK, "Completed 2 tasks",
+                        tech.csalliance.unstuck.core.logic.ReceiptUndo.uncompleteTasks(listOf("a", "b")),
+                    ),
+                ),
+            ),
+        )
+
+        vm.undoAssistantReceipt("m1", 0)
+        advanceUntilIdle()
+
+        awaitTasks { l -> l.size == 2 && l.none { it.done } }
+        assertTrue("receipt marked used", vm.assistantHistory.first().receipts!![0].undone)
+    }
 }

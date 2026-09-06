@@ -197,6 +197,9 @@ fun topInsights(
     tasks: List<TaskItem>,
     captures: List<Capture>,
     reasonLogs: List<ReasonLog>,
+    /** Injectable so the caller's clock reaches [slipping] (web/iOS parity —
+     *  get_insights renders against a fixed nowMs, not the wall clock). */
+    now: Long = System.currentTimeMillis(),
 ): List<Insight> {
     val out = mutableListOf<Insight>()
 
@@ -234,7 +237,7 @@ fun topInsights(
     }
 
     // 3. Slipping task (works even at low session counts).
-    val slips = slipping(tasks)
+    val slips = slipping(tasks, now)
     slips.firstOrNull()?.let { top ->
         val reason = if (top.moveCount >= 3) "rescheduled ${top.moveCount} times" else "${top.weeks}+ weeks on the list"
         out.add(Insight("\"${top.name}\" keeps slipping.", "$reason. Remove it, or break it down differently?"))

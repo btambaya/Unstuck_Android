@@ -52,6 +52,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -71,6 +72,7 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tech.csalliance.unstuck.core.logic.AssistantHarnessRules
 import tech.csalliance.unstuck.core.logic.Receipt
 import tech.csalliance.unstuck.core.logic.assistantDayLabel
 import tech.csalliance.unstuck.core.logic.shouldCheckIn
@@ -126,6 +128,9 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     val sending by vm.assistantSending.collectAsStateWithLifecycle()
     val errorCode by vm.assistantError.collectAsStateWithLifecycle()
     val pendingShares by vm.pendingShares.collectAsStateWithLifecycle()
+    // Messages typed while a turn was in flight: queued, shown faded, sent when
+    // the reply lands (contract §8) — never silently dropped.
+    val queued by vm.assistantQueued.collectAsStateWithLifecycle()
 
     // Coarse clock for the day dividers + the context strip: a sheet left open
     // across midnight must roll "Today" over rather than freeze.
@@ -144,10 +149,13 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     var showChips by rememberSaveable { mutableStateOf(true) }
     val listState = rememberLazyListState()
 
-    val display = messages.filter {
-        (it.role == "user" || it.role == "assistant") && !it.content.isNullOrBlank()
+    // Tool steps, the harness's hidden guard bounce (the fabricated claim + the
+    // corrective it answers) and the cut-off hint never render — the user never
+    // saw them, so the retry must read like a first answer.
+    val display = messages.filterIndexed { i, m ->
+        (m.role == "user" || m.role == "assistant") && !m.content.isNullOrBlank() && !isHiddenHarnessTurn(messages, i)
     }
-    val hasHistory = display.isNotEmpty()
+    val hasHistory = display.isNotEmpty() || queued.isNotEmpty()
 
     // Flatten to rows so day dividers and receipts are first-class list items
     // (a divider must not scroll as part of the bubble above it).
@@ -185,12 +193,12 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     // a full viewport tall, so aligning its top with the viewport top hides
     // everything before it; scrolling up reveals the history.
     val thinkingCount = if (sending) 1 else 0
-    val chipsIndex = rows.size + thinkingCount + pendingShares.size
-    LaunchedEffect(rows.size, sending, showChips, pendingShares) {
+    val chipsIndex = rows.size + thinkingCount + queued.size + pendingShares.size
+    LaunchedEffect(rows.size, sending, showChips, pendingShares, queued.size) {
         val unresolved = pendingShares.indexOfLast { it.outcome == null }
         when {
             // A staged share is the thing that needs an answer — go to it.
-            unresolved >= 0 -> listState.animateScrollToItem(rows.size + thinkingCount + unresolved)
+            unresolved >= 0 -> listState.animateScrollToItem(rows.size + thinkingCount + queued.size + unresolved)
             showChips -> listState.scrollToItem(chipsIndex)
             chipsIndex > 0 -> listState.animateScrollToItem(chipsIndex - 1)
         }
@@ -204,7 +212,7 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
 
     fun ask(text: String) {
         val t = text.trim()
-        if (t.isEmpty() || sending) return
+        if (t.isEmpty()) return
         input = ""
         note = null
         showChips = false
@@ -327,6 +335,7 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                         }
                     }
                     if (sending) item(key = "thinking") { ThinkingRow() }
+                    items(count = queued.size, key = { i -> "queued:${queued[i].id}" }) { i -> PendingBubble(queued[i].text) }
                     items(count = pendingShares.size, key = { i -> "share:${pendingShares[i].id}" }) { i ->
                         val p = pendingShares[i]
                         ShareConfirmCard(
@@ -410,11 +419,12 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                 label = if (listening) "Stop listening" else "Dictate message",
                 onClick = ::onMic,
             )
+            // Sending stays live mid-turn: the message queues (a faded bubble) instead of vanishing.
             RoundIcon(
                 icon = Icons.AutoMirrored.Filled.Send,
-                tint = if (input.isBlank() || sending) c.ink4 else Color.White,
-                bg = if (input.isBlank() || sending) c.bg2 else c.coral,
-                label = "Send",
+                tint = if (input.isBlank()) c.ink4 else Color.White,
+                bg = if (input.isBlank()) c.bg2 else c.coral,
+                label = if (sending) "Queue message" else "Send",
             ) { ask(input) }
         }
     }
@@ -487,6 +497,32 @@ private fun ReceiptCard(row: ThreadRow.ReceiptItem, onUndo: () -> Unit) {
                     .minimumInteractiveComponentSize().padding(horizontal = 6.dp, vertical = 2.dp),
             )
         }
+    }
+}
+
+/** The harness's hidden turns: the corrective bounce / cut-off hint (user role)
+ *  and the fabricated claim the corrective answers (the assistant turn right
+ *  before it). Persisted for the model window, never shown. */
+internal fun isHiddenHarnessTurn(messages: List<ChatMessage>, i: Int): Boolean {
+    val m = messages[i]
+    val hiddenUser = setOf(AssistantHarnessRules.CORRECTIVE, AssistantHarnessRules.CUT_OFF_HINT)
+    if (m.role == "user" && m.content in hiddenUser) return true
+    if (m.role == "assistant") {
+        val next = messages.getOrNull(i + 1)
+        if (next?.role == "user" && next.content == AssistantHarnessRules.CORRECTIVE) return true
+    }
+    return false
+}
+
+/** A queued send — the user's bubble, faded, until its turn starts. */
+@Composable
+private fun PendingBubble(text: String) {
+    val c = UTheme.colors
+    Row(Modifier.fillMaxWidth().alpha(0.55f).semantics { contentDescription = "Queued: $text" }, horizontalArrangement = Arrangement.End) {
+        Box(
+            Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(16.dp)).background(c.coral)
+                .padding(horizontal = 14.dp, vertical = 10.dp),
+        ) { Text(text, style = UFont.sans(15), color = Color.White) }
     }
 }
 

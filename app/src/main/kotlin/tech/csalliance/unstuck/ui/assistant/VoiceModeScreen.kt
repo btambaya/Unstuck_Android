@@ -57,8 +57,10 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.viewmodel.compose.viewModel
+import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.SettingsStore
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
@@ -98,6 +100,11 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
     var client: VoiceRealtimeClient? by mutableStateOf(null); private set
     private var attached = false
     private val reattachDeadline = Runnable { if (!attached) end() }
+    /** A start is in flight (its prompt is still being read off the main thread). */
+    private var starting = false
+    /** Bumped by [end] so a start still building its prompt aborts instead of
+     *  dialling into a session the user already left. */
+    private var startEpoch = 0
 
     /** A client exists and hasn't been stop()ped (CONNECTING counts — the dial is in flight). */
     val sessionActive: Boolean get() = client?.let { !it.isStopped } == true
@@ -130,12 +137,28 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
 
     /** Start a session unless one is live (re-attach after a config change). */
     fun ensureStarted(vm: AppViewModel) {
-        if (sessionActive) return
+        if (sessionActive || starting) return
         val token = vm.voiceAccessToken()
         if (token.isNullOrBlank()) { fail("Please sign in to use voice."); return }
         if (!vm.voiceConfigured()) { fail("Voice isn't set up yet."); return }
         note = null; caption = ""; state = VoiceState.CONNECTING
         vm.resetVoiceScratch()
+        // The session prompt IS the whole app context (tasks, blocks, captures,
+        // lists, circle, profile facts) — a dozen Room reads. The blocking
+        // voiceInstructions()/voiceOpening() would run all of that on the main
+        // thread from the mic tap; read it on viewModelScope and dial after.
+        starting = true
+        val epoch = startEpoch
+        viewModelScope.launch {
+            val prompt = runCatching { vm.voiceInstructionsAsync() to vm.voiceOpeningAsync() }.getOrNull()
+            starting = false
+            if (epoch != startEpoch || sessionActive) return@launch   // ended (or restarted) while reading
+            if (prompt == null) { fail("Couldn't start voice — try again."); return@launch }
+            dial(vm, token, prompt.first, prompt.second)
+        }
+    }
+
+    private fun dial(vm: AppViewModel, token: String, instructions: String, opening: String) {
         val engine = VoiceAudioEngine(appContext)
         audio = engine
         holdToTalk = engine.holdToTalkPref
@@ -147,7 +170,7 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
         fun current() = client === rc
         rc = VoiceRealtimeClient(
             proxyUrl = vm.voiceProxyUrl, token = token, model = vm.voiceModel,
-            instructions = vm.voiceInstructions(), tools = vm.voiceTools(), opening = vm.voiceOpening(),
+            instructions = instructions, tools = vm.voiceTools(), opening = opening,
             audio = engine,
             runTool = { name, args -> vm.runVoiceTool(name, args) },
             onState = { s -> main.post { if (current()) state = s } },
@@ -181,6 +204,7 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
      *  directly only covers the never-started case, where it's a cheap no-op sweep. */
     fun end() {
         main.removeCallbacks(reattachDeadline)
+        startEpoch++          // abort a start whose prompt is still being read
         val rc = client
         val engine = audio
         client = null

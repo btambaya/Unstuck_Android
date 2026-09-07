@@ -138,7 +138,19 @@ class CallVoiceService : Service() {
         // Honour the startForeground()-within-5s contract UNCONDITIONALLY before
         // anything else (a redelivered null intent / an END for a dead call included).
         val incoming = intent?.let { payloadFrom(it) }
-        startForegroundNow(incoming ?: payload)
+        // Belt-and-braces for the RECORD_AUDIO rule the ring screen now enforces:
+        // a microphone FGS that cannot start must never take the app down with it.
+        val started = runCatching { startForegroundNow(incoming ?: payload) }.isSuccess
+        if (!started) {
+            val p = incoming ?: payload
+            if (p != null) {
+                report(p, CallOutcome.DONE)
+                runCatching { CallNotifications.voiceFailed(applicationContext, p) }
+            }
+            phase = Phase.ENDED
+            stopSelf()
+            return START_NOT_STICKY
+        }
         when (intent?.action) {
             ACTION_END -> {
                 // An END for a call that already ended (a late shade tap): just drop the FGS.

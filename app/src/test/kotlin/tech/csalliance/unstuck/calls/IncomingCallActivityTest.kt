@@ -1,8 +1,10 @@
 package tech.csalliance.unstuck.calls
 
+import android.Manifest
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.os.Looper
 import android.widget.TextView
 import androidx.test.core.app.ApplicationProvider
@@ -40,7 +42,12 @@ class IncomingCallActivityTest {
     private val started = mutableListOf<IncomingCallPayload>()
     private val originalStarter = IncomingCallActivity.voiceStarter
 
-    @Before fun seam() { IncomingCallActivity.voiceStarter = { _, p -> started += p } }
+    @Before fun seam() {
+        IncomingCallActivity.voiceStarter = { _, p -> started += p }
+        // A microphone FGS may not start without RECORD_AUDIO on API 34+; the ring
+        // screen now asks for it, so the answering tests grant it up front.
+        shadowOf(context as android.app.Application).grantPermissions(Manifest.permission.RECORD_AUDIO)
+    }
     @After fun restore() { IncomingCallActivity.voiceStarter = originalStarter }
 
     private fun queued(): List<PendingOutcome> = CallOutcomeStore.load(context).items
@@ -79,6 +86,42 @@ class IncomingCallActivityTest {
         val a = launch(CallRinger.activityIntent(context, payload, CallRinger.ACTION_ANSWER))
         assertEquals(listOf(CallOutcome.ANSWERED), queued().map { it.outcome })
         assertEquals(1, started.size)
+        assertTrue(a.isFinishing)
+    }
+
+    @Test fun `Answer without the mic permission asks instead of starting the service`() {
+        shadowOf(context as android.app.Application).denyPermissions(Manifest.permission.RECORD_AUDIO)
+        ring()
+        val a = launch()
+        a.findViewById<android.view.View>(IncomingCallActivity.ID_ANSWER).performClick()
+        assertTrue("asked for the mic", shadowOf(a).lastRequestedPermission != null)
+        assertTrue("nothing settled while the dialog is up", queued().isEmpty())
+        assertTrue("service not started", started.isEmpty())
+        assertTrue("screen stays up for the dialog", !a.isFinishing)
+
+        a.onRequestPermissionsResult(
+            IncomingCallActivity.REQ_MIC, arrayOf(Manifest.permission.RECORD_AUDIO),
+            intArrayOf(PackageManager.PERMISSION_GRANTED),
+        )
+        assertEquals(listOf(CallOutcome.ANSWERED), queued().map { it.outcome })
+        assertEquals(listOf(payload), started)
+    }
+
+    @Test fun `a refused mic permission reports done with a voice-failed note and the notice`() {
+        shadowOf(context as android.app.Application).denyPermissions(Manifest.permission.RECORD_AUDIO)
+        ring()
+        val a = launch()
+        a.findViewById<android.view.View>(IncomingCallActivity.ID_ANSWER).performClick()
+        a.onRequestPermissionsResult(
+            IncomingCallActivity.REQ_MIC, arrayOf(Manifest.permission.RECORD_AUDIO),
+            intArrayOf(PackageManager.PERMISSION_DENIED),
+        )
+        shadowOf(Looper.getMainLooper()).idle()
+        val q = queued()
+        assertEquals(listOf(CallOutcome.DONE), q.map { it.outcome })
+        assertEquals(listOf("voice failed: microphone permission"), q.first().outcomeNotes)
+        assertTrue("service never started", started.isEmpty())
+        assertTrue("the notes still reach the user", shadowOf(nm).allNotifications.isNotEmpty())
         assertTrue(a.isFinishing)
     }
 

@@ -1,9 +1,11 @@
 package tech.csalliance.unstuck.calls
 
+import android.Manifest
 import android.app.Activity
 import android.app.KeyguardManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -21,6 +23,7 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
 import tech.csalliance.unstuck.core.logic.CallOutcome
 import tech.csalliance.unstuck.core.logic.IncomingCallPayload
@@ -54,6 +57,7 @@ class IncomingCallActivity : Activity() {
 
     private val handler = Handler(Looper.getMainLooper())
     private var payload: IncomingCallPayload? = null
+    private var pendingAnswer: IncomingCallPayload? = null
     private var notesView: TextView? = null
     private val missedTick = Runnable { onRingTimedOut() }
 
@@ -105,6 +109,41 @@ class IncomingCallActivity : Activity() {
     private fun answer() {
         val p = payload ?: return
         handler.removeCallbacks(missedTick)
+        // A `microphone` foreground service may not START without RECORD_AUDIO on
+        // API 34+ — startForeground throws SecurityException and takes the app down
+        // (review section 4, 2026-09-07). A user who never opened Talk/the mic has
+        // never been asked, so ask HERE: the ring activity is foreground, so the
+        // system dialog shows, and the call is only settled once we know the answer.
+        if (!hasMic()) {
+            pendingAnswer = p
+            runCatching { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC) }
+                .onFailure { pendingAnswer = null; failVoice(p, "microphone permission") }
+            return
+        }
+        startAnswered(p)
+    }
+
+    private fun hasMic(): Boolean =
+        ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_MIC) return
+        val p = pendingAnswer ?: run { finish(); return }
+        pendingAnswer = null
+        // An empty result means the dialog was dismissed — treat it as a refusal.
+        if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) startAnswered(p)
+        else failVoice(p, "microphone permission")
+    }
+
+    /** The notes still reach the user even when the conversation cannot happen. */
+    private fun failVoice(p: IncomingCallPayload, why: String) {
+        CallRinger.settle(this, p.callId, CallOutcome.DONE, outcomeNotes = listOf("voice failed: $why"))
+        runCatching { CallNotifications.voiceFailed(this, p) }
+        finish()
+    }
+
+    private fun startAnswered(p: IncomingCallPayload) {
         if (CallRinger.settle(this, p.callId, CallOutcome.ANSWERED)) {
             // The user tapped Answer on a foreground Activity: the one path
             // allowed to start the microphone foreground service.
@@ -277,6 +316,9 @@ class IncomingCallActivity : Activity() {
         /** Starts the in-call voice foreground service. A test seam: production
          *  is [CallVoiceService.start], which MUST only be called from here. */
         var voiceStarter: (Context, IncomingCallPayload) -> Unit = { ctx, p -> CallVoiceService.start(ctx, p) }
+
+        /** Runtime RECORD_AUDIO request raised from the ring screen itself. */
+        const val REQ_MIC = 4021
 
         /** The payload the ring / answer intents carry (one String extra per key). */
         fun payloadFrom(intent: Intent?): IncomingCallPayload? {

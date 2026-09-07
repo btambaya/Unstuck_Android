@@ -101,6 +101,14 @@ class InterviewFlowController(
     val state: StateFlow<InterviewFlowState> = _state.asStateFlow()
     /** The account flag is pushed at most once per run (finish, or reaching the picker). */
     private var doneNotified = false
+    /** True once THIS controller pushed the flag ([notifyDone]) — as opposed to
+     *  having read it off the account. The panel watches `host.interviewDone`
+     *  so a finish on ANOTHER device closes it; without this, reaching the
+     *  rituals picker (which marks the account done, by design) fired that same
+     *  watcher and slammed the panel shut on its own last step — the picker and
+     *  "That's me set up" were unreachable. */
+    var pushedDoneLocally = false
+        private set
 
     val step: Int get() = _state.value.step
     val isPicker: Boolean get() = InterviewScript.isPicker(step, questions.size)
@@ -168,11 +176,18 @@ class InterviewFlowController(
 
     /** The account says done (a server pin landing while the panel is open, or
      *  a finish on another device): close without pushing again. Web/iOS
-     *  `InterviewFlag.apply` — done never keeps the panel open. */
-    fun applyHostDone() {
-        if (!host.interviewDone.value || finished) return
+     *  `InterviewFlag.apply` — done never keeps the panel open.
+     *
+     *  Only a flag that came from ELSEWHERE closes the panel: our own
+     *  [notifyDone] (reaching the picker) flips the very same host flag, and
+     *  honouring that echo dismissed the sheet before the rituals step could
+     *  render. @return true when this call actually finished the panel — the
+     *  host dismisses only then. */
+    fun applyHostDone(): Boolean {
+        if (!host.interviewDone.value || finished || pushedDoneLocally) return false
         doneNotified = true
         _state.update { it.copy(finished = true) }
+        return true
     }
 
     /** True = landed (noted); false = the write failed (step kept, error shown). */
@@ -200,6 +215,7 @@ class InterviewFlowController(
     private fun notifyDone() {
         if (doneNotified) return
         doneNotified = true
+        pushedDoneLocally = true
         host.markInterviewDone()
     }
 }
@@ -233,9 +249,13 @@ fun InterviewFlow(
 
     // The moment the panel is shown its step is parked (auto-open once, then the pill).
     LaunchedEffect(controller) { controller.markInProgress() }
-    // The server flag pins done underneath an open panel → close, no re-push.
+    // A done flag from ELSEWHERE (a server pin landing under the open panel, a
+    // finish on another device) closes it — but never the controller's own
+    // push: reaching the rituals picker marks the account done by design, and
+    // treating that echo as "someone else finished" dismissed the sheet on its
+    // last step. `applyHostDone` owns that rule (and returns false for the echo).
     LaunchedEffect(hostDone) {
-        if (hostDone && !state.finished) { controller.applyHostDone(); onFinished() }
+        if (hostDone && controller.applyHostDone()) onFinished()
     }
     // Facts that arrive from ELSEWHERE while the panel is open but UNTOUCHED
     // (another device's hydrate or a realtime row landing a beat after the

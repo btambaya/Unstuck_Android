@@ -35,6 +35,14 @@ import tech.csalliance.unstuck.surface.NotificationLog
 //   what clears the ring. The ring state lives in SharedPreferences so a
 //   process killed mid-ring still reports `missed` when the alarm fires.
 //
+//   That persisted record is also BOUNDED (recover / staleOutcome): a reboot
+//   drops the 30 s alarm with every other alarm, and a process kill mid-call
+//   leaves nobody to end the conversation — an unsettled record with no
+//   staleness rule would make `activeCallId` non-null for ever, and every
+//   future call would then be reported `busy` without ever ringing. A RINGING
+//   record past 30 s + grace retires as `missed`, an ANSWERED one whose voice
+//   service is gone as `done`, reported into the durable CallOutcomeStore.
+//
 // The ringtone + vibration are the CHANNEL's (system-managed: they follow the
 // ringer volume, silent/vibrate mode, DND, and keep going if our process dies
 // — see NotificationChannels.CALLS); nothing here touches the microphone: the
@@ -44,6 +52,31 @@ object CallRinger {
     /** Ring for this long before giving up (iOS CallCoordinator.ringTimeout). */
     const val MISSED_AFTER_MS: Long = CallCoordinatorLogic.MISSED_AFTER_MS
 
+    /**
+     * How long past the 30 s missed alarm a RINGING record may sit unsettled
+     * before it counts as STALE. The alarm fires at +30 s (Doze-tolerant), so a
+     * record still ringing after this never got its alarm at all — the device
+     * rebooted (AlarmManager alarms do not survive one) or the process was
+     * killed mid-ring. See [staleOutcome] / [recover].
+     */
+    const val RING_STALE_GRACE_MS: Long = 15_000
+
+    /**
+     * The longest an ANSWERED record may hold the phone "busy" while a live
+     * [CallVoiceService] still claims it. Deliberately ABOVE that service's own
+     * [CallVoiceService.MAX_CALL_MS] watchdog, which ends every real call first —
+     * this is the backstop for a service that somehow outlived it.
+     */
+    const val MAX_CALL_MS: Long = 20 * 60_000
+
+    /**
+     * Grace after the Answer tap before an ACTIVE record with no live
+     * [CallVoiceService] counts as abandoned: `settle(ANSWERED)` runs in the ring
+     * screen and the FGS publishes `CallVoiceService.activeCallId` a moment
+     * later, so the hand-off must not look stale in between.
+     */
+    const val ACTIVE_HANDOFF_GRACE_MS: Long = 60_000
+
     private const val PREFS = "unstuck.calls.ring"
     private const val K_CALL_ID = "callId"
     private const val K_STARTED = "startedMs"
@@ -51,6 +84,8 @@ object CallRinger {
     private const val K_PAYLOAD = "payload"
     private const val K_FSI_DENIED = "fullScreenIntentDenied"
     private const val K_PHASE = "phase"
+    /** When the CURRENT phase began (the ring, or the Answer tap). */
+    private const val K_PHASE_AT = "phaseAtMs"
     private const val PHASE_RINGING = "ringing"
     private const val PHASE_ACTIVE = "active"
 
@@ -68,25 +103,95 @@ object CallRinger {
     // ── state ────────────────────────────────────────────────────────────────
 
     /** The call that is up right now (ringing, or answered and in the voice
-     *  service) — null once its outcome has been settled. A second push for
-     *  ANOTHER call while this is non-null ends as `busy` (Push.kt). */
+     *  service) — null once its outcome has been settled, and null for a STALE
+     *  record ([staleOutcome]): an unsettled ring left behind by a reboot or a
+     *  process kill must never make every FUTURE call report `busy` (Push.kt)
+     *  for the life of the install. [recover] reports what it left pending. */
     fun activeCallId(context: Context): String? = synchronized(lock) {
         val p = prefs(context)
-        if (p.getBoolean(K_SETTLED, true)) null else p.getString(K_CALL_ID, null)
+        if (p.getBoolean(K_SETTLED, true)) null
+        else if (staleOutcome(p, System.currentTimeMillis()) != null) null
+        else p.getString(K_CALL_ID, null)
     }
 
-    /** The payload of the call that is still RINGING (unsettled), for the
-     *  activity to restore itself from / a deep link to resume into. */
+    /** The payload of the call that is still RINGING (unsettled, not stale), for
+     *  the activity to restore itself from / a deep link to resume into. */
     fun ringing(context: Context): IncomingCallPayload? = synchronized(lock) {
         val p = prefs(context)
         if (p.getBoolean(K_SETTLED, true) || p.getString(K_PHASE, PHASE_RINGING) != PHASE_RINGING) return null
+        if (staleOutcome(p, System.currentTimeMillis()) != null) return null
         decodePayload(p.getString(K_PAYLOAD, null))
     }
 
     /** When the current ring started (epoch ms), or null when nothing rings. */
     fun ringStartedMs(context: Context): Long? = synchronized(lock) {
         val p = prefs(context)
-        if (p.getBoolean(K_SETTLED, true)) null else p.getLong(K_STARTED, 0L).takeIf { it > 0 }
+        if (p.getBoolean(K_SETTLED, true)) null
+        else if (staleOutcome(p, System.currentTimeMillis()) != null) null
+        else p.getLong(K_STARTED, 0L).takeIf { it > 0 }
+    }
+
+    /**
+     * The outcome an UNSETTLED record has gone stale owing, or null while it is
+     * still genuinely live. Callers hold [lock].
+     *
+     *  - RINGING past 30 s + [RING_STALE_GRACE_MS] → `missed`: the alarm that
+     *    should have settled it is gone (a reboot drops AlarmManager alarms; a
+     *    process kill before the alarm was armed loses it too).
+     *  - ACTIVE with no live [CallVoiceService] for this call after
+     *    [ACTIVE_HANDOFF_GRACE_MS] → `done`: the conversation's process died, so
+     *    nobody is left to end it. A record a live service still owns retires
+     *    only at [MAX_CALL_MS], as a backstop behind that service's watchdog.
+     */
+    private fun staleOutcome(p: android.content.SharedPreferences, nowMs: Long): CallOutcome? {
+        if (p.getBoolean(K_SETTLED, true)) return null
+        val callId = p.getString(K_CALL_ID, null) ?: return null
+        val active = p.getString(K_PHASE, PHASE_RINGING) == PHASE_ACTIVE
+        val since = p.getLong(K_PHASE_AT, 0L).takeIf { it > 0 } ?: p.getLong(K_STARTED, 0L)
+        // A record from an older build carries neither stamp: with no age to
+        // measure, treat it as arbitrarily old — nothing in THIS process is
+        // ringing or talking, so it can only be a leftover.
+        val age = if (since > 0) nowMs - since else Long.MAX_VALUE
+        if (!active) return if (age > MISSED_AFTER_MS + RING_STALE_GRACE_MS) CallOutcome.MISSED else null
+        // A conversation this process is actually running is never stale, whatever
+        // the wall clock has done (CallVoiceService.MAX_CALL_MS ends it); only a
+        // record whose service is GONE — the process died — retires here.
+        val owned = CallVoiceService.activeCallId == callId
+        if (!owned) return if (age > ACTIVE_HANDOFF_GRACE_MS) CallOutcome.DONE else null
+        return if (age > MAX_CALL_MS) CallOutcome.DONE else null
+    }
+
+    /**
+     * Retire a ring nothing will ever settle: an unsettled record left by a
+     * reboot or a process kill (see [staleOutcome]) is cleared and its pending
+     * outcome reported into the durable [CallOutcomeStore] — a `missed` the
+     * server would otherwise age out ten minutes late, or a `done` for an
+     * answered row the cron never touches at all. Returns what it reported.
+     *
+     * Called on every launch (UnstuckApp.onCreate), on BOOT_COMPLETED /
+     * MY_PACKAGE_REPLACED (BootReceiver) and before every ring decision
+     * (CallPushHandler) — cheap, idempotent, and a no-op while a call is live.
+     */
+    fun recover(context: Context, nowMs: Long = System.currentTimeMillis()): CallOutcome? {
+        val callId: String
+        val outcome: CallOutcome
+        val payload: IncomingCallPayload?
+        synchronized(lock) {
+            val p = prefs(context)
+            outcome = staleOutcome(p, nowMs) ?: return null
+            callId = p.getString(K_CALL_ID, null) ?: return null
+            payload = decodePayload(p.getString(K_PAYLOAD, null))
+            p.edit().putBoolean(K_SETTLED, true).putString(K_PHASE, PHASE_RINGING).commit()
+        }
+        dismissRing(context, callId)
+        CallOutcomeStore.enqueue(context, callId, outcome, nowMs = nowMs)
+        // The user was rung and never answered: they still get the notes, exactly
+        // as the missed alarm would have posted them. An abandoned ACTIVE call
+        // already had its conversation — nothing to say.
+        if (outcome == CallOutcome.MISSED && payload != null) {
+            runCatching { CallNotifications.missed(context, payload) }
+        }
+        return outcome
     }
 
     private fun decodePayload(raw: String?): IncomingCallPayload? {
@@ -122,7 +227,12 @@ object CallRinger {
         val duplicate: Boolean
         synchronized(lock) {
             val p = prefs(context)
-            duplicate = !p.getBoolean(K_SETTLED, true) && p.getString(K_CALL_ID, null) == payload.callId
+            // A record that has gone STALE (a reboot / process kill left it
+            // unsettled) is not a live ring: the server re-ringing the same call
+            // starts a FRESH one rather than re-posting over a dead record.
+            duplicate = !p.getBoolean(K_SETTLED, true) &&
+                p.getString(K_CALL_ID, null) == payload.callId &&
+                staleOutcome(p, nowMs) == null
             // A retry for a call that was already ANSWERED: the voice service owns
             // it now — re-posting the ring over the conversation would be wrong.
             if (duplicate && p.getString(K_PHASE, PHASE_RINGING) == PHASE_ACTIVE) return
@@ -130,6 +240,7 @@ object CallRinger {
                 p.edit()
                     .putString(K_CALL_ID, payload.callId)
                     .putLong(K_STARTED, nowMs)
+                    .putLong(K_PHASE_AT, nowMs)
                     .putBoolean(K_SETTLED, false)
                     .putString(K_PHASE, PHASE_RINGING)
                     .putString(K_PAYLOAD, json.encodeToString(mapSer, payload.toData()))
@@ -244,7 +355,9 @@ object CallRinger {
             when (outcome) {
                 CallOutcome.ANSWERED -> {
                     if (phase != PHASE_RINGING) return false
-                    p.edit().putString(K_PHASE, PHASE_ACTIVE).commit()
+                    // phaseAt restarts with the conversation: the ACTIVE record is
+                    // bounded from the ANSWER, not from when the phone started ringing.
+                    p.edit().putString(K_PHASE, PHASE_ACTIVE).putLong(K_PHASE_AT, nowMs).commit()
                 }
                 CallOutcome.DECLINED, CallOutcome.MISSED -> {
                     // Only a RINGING call can be declined / missed; an answered one

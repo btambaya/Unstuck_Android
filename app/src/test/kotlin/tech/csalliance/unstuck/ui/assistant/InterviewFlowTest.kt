@@ -371,9 +371,10 @@ class InterviewFlowTest {
         m.answer(chip(m, "Morning"))
         assertFalse(m.finished)
         h.interviewDone.value = true   // the pull's applyServerAssistantPrefs pinned it (finished on the web)
-        m.applyHostDone()
+        assertTrue("a done flag from ELSEWHERE closes the panel", m.applyHostDone())
         assertTrue("done never keeps the panel open — someone who finished elsewhere is not asked again", m.finished)
         assertEquals("nothing pushed from here — the account already says done", 0, h.doneCalls)
+        assertFalse("already finished — a second pin is not a second dismissal", m.applyHostDone())
         m.finish()
         assertEquals("a later finish doesn't push either", 0, h.doneCalls)
         assertFalse(h.hasResumeStep())
@@ -382,9 +383,43 @@ class InterviewFlowTest {
     @Test fun `applyHostDone is a no-op while the account says not done`() {
         val (m, h) = make()
         m.skipQuestion()
-        m.applyHostDone()
+        assertFalse(m.applyHostDone())
         assertFalse(m.finished)
         assertEquals(1, m.step)
         assertEquals(0, h.doneCalls)
+    }
+
+    /** The panel watches `host.interviewDone` so a finish on another device
+     *  closes it. Reaching the rituals picker flips that SAME flag on purpose —
+     *  and honouring that echo dismissed the sheet on its own last step: no
+     *  "Which recurring moments should I run?", no "That's me set up", and no
+     *  way back (the pill is gone once done). Only a flag from elsewhere closes. */
+    @Test fun `reaching the picker marks done but never closes the panel from underneath`() {
+        val (m, h) = make()
+        skip(m, 7)
+        assertTrue(m.isPicker)
+        assertTrue("reaching the end IS being onboarded", h.isDone())
+        assertEquals(1, h.doneCalls)
+        assertFalse(
+            "the panel's OWN push must not read as \"finished elsewhere\"",
+            m.applyHostDone(),
+        )
+        assertFalse("the rituals picker still renders", m.finished)
+        // The step the bug made unreachable: pick rituals, then finish.
+        m.setRitual(RitualKey.FRIDAY, true)
+        assertEquals(1, h.ritualWrites.size)
+        m.finish()
+        assertTrue(m.finished)
+        assertEquals("still exactly one account-wide push", 1, h.doneCalls)
+        assertFalse(h.hasResumeStep())
+    }
+
+    @Test fun `an I'm done finish is not mistaken for a foreign flag either`() {
+        val (m, h) = make()
+        m.skipQuestion()
+        m.finish()
+        assertTrue(h.isDone())
+        assertFalse("our own push, already finished", m.applyHostDone())
+        assertEquals(1, h.doneCalls)
     }
 }

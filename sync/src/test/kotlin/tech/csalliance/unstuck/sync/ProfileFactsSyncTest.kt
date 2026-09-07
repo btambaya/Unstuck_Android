@@ -297,6 +297,45 @@ class ProfileFactsSyncTest {
         assertNull("save() stays the null-on-anything wrapper", s.save(ProfileFactCategory.PERSON, "Zara — daughter", ProfileFactSource.CHAT))
     }
 
+    /** Settings → "What Unstuck knows" edit-in-place: SAME row + id, category
+     *  kept, source becomes `settings`, updatedAt bumped, one queued push. */
+    @Test fun updateRewritesTheFactInPlace() = runTest {
+        val stored = service(now = T0).save(ProfileFactCategory.PERSON, "Maleek — son", ProfileFactSource.CHAT, whenIso = "2026-09-14")!!
+        val edited = service(now = T1).update(stored.id, "  Maleek — son, 9  ")
+        assertEquals("same row, never delete + re-add", stored.id, edited.id)
+        assertEquals("Maleek — son, 9", edited.fact)
+        assertEquals(ProfileFactCategory.PERSON, edited.category)
+        assertEquals(ProfileFactSource.SETTINGS, edited.source)
+        assertEquals("the date is kept when the caller passes none", "2026-09-14", edited.whenIso)
+        assertEquals(T1, edited.updatedAt)
+        assertEquals(T0, edited.createdAt)
+        assertEquals(1, rows().size)
+        assertEquals("Maleek — son, 9", row(stored.id)!!.fact)
+        assertEquals("one op per fact — the create collapsed into the edit", 1, pending().size)
+        // A valid date replaces it; an invalid one leaves it alone.
+        assertEquals("2026-10-01", service(now = T1).update(stored.id, "Maleek — son, 9", whenIso = "2026-10-01").whenIso)
+        assertEquals("2026-10-01", service(now = T1).update(stored.id, "Maleek — son, 9", whenIso = "nonsense").whenIso)
+        // Blank text is the same rejection `store` reports.
+        try { service().update(stored.id, "   "); fail("expected Empty") }
+        catch (e: ProfileFactSaveError) { assertTrue(e is ProfileFactSaveError.Empty) }
+    }
+
+    /** The row vanished (forgotten elsewhere / never pulled here): the edit is
+     *  stored as a FRESH fact rather than silently dropped. */
+    @Test fun updateFallsBackToAFreshSaveWhenTheRowIsGone() = runTest {
+        val gone = service(now = T0).update("no-such-id", "Zara's birthday is 12 Sept", category = ProfileFactCategory.PERSON)
+        assertTrue(isUuid(gone.id))
+        assertEquals("Zara's birthday is 12 Sept", gone.fact)
+        assertEquals(ProfileFactSource.SETTINGS, gone.source)
+        assertEquals(1, service().all().size)
+        // A tombstoned row is "gone" too — the edit must not resurrect it in place.
+        val stored = service(now = T0).save(ProfileFactCategory.PERSON, "Maleek — son", ProfileFactSource.CHAT)!!
+        service(now = T1).remove(stored.id)
+        val re = service(now = T1).update(stored.id, "Maleek — son, 9")
+        assertTrue("a new row, not the tombstone", re.id != stored.id)
+        assertFalse(row(stored.id)!!.active)
+    }
+
     @Test fun removeTombstonesAndQueuesThePush() = runTest {
         val stored = service(now = T0).save(ProfileFactCategory.PERSON, "Maleek — son", ProfileFactSource.CHAT)!!
         assertEquals(1, pending().size)

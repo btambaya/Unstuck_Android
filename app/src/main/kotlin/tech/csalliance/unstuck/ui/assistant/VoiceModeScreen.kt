@@ -64,6 +64,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import tech.csalliance.unstuck.SettingsStore
+import tech.csalliance.unstuck.calls.CallVoiceService
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
@@ -98,6 +99,12 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
     var suggestHoldToTalk by mutableStateOf(false); private set
 
     private var audio: VoiceAudioEngine? = null
+    /** Set when a session actually dials: the receipts of everything the voice
+     *  assistant wrote are appended to the assistant thread as a local
+     *  "While we talked:" turn when it ends (AppViewModel.endVoiceSession, the
+     *  same entry CallVoiceService.Deps.sessionDidEnd uses). Held as a lambda
+     *  rather than an AppViewModel reference so the holder never outlives it. */
+    private var sessionDidEnd: (() -> Unit)? = null
     // Compose state: the screen derives `live`/`canInterrupt` from it.
     var client: VoiceRealtimeClient? by mutableStateOf(null); private set
     private var attached = false
@@ -137,9 +144,31 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
 
     fun fail(message: String) { note = message; state = VoiceState.ERROR }
 
+    /** Is a call FROM Unstuck live right now? A seam so the gate below is
+     *  unit-testable (CallVoiceService.activeCallId has a private setter). */
+    internal var isCallActive: () -> Boolean = { CallVoiceService.activeCallId != null }
+
+    /**
+     * One voice conversation at a time. A call from Unstuck owns the
+     * microphone, the comm-mode audio focus and the tool scratch
+     * (CallVoiceService, a live `microphone` FGS). A Talk session started over
+     * it would take exclusive focus off the call (muting the call's mic with no
+     * un-mute in sight), reset the SAME `voiceScratch` the call's conversation
+     * is mid-way through, and burn the proxy's second per-user socket — two
+     * assistants talking over each other. Refuse, and say why.
+     *
+     * @return true when the start was refused.
+     */
+    fun refuseWhileOnCall(): Boolean {
+        if (!isCallActive()) return false
+        fail(ON_A_CALL)
+        return true
+    }
+
     /** Start a session unless one is live (re-attach after a config change). */
     fun ensureStarted(vm: AppViewModel) {
         if (sessionActive || starting) return
+        if (refuseWhileOnCall()) return
         val token = vm.voiceAccessToken()
         if (token.isNullOrBlank()) { fail("Please sign in to use voice."); return }
         if (!vm.voiceConfigured()) { fail("Voice isn't set up yet."); return }
@@ -196,9 +225,11 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
             // Already posted to the main thread by the client.
             onSuggestHoldToTalk = { if (current()) suggestHoldToTalk = true },
         )
+        sessionDidEnd = { vm.endVoiceSession() }
         // Another app (most importantly an incoming phone call) took audio focus →
-        // end the session instead of talking over it. stop() reports CLOSED ("Ended").
-        engine.onFocusLost = { rc.stop() }
+        // end the session instead of talking over it, transient or not. stop()
+        // reports CLOSED ("Ended"). (Only a CALL from Unstuck mutes-and-waits.)
+        engine.onFocusLost = { _ -> rc.stop() }
         // May fire SYNCHRONOUSLY from inside rc.start() (mic held elsewhere): the
         // client checks `stopped` after startCapture and never dials in that case.
         engine.onCaptureError = {
@@ -216,14 +247,19 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
         startEpoch++          // abort a start whose prompt is still being read
         val rc = client
         val engine = audio
+        val didEnd = sessionDidEnd
         client = null
         audio = null
+        sessionDidEnd = null
         if (rc != null) {
             rc.stop()
             // rc's own CLOSED report is ignored now that it isn't current — say it here
             // (an ON_STOP end leaves the screen up, and it must read "Ended").
             state = VoiceState.CLOSED
         } else engine?.shutdown()
+        // Everything the voice assistant wrote lands in the thread with Undo —
+        // the receipt IS the consent UX (web overlay close / iOS endVoiceSession).
+        if (didEnd != null) runCatching { didEnd() }
     }
 
     override fun onCleared() { end() }
@@ -231,6 +267,8 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
     companion object {
         /** How long a detached session waits for the recreated screen before ending itself. */
         const val REATTACH_GRACE_MS = 2_000L
+        /** Refusal shown when Talk is opened while a call FROM Unstuck is live. */
+        const val ON_A_CALL = "You’re on a call with Unstuck."
     }
 }
 
@@ -288,6 +326,9 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
     }
     LaunchedEffect(holder) {
         if (holder.sessionActive) return@LaunchedEffect // re-attached to a live call
+        // A call from Unstuck already owns the mic — say so instead of popping a
+        // permission dialog over the conversation (ensureStarted refuses too).
+        if (holder.refuseWhileOnCall()) return@LaunchedEffect
         val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
         if (granted) holder.ensureStarted(vm) else micPermission.launch(Manifest.permission.RECORD_AUDIO)
     }

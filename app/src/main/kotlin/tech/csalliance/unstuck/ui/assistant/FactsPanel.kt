@@ -43,9 +43,11 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.semantics.LiveRegionMode
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.liveRegion
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -102,6 +104,10 @@ object FactsPanelCopy {
     const val TONE_NOTE = "Your tone is derived from these facts — tell it “keep me honest” or “gently” and it adapts. No separate dial."
     const val EDIT_PLACEHOLDER = "The fact"
     const val SAVE = "Save"
+    /** A rejected/failed edit is SAID, never swallowed — the old text is still
+     *  on screen because the row was never removed. Same words as the
+     *  interview's failed save (InterviewCopy.SAVE_FAILED). */
+    const val EDIT_FAILED = "Couldn’t save that — try again"
     fun editTitle(f: ProfileFact) = "Edit · ${f.category.raw}"
     fun editA11y(f: ProfileFact) = "Edit fact: ${f.fact}"
     fun forgetA11y(f: ProfileFact) = "Forget \"${f.fact}\""
@@ -157,6 +163,9 @@ fun FactsPanelContent(host: FactsHost, modifier: Modifier = Modifier) {
     val rituals by host.rituals.collectAsStateWithLifecycle()
     var editing by remember { mutableStateOf<ProfileFact?>(null) }
     var confirmForgetAll by remember { mutableStateOf(false) }
+    /** Set when the last edit didn't land — the row is untouched, so this is
+     *  the only sign the user gets. Cleared by the next edit attempt. */
+    var editError by remember { mutableStateOf<String?>(null) }
 
     Column(modifier.fillMaxWidth()) {
         Text(FactsPanelCopy.DISCLOSURE, style = UFont.sans(12).copy(lineHeight = 17.sp), color = c.ink3, modifier = Modifier.padding(bottom = 12.dp))
@@ -179,6 +188,13 @@ fun FactsPanelContent(host: FactsHost, modifier: Modifier = Modifier) {
             }
             Divider()
             AddRow { category, text -> scope.launch { host.saveProfileFact(category, text, ProfileFactSource.SETTINGS, null) } }
+        }
+
+        editError?.let { err ->
+            Text(
+                err, style = UFont.sans(12), color = c.coralDeep,
+                modifier = Modifier.padding(top = 6.dp).semantics { liveRegion = LiveRegionMode.Polite },
+            )
         }
 
         if (facts.isNotEmpty()) {
@@ -226,13 +242,18 @@ fun FactsPanelContent(host: FactsHost, modifier: Modifier = Modifier) {
             onSave = { text ->
                 editing = null
                 if (text != f.fact) {
-                    // Edit = forget the old row, then save the new text (category +
-                    // date kept) through the same host path every other save uses.
-                    // Forget FIRST: a save can refine the old row in place (same
-                    // person key), and forgetting after would tombstone the edit.
+                    // Edit = rewrite the row IN PLACE (same id, one outbox op).
+                    // The old forget+re-save minted a NEW id, so every moment
+                    // dismissed against this fact (dates-that-matter:<id>:<date>)
+                    // re-fired — and a save that was rejected or dropped lost the
+                    // fact outright, because the forget had already committed.
+                    // updateProfileFact falls back to a fresh save only when the
+                    // row has vanished (forgotten on another device).
+                    // iOS FactsPanel.swift:88-93.
                     scope.launch {
-                        host.forgetProfileFact(f.id)
-                        host.saveProfileFact(f.category, text, ProfileFactSource.SETTINGS, f.whenIso)
+                        editError = null
+                        val r = host.updateProfileFact(f.id, text, f.whenIso)
+                        if (r.isFailure) editError = FactsPanelCopy.EDIT_FAILED
                     }
                 }
             },

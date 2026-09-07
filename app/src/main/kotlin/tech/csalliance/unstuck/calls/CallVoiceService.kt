@@ -17,6 +17,9 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.JsonArray
@@ -65,9 +68,11 @@ import tech.csalliance.unstuck.ui.assistant.VoiceState
 //              Answer waits up to LAUNCHER_GRACE_MS for AppViewModel to bind
 //              them (iOS launcherGrace), and brings MainActivity up meanwhile.
 //   Audio  ──▶ MODE_IN_COMMUNICATION + USAGE_VOICE_COMMUNICATION (the engine);
-//              audio focus LOST → the mic is MUTED, not the call ended (risk 6);
-//              focus regained → un-muted. The End action and the ring
-//              notification's slot are the only ways out.
+//              a TRANSIENT focus loss MUTES the mic, never ends the call (risk
+//              6), and focus regained un-mutes it; a PERMANENT one (a real
+//              cellular call answered) ENDS it — no AUDIOFOCUS_GAIN ever
+//              follows, so muting would leave the mic dead for the rest of the
+//              session. MAX_CALL_MS bounds the whole thing either way.
 //   Tools  ──▶ snooze_call is answered inside the client (CallMode) and lands
 //              here as onSnooze: outcome `snoozed` + minutes is queued AT ONCE
 //              (a kill during the goodbye still snoozes), the goodbye gets
@@ -109,6 +114,10 @@ class CallVoiceService : Service() {
                 override fun voiceTools() = vm.voiceTools()
                 override suspend fun runAppTool(name: String, args: JsonObject) = vm.runVoiceTool(name, args)
                 override fun sessionWillStart() = vm.resetVoiceScratch()
+                // Everything the call WROTE lands in the assistant thread as
+                // "While we talked:", with Undo — a call is a voice session like
+                // Talk, and the receipt is the consent UX (web / iOS parity).
+                override fun sessionDidEnd() = vm.endVoiceSession()
             }
         }
     }
@@ -126,6 +135,9 @@ class CallVoiceService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private val graceRunnable = Runnable { if (phase == Phase.STARTING) finish(CallEndReason.Failed("voice unavailable")) }
     private var snoozeEndRunnable: Runnable? = null
+    /** The max-length watchdog: a wedged conversation ends DELIBERATELY here
+     *  rather than being closed by the proxy's own cap and reported `done`. */
+    private val maxLengthRunnable = Runnable { if (phase != Phase.ENDED) finish(CallEndReason.HungUp) }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -195,6 +207,12 @@ class CallVoiceService : Service() {
         generation++
         activeCallId = p.callId
         state = VoiceState.CONNECTING
+        // Nothing else bounds a conversation: the model may stop speaking without
+        // hanging up (a permanent audio-focus loss used to leave exactly that), and
+        // the mic would stay hot until the proxy's 15-minute cap closed the socket
+        // and the row was reported `done` as if the call had gone fine.
+        main.removeCallbacks(maxLengthRunnable)
+        main.postDelayed(maxLengthRunnable, MAX_CALL_MS)
         val d = deps
         if (d != null) {
             dial(d, p, generation)
@@ -247,8 +265,16 @@ class CallVoiceService : Service() {
                 onSnoozeCall = { minutes -> main.post { if (current()) snooze(minutes) } },
             ),
         )
-        // Focus lost (a phone call, an alarm) → MUTE, never end; regained → un-mute.
-        audio.onFocusLost = { rc.micMuted = true }
+        // TRANSIENT focus loss (an alarm, a notification ducking us) → MUTE, never
+        // end; regained → un-mute. A PERMANENT loss (AUDIOFOCUS_LOSS — a real
+        // cellular call was answered) is never followed by an AUDIOFOCUS_GAIN, so
+        // muting there would leave the mic dead for the rest of the session while
+        // the model talked into the phone call: end the call instead and hand the
+        // user the notes they never heard (voiceFailed → done + the note).
+        audio.onFocusLost = { permanent ->
+            if (permanent) main.post { if (current()) finish(CallEndReason.Failed("interrupted by another call")) }
+            else rc.micMuted = true
+        }
         audio.onFocusGained = { rc.micMuted = false }
         // Mic acquisition failed — the call can't proceed; degrade to the notes notification.
         audio.onCaptureError = { main.post { if (current()) finish(CallEndReason.Failed("microphone unavailable")) } }
@@ -289,6 +315,7 @@ class CallVoiceService : Service() {
         val p = payload
         phase = Phase.ENDED
         main.removeCallbacks(graceRunnable)
+        main.removeCallbacks(maxLengthRunnable)
         snoozeEndRunnable?.let { main.removeCallbacks(it) }
         snoozeEndRunnable = null
         val rc = client
@@ -317,6 +344,34 @@ class CallVoiceService : Service() {
         stopSelfNow()
     }
 
+    /**
+     * Sign-out with a call still up: drop the whole voice stack WITHOUT
+     * reporting anything. The JWT that dialled is gone, so an outcome posted
+     * now would go out under the NEXT account's token and be refused 404 (and
+     * the ring record is being cleared by the same sign-out either way). Mirrors
+     * iOS `signedOut()`.
+     */
+    private fun abandon() {
+        val rc = client
+        val audio = engine
+        client = null
+        engine = null
+        // ENDED before stop(): neither onDestroy nor a late transport callback may
+        // turn this into a reported end.
+        phase = Phase.ENDED
+        payload = null
+        pendingSnoozeMin = null
+        generation++
+        main.removeCallbacks(graceRunnable)
+        main.removeCallbacks(maxLengthRunnable)
+        snoozeEndRunnable?.let { main.removeCallbacks(it) }
+        snoozeEndRunnable = null
+        if (rc != null) rc.stop() else audio?.shutdown()
+        state = VoiceState.CLOSED
+        activeCallId = null
+        stopSelfNow()
+    }
+
     /** Through the ringer's first-outcome-wins state when it still knows the
      *  call; straight into the durable queue when it doesn't (the process died
      *  and came back, or the ring state was cleared) — never lost either way. */
@@ -335,6 +390,9 @@ class CallVoiceService : Service() {
     // ── notification ─────────────────────────────────────────────────────────
 
     private fun startForegroundNow(p: IncomingCallPayload?) {
+        // The channel must exist before the notification is posted (a missing one
+        // throws, and this is the 5 s startForeground contract). Idempotent.
+        NotificationChannels.ensureAll(this)
         val n = build(p)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             ServiceCompat.startForeground(this, NOTIF_ID, n, ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
@@ -354,7 +412,12 @@ class CallVoiceService : Service() {
             this, 1, Intent(this, CallVoiceService::class.java).setAction(ACTION_END),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
         )
-        return NotificationCompat.Builder(this, NotificationChannels.FOCUS_ONGOING)
+        // Its OWN channel, never FOCUS_ONGOING ("Focus session", LOW, "shows the
+        // running focus timer"): this notification carries the End action — the
+        // only hang-up outside the app — so a user who silences the focus timer
+        // must not lose it while the microphone keeps running, and a live call
+        // must not read as a low-priority focus entry in the shade.
+        return NotificationCompat.Builder(this, NotificationChannels.CALL_ONGOING)
             .setSmallIcon(R.drawable.ic_orbit)
             .setColor(NotificationChannels.CORAL)
             .setOngoing(true)
@@ -393,13 +456,35 @@ class CallVoiceService : Service() {
         const val LAUNCHER_GRACE_MS = 8_000L
         /** After snooze_call: room for "call you back in ten — bye" to play. */
         const val SNOOZE_GOODBYE_MS = 6_000L
+        /** The longest a single call may run. Deliberately BELOW the voice proxy's
+         *  own 15-minute session cap: a wedged conversation (the model silent, the
+         *  socket alive) must end here, on our terms, rather than be closed by the
+         *  proxy and reported `done` as though it had gone fine. Also the bound
+         *  CallRinger.MAX_CALL_MS sits above, so a live call is never mistaken for
+         *  an abandoned record. */
+        const val MAX_CALL_MS = 14 * 60_000L
 
         @Volatile private var instance: CallVoiceService? = null
         @Volatile private var deps: Deps? = null
 
+        private val _activeCall = MutableStateFlow<String?>(null)
+
+        /**
+         * [activeCallId] as a stream, for a SCREEN that has to react to it —
+         * the in-app call bar (MainScaffold) that carries the only in-app hang-up.
+         * The plain @Volatile field can't be observed by Compose, and polling it
+         * would show the bar up to a tick late (and keep it up a tick after the
+         * call ended, over a live "End" that no longer ends anything). Written
+         * only through [activeCallId]'s setter, so the two can never disagree.
+         */
+        val activeCall: StateFlow<String?> = _activeCall.asStateFlow()
+
         /** The call the service is running (null = idle). */
         @Volatile var activeCallId: String? = null
-            private set
+            private set(value) {
+                field = value
+                _activeCall.value = value
+            }
         /** The conversation's state, for a screen that wants to show it. */
         @Volatile var state: VoiceState = VoiceState.CLOSED
             private set
@@ -423,6 +508,20 @@ class CallVoiceService : Service() {
         fun end(context: Context) {
             if (instance == null) return
             runCatching { context.startService(Intent(context, CallVoiceService::class.java).setAction(ACTION_END)) }
+        }
+
+        /**
+         * Sign-out with a call still up: stop the realtime client + the audio
+         * engine and drop the foreground service, reporting NOTHING — the JWT
+         * that dialled is gone, so an outcome sent now would ride the next
+         * account's token and be refused. Leaves the ring state alone; the
+         * caller (AppViewModel.scrubAssistantUserState) clears it right after.
+         * Mirrors iOS `signedOut()`. A no-op when no call is up.
+         */
+        fun signedOut(context: Context) {
+            val s = instance
+            if (s != null) main().post { s.abandon() }
+            else runCatching { context.stopService(Intent(context, CallVoiceService::class.java)) }
         }
 
         /** Bind the app-side seams (AppViewModel init: `CallVoiceService.bind(

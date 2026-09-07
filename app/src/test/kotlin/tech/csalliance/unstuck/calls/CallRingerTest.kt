@@ -94,7 +94,9 @@ class CallRingerTest {
 
     @Test fun `answering keeps the call ACTIVE for the voice service and blocks missed or declined`() {
         ring()
-        assertTrue(CallRinger.settle(context, payload.callId, CallOutcome.ANSWERED))
+        // The whole test runs on the synthetic `now`, so the answer is stamped with
+        // it too — the ACTIVE record's staleness bound is measured from that stamp.
+        assertTrue(CallRinger.settle(context, payload.callId, CallOutcome.ANSWERED, nowMs = now))
         assertEquals(listOf(CallOutcome.ANSWERED), queued().map { it.outcome })
         assertNull("ring notification down", shadowOf(nm).getNotification(NotifIds.CALL))
         assertTrue(shadowOf(context.getSystemService(AlarmManager::class.java)).scheduledAlarms.isEmpty())
@@ -141,6 +143,80 @@ class CallRingerTest {
         ring()
         // Robolectric grants USE_FULL_SCREEN_INTENT by default (API 34).
         assertEquals(!CallRinger.canUseFullScreenIntent(context), CallRinger.fullScreenIntentDenied(context))
+    }
+
+    // ── staleness + recovery: the record must never wedge the phone ──────────
+    // A reboot drops the 30 s missed alarm with every other alarm, and a process
+    // kill mid-call leaves nobody to end the conversation. Before the bound, the
+    // unsettled record made activeCallId non-null for ever and EVERY later call
+    // was reported `busy` without ringing — the user's calls died permanently.
+    // These use offsets from the real clock: the staleness readers ask the system
+    // clock, exactly as the FCM path does.
+
+    private fun ringAgo(ms: Long, p: IncomingCallPayload = payload) {
+        NotificationChannels.ensureAll(context)
+        CallRinger.ring(context, p, System.currentTimeMillis() - ms)
+    }
+
+    @Test fun `a ring the alarm never settled goes stale, so the next call still rings`() {
+        ringAgo(CallRinger.MISSED_AFTER_MS + CallRinger.RING_STALE_GRACE_MS + 1_000)
+        assertNull("no longer 'busy'", CallRinger.activeCallId(context))
+        assertNull(CallRinger.ringing(context))
+        assertNull(CallRinger.ringStartedMs(context))
+    }
+
+    @Test fun `a ring still inside its 30 s window is live, not stale`() {
+        ringAgo(5_000)
+        assertEquals(payload.callId, CallRinger.activeCallId(context))
+        assertNotNull(CallRinger.ringing(context))
+        assertNull("nothing to recover", CallRinger.recover(context))
+        assertTrue(queued().isEmpty())
+    }
+
+    @Test fun `recover reports the pending missed, posts the notice, clears the ring, and is idempotent`() {
+        ringAgo(CallRinger.MISSED_AFTER_MS + CallRinger.RING_STALE_GRACE_MS + 1_000)
+        assertEquals(CallOutcome.MISSED, CallRinger.recover(context))
+        assertEquals(listOf(CallOutcome.MISSED), queued().map { it.outcome })
+        assertEquals(
+            "I called about speak to James",
+            shadowOf(nm).getNotification(NotifIds.callResult(payload.callId))
+                .extras.getCharSequence(Notification.EXTRA_TITLE).toString(),
+        )
+        assertNull(shadowOf(nm).getNotification(NotifIds.CALL))
+        assertTrue(shadowOf(context.getSystemService(AlarmManager::class.java)).scheduledAlarms.isEmpty())
+        // A second launch (or the FCM path) must not report it twice.
+        assertNull(CallRinger.recover(context))
+        assertEquals(1, queued().size)
+        // And a late alarm for the retired call is a no-op.
+        fire(MissedCallReceiver.ACTION_MISSED)
+        assertEquals(1, queued().size)
+    }
+
+    @Test fun `an answered call whose voice service died recovers as done`() {
+        val answeredAgo = CallRinger.ACTIVE_HANDOFF_GRACE_MS + 60_000
+        ringAgo(answeredAgo + 10_000)
+        assertTrue(CallRinger.settle(context, payload.callId, CallOutcome.ANSWERED, nowMs = System.currentTimeMillis() - answeredAgo))
+        assertNull("no CallVoiceService owns it in this process", CallRinger.activeCallId(context))
+        assertEquals(CallOutcome.DONE, CallRinger.recover(context))
+        assertEquals(listOf(CallOutcome.ANSWERED, CallOutcome.DONE), queued().map { it.outcome })
+        // No "I called about …" notice: the conversation happened.
+        assertNull(shadowOf(nm).getNotification(NotifIds.callResult(payload.callId)))
+    }
+
+    @Test fun `the answer hand-off to the voice service is not mistaken for an abandoned call`() {
+        ringAgo(5_000)
+        assertTrue(CallRinger.settle(context, payload.callId, CallOutcome.ANSWERED))
+        assertEquals("still busy while the FGS starts", payload.callId, CallRinger.activeCallId(context))
+        assertNull(CallRinger.recover(context))
+    }
+
+    @Test fun `the server re-ringing a stale call starts a fresh ring rather than a duplicate`() {
+        ringAgo(CallRinger.MISSED_AFTER_MS + CallRinger.RING_STALE_GRACE_MS + 1_000)
+        val fresh = System.currentTimeMillis()
+        CallRinger.ring(context, payload, fresh)
+        assertEquals(payload.callId, CallRinger.activeCallId(context))
+        assertEquals("the 30 s clock restarted", fresh, CallRinger.ringStartedMs(context))
+        assertNotNull(shadowOf(nm).getNotification(NotifIds.CALL))
     }
 
     @Test fun `the activity intent round-trips the payload through String extras`() {

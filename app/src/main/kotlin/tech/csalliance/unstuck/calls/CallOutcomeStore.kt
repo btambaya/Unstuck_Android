@@ -33,11 +33,28 @@ import tech.csalliance.unstuck.sync.CallsClient
 // (CallOutcomeRejected: 404 the row is gone / not the caller's, 400 / 422 — any
 // other 4xx) drops THAT item and the drain continues, so one dead report never
 // blocks every later missed / snoozed / done behind it.
+//
+// CONCURRENCY: the queue is one JSON blob, so EVERY read-modify-write of it —
+// enqueue (FCM thread, the Answer tap, the alarm receiver, the voice service)
+// and each of the drain's own markSent / markFailed — runs under [queueLock],
+// and the drain RE-LOADS the queue after every suspending send instead of
+// writing back a snapshot taken before it. Without that, an outcome queued
+// while a send was in flight (a `snoozed` three seconds after the `answered`
+// that started the flush) was overwritten by the stale in-memory copy and lost
+// silently: the server never learned about the snooze, so the call-back the
+// user had just been promised never came. [flushLock] still keeps the drains
+// themselves one-at-a-time; it cannot be [queueLock] because enqueue is a
+// blocking call from threads that may be about to die.
 object CallOutcomeStore {
     const val PREFS = "unstuck.calls.outcome"
     const val KEY_QUEUE = "queue"
 
+    /** One drain at a time. */
     private val flushLock = Mutex()
+    /** Every read-modify-write of the persisted blob, from any thread (see the
+     *  file header's CONCURRENCY note). A plain monitor, not a Mutex: [enqueue]
+     *  is called from the FCM thread / a receiver and cannot suspend. */
+    private val queueLock = Any()
 
     private fun prefs(context: Context) =
         context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
@@ -53,21 +70,29 @@ object CallOutcomeStore {
         e.commit()
     }
 
+    /** Load → [mutate] → save, atomically against every other queue writer.
+     *  The block must not suspend or block on I/O other than the save. */
+    private fun <T> mutate(context: Context, mutate: (CallOutcomeQueue) -> T): T = synchronized(queueLock) {
+        val q = load(context)
+        val result = mutate(q)
+        save(context, q)
+        result
+    }
+
     /** Sign-out: forget everything queued (nothing left in it can be sent with
      *  the next account's JWT — the server would answer not_found for each). */
     fun clear(context: Context) {
-        prefs(context).edit().remove(KEY_QUEUE).commit()
+        synchronized(queueLock) { prefs(context).edit().remove(KEY_QUEUE).commit() }
     }
 
     /** Queue one outcome (persisted before this returns) and kick a flush on the
-     *  app scope when a signed-in client exists. Safe from any thread. */
+     *  app scope when a signed-in client exists. Safe from any thread — the
+     *  append is atomic against a drain that is mid-send. */
     fun enqueue(
         context: Context, callId: String, outcome: CallOutcome, snoozeMin: Int? = null,
         outcomeNotes: List<String>? = null, nowMs: Long = System.currentTimeMillis(),
     ): PendingOutcome {
-        val q = load(context)
-        val item = q.enqueue(callId, outcome, snoozeMin, outcomeNotes, nowMs)
-        save(context, q)
+        val item = mutate(context) { q -> q.enqueue(callId, outcome, snoozeMin, outcomeNotes, nowMs) }
         flushAsync(context)
         return item
     }
@@ -87,22 +112,23 @@ object CallOutcomeStore {
     ): Int {
         var sent = 0
         flushLock.withLock {
-            val q = load(context)
             while (true) {
-                val head = q.next(nowMs()) ?: break
+                // Re-read the head every round: an outcome enqueued while the last
+                // send was in flight is on disk, and a snapshot taken before the
+                // suspension would overwrite it on the way back out.
+                val head = synchronized(queueLock) { load(context).next(nowMs()) } ?: break
                 val result = send(head)
                 if (result.isSuccess) {
-                    q.markSent(head.callId)
+                    mutate(context) { q -> q.markSent(head.callId) }
                     sent++
                 } else {
                     val err = result.exceptionOrNull()
                     if (err is CancellationException) throw err
                     val permanent = err is CallOutcomeRejected
-                    q.markFailed(head.callId, permanent = permanent, nowMs = nowMs())
+                    mutate(context) { q -> q.markFailed(head.callId, permanent = permanent, nowMs = nowMs()) }
                     println("[calls] outcome ${head.outcome.wire} for ${head.callId} ${if (permanent) "rejected for good — dropped" else "failed, will retry"}: $err")
-                    if (!permanent) { save(context, q); break }
+                    if (!permanent) break
                 }
-                save(context, q)
             }
         }
         return sent

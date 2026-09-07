@@ -3,6 +3,7 @@ package tech.csalliance.unstuck.ui.assistant
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tech.csalliance.unstuck.core.logic.InterviewCopy
 import tech.csalliance.unstuck.core.model.ProfileFact
 import tech.csalliance.unstuck.core.model.ProfileFactCategory
 import tech.csalliance.unstuck.core.model.ProfileFactSource
@@ -52,5 +53,15 @@ class FactsPanelLogicTest {
         assertEquals("Forget everything the assistant has learned about you? This can’t be undone.", FactsPanelCopy.FORGET_ALL_MESSAGE)
         assertEquals("Edit · person", FactsPanelCopy.editTitle(fact()))
         assertEquals("Forget \"Maleek — son, 9\"", FactsPanelCopy.forgetA11y(fact()))
+    }
+
+    /** An edit that doesn't land is SAID. It used to be swallowed: the panel
+     *  forgot the row FIRST and then dropped a failed re-save on the floor, so
+     *  the fact simply vanished. The edit is an in-place update now (same id, so
+     *  a moment already dismissed against it stays dismissed), and a failure is
+     *  shown inline — in the interview's words, for one voice across the app. */
+    @Test fun `a failed edit has words, and they are the interview's`() {
+        assertEquals("Couldn’t save that — try again", FactsPanelCopy.EDIT_FAILED)
+        assertEquals(InterviewCopy.SAVE_FAILED, FactsPanelCopy.EDIT_FAILED)
     }
 }

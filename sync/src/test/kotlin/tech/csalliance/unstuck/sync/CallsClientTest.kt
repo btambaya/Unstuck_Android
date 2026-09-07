@@ -70,18 +70,48 @@ class CallsClientTest {
     }
 
     @Test fun `the update patch touches only what changed and re-arms a moved call`() {
-        val notesOnly = CallsClient.updatePatch(null, null, null, null, listOf("bring the contract"), 0L)
-        assertEquals(setOf("updated_at", "notes"), notesOnly.keys)
-        val moved = CallsClient.updatePatch(1_788_360_300_000L, CallsClient.Patch(null), CallsClient.Patch(null), null, null, 0L)
+        val notesOnly = CallsClient.updatePatch(null, null, null, null, listOf("bring the contract"))
+        assertEquals(setOf("notes"), notesOnly.keys)
+        val moved = CallsClient.updatePatch(1_788_360_300_000L, CallsClient.Patch(null), CallsClient.Patch(null), null, null)
         assertEquals("scheduled", moved["status"]!!.jsonPrimitive.content)
         assertEquals(JsonNull, moved["snooze_until"])
         assertEquals(JsonNull, moved["block_id"])
         assertEquals(JsonNull, moved["lead_min"])
         assertEquals("2026-09-02T14:45:00.000Z", moved["call_at"]!!.jsonPrimitive.content)
-        val reanchored = CallsClient.updatePatch(0L, CallsClient.Patch("b2"), CallsClient.Patch(10), "new label", null, 0L)
+        val reanchored = CallsClient.updatePatch(0L, CallsClient.Patch("b2"), CallsClient.Patch(10), "new label", null)
         assertEquals("b2", reanchored["block_id"]!!.jsonPrimitive.content)
         assertEquals("10", reanchored["lead_min"]!!.jsonPrimitive.content)
         assertEquals("new label", reanchored["label"]!!.jsonPrimitive.content)
+    }
+
+    /**
+     * 053's `call_requests_guard_stale_write` reverts status / snooze_until when
+     * the incoming row's `updated_at` is OLDER than the stored one, so a phone
+     * with a lagging clock had its cancel silently undone while PostgREST still
+     * returned a row and the tool still answered "ok: cancelled the call" — and
+     * the phone rang at the booked time anyway. The column is server-owned
+     * (touch_call_requests), so the writes stop claiming it at all.
+     */
+    @Test fun `neither write sends a device-clock updated_at`() {
+        assertFalse("the server owns updated_at", CallsClient.updatePatch(1_788_360_300_000L, null, null, "l", null).containsKey("updated_at"))
+        assertFalse(CallsClient.updatePatch(null, null, null, null, listOf("x")).containsKey("updated_at"))
+    }
+
+    @Test fun `a returned row counts as success only when it reflects the write`() {
+        fun r(status: String, snooze: String? = null) =
+            CallRequest(id = "c1", callAt = "2026-09-02T14:45:00.000Z", label = "l", status = status, snoozeUntil = snooze)
+        // cancel: the server kept 'scheduled' (the guard reverted it) → changed underneath.
+        assertTrue(CallsClient.reflectsWrite(r("cancelled"), cancelled = true))
+        assertFalse(CallsClient.reflectsWrite(r("scheduled"), cancelled = true))
+        assertFalse(CallsClient.reflectsWrite(r("calling"), cancelled = true))
+        // A time change must land the re-arm as well as the new call_at: a snoozed
+        // row that kept its snooze_until would still ring at the OLD snooze time.
+        assertTrue(CallsClient.reflectsWrite(r("scheduled"), timeMoved = true))
+        assertFalse(CallsClient.reflectsWrite(r("snoozed", "2026-09-02T15:05:00.000Z"), timeMoved = true))
+        assertFalse(CallsClient.reflectsWrite(r("scheduled", "2026-09-02T15:05:00.000Z"), timeMoved = true))
+        // Notes / label edits are outside the guard — any returned row IS the write.
+        assertTrue(CallsClient.reflectsWrite(r("calling")))
+        assertTrue(CallsClient.reflectsWrite(r("snoozed", "2026-09-02T15:05:00.000Z")))
     }
 
     @Test fun `reportOutcome folds the client-side end states onto the server's seven outcomes`() {

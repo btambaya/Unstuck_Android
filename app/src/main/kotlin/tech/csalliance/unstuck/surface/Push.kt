@@ -83,6 +83,13 @@ object CallPushHandler {
         if (data["kind"] != KIND) return false
         val payload = IncomingCallPayload.fromData(data) ?: return false
 
+        // Retire a ring nothing will ever settle BEFORE asking whether one is up: a
+        // reboot / process kill mid-ring leaves an unsettled record behind (the 30 s
+        // alarm does not survive a reboot), and without this EVERY later call would
+        // report `busy` for the life of the install — the phone would simply stop
+        // ringing. recover() reports the pending missed / done as it clears.
+        CallRinger.recover(context, nowMs)
+
         // A retried / duplicated push for the call that is ALREADY up: re-post the
         // ring in place (CallRinger ignores it once answered), and touch nothing —
         // not the 30 s clock, not the outcome. A push for ANOTHER call while one is

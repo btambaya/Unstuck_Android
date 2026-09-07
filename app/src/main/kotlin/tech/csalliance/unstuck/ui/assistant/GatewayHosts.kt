@@ -47,6 +47,11 @@ interface FactsHost {
     fun setRitual(key: RitualKey, on: Boolean)
     /** Same member as [InterviewHost.saveProfileFact]; the default is declared there. */
     suspend fun saveProfileFact(category: ProfileFactCategory, fact: String, source: ProfileFactSource, whenIso: String?): ProfileFact?
+    /** Edit one fact's text IN PLACE: the SAME row and id, `updatedAt` bumped
+     *  (never delete + re-add, which strands the old id in every device's
+     *  cache); a fresh save only when the row has vanished. Failure carries the
+     *  `ProfileFactSaveError` so the panel can say why the edit didn't stick. */
+    suspend fun updateProfileFact(id: String, fact: String, whenIso: String? = null): Result<ProfileFact>
     /** Soft-delete one fact (a tombstone that syncs). False = no active fact with that id. */
     suspend fun forgetProfileFact(id: String): Boolean
     suspend fun forgetAllProfileFacts()

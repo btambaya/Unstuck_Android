@@ -24,6 +24,14 @@ class UnstuckApp : Application() {
         // `missed` / `snoozed` / `done` would leave the server row in `calling`
         // for ever (the cron never re-rings it).
         tech.csalliance.unstuck.calls.CallOutcomeStore.installForegroundFlush(this)
+        // Retire a ring nothing can settle any more. A reboot (AlarmManager alarms
+        // don't survive one) or a process kill mid-ring / mid-call leaves an
+        // unsettled record in SharedPreferences, and that record makes every FUTURE
+        // call report `busy` — the phone would stop ringing for good. This is a
+        // FRESH process, so anything still marked ringing / answered here is
+        // orphaned: it clears and the pending `missed` / `done` goes into the
+        // durable queue installForegroundFlush has just wired up.
+        runCatching { tech.csalliance.unstuck.calls.CallRinger.recover(this) }
         // Keep pre-task reminder alarms in sync with the scheduled blocks.
         ReminderScheduler.observe(this)
         // Drop the realtime channels + websocket while the whole app is backgrounded

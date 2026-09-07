@@ -77,35 +77,40 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
         write?.upsertCollection(col) ?: store.upsert(Tables.COLLECTIONS, col, ItemCollection.serializer(), col.id)
         return col.id
     }
+    // Every list write below AWAITS the local commit (the `…Now` entries). The
+    // fire-and-forget UI variants only *launched* the write, so a read tool in
+    // the SAME round ("add milk to the shopping list and read it back") rendered
+    // the list without the change — breaking this interface's own
+    // "RETURN ONLY AFTER THE LOCAL ROW IS COMMITTED" rule (review section 4).
     override suspend fun addCollectionItem(collectionId: String, body: String) {
         val c = collection(collectionId) ?: return
-        vm.addCollectionItem(c, body)
+        vm.addCollectionItemNow(c, body)
     }
     override suspend fun promoteItemToTask(collectionId: String, itemId: String, loop: Boolean, dueAt: String?) {
         val c = collection(collectionId) ?: return
         val item = c.items.firstOrNull { it.id == itemId } ?: return
-        vm.moveItemToTask(c, item, if (loop) AppViewModel.PromoteMode.LOOP else AppViewModel.PromoteMode.SELF, dueAt)
+        vm.moveItemToTaskNow(c, item, if (loop) AppViewModel.PromoteMode.LOOP else AppViewModel.PromoteMode.SELF, dueAt)
     }
     override suspend fun renameCollection(id: String, name: String) {
         val c = collection(id) ?: return
-        vm.renameCollection(c, name)
+        vm.renameCollectionNow(c, name)
     }
     override suspend fun updateCollection(id: String, archived: Boolean?, color: String?) {
         val c = collection(id) ?: return
-        if (archived != null) vm.archiveCollection(id, archived)
-        if (color != null) vm.recolorCollection(c, color)
+        if (archived != null) vm.archiveCollectionNow(id, archived)
+        if (color != null) vm.recolorCollectionNow(c, color)
     }
-    override suspend fun removeCollection(id: String) { vm.deleteCollection(id) }
+    override suspend fun removeCollection(id: String) { vm.deleteCollectionNow(id) }
     override suspend fun updateCollectionItem(collectionId: String, itemId: String, body: String?, done: Boolean?) {
         val c = collection(collectionId) ?: return
         val item = c.items.firstOrNull { it.id == itemId } ?: return
-        if (body != null) vm.updateCollectionItemBody(c, itemId, body)
+        if (body != null) vm.updateCollectionItemBodyNow(c, itemId, body)
         // The UI only has a toggle — flip only when the desired state differs.
-        if (done != null && (item.done ?: false) != done) vm.toggleCollectionItemDone(c, itemId)
+        if (done != null && (item.done ?: false) != done) vm.toggleCollectionItemDoneNow(c, itemId)
     }
     override suspend fun removeCollectionItem(collectionId: String, itemId: String) {
         val c = collection(collectionId) ?: return
-        vm.removeCollectionItem(c, itemId)
+        vm.removeCollectionItemNow(c, itemId)
     }
     override suspend fun canEditCollection(id: String): Boolean {
         val c = collection(id) ?: return false

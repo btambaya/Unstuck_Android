@@ -39,7 +39,13 @@ import java.time.format.DateTimeParseException
 // Writes that can lose a race (update / cancel) are compare-and-set on the row
 // still being LIVE and return the row the server actually wrote — null means
 // zero rows matched (the call was cancelled / rang / finished underneath the
-// caller), and callers must say so rather than echo stale state.
+// caller), and callers must say so rather than echo stale state. A returned row
+// is not proof the write LANDED: 053's `call_requests_guard_stale_write` can
+// revert `status` / `snooze_until` inside the same statement, so both writes
+// check the row against what they asked for ([reflectsWrite]) and neither sends
+// a device-clock `updated_at` any more (the column is the server's — see
+// updatePatch). Without that a lagging phone clock produced "ok: cancelled the
+// call" for a call that then rang anyway.
 //
 // LOCAL MIRROR (C1-android): `Tables.CALL_REQUESTS` is hydrated + realtime-mirrored
 // READ-ONLY into the LocalStore (Hydrator / RealtimeMirror). Given a
@@ -164,13 +170,24 @@ class CallsClient(private val client: SupabaseClient, private val mirror: CallRe
             put("updated_at", iso(nowMs))
         }
 
-        /** The PATCH for [update]. `blockId` / `leadMin` use a present-vs-absent
-         *  wrapper: absent = leave the column alone, present-null = clear it. */
+        /**
+         * The PATCH for [update]. `blockId` / `leadMin` use a present-vs-absent
+         * wrapper: absent = leave the column alone, present-null = clear it.
+         *
+         * `updated_at` is DELIBERATELY absent. The column is server-owned
+         * (051's `touch_call_requests` stamps `now()` on every update), and 053's
+         * `call_requests_guard_stale_write` SILENTLY reverts `status` /
+         * `snooze_until` when the incoming row carries a timestamp older than the
+         * one already stored — so a phone whose clock lags by a minute would have
+         * its reschedule quietly undone while PostgREST still returned a row and
+         * the tool still answered "ok". Sending nothing leaves
+         * `new.updated_at = old.updated_at`, which the guard passes; [update] then
+         * VERIFIES the returned row rather than trusting it.
+         */
         fun updatePatch(
             callAtMs: Long?, blockId: Patch<String?>?, leadMin: Patch<Int?>?,
-            label: String?, notes: List<String>?, nowMs: Long,
+            label: String?, notes: List<String>?,
         ): JsonObject = buildJsonObject {
-            put("updated_at", iso(nowMs))
             if (callAtMs != null) {
                 put("call_at", iso(callAtMs))
                 put("status", "scheduled")
@@ -180,6 +197,24 @@ class CallsClient(private val client: SupabaseClient, private val mirror: CallRe
             if (leadMin != null) put("lead_min", leadMin.value?.let { JsonPrimitive(it) } ?: JsonNull)
             if (label != null) put("label", label)
             if (notes != null) put("notes", JsonArray(notes.map { JsonPrimitive(it) }))
+        }
+
+        /**
+         * Did the row the server returned actually TAKE the write? PostgREST
+         * returns the row whenever the WHERE matched, but 053's BEFORE UPDATE
+         * guard may have reverted `status` / `snooze_until` inside the same
+         * statement (a client timestamp older than the row's), and the block-follow
+         * step of `dispatch_calls` rewrites rows underneath us. Callers treat
+         * `false` exactly like "zero rows matched" — CHANGED_UNDERNEATH — rather
+         * than echoing a cancel / reschedule that did not happen.
+         *
+         * Only the guard's two columns are checked: `label` / `notes` are never
+         * touched by it, and a call whose time is not moving does not claim either.
+         */
+        fun reflectsWrite(row: CallRequest, cancelled: Boolean = false, timeMoved: Boolean = false): Boolean = when {
+            cancelled -> row.status == tech.csalliance.unstuck.core.model.CallStatus.CANCELLED.wire
+            timeMoved -> row.status == tech.csalliance.unstuck.core.model.CallStatus.SCHEDULED.wire && row.snoozeUntil == null
+            else -> true
         }
     }
 
@@ -288,30 +323,40 @@ class CallsClient(private val client: SupabaseClient, private val mirror: CallRe
 
     /** Patch a booked call — only the given fields change. Re-arms a snoozed
      *  row back to `scheduled` when its time is moved. Compare-and-set on the
-     *  row's status (see [statusesAccepting]). null ⇒ nothing was written (it
-     *  changed underneath, or the time change was refused). */
+     *  row's status (see [statusesAccepting]) AND on what the server actually
+     *  stored ([reflectsWrite]). null ⇒ nothing was written: zero rows matched,
+     *  or the row changed underneath and the time change was reverted. */
     suspend fun update(
         id: String, callAtMs: Long? = null, blockId: Patch<String?>? = null, leadMin: Patch<Int?>? = null,
-        label: String? = null, notes: List<String>? = null, nowMs: Long = System.currentTimeMillis(),
+        label: String? = null, notes: List<String>? = null,
     ): CallRequest? {
-        val patch = updatePatch(callAtMs, blockId, leadMin, label, notes, nowMs)
+        val patch = updatePatch(callAtMs, blockId, leadMin, label, notes)
         val timeChange = callAtMs != null || blockId != null || leadMin != null
         val rows: List<CallRequest> = client.from(TABLE).update(patch) {
             select()
             filter { eq("id", id); isIn("status", statusesAccepting(timeChange)) }
         }.decodeList()
-        return rows.firstOrNull()?.also { mirror?.absorb(it) }
+        val row = rows.firstOrNull() ?: return null
+        // Absorb either way: the truth the server sent is what get_calls must show,
+        // even (especially) when it isn't what we asked for.
+        mirror?.absorb(row)
+        return row.takeIf { reflectsWrite(it, timeMoved = callAtMs != null) }
     }
 
     /** Cancel a booked call (status → cancelled; the row stays for history).
-     *  Compare-and-set on the row still being live: the cancelled row, or null
-     *  when zero rows matched (already cancelled / rang / done elsewhere). */
-    suspend fun cancel(id: String, nowMs: Long = System.currentTimeMillis()): CallRequest? {
-        val patch = buildJsonObject { put("status", "cancelled"); put("updated_at", iso(nowMs)) }
+     *  Compare-and-set on the row still being live AND on the row coming back
+     *  actually cancelled: the cancelled row, or null when zero rows matched
+     *  (already cancelled / rang / done elsewhere) or the server kept its own
+     *  status (053's stale-write guard) — a call that will still ring must never
+     *  be reported as cancelled. */
+    suspend fun cancel(id: String): CallRequest? {
+        val patch = buildJsonObject { put("status", "cancelled") }
         val rows: List<CallRequest> = client.from(TABLE).update(patch) {
             select()
             filter { eq("id", id); isIn("status", CallRequest.liveStatuses) }
         }.decodeList()
-        return rows.firstOrNull()?.also { mirror?.absorb(it) }
+        val row = rows.firstOrNull() ?: return null
+        mirror?.absorb(row)
+        return row.takeIf { reflectsWrite(it, cancelled = true) }
     }
 }

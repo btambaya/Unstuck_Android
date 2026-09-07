@@ -93,9 +93,17 @@ open class VoiceAudioEngine(private val context: Context) {
 
     // Session-level callbacks, set by the owner of the engine (voice screen / client).
     /** Another app (most importantly telephony) took audio focus — end the session
-     *  (Talk) or MUTE the mic and wait (a call from Unstuck: CallVoiceService). */
-    @Volatile var onFocusLost: (() -> Unit)? = null
-    /** Focus came back after a transient loss — a call-mode owner un-mutes. */
+     *  (Talk) or MUTE the mic and wait (a call from Unstuck: CallVoiceService).
+     *
+     *  `permanent` = AUDIOFOCUS_LOSS: the other app took focus for good and
+     *  AUDIOFOCUS_GAIN will NEVER follow, so [onFocusGained] never runs. A
+     *  call-mode owner that mutes on this waits for an un-mute that can't come
+     *  (deaf for the rest of the call, ended ~15 min later by the proxy cap and
+     *  reported `done`) — it must END the call instead. `false` =
+     *  AUDIOFOCUS_LOSS_TRANSIENT, where focus does come back. */
+    @Volatile var onFocusLost: ((permanent: Boolean) -> Unit)? = null
+    /** Focus came back after a TRANSIENT loss — a call-mode owner un-mutes.
+     *  Never delivered after a permanent loss. */
     @Volatile var onFocusGained: (() -> Unit)? = null
     /** Mic capture couldn't start or died mid-session (mic held elsewhere). */
     @Volatile var onCaptureError: (() -> Unit)? = null
@@ -124,10 +132,12 @@ open class VoiceAudioEngine(private val context: Context) {
     val route: VoiceRoute get() = if (echoProne) VoiceRoute.SPEAKER else VoiceRoute.LOW_ECHO
 
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
-        if (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT) {
-            onFocusLost?.invoke()
-        } else if (change == AudioManager.AUDIOFOCUS_GAIN) {
-            onFocusGained?.invoke()
+        // The KIND of loss is what the owner needs: a permanent one is never
+        // followed by AUDIOFOCUS_GAIN, so "mute and wait" would wait for ever.
+        when (change) {
+            AudioManager.AUDIOFOCUS_LOSS -> onFocusLost?.invoke(true)
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> onFocusLost?.invoke(false)
+            AudioManager.AUDIOFOCUS_GAIN -> onFocusGained?.invoke()
         }
     }
 

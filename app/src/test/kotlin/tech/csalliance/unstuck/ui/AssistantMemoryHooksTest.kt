@@ -11,7 +11,9 @@ import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.put
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -24,15 +26,21 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import tech.csalliance.unstuck.AppGraph
+import tech.csalliance.unstuck.core.logic.ReceiptUndoKind
 import tech.csalliance.unstuck.core.logic.RitualKey
 import tech.csalliance.unstuck.core.logic.RitualPrefs
+import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.ProfileFact
 import tech.csalliance.unstuck.core.model.ProfileFactCategory
 import tech.csalliance.unstuck.core.model.ProfileFactSource
+import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.Tables
 import tech.csalliance.unstuck.data.db.UnstuckDatabase
+import tech.csalliance.unstuck.sync.ChatMessage
 import tech.csalliance.unstuck.sync.PreferencesClient
+import tech.csalliance.unstuck.sync.ToolCall
+import tech.csalliance.unstuck.sync.ToolFunction
 import tech.csalliance.unstuck.sync.WriteThrough
 
 /**
@@ -87,6 +95,22 @@ class AssistantMemoryHooksTest {
             Thread.sleep(10)
         }
         error("assistant turn never settled")
+    }
+
+    /** One executor tool call against the live ViewModel state (the harness's
+     *  own entry, minus the scratch the tests here don't need). */
+    private suspend fun AppViewModel.tool(name: String, args: kotlinx.serialization.json.JsonObject = buildJsonObject { }): String =
+        runAssistantTool(name, args, HashMap<String, TaskItem>(), HashMap<String, ItemCollection>())
+
+    /** Drain the VM's coroutines until [cond] holds. Some steps await Room on a
+     *  REAL executor thread, which the virtual scheduler can't advance through. */
+    private fun kotlinx.coroutines.test.TestScope.settleUntil(cond: () -> Boolean) {
+        repeat(300) {
+            advanceUntilIdle()
+            if (cond()) { Thread.sleep(20); advanceUntilIdle(); return }
+            Thread.sleep(10)
+        }
+        error("condition never settled")
     }
 
     private suspend fun facts(): List<ProfileFact> = store.profileFacts().first()
@@ -255,6 +279,131 @@ class AssistantMemoryHooksTest {
         assertEquals(RitualPrefs.DEFAULTS, vm.rituals.value)
         assertFalse(vm.interviewDone.value)
         assertFalse(vm.ritualsPendingPush("me"))
+    }
+
+    // ── review section 4 ────────────────────────────────────────────────────
+
+    /** The style receipt IS the consent UX for a fact that then rides in every
+     *  prompt — so it carries the same one-tap forget web and iOS attach. */
+    @Test fun styleReceiptCarriesAOneTapForget() = runTest {
+        val vm = vm()
+        val r = vm.saveStylePreference("please stop saying my name")!!
+        assertEquals("Noted: Don't use their name in replies", r.label)
+        val stored = facts().single()
+        assertEquals(ReceiptUndoKind.FORGET_FACT, r.undo?.kind)
+        assertEquals(stored.id, r.undo?.id)
+        assertTrue("and the undo target really exists", vm.forgetProfileFact(r.undo!!.id))
+        assertNull("nothing to note in an ordinary message", vm.saveStylePreference("what's next?"))
+    }
+
+    /** Settings edit-in-place: the SAME row, id kept, updatedAt bumped; a blank
+     *  edit reports why instead of silently doing nothing. */
+    @Test fun updateProfileFact_rewritesTheRowInPlace() = runTest {
+        val vm = vm()
+        val f = vm.saveProfileFact(ProfileFactCategory.PERSON, "Maleek — son", ProfileFactSource.INTERVIEW)!!
+        val edited = vm.updateProfileFact(f.id, "  Maleek — son, 9  ").getOrThrow()
+        assertEquals(f.id, edited.id)
+        assertEquals("Maleek — son, 9", edited.fact)
+        assertEquals(ProfileFactCategory.PERSON, edited.category)
+        assertEquals(1, facts().size)
+        assertEquals("Maleek — son, 9", facts().single().fact)
+        assertTrue(vm.updateProfileFact(f.id, "   ").isFailure)
+    }
+
+    /** A thread poisoned before the tool-call hygiene fix (arguments cut off by
+     *  finish_reason=length) is REPAIRED on replay — every later turn used to
+     *  400 forever and the only escape erased the conversation. */
+    @Test fun replayNormalisesAPoisonedPersistedToolCall() = runTest {
+        val vm = vm()
+        fun msg(args: String) = ChatMessage(
+            role = "assistant",
+            toolCalls = listOf(ToolCall("c1", "function", ToolFunction("create_tasks", args))),
+        )
+        with(vm) {
+            assertEquals("{}", msg("""{"tasks":[{"name":"a"},{"name":"b""").toHarness().toolCalls.single().argumentsJson)
+            assertEquals("{}", msg("").toHarness().toolCalls.single().argumentsJson)
+            assertEquals("""{"name":"A"}""", msg("""{"name":"A"}""").toHarness().toolCalls.single().argumentsJson)
+        }
+    }
+
+    /** The executor contract: a list write RETURNS ONLY once the local row is
+     *  committed, so a read tool in the SAME round sees it. The writes used to be
+     *  fire-and-forget — "add milk then read the list back" showed no milk. */
+    @Test fun listWritesAreCommittedBeforeTheNextToolReadsThem() = runTest {
+        val vm = vm()
+        val created = vm.runAssistantTool("create_list", buildJsonObject { put("name", "Shopping") }, HashMap(), HashMap())
+        val id = Regex("id=(\\S+)").find(created)!!.groupValues[1].trimEnd(']')
+        assertEquals("ok: added to \"Shopping\"", vm.tool("add_to_list", buildJsonObject { put("listId", id); put("body", "Milk") }))
+        // No dispatcher hop between the two calls — the harness runs them back to back.
+        assertTrue("the read must see the write", vm.tool("get_lists", buildJsonObject { put("listId", id) }).contains("Milk"))
+        vm.tool("rename_list", buildJsonObject { put("listId", id); put("name", "Groceries") })
+        assertTrue(vm.tool("get_lists").contains("Groceries"))
+        vm.tool("archive_list", buildJsonObject { put("listId", id); put("archived", true) })
+        assertEquals("ok: no lists yet", vm.tool("get_lists"))
+        vm.tool("delete_list", buildJsonObject { put("listId", id) })
+        assertEquals("ok: no lists yet", vm.tool("get_lists", buildJsonObject { put("includeArchived", true) }))
+    }
+
+    /** Everything the VOICE assistant writes gets the same receipt the text
+     *  harness shows, and they land in the shared thread when the session ends —
+     *  with their Undo still working. */
+    @Test fun voiceToolReceiptsLandInTheThreadWhenTheSessionEnds() = runTest {
+        val vm = vm()
+        vm.resetVoiceScratch()
+        val result = vm.runVoiceTool("create_task", buildJsonObject { put("name", "Call the dentist") })
+        assertTrue(result, result.startsWith("ok"))
+        val r = vm.voiceReceipts.value.single()
+        assertEquals("Created “Call the dentist”", r.label)
+        assertEquals(ReceiptUndoKind.DELETE_TASK, r.undo?.kind)
+        assertTrue("nothing lands mid-session", vm.assistantHistory.none { it.content == VOICE_SESSION_RECEIPTS })
+
+        vm.endVoiceSession()
+        settleUntil { vm.assistantHistory.any { it.content == VOICE_SESSION_RECEIPTS } }
+        val turn = vm.assistantHistory.single { it.content == VOICE_SESSION_RECEIPTS }
+        assertTrue("display-only — never re-sent to the model", turn.local)
+        assertEquals(listOf(r), turn.receipts)
+        assertTrue("consumed", vm.voiceReceipts.value.isEmpty())
+
+        // The Undo still works from the thread — the whole point of landing them.
+        vm.undoAssistantReceipt(turn.id!!, 0)
+        settleUntil { vm.assistantHistory.first { it.id == turn.id }.receipts?.first()?.undone == true }
+        assertTrue("the task is gone", vm.assistantApi.getTasks().none { it.name == "Call the dentist" })
+
+        // A session that wrote nothing leaves nothing behind.
+        vm.resetVoiceScratch()
+        vm.endVoiceSession()
+        advanceUntilIdle()
+        assertEquals(1, vm.assistantHistory.count { it.content == VOICE_SESSION_RECEIPTS })
+    }
+
+    /**
+     * The two voice surfaces don't hand over cleanly: a call ringing over the
+     * Talk overlay stops Talk's client through audio focus, but the holder only
+     * lands its receipts when the SCREEN is dismissed — after the answered
+     * call's `sessionWillStart` has already reset the scratch. Starting a
+     * session must therefore LAND what the last one left, never discard it.
+     */
+    @Test fun aNewVoiceSessionLandsTheLastOnesReceiptsInsteadOfDroppingThem() = runTest {
+        val vm = vm()
+        vm.resetVoiceScratch()
+        assertTrue(vm.runVoiceTool("create_task", buildJsonObject { put("name", "Book the dentist") }).startsWith("ok"))
+        assertEquals(1, vm.voiceReceipts.value.size)
+
+        // The call starts without the Talk overlay ever having been dismissed.
+        vm.resetVoiceScratch()
+        settleUntil { vm.assistantHistory.any { it.content == VOICE_SESSION_RECEIPTS } }
+        val turn = vm.assistantHistory.single { it.content == VOICE_SESSION_RECEIPTS }
+        assertEquals("Created “Book the dentist”", turn.receipts?.single()?.label)
+        assertTrue("the new session starts empty", vm.voiceReceipts.value.isEmpty())
+
+        // Sign-out is the one path that drops them: they point at the previous
+        // account's rows and the thread is being erased in the same breath.
+        assertTrue(vm.runVoiceTool("create_task", buildJsonObject { put("name", "Renew the passport") }).startsWith("ok"))
+        assertEquals(1, vm.voiceReceipts.value.size)
+        vm.scrubAssistantUserState()
+        advanceUntilIdle()
+        assertTrue(vm.voiceReceipts.value.isEmpty())
+        assertEquals("nothing landed", 1, vm.assistantHistory.count { it.content == VOICE_SESSION_RECEIPTS })
     }
 
     @Test fun forgetProfileFact_tombstonesAndForgetAllClears() = runTest {

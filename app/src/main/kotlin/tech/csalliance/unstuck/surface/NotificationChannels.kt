@@ -26,6 +26,13 @@ object NotificationChannels {
     const val FOCUS_ONGOING = "focus_timer"     // B1 — live focus session (LOW, ongoing; existing id)
     const val COLLAB = "unstuck_collab"         // shared-list collaboration: shared/done/late (HIGH heads-up)
     const val CALLS = "unstuck_calls"           // "Unstuck calls you" — the ring (HIGH, ringtone + vibration, full-screen)
+    /** The LIVE conversation's foreground-service notification (DEFAULT, silent,
+     *  ongoing). Its own channel on purpose: it carries the "End" action — the
+     *  only way to hang up from outside the app — so it must not ride on
+     *  [FOCUS_ONGOING], a channel a user may reasonably switch off to silence the
+     *  focus timer, and an active call must not read as a low-priority
+     *  "Focus session" entry in the shade. */
+    const val CALL_ONGOING = "unstuck_call_ongoing"
 
     /** Brand accents for notification tint (running = coral, paused = amber). */
     const val CORAL = 0xFFE89077.toInt()
@@ -34,12 +41,13 @@ object NotificationChannels {
     fun ensureAll(context: Context) {
         val mgr = context.getSystemService(NotificationManager::class.java) ?: return
         mgr.createNotificationChannelGroup(NotificationChannelGroup(GROUP, "Unstuck"))
-        fun ch(id: String, name: String, importance: Int, silent: Boolean = false, desc: String? = null) {
+        fun ch(id: String, name: String, importance: Int, silent: Boolean = false, desc: String? = null, vibrate: Boolean = true) {
             val c = NotificationChannel(id, name, importance).apply {
                 group = GROUP
                 setShowBadge(false)
                 lockscreenVisibility = Notification.VISIBILITY_PRIVATE
                 if (silent) setSound(null, null)
+                if (!vibrate) enableVibration(false)
                 if (desc != null) description = desc
             }
             mgr.createNotificationChannel(c)
@@ -51,6 +59,12 @@ object NotificationChannels {
         ch(NUDGES, "Gentle nudges", NotificationManager.IMPORTANCE_MIN, silent = true)
         ch(FOCUS_ONGOING, "Focus session", NotificationManager.IMPORTANCE_LOW, desc = "Shows the running focus timer")
         ch(COLLAB, "Shared lists", NotificationManager.IMPORTANCE_HIGH, desc = "When a shared list is shared with you, finished, or running late")
+        // The live call's own ongoing entry. DEFAULT (not LOW) so it sits with the
+        // conversation rather than under the fold, and silent + no vibration
+        // because the phone is already in one. Never FOCUS_ONGOING: silencing the
+        // focus timer — a reasonable thing to do — would otherwise take the only
+        // hang-up affordance away while the microphone kept running.
+        ch(CALL_ONGOING, "Ongoing call", NotificationManager.IMPORTANCE_DEFAULT, silent = true, vibrate = false, desc = "Shows the call you're on with Unstuck, with an End button")
         // The ring channel: HIGH so it heads-up / full-screens, the device's
         // RINGTONE (not the notification tone) under USAGE_NOTIFICATION_RINGTONE so
         // it follows the ringer volume + silent/vibrate modes like a phone call,

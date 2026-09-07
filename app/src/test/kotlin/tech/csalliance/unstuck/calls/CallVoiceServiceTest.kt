@@ -1,5 +1,6 @@
 package tech.csalliance.unstuck.calls
 
+import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
@@ -10,14 +11,19 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
+import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
+import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import tech.csalliance.unstuck.core.logic.CallScript
 import tech.csalliance.unstuck.core.logic.IncomingCallPayload
+import tech.csalliance.unstuck.surface.NotificationChannels
 import tech.csalliance.unstuck.ui.assistant.CallMode
 
 /**
@@ -69,5 +75,63 @@ class CallVoiceServiceTest {
         payload.toData().forEach { (k, v) -> i.putExtra("p.$k", v) }
         assertEquals(payload, CallVoiceService.payloadFrom(i))
         assertNull(CallVoiceService.payloadFrom(Intent(app, CallVoiceService::class.java).setAction(CallVoiceService.ACTION_END)))
+    }
+
+    /**
+     * The in-call notification carries the End action — the only hang-up outside
+     * the app — so it gets its own channel. On FOCUS_ONGOING ("Focus session",
+     * LOW, "shows the running focus timer") a user who had silenced the focus
+     * timer lost the End button while the microphone kept running, and a live
+     * call read as a low-priority focus entry in the shade.
+     */
+    @Test fun `the in-call notification is on the call-ongoing channel, not the focus timer`() {
+        val start = Intent(app, CallVoiceService::class.java)
+        payload.toData().forEach { (k, v) -> start.putExtra("p.$k", v) }
+        val controller = Robolectric.buildService(CallVoiceService::class.java, start).create()
+        controller.startCommand(0, 0)
+        val shadow = shadowOf(controller.get())
+        val n = shadow.lastForegroundNotification
+        assertNotNull("the 5 s startForeground contract is honoured unconditionally", n)
+        assertEquals(NotificationChannels.CALL_ONGOING, n.channelId)
+        assertEquals(CallVoiceService.NOTIF_ID, shadow.lastForegroundNotificationId)
+        assertTrue("the End action is what the channel has to keep reachable", n.actions.any { it.title == "End" })
+        // Created before the notification is posted, and silent: the phone is
+        // already in a conversation.
+        val ch = app.getSystemService(NotificationManager::class.java).getNotificationChannel(NotificationChannels.CALL_ONGOING)
+        assertNotNull(ch)
+        assertNull("silent", ch.sound)
+        assertFalse(ch.shouldVibrate())
+        controller.destroy()
+    }
+
+    /**
+     * Sign-out with a call still up. The microphone foreground service, its
+     * AudioRecord and the realtime socket all ran on the JWT captured at dial
+     * time, so without this the previous account kept talking (and listening)
+     * straight through the next sign-in. `signedOut` must:
+     *  - drop the service and clear `activeCallId` (so the Talk gate and the
+     *    ring's busy check both go free), and
+     *  - report NOTHING — an outcome queued here would ride the NEXT account's
+     *    token and come back 404 (the ring record is cleared by the same scrub).
+     */
+    @Test fun `sign-out abandons a live call, silently`() {
+        CallOutcomeStore.clear(app)
+        val start = Intent(app, CallVoiceService::class.java)
+        payload.toData().forEach { (k, v) -> start.putExtra("p.$k", v) }
+        val controller = Robolectric.buildService(CallVoiceService::class.java, start).create()
+        controller.startCommand(0, 0)
+        assertEquals(payload.callId, CallVoiceService.activeCallId)
+        assertEquals("the observable form the in-call bar reads must agree", payload.callId, CallVoiceService.activeCall.value)
+
+        CallVoiceService.signedOut(app)
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+
+        assertNull("a live call must not outlive the account", CallVoiceService.activeCallId)
+        assertNull(CallVoiceService.activeCall.value)
+        assertTrue("nothing may be reported under a dead JWT", CallOutcomeStore.load(app).isEmpty)
+        // ENDED before the teardown, so the destroy that follows can't turn the
+        // abandoned call into a reported `done`.
+        controller.destroy()
+        assertTrue(CallOutcomeStore.load(app).isEmpty)
     }
 }

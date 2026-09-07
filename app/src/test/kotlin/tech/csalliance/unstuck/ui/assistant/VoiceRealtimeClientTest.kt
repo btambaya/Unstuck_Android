@@ -135,12 +135,22 @@ class VoiceRealtimeClientTest {
         message("""{"type":"response.function_call_arguments.done","name":"$name","call_id":"$callId","arguments":"{}"}""")
 
     /** The tool runs on Dispatchers.IO: wait for its output, then let the
-     *  coalesced response.create fire on the (paused) main looper. */
+     *  coalesced response.create fire on the (paused) main looper.
+     *
+     *  That continue is POSTED from the same IO coroutine a beat AFTER the
+     *  output reaches the socket, so a single `idleFor` can run before the post
+     *  and leave the runnable scheduled past the already-advanced clock — the
+     *  flaky "expected response.create but was conversation.item.create". Pump
+     *  until it has actually landed (bounded, like the wait above). */
     private fun awaitToolOutput(s: FakeSocket, expected: Int) {
         var waited = 0
         while (s.toolOutputs() < expected && waited < 5_000) { Thread.sleep(10); waited += 10 }
         assertEquals("tool output sent", expected, s.toolOutputs())
-        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(VoiceRealtimeClient.CONTINUE_DELAY_MS + 50))
+        waited = 0
+        while (s.types().lastOrNull() != "response.create" && waited < 5_000) {
+            shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(VoiceRealtimeClient.CONTINUE_DELAY_MS + 50))
+            Thread.sleep(10); waited += 10
+        }
     }
 
     private fun openSession(runTool: suspend (String, kotlinx.serialization.json.JsonObject) -> String = { _, _ -> "ok" }): Pair<FakeFactory, FakeSocket> {

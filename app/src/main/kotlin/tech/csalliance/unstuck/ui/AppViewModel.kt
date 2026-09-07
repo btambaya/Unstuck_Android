@@ -80,6 +80,7 @@ import tech.csalliance.unstuck.core.logic.MomentAction
 import tech.csalliance.unstuck.core.logic.MomentRun
 import tech.csalliance.unstuck.core.logic.addDaysIso
 import tech.csalliance.unstuck.core.logic.AssistantHarness
+import tech.csalliance.unstuck.core.logic.AssistantHarnessRules
 import tech.csalliance.unstuck.core.logic.HarnessAsk
 import tech.csalliance.unstuck.core.logic.HarnessAskFailed
 import tech.csalliance.unstuck.core.logic.HarnessMessage
@@ -433,19 +434,44 @@ class AppViewModel(
         // and drop the share (T2). Empty for callers that don't share (e.g. onboarding).
         shares: Map<String, ShareLevel> = emptyMap(),
     ): TaskItem {
-        val now = isoNow()
-        val t = TaskItem(
-            id = newUuid(), name = name.trim(), estimateMin = estimateMin, priority = priority,
-            lifeArea = lifeArea, tags = tags, intentWhen = intentWhen, intentThen = intentThen,
-            firstPhysicalAction = firstPhysicalAction, recurrence = recurrence, later = later,
-            sourceCollectionId = sourceCollectionId, sourceItemId = sourceItemId, dueAt = dueAt,
-            createdAt = now, updatedAt = now,
+        val t = newTaskRow(
+            name = name, estimateMin = estimateMin, priority = priority, lifeArea = lifeArea, tags = tags,
+            intentWhen = intentWhen, intentThen = intentThen, firstPhysicalAction = firstPhysicalAction,
+            recurrence = recurrence, later = later, sourceCollectionId = sourceCollectionId,
+            sourceItemId = sourceItemId, dueAt = dueAt,
         )
         launchWrite {
             write?.upsertTask(t)                                   // local write + enqueue (this coroutine)
             if (shares.isNotEmpty()) applyCreatedShares(t.id, shares)   // then flush + share, ordered
         }
         return t
+    }
+
+    /** The row [addTask] writes — shared with the awaited promote path
+     *  ([moveItemToTaskNow]) so the two can never drift on defaults. */
+    private fun newTaskRow(
+        name: String,
+        estimateMin: Int = 25,
+        priority: Priority? = null,
+        lifeArea: String? = null,
+        tags: List<String>? = null,
+        intentWhen: String? = null,
+        intentThen: String? = null,
+        firstPhysicalAction: String? = null,
+        recurrence: Recurrence? = null,
+        later: Boolean = false,
+        sourceCollectionId: String? = null,
+        sourceItemId: String? = null,
+        dueAt: String? = null,
+    ): TaskItem {
+        val now = isoNow()
+        return TaskItem(
+            id = newUuid(), name = name.trim(), estimateMin = estimateMin, priority = priority,
+            lifeArea = lifeArea, tags = tags, intentWhen = intentWhen, intentThen = intentThen,
+            firstPhysicalAction = firstPhysicalAction, recurrence = recurrence, later = later,
+            sourceCollectionId = sourceCollectionId, sourceItemId = sourceItemId, dueAt = dueAt,
+            createdAt = now, updatedAt = now,
+        )
     }
 
     /** Apply the create-sheet's opt-in shares AFTER the task row has landed on the
@@ -556,7 +582,10 @@ class AppViewModel(
      * - recurring tasks diff via regenerateForTask instead of blindly inserting a
      *   whole new horizon every tap.
      */
-    fun scheduleTask(task: TaskItem, date: String, startTime: String) = launchWrite {
+    fun scheduleTask(task: TaskItem, date: String, startTime: String) = launchWrite { scheduleTaskNow(task, date, startTime) }
+
+    /** [scheduleTask], committed before returning. */
+    private suspend fun scheduleTaskNow(task: TaskItem, date: String, startTime: String) {
         val recurrence = task.recurrence
         val existing = blocks.value.filter { it.taskId == task.id && tech.csalliance.unstuck.core.logic.isTaskBlock(it) }
         if (recurrence != null) {
@@ -1813,7 +1842,10 @@ class AppViewModel(
     // --- collections ---
 
     fun upsertCollection(c: ItemCollection) = launchWrite { write?.upsertCollection(c) }
-    fun deleteCollection(id: String) = launchWrite { write?.deleteCollection(id) }
+    fun deleteCollection(id: String) = launchWrite { deleteCollectionNow(id) }
+    /** [deleteCollection], committed before returning (the assistant executor
+     *  reads the lists back in the same round). */
+    suspend fun deleteCollectionNow(id: String) { write?.deleteCollection(id) }
 
     // --- shared-collection helpers (migration 020/022) ---
     internal fun currentUid(): String? = currentUidProvider?.invoke() ?: auth?.currentUserId
@@ -1835,7 +1867,12 @@ class AppViewModel(
     // clobber each other's items array. Each mutation is serialized + re-resolves
     // the LATEST collection from Room first (web's functional-update guard).
     private val collectionMutex = Mutex()
-    private fun mutateCollection(id: String, transform: (ItemCollection) -> ItemCollection) = launchWrite {
+    private fun mutateCollection(id: String, transform: (ItemCollection) -> ItemCollection) = launchWrite { mutateCollectionNow(id, transform) }
+    /** [mutateCollection], COMMITTED before returning. The assistant executor
+     *  reads its own writes back inside a single turn (rename_list then get_lists
+     *  in one round), so its entry points must await the local commit — the
+     *  fire-and-forget launch made those reads miss the change (review section 4). */
+    private suspend fun mutateCollectionNow(id: String, transform: (ItemCollection) -> ItemCollection) {
         collectionMutex.withLock {
             val latest = store.collections().first().firstOrNull { it.id == id } ?: return@withLock
             val next = transform(latest)
@@ -1854,7 +1891,13 @@ class AppViewModel(
         id: String,
         transform: (ItemCollection) -> ItemCollection,
         rpc: () -> tech.csalliance.unstuck.sync.CollectionRpc,
-    ) = launchWrite {
+    ) = launchWrite { mutateCollectionItemNow(id, transform, rpc) }
+    /** [mutateCollectionItem], COMMITTED before returning (see [mutateCollectionNow]). */
+    private suspend fun mutateCollectionItemNow(
+        id: String,
+        transform: (ItemCollection) -> ItemCollection,
+        rpc: () -> tech.csalliance.unstuck.sync.CollectionRpc,
+    ) {
         collectionMutex.withLock {
             val latest = store.collections().first().firstOrNull { it.id == id } ?: return@withLock
             val next = transform(latest)
@@ -1872,16 +1915,20 @@ class AppViewModel(
             }
         }
     }
-    fun addCollectionItem(col: ItemCollection, body: String) {
+    fun addCollectionItem(col: ItemCollection, body: String) = launchWrite { addCollectionItemNow(col, body) }
+    /** [addCollectionItem], committed before returning (the assistant executor). */
+    suspend fun addCollectionItemNow(col: ItemCollection, body: String) {
         val text = body.trim(); if (text.isEmpty()) return
         val item = tech.csalliance.unstuck.core.model.CollectionItem(newUuid(), text, at = isoNow())
-        mutateCollectionItem(col.id,
+        mutateCollectionItemNow(col.id,
             { it.copy(items = it.items + item) },
             { CollectionRpcs.addItem(col.id, item.id, item.body, item.at) })
     }
-    fun updateCollectionItemBody(col: ItemCollection, itemId: String, body: String) {
+    fun updateCollectionItemBody(col: ItemCollection, itemId: String, body: String) = launchWrite { updateCollectionItemBodyNow(col, itemId, body) }
+    /** [updateCollectionItemBody], committed before returning. */
+    suspend fun updateCollectionItemBodyNow(col: ItemCollection, itemId: String, body: String) {
         val text = body.trim()
-        mutateCollectionItem(col.id,
+        mutateCollectionItemNow(col.id,
             { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(body = text) else it }) },
             { CollectionRpcs.updateItem(col.id, itemId, text) })
     }
@@ -1891,14 +1938,18 @@ class AppViewModel(
             { c -> c.copy(items = c.items.map { if (it.id == itemId) { nextVal = !(it.pinned ?: false); it.copy(pinned = nextVal) } else it }) },
             { CollectionRpcs.setItemFlag(col.id, itemId, "pinned", nextVal) })
     }
-    fun toggleCollectionItemDone(col: ItemCollection, itemId: String) {
+    fun toggleCollectionItemDone(col: ItemCollection, itemId: String) = launchWrite { toggleCollectionItemDoneNow(col, itemId) }
+    /** [toggleCollectionItemDone], committed before returning. */
+    suspend fun toggleCollectionItemDoneNow(col: ItemCollection, itemId: String) {
         var nextVal = false
-        mutateCollectionItem(col.id,
+        mutateCollectionItemNow(col.id,
             { c -> c.copy(items = c.items.map { if (it.id == itemId) { nextVal = !(it.done ?: false); it.copy(done = nextVal) } else it }) },
             { CollectionRpcs.setItemFlag(col.id, itemId, "done", nextVal) })
     }
-    fun removeCollectionItem(col: ItemCollection, itemId: String) {
-        mutateCollectionItem(col.id,
+    fun removeCollectionItem(col: ItemCollection, itemId: String) = launchWrite { removeCollectionItemNow(col, itemId) }
+    /** [removeCollectionItem], committed before returning. */
+    suspend fun removeCollectionItemNow(col: ItemCollection, itemId: String) {
+        mutateCollectionItemNow(col.id,
             { c -> c.copy(items = c.items.filterNot { it.id == itemId }) },
             { CollectionRpcs.removeItem(col.id, itemId) })
     }
@@ -1907,49 +1958,63 @@ class AppViewModel(
      *  screen shows them. Empty flow when there's no sync engine (tests / demo). */
     val collectionSyncErrors: kotlinx.coroutines.flow.Flow<String>
         get() = graph.coordinator?.collectionSyncErrors ?: kotlinx.coroutines.flow.emptyFlow()
-    fun renameCollection(col: ItemCollection, name: String) {
-        val nm = name.trim(); if (nm.isNotEmpty()) mutateCollection(col.id) { it.copy(name = nm) }
+    fun renameCollection(col: ItemCollection, name: String) = launchWrite { renameCollectionNow(col, name) }
+    /** [renameCollection], committed before returning. */
+    suspend fun renameCollectionNow(col: ItemCollection, name: String) {
+        val nm = name.trim(); if (nm.isNotEmpty()) mutateCollectionNow(col.id) { it.copy(name = nm) }
     }
     fun recolorCollection(col: ItemCollection, color: String) = mutateCollection(col.id) { it.copy(color = color) }
+    /** [recolorCollection], committed before returning. */
+    suspend fun recolorCollectionNow(col: ItemCollection, color: String) = mutateCollectionNow(col.id) { it.copy(color = color) }
     fun archiveCollection(id: String, archived: Boolean) = mutateCollection(id) { it.copy(archived = archived) }
+    /** [archiveCollection], committed before returning. */
+    suspend fun archiveCollectionNow(id: String, archived: Boolean) = mutateCollectionNow(id) { it.copy(archived = archived) }
 
     // --- Move to task (promote a collection item to a task) ---
     enum class PromoteMode { SELF, LOOP }   // LOOP = keep everyone in the loop (shared accountability)
 
     /** Mark an item as promoted (struck + status chip), synced to all members on
      *  a shared list. done = false → "on it", null → static "Promoted". */
-    private fun markItemPromoted(col: ItemCollection, itemId: String, assignee: String, done: Boolean?, dueAt: String?) {
-        mutateCollectionItem(col.id,
+    private suspend fun markItemPromotedNow(col: ItemCollection, itemId: String, assignee: String, done: Boolean?, dueAt: String?) {
+        mutateCollectionItemNow(col.id,
             { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(promoted = true, assignee = assignee, promotedDone = done, dueAt = dueAt) else it }) },
             { CollectionRpcs.setItemPromotion(col.id, itemId, assignee, done, dueAt) })
     }
 
     /** Turn a collection item into a task. LOOP on a shared list links the task to
      *  the item (so completion/lateness flows back to everyone) + sets a "by" time. */
-    fun moveItemToTask(col: ItemCollection, item: CollectionItem, mode: PromoteMode, dueAtIso: String? = null) {
+    fun moveItemToTask(col: ItemCollection, item: CollectionItem, mode: PromoteMode, dueAtIso: String? = null) =
+        launchWrite { moveItemToTaskNow(col, item, mode, dueAtIso) }
+
+    /** [moveItemToTask], every write COMMITTED before returning — the assistant's
+     *  `promote_item_to_task` reads the task and the list back in the same turn.
+     *  Returns the new task, or null when the guard refused (already in flight). */
+    suspend fun moveItemToTaskNow(col: ItemCollection, item: CollectionItem, mode: PromoteMode, dueAtIso: String? = null): TaskItem? {
         // Guard: don't duplicate a task for an item that's already promoted + in
         // flight (a completed one may be re-promoted for a fresh cycle).
-        if (item.promoted == true && item.promotedDone != true) return
+        if (item.promoted == true && item.promotedDone != true) return null
         val loop = mode == PromoteMode.LOOP && isShared(col)
-        val task = addTask(
+        val task = newTaskRow(
             name = item.body, estimateMin = 25, tags = listOf("from-collection"),
             sourceCollectionId = if (loop) col.id else null,
             sourceItemId = if (loop) item.id else null,
             dueAt = if (loop) dueAtIso else null,
         )
+        write?.upsertTask(task) ?: store.upsert(tech.csalliance.unstuck.data.db.Tables.TASKS, task, TaskItem.serializer(), task.id, task.updatedAt)
         // Schedule keep-in-loop tasks at the "by" time so they show on the calendar.
         if (loop && dueAtIso != null) {
             runCatching { java.time.Instant.parse(dueAtIso).atZone(java.time.ZoneId.systemDefault()) }.getOrNull()?.let { z ->
-                scheduleTask(task, z.toLocalDate().toString(), String.format("%02d:%02d", z.hour, z.minute))
+                scheduleTaskNow(task, z.toLocalDate().toString(), String.format("%02d:%02d", z.hour, z.minute))
             }
         }
         // "Just me" on a SHARED list must NOT announce to the others (it would mark the
         // shared item "<you>'s on it" for everyone with no way to clear). Only mark when
         // keeping-in-loop, or on a solo list (where it's a local-only "Promoted" chip).
         if (loop || !isShared(col)) {
-            markItemPromoted(col, item.id, assignee = currentName ?: "Someone",
+            markItemPromotedNow(col, item.id, assignee = currentName ?: "Someone",
                 done = if (loop) false else null, dueAt = if (loop) dueAtIso else null)
         }
+        return task
     }
 
     // --- collection sharing (edge function-backed) ---
@@ -2767,6 +2832,13 @@ class AppViewModel(
         // The call settings share the file (calls.<field>.<uid>) — cleared with it
         // (risk 9); the explicit per-uid clear covers a uid still known here.
         currentUid()?.let { uid -> runCatching { tech.csalliance.unstuck.calls.CallSettingsStore.clear(graph.appContext, uid) } }
+        // A LIVE call must not outlive the account either: the microphone
+        // foreground service, its AudioRecord and the realtime socket keep
+        // streaming under the JWT captured at dial time, and its outcome would
+        // land in the queue for the NEXT account's token. Torn down FIRST (before
+        // the ring state is cleared) and with NO outcome reported — the token is
+        // already gone. iOS signedOut parity.
+        runCatching { tech.csalliance.unstuck.calls.CallVoiceService.signedOut(graph.appContext) }
         // A ring / an unsent outcome must never survive into the NEXT account
         // (iOS signedOut parity): the queue would be replayed with the new JWT
         // (call-outcome answers not_found for every item) and the ring would
@@ -2782,12 +2854,32 @@ class AppViewModel(
         _profileFactsHydrated.value = false
         _momentDone.value = null
         interviewAutoOpenGate = InterviewAutoOpenGate()
+        // The voice session's un-landed receipts point at the PREVIOUS account's
+        // rows, and their Undo would write them. `signedOut` abandons a live call
+        // WITHOUT calling [endVoiceSession] (nothing may be reported under a dead
+        // JWT), so nothing else drops them until the next session dials — and
+        // `voiceReceipts` is public, so a surface rendering it would be showing
+        // the last account's edits to the new one.
+        dropVoiceSession()
     }
 
     // profile facts (app-facing sugar over the service)
 
     override suspend fun saveProfileFact(category: ProfileFactCategory, fact: String, source: ProfileFactSource, whenIso: String?): ProfileFact? =
         profileFactsService.save(category, fact, source, whenIso)
+
+    /** Edit one remembered fact IN PLACE (Settings → "What Unstuck knows"): the
+     *  same row and id, `updatedAt` bumped; a fresh save only when the row has
+     *  vanished. The Result carries the [ProfileFactSaveError] so the panel can
+     *  tell the user why nothing changed instead of silently reverting. */
+    override suspend fun updateProfileFact(id: String, fact: String, whenIso: String?): Result<ProfileFact> =
+        try {
+            Result.success(profileFactsService.update(id, fact, whenIso))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Result.failure(e)
+        }
 
     override suspend fun forgetProfileFact(id: String): Boolean = profileFactsService.remove(id)
 
@@ -2801,10 +2893,13 @@ class AppViewModel(
 
     /** "Don't use my name" / "call me X" saved deterministically from the user's own
      *  words before the model sees them; the receipt is attached to the closing turn. */
-    private suspend fun saveStylePreference(userText: String): Receipt? {
+    internal suspend fun saveStylePreference(userText: String): Receipt? {
         val pref = ProfileFactsLogic.detectStylePreference(userText) ?: return null
         val stored = profileFactsService.saveStylePreference(pref) ?: return null
-        return Receipt(ReceiptIcon.PENCIL, "Noted: ${stored.fact}")
+        // The receipt IS the consent UX for a fact that then rides in every
+        // future prompt — so it carries the same one-tap "forget" web and iOS
+        // attach (review section 4); without it the only way back was Settings.
+        return Receipt(ReceiptIcon.PENCIL, "Noted: ${stored.fact}", ReceiptUndo.forgetFact(stored.id))
     }
 
     // ONE endless thread (redesign 2026-08-02): DISPLAY history persists long
@@ -2832,11 +2927,12 @@ class AppViewModel(
         name = name, id = newUuid(), at = nowMs(), local = local,
     )
 
-    /** Inject a LOCAL display-only assistant turn (the daily check-in). Never
-     *  enters the model window; persists like any other display turn. */
-    fun appendLocalAssistant(content: String) {
+    /** Inject a LOCAL display-only assistant turn (the daily check-in, a voice
+     *  session's receipts). Never enters the model window; persists like any
+     *  other display turn — receipts included, so their Undo keeps working. */
+    fun appendLocalAssistant(content: String, receipts: List<Receipt>? = null) {
         if (content.isBlank()) return
-        assistantHistory.add(turn("assistant", content = content, local = true))
+        assistantHistory.add(turn("assistant", content = content, local = true).copy(receipts = receipts?.takeIf { it.isNotEmpty() }))
         persistAssistant()
     }
 
@@ -3035,7 +3131,14 @@ class AppViewModel(
         val base = window.dropLast(1).map { it.toHarness() }
 
         val ask = HarnessAsk { messages ->
-            when (val r = a.ask(messages.map { it.toChat() }, buildAssistantContext(api))) {
+            // The context snapshot decodes ~9 whole Room tables to JSON. The turn
+            // runs on viewModelScope (Dispatchers.Main.immediate) and never hopped
+            // dispatcher, so that decode ran on the UI thread once per model round
+            // — the one place the codebase's own "decode off the main thread" rule
+            // was missed (review section 4). Off Main now.
+            val wire = messages.map { it.toChat() }
+            val context = withContext(Dispatchers.Default) { buildAssistantContext(api) }
+            when (val r = a.ask(wire, context)) {
                 is AssistantResult.Ok -> HarnessReply(
                     text = r.reply.content,
                     toolCalls = r.reply.toolCalls.orEmpty().map { HarnessToolCall(it.id, it.function.name, it.function.arguments) },
@@ -3044,15 +3147,21 @@ class AppViewModel(
                 is AssistantResult.Err -> throw AssistantAskException(r.code)
             }
         }
+        // Tool execution decodes the same tables again (create_tasks → scheduleTask
+        // reads blocks + tasks per item) — also off Main. Nothing the executor
+        // touches is Compose state; only the assistantHistory mutations below
+        // stay on Main.immediate.
         val runner = HarnessToolRunner { call ->
-            val args = ToolArgs.parse(call.argumentsJson)
-            val result = runAssistantTool(call.name, args, api, scratch)
-            // Deterministic receipts for everything this turn actually changed —
-            // from the tool name + args + the executor's own result string, never
-            // from the model's prose. Scratch rows first so an in-flight
-            // completion resolves its undo target.
-            deriveReceipt(call.name, args.receiptArgs, result, scratch.newTasks.values.toList() + api.getTasks())?.let { receipts += it }
-            result
+            withContext(Dispatchers.Default) {
+                val args = ToolArgs.parse(call.argumentsJson)
+                val result = runAssistantTool(call.name, args, api, scratch)
+                // Deterministic receipts for everything this turn actually changed —
+                // from the tool name + args + the executor's own result string, never
+                // from the model's prose. Scratch rows first so an in-flight
+                // completion resolves its undo target.
+                deriveReceipt(call.name, args.receiptArgs, result, scratch.newTasks.values.toList() + api.getTasks())?.let { receipts += it }
+                result
+            }
         }
         val outcome = try {
             AssistantHarness(ask, runner).turn(base, text)
@@ -3083,9 +3192,19 @@ class AppViewModel(
         return AssistantTurn.Reply(closing)
     }
 
-    private fun ChatMessage.toHarness() = HarnessMessage(
+    /** A persisted turn on its way back INTO the harness. The `arguments` string
+     *  is re-normalised here, not just when a fresh reply is stored: a thread
+     *  poisoned before the hygiene fix (a `finish_reason=length` tool_call whose
+     *  arguments are "" or cut-off JSON) is replayed verbatim on every later
+     *  turn, and DashScope 400s the WHOLE request ("function.arguments … must be
+     *  in JSON format") — every turn failed forever and the only escape erased
+     *  the thread. Normalising on replay repairs the old conversation instead
+     *  (review section 4). A valid object is passed through untouched. */
+    internal fun ChatMessage.toHarness() = HarnessMessage(
         role = role, content = content,
-        toolCalls = toolCalls.orEmpty().map { HarnessToolCall(it.id, it.function.name, it.function.arguments) },
+        toolCalls = toolCalls.orEmpty().map {
+            HarnessToolCall(it.id, it.function.name, AssistantHarnessRules.argumentsAsObjectJson(it.function.arguments))
+        },
         toolCallId = toolCallId, name = name,
     )
 
@@ -3143,9 +3262,65 @@ class AppViewModel(
     fun voiceAccessToken(): String? = graph.provider?.client?.auth?.currentSessionOrNull()?.accessToken
 
     private val voiceScratch = TurnScratch()
-    fun resetVoiceScratch() { voiceScratch.clear() }
-    suspend fun runVoiceTool(name: String, args: JsonObject): String =
-        runAssistantTool(name, ToolArgs(args), assistantApi, voiceScratch)
+
+    /** Receipts for what THIS voice session actually changed (oldest first). The
+     *  overlay can show them live; [endVoiceSession] lands the un-undone ones in
+     *  the shared thread so nothing the voice assistant wrote is invisible or
+     *  un-undoable (iOS `voiceReceipts` / web voice-mode parity — the receipt IS
+     *  the consent UX; review section 4). */
+    private val _voiceReceipts = MutableStateFlow<List<Receipt>>(emptyList())
+    val voiceReceipts: StateFlow<List<Receipt>> = _voiceReceipts.asStateFlow()
+
+    /**
+     * Start of a session: drop the mid-session entities, and LAND — never
+     * discard — anything the previous session left un-landed.
+     *
+     * The two voice surfaces do not hand over cleanly. A call ringing while the
+     * Talk overlay is up stops Talk's client through audio focus, but the
+     * holder only lands its receipts when the SCREEN is dismissed — which is
+     * usually after the answered call's `sessionWillStart` has run this. A plain
+     * `_voiceReceipts.value = emptyList()` here threw away everything the Talk
+     * session had just written, Undo and all. [endVoiceSession] is idempotent
+     * and a no-op for a session that wrote nothing, so this costs nothing in
+     * the normal case. ([dropVoiceSession] is the sign-out path, where the
+     * thread itself is being erased.)
+     */
+    fun resetVoiceScratch() {
+        endVoiceSession()
+        voiceScratch.clear()
+    }
+
+    /** Sign-out: forget the voice session WITHOUT landing its receipts — they
+     *  point at the previous account's rows and the thread is being erased in
+     *  the same breath. */
+    private fun dropVoiceSession() {
+        voiceScratch.clear()
+        _voiceReceipts.value = emptyList()
+    }
+
+    suspend fun runVoiceTool(name: String, args: JsonObject): String {
+        val parsed = ToolArgs(args)
+        val result = runAssistantTool(name, parsed, assistantApi, voiceScratch)
+        // Derived exactly like the text harness: tool name + args + the executor's
+        // own result string, never model prose. Scratch rows first so a task
+        // created earlier in the SAME session resolves its undo target.
+        deriveReceipt(name, parsed.receiptArgs, result, voiceScratch.newTasks.values.toList() + assistantApi.getTasks())
+            ?.let { _voiceReceipts.value = _voiceReceipts.value + it }
+        return result
+    }
+
+    /** The session ended (overlay closed / call hung up): its receipts — and
+     *  their Undo — must not vanish with it. They land in the shared thread as
+     *  ONE local turn ("While we talked:"), which persists like any other.
+     *  Safe from any thread (a call's `sessionDidEnd` fires off Main). */
+    fun endVoiceSession() {
+        val rs = _voiceReceipts.value.filter { !it.undone }
+        _voiceReceipts.value = emptyList()
+        if (rs.isEmpty()) return
+        viewModelScope.launch(Dispatchers.Main.immediate) {
+            appendLocalAssistant(VOICE_SESSION_RECEIPTS, rs)
+        }
+    }
 
     /** What the voice assistant should do the instant a session opens — the
      *  interview branch on first contact, else a by-name hello (web parity). */
@@ -3437,6 +3612,10 @@ data class Nudge(
     val taskId: String? = null,
     val captureId: String? = null,
 )
+
+/** The local turn a finished voice session's receipts land under (iOS + web
+ *  use the same words). */
+const val VOICE_SESSION_RECEIPTS = "While we talked:"
 
 // ── "Test call now" (Settings → Calls) — copy from iOS CallSettingsView ──
 /** The label of the row "Test call now" books (a live one is cancelled before a retry). */

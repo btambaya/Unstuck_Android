@@ -86,6 +86,42 @@ class CallOutcomeStoreTest {
         assertTrue(CallOutcomeStore.load(app).isEmpty)
     }
 
+    /**
+     * The enqueue/flush race that silently dropped a report: the Answer tap
+     * queues `answered` and starts a flush; three seconds into that POST the
+     * model runs snooze_call and queues `snoozed`. The drain used to hold its
+     * in-memory copy across the suspending send and write it back on return,
+     * wiping the snooze — the server never got snooze_until, the cron never
+     * re-rang, and the user who had just been told "I'll call back in ten" never
+     * heard from us again.
+     */
+    @Test fun `an outcome queued while a send is in flight is not overwritten`() = runTest {
+        CallOutcomeStore.enqueue(app, "c1", CallOutcome.ANSWERED, nowMs = 1)
+        val sent = mutableListOf<CallOutcome>()
+        val n = CallOutcomeStore.flush(app, nowMs = { 10 }) { item ->
+            sent += item.outcome
+            // snooze_call runs while the `answered` POST is still in flight.
+            if (item.outcome == CallOutcome.ANSWERED) {
+                CallOutcomeStore.enqueue(app, "c1", CallOutcome.SNOOZED, snoozeMin = 10, nowMs = 2)
+            }
+            Result.success(Unit)
+        }
+        assertEquals(2, n)
+        assertEquals(listOf(CallOutcome.ANSWERED, CallOutcome.SNOOZED), sent)
+        assertTrue(CallOutcomeStore.load(app).isEmpty)
+    }
+
+    @Test fun `an outcome queued during a FAILING send survives behind the head`() = runTest {
+        CallOutcomeStore.enqueue(app, "c1", CallOutcome.MISSED, nowMs = 1)
+        CallOutcomeStore.flush(app, nowMs = { 1_000 }) {
+            CallOutcomeStore.enqueue(app, "c2", CallOutcome.BUSY, nowMs = 2)
+            Result.failure(RuntimeException("offline"))
+        }
+        val q = CallOutcomeStore.load(app)
+        assertEquals(listOf(CallOutcome.MISSED, CallOutcome.BUSY), q.items.map { it.outcome })
+        assertEquals("the backoff landed on the head, not on a stale copy", 1, q.items[0].attempts)
+    }
+
     @Test fun `sign-out clears the queue on disk`() {
         CallOutcomeStore.enqueue(app, "c1", CallOutcome.ANSWERED, nowMs = 1)
         CallOutcomeStore.clear(app)

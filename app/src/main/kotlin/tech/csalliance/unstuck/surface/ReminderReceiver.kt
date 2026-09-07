@@ -13,10 +13,17 @@ import tech.csalliance.unstuck.UnstuckApp
  * through to fire a bogus "Coming up · your task is starting". This is the only
  * exported reminder receiver (the system sends these broadcasts from another
  * UID) and it deliberately reads NO intent extras, so other apps can't abuse it.
+ *
+ * It also retires an orphaned call ring: a reboot mid-ring drops the 30 s missed
+ * alarm along with every other alarm, leaving an unsettled record that would make
+ * every future call report `busy` (CallRinger.recover reports its pending
+ * `missed` / `done` and clears it).
  */
 class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         if (intent.action != Intent.ACTION_BOOT_COMPLETED && intent.action != Intent.ACTION_MY_PACKAGE_REPLACED) return
+        NotificationChannels.ensureAll(context)
+        runCatching { tech.csalliance.unstuck.calls.CallRinger.recover(context) }
         (context.applicationContext as? UnstuckApp)?.let { ReminderScheduler.reschedule(it) }
     }
 }

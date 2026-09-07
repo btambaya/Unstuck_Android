@@ -113,6 +113,48 @@ class ProfileFactsService(
         return stored
     }
 
+    /** Edit ONE fact's text IN PLACE (Settings → "What Unstuck knows"): the SAME
+     *  row and id, its category kept, `source` becoming `settings` (the user
+     *  typed these words), `whenIso` replaced only when valid, `updatedAt`
+     *  bumped so the newest-first order and the server's last-write-wins both
+     *  see the edit. One upsert, one queued push — never a delete + re-add,
+     *  which would strand the old id in every device's cache.
+     *
+     *  When the row has VANISHED (forgotten on another device, or never pulled
+     *  on this one) the text is stored as a FRESH fact instead — the edit is
+     *  never silently dropped. Throws [ProfileFactSaveError.Empty] on blank text
+     *  and [ProfileFactSaveError.StoreFailed] when the local write fails.
+     *  Port of iOS `AppModel.updateProfileFact`. */
+    suspend fun update(
+        id: String,
+        fact: String,
+        whenIso: String? = null,
+        /** Category for the re-save branch only (the existing row keeps its own). */
+        category: ProfileFactCategory = ProfileFactCategory.CONTEXT,
+    ): ProfileFact {
+        val text = ProfileFactsLogic.prepareFact(fact) ?: throw ProfileFactSaveError.Empty
+        val row = try {
+            store.getOne(Tables.PROFILE_FACTS, id, ProfileFact.serializer())
+        } catch (e: Throwable) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            throw ProfileFactSaveError.StoreFailed(e)
+        }
+        if (row == null || !row.active) return store(category, text, ProfileFactSource.SETTINGS, whenIso)
+        val next = row.copy(
+            fact = text,
+            source = ProfileFactSource.SETTINGS,
+            whenIso = ProfileFactsLogic.validWhenIso(whenIso) ?: row.whenIso,
+            updatedAt = now(),
+        )
+        try {
+            persist(next)
+        } catch (e: Throwable) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            throw ProfileFactSaveError.StoreFailed(e)
+        }
+        return next
+    }
+
     /** Persist a deterministically-detected style preference ("don't use my
      *  name" / "call me X") as the web does — a `preference` fact from the
      *  `chat` source. */

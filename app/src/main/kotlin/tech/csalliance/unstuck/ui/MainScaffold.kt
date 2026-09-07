@@ -36,7 +36,16 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 import androidx.compose.material.icons.filled.AutoAwesome
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material3.Icon
+import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.text.font.FontWeight
+import tech.csalliance.unstuck.calls.CallVoiceService
+import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.BuildConfig
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
@@ -331,6 +340,15 @@ fun MainScaffold(vm: AppViewModel) {
                     else -> { tab = "today"; stack.clear() }
                 }
             }
+            // The LIVE call's own notification (CallVoiceService.build) and the
+            // ring payload both carry `unstuck://call/<id>`. It used to fall
+            // through to the `else` branch and dump the user on Today with
+            // nothing on screen saying a call was running — and no way out but
+            // the shade. Land on Today with every overlay cleared, which is
+            // exactly where InCallBar shows its End.
+            dl.startsWith(tech.csalliance.unstuck.core.logic.IncomingCallPayload.DEEP_LINK_PREFIX) -> {
+                tab = "today"; stack.clear()
+            }
             dl == "unstuck://collections" -> { tab = "lists"; stack.clear() }   // a shared collection
             dl.startsWith("unstuck://collections/") -> goAssistantScreen("lists", dl.removePrefix("unstuck://collections/"))
             dl == "unstuck://tasks/all" -> goAssistantScreen("tasks")
@@ -383,6 +401,15 @@ fun MainScaffold(vm: AppViewModel) {
         val tourContentLocked = TourEvents.contentLocked
         Box(Modifier.fillMaxSize().then(if (tourContentLocked) Modifier.clearAndSetSemantics {} else Modifier)) {
         Column(Modifier.fillMaxSize().statusBarsPadding()) {
+            // The ONLY in-app hang-up. Without it the shade notification's End
+            // action was the single way out of a live call: a user who had
+            // swiped the shade away, or silenced the channel, had a hot
+            // microphone and no control at all. Takes real layout space (never
+            // an overlay) so it can't cover a screen's header, and the in-call
+            // notification's `unstuck://call/<id>` deep link lands on Today —
+            // where this bar is — instead of dumping the user on a Today with
+            // no sign a call is even running.
+            InCallBar(onEnd = { CallVoiceService.end(fgsContext) })
             Box(Modifier.weight(1f)) {
                 when (tab) {
                     "today" -> TodayScreen(
@@ -596,3 +623,51 @@ fun MainScaffold(vm: AppViewModel) {
         )
     }
 }
+
+/**
+ * The live-call bar: "On a call with Unstuck" + the only IN-APP End control.
+ *
+ * Before this, `CallVoiceService.end` had exactly one caller — the shade
+ * notification's End action — so a user who dismissed the shade, silenced the
+ * channel, or simply looked for the control in the app had a microphone
+ * foreground service running with no way to stop it but a force-quit. It takes
+ * real layout space at the top of the scaffold (never a floating overlay) so it
+ * cannot cover a screen's own header, and it shows on every tab: the call is a
+ * whole-app state, not a Today-screen one.
+ *
+ * Driven by [CallVoiceService.activeCall] rather than a poll of the @Volatile
+ * field, so the bar appears the instant the conversation starts and — more
+ * importantly — disappears the instant it ends, never leaving a live "End"
+ * button that would no-op.
+ */
+@Composable
+private fun InCallBar(onEnd: () -> Unit) {
+    val callId by CallVoiceService.activeCall.collectAsStateWithLifecycle()
+    if (callId == null) return
+    val c = UTheme.colors
+    Row(
+        Modifier.fillMaxWidth().background(c.coralSoft).padding(horizontal = 16.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(Icons.Filled.Mic, contentDescription = null, tint = c.coralDeep, modifier = Modifier.size(16.dp))
+        Text(
+            IN_CALL_LABEL,
+            style = UFont.sans(13, FontWeight.Medium), color = c.coralDeep,
+            modifier = Modifier.weight(1f).padding(start = 8.dp),
+        )
+        Text(
+            IN_CALL_END,
+            style = UFont.sans(13, FontWeight.SemiBold), color = c.red,
+            modifier = Modifier
+                .clip(CircleShape)
+                .clickable(role = Role.Button, onClickLabel = IN_CALL_END_HINT, onClick = onEnd)
+                .minimumInteractiveComponentSize()
+                .padding(horizontal = 12.dp, vertical = 4.dp),
+        )
+    }
+}
+
+/** In-call bar copy (iOS CallBar parity). */
+internal const val IN_CALL_LABEL = "On a call with Unstuck"
+internal const val IN_CALL_END = "End"
+internal const val IN_CALL_END_HINT = "End the call"

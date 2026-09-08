@@ -237,7 +237,11 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
     fun mon(d: java.time.LocalDate) = d.month.name.lowercase().replaceFirstChar { it.uppercase() }.take(3)
     val rangeLabel = if (monday.month == end.month) "${mon(monday)} ${monday.dayOfMonth}–${end.dayOfMonth}"
         else "${mon(monday)} ${monday.dayOfMonth} – ${mon(end)} ${end.dayOfMonth}"
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
+    // The week title, rollup and weekday row stay PINNED above the grid (like
+    // Month and the Day view header) — only the hour grid scrolls, so scrolling
+    // to an early or late hour never hides which day a column is (tester,
+    // 2026-09-07: "can't see the days").
+    Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
                 SectionLabel(if (weekOffset == 0) "This week" else "Week", color = c.primaryDeep)
@@ -265,6 +269,8 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
                 }
             }
         }
+        // The hour grid is the only part that scrolls.
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
         // Hour grid: time gutter + 7 day columns with positioned blocks.
         Row(Modifier.fillMaxWidth().height(WHOUR * (WEND - WSTART)).padding(top = 6.dp)) {
             Column(Modifier.width(26.dp)) {
@@ -335,6 +341,7 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
             }
         }
         Box(Modifier.padding(16.dp)) {}
+        }
     }
 }
 

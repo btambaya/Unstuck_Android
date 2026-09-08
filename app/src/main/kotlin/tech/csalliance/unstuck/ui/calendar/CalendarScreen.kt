@@ -38,6 +38,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.lerp
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
@@ -50,6 +52,8 @@ import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import tech.csalliance.unstuck.core.logic.SHARED_BLOCK_ID_PREFIX
 import tech.csalliance.unstuck.core.logic.asCalBlock
+import tech.csalliance.unstuck.core.logic.busyMinutesByDay
+import tech.csalliance.unstuck.core.logic.busyScaleMax
 import tech.csalliance.unstuck.core.logic.asSharedWithMe
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.liveSharedBlocks
@@ -60,7 +64,6 @@ import tech.csalliance.unstuck.core.logic.taskForBlock
 import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
-import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.design.component.AppBar
 import tech.csalliance.unstuck.design.component.Card
 import tech.csalliance.unstuck.design.component.Leading
@@ -115,7 +118,9 @@ fun CalendarScreen(
         when (view) {
             "Day" -> DayGridScreen(vm, onOpen, onOpenShared, onCreateAt, initialDate = jumpDate)
             "Week" -> WeekView(vm, onOpen, onOpenShared, onCreateAt)
-            else -> MonthView(vm) { iso -> jumpDate = iso; view = "Day" }
+            // Month gets the same onOpen / onOpenShared the other two views take: a row
+            // in its day peek opens the task (or the read-only shared detail) directly.
+            else -> MonthView(vm, onOpen, onOpenShared) { iso -> jumpDate = iso; view = "Day" }
         }
     }
 }
@@ -354,27 +359,31 @@ private fun RollupStat(label: String, value: String, bg: androidx.compose.ui.gra
 }
 
 @Composable
-private fun MonthView(vm: AppViewModel, onPickDay: (String) -> Unit) {
+private fun MonthView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (SharedWithMe) -> Unit, onPickDay: (String) -> Unit) {
     val c = UTheme.colors
-    val sessions by vm.sessions.collectAsStateWithLifecycle()
     var ym by rememberSaveable(stateSaver = YearMonthSaver) { mutableStateOf(java.time.YearMonth.now()) }
-    // Planned indicators: the heatmap is what got DONE; the dots under a day say what's
-    // PLANNED — own task blocks (solid) + blocks of tasks shared with me (hollow, at
-    // the owner's slot; migration 052). The shared window follows the viewed month.
+    // Planned indicators: the dots under a day say what's PLANNED — own task blocks
+    // (solid) + blocks of tasks shared with me (hollow, at the owner's slot;
+    // migration 052). The shared window follows the viewed month.
     val blocksRaw by vm.blocks.collectAsStateWithLifecycle()
     val sharedRaw by vm.sharedBlocks.collectAsStateWithLifecycle()
     LaunchedEffect(ym) { val r = monthRange(ym.year, ym.monthValue); vm.setSharedBlockRange(r.from, r.to) }
+    val liveShared = remember(sharedRaw) { liveSharedBlocks(sharedRaw) }
     val ownPlannedDays = remember(blocksRaw) { blocksRaw.filter { isTaskBlock(it) && !it.skipped }.map { it.date }.toSet() }
-    val sharedPlannedDays = remember(sharedRaw) { liveSharedBlocks(sharedRaw).map { it.date }.toSet() }
-    val byDay = remember(sessions) {
-        HashMap<String, Int>().apply {
-            sessions.forEach { s -> Time.parseMillis(s.completedAt)?.let { val k = Clock.dateIso(it); put(k, (get(k) ?: 0) + s.actualSec) } }
-        }
-    }
+    val sharedPlannedDays = remember(liveShared) { liveShared.map { it.date }.toSet() }
+    // Heat = how BUSY the day is: scheduled minutes (my blocks + shared), which is
+    // readable for days still ahead. It used to be focus density (minutes actually
+    // focused from sessions), so every future day rendered empty.
+    val byDay = remember(blocksRaw, liveShared) { busyMinutesByDay(blocksRaw, liveShared) }
+    // Tap ANY day → everything on it, in a peek sheet (tester, 2026-09-08: a shared
+    // day opened something and a planned day didn't). Saveable so the peek survives
+    // rotation like the viewed month does.
+    var peekIso by rememberSaveable { mutableStateOf<String?>(null) }
     val first = ym.atDay(1)
     val lead = (first.dayOfWeek.value + 6) % 7
     val cells: List<java.time.LocalDate?> = List(lead) { null } + (1..ym.lengthOfMonth()).map { ym.atDay(it) }
-    val max = (byDay.values.maxOrNull() ?: 1).coerceAtLeast(1)
+    // A floor (3h) so one 8-hour day doesn't flatten a normal week to nothing.
+    val max = remember(byDay) { busyScaleMax(byDay) }
     val dows = listOf("M", "T", "W", "T", "F", "S", "S")
     val todayIso = Clock.todayIso()
 
@@ -390,7 +399,7 @@ private fun MonthView(vm: AppViewModel, onPickDay: (String) -> Unit) {
             Text("›", style = UFont.serifItalic(24), color = c.ink2, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { ym = ym.plusMonths(1) }.padding(horizontal = 10.dp, vertical = 2.dp))
         }
         Row(Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Focus density", style = UFont.mono(10, FontWeight.Medium), color = c.ink3, modifier = Modifier.weight(1f))
+            Text("How busy", style = UFont.mono(10, FontWeight.Medium), color = c.ink3, modifier = Modifier.weight(1f))
             // Legend for the per-day planned dots.
             Box(Modifier.size(5.dp).clip(CircleShape).background(c.primaryDeep))
             Text(" planned   ", style = UFont.mono(9), color = c.ink3)
@@ -413,16 +422,21 @@ private fun MonthView(vm: AppViewModel, onPickDay: (String) -> Unit) {
                                     val v = byDay[iso] ?: 0
                                     val t = (v.toFloat() / max).coerceIn(0f, 1f)
                                     val isToday = iso == todayIso
+                                    val ownHere = iso in ownPlannedDays
+                                    val sharedHere = iso in sharedPlannedDays
                                     Box(
                                         Modifier.weight(1f).aspectRatio(1f).clip(RoundedCornerShape(7.dp))
                                             .background(if (isToday) c.coral else if (v == 0) c.bg2 else lerp(c.bg2, c.primary, 0.2f + 0.6f * t))
-                                            // Tap a day → open it in Day view.
-                                            .clickable(role = androidx.compose.ui.semantics.Role.Button) { onPickDay(iso) },
+                                            // EVERY day opens the same peek — what is on it, and a way into
+                                            // each item. (Shared days used to open a sheet and planned days
+                                            // only jumped to Day view.)
+                                            .clickable(role = androidx.compose.ui.semantics.Role.Button) { peekIso = iso }
+                                            .semantics(mergeDescendants = true) {
+                                                contentDescription = monthCellLabel(d.dayOfMonth, isToday, ownHere, sharedHere, v)
+                                            },
                                         contentAlignment = Alignment.Center,
                                     ) {
                                         val onDark = isToday || t > 0.5f
-                                        val ownHere = iso in ownPlannedDays
-                                        val sharedHere = iso in sharedPlannedDays
                                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                             Text("${d.dayOfMonth}", style = UFont.sans(11, FontWeight.SemiBold), color = if (onDark) c.bg else c.ink2, textAlign = TextAlign.Center)
                                             // ● own blocks planned · ○ shared blocks (the owner's slot).
@@ -447,4 +461,25 @@ private fun MonthView(vm: AppViewModel, onPickDay: (String) -> Unit) {
             Box(Modifier.padding(36.dp)) {}
         }
     }
+    // Tap a day → everything on it; a row then opens the task (mine) or the
+    // read-only shared detail, and "Open in Day view" keeps the old jump.
+    peekIso?.let { iso ->
+        MonthDayPeekSheet(
+            vm = vm, iso = iso,
+            onOpen = { peekIso = null; onOpen(it) },
+            onOpenShared = { peekIso = null; onOpenShared(it) },
+            onOpenDay = { peekIso = null; onPickDay(iso) },
+            onDismiss = { peekIso = null },
+        )
+    }
+}
+
+/** A month cell's spoken label: "Today, 8, 2 planned, 1 shared, 180 minutes scheduled".
+ *  (Was "minutes focused" — the fill measures scheduled load now.) */
+private fun monthCellLabel(day: Int, isToday: Boolean, own: Boolean, shared: Boolean, busyMin: Int): String {
+    val parts = mutableListOf(if (isToday) "Today, $day" else "$day")
+    if (own) parts += "planned"
+    if (shared) parts += "shared"
+    if (busyMin > 0) parts += "$busyMin minutes scheduled"
+    return parts.joinToString(", ")
 }

@@ -81,10 +81,16 @@ fun pickTodayHero(
     areaFilter: String? = null,
     // excludeIds: tasks you've assigned away — never surface them in the hero.
     excludeIds: Set<String>? = null,
+    /** The caller's ALREADY-COMPUTED `visibleTasks(TODAY, tasks, blocks, now,
+     *  activeArea = null, slipMode = false)`. Today renders that exact list
+     *  anyway, so passing it in skips a second identical bucketing pass over
+     *  every block. Omit it and this computes the same list itself — the result
+     *  is identical either way. */
+    todayRows: List<TaskItem>? = null,
 ): TaskItem? {
     // Today's open rows (non-template today tasks + today's occurrences), minus the
     // live-focused task and anything assigned away, narrowed by the active area.
-    val rows = visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false)
+    val rows = (todayRows ?: visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false))
         .filter { it.id != liveTaskId && it.id !in (excludeIds ?: emptySet()) && matchesArea(it.lifeArea, areaFilter) }
     if (rows.isEmpty()) return null
 

@@ -20,6 +20,7 @@ import tech.csalliance.unstuck.core.logic.toneFromFacts
 import tech.csalliance.unstuck.core.logic.upcomingDates
 import tech.csalliance.unstuck.core.logic.weekdayName
 import tech.csalliance.unstuck.core.model.CalBlock
+import tech.csalliance.unstuck.core.model.TaskItem
 
 // The assistant's live context (the contract's `buildAssistantContext` shape),
 // the voice session's opening primer + instructions. 1:1 with
@@ -43,21 +44,21 @@ suspend fun buildAssistantContext(api: AssistantApi): JsonObject {
     val nowMs = api.nowMs()
     val facts = api.getProfileFacts()
 
-    // Per task, the NEXT LIVE occurrence — first-in-array gave the model an old
-    // done block's date as "scheduled" (tester round, 2026-09-01).
-    val blocksByTask = HashMap<String, CalBlock>()
-    for (b in blocks.sortedBy { it.date + it.startTime }) {
-        val tid = b.taskId?.takeIf { it.isNotEmpty() } ?: continue
-        if (b.done || b.skipped || b.date < today) continue
-        if (blocksByTask[tid] == null) blocksByTask[tid] = b
-    }
+    val blocksByTask = nextLiveBlockByTask(blocks, today)
+    // Task-by-id, built once: the week roll-up and the live-focus lookup each
+    // did tasks.firstOrNull over every task. First wins, like firstOrNull.
+    val taskById = HashMap<String, TaskItem>()
+    for (t in tasks) if (!taskById.containsKey(t.id)) taskById[t.id] = t
 
     val weekFrom = IsoDate.mondayOf(today)
     val weekTo = addDaysIso(weekFrom, 7)
     val week = blocks.filter { it.date >= weekFrom && it.date < weekTo }.sortedBy { it.date + it.startTime }.take(60)
 
     val archived = api.getArchivedCaptureIds()
-    val captures = api.getCaptures().filter { it.id !in archived }.sortedByDescending { it.at }.take(12)
+    // Newest 12 — selected in one pass instead of sorting all of them to throw
+    // all but 12 away. [topByDescendingStable] reproduces sortedByDescending +
+    // take(12) exactly, ties included.
+    val captures = topByDescendingStable(api.getCaptures().filter { it.id !in archived }, 12) { it.at }
     val live = api.getLiveFocus()?.takeIf { it.sessionStart != null }
     val sp = struggleProfile(api.getStruggles(), api.getReasonLogs(), nowMs)
     val gh = goldenHours(api.getSessions(), nowMs)
@@ -95,7 +96,7 @@ suspend fun buildAssistantContext(api: AssistantApi): JsonObject {
         }
         putJsonArray("week") {
             week.forEach { b ->
-                val t = b.taskId?.let { id -> tasks.firstOrNull { it.id == id } }
+                val t = b.taskId?.let { taskById[it] }
                 addJsonObject {
                     put("date", b.date)
                     if (b.startTime.isNotEmpty()) put("time", b.startTime)
@@ -134,7 +135,7 @@ suspend fun buildAssistantContext(api: AssistantApi): JsonObject {
             put("active", active); put("pending", p.size - active)
         }
         if (live != null) {
-            val t = tasks.firstOrNull { it.id == live.taskId }
+            val t = taskById[live.taskId]
             val mins = Math.round((nowMs - (live.sessionStart ?: nowMs)) / 60_000.0).toInt()
             putJsonObject("focus") {
                 put("taskId", live.taskId); put("task", t?.name ?: "a task")
@@ -167,6 +168,60 @@ suspend fun buildAssistantContext(api: AssistantApi): JsonObject {
             }
         }
     }
+}
+
+/**
+ * Per task id, its NEXT LIVE cal_block on or after [today] — not done, not
+ * skipped, earliest by `date + startTime`. (First-in-array used to give the
+ * model an old done block's date as "scheduled" — tester round, 2026-09-01.)
+ *
+ * ONE pass keeping the running minimum, rather than sorting the whole block
+ * list by an allocated key just to read the first entry per task. Same winner
+ * as `blocks.sortedBy { it.date + it.startTime }` then first-wins: the smallest
+ * key, ties going to the earlier block in list order (`key < best` never
+ * displaces an equal key, which is what a STABLE sort + first-wins gave). The
+ * key is now built only for blocks that are actually eligible.
+ */
+internal fun nextLiveBlockByTask(blocks: List<CalBlock>, today: String): Map<String, CalBlock> {
+    val out = HashMap<String, CalBlock>()
+    val bestKey = HashMap<String, String>()
+    for (b in blocks) {
+        val tid = b.taskId?.takeIf { it.isNotEmpty() } ?: continue
+        if (b.done || b.skipped || b.date < today) continue
+        val key = b.date + b.startTime
+        val best = bestKey[tid]
+        if (best == null || key < best) {
+            bestKey[tid] = key
+            out[tid] = b
+        }
+    }
+    return out
+}
+
+/**
+ * The first [n] items of `items.sortedByDescending(key).take(n)`, without
+ * sorting the rest. Stability matters: a stable descending sort keeps equal
+ * keys in input order and drops later duplicates once the window is full, and
+ * so does this — insert after every element whose key is >= the candidate's,
+ * and skip a candidate that can't beat the current n-th.
+ */
+internal fun <T, K : Comparable<K>> topByDescendingStable(items: List<T>, n: Int, key: (T) -> K): List<T> {
+    if (n <= 0 || items.isEmpty()) return emptyList()
+    val out = ArrayList<T>(minOf(n, items.size))
+    val keys = ArrayList<K>(minOf(n, items.size))
+    for (item in items) {
+        val k = key(item)
+        if (out.size == n && k <= keys[n - 1]) continue
+        var i = out.size
+        while (i > 0 && keys[i - 1] < k) i--
+        out.add(i, item)
+        keys.add(i, k)
+        if (out.size > n) {
+            out.removeAt(n)
+            keys.removeAt(n)
+        }
+    }
+    return out
 }
 
 // ── voice opening + instructions ──

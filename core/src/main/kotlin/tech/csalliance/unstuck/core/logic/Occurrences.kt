@@ -116,6 +116,40 @@ fun occurrenceBlockFor(rowId: String, tasks: List<TaskItem>, blocks: List<CalBlo
  */
 fun overdueOccurrenceLabel(rowId: String, tasks: List<TaskItem>, blocks: List<CalBlock>, todayIso: String): String? {
     val b = occurrenceBlockFor(rowId, tasks, blocks) ?: return null
+    return overdueLabelFor(b, todayIso)
+}
+
+/**
+ * [overdueOccurrenceLabel] for a WHOLE list of rows in ONE pass: the label for
+ * every id in [rowIds] that has one (an id with no label is simply absent).
+ *
+ * Identical answer per row to calling [overdueOccurrenceLabel] once per id —
+ * including its "first task-shaped block with this id wins, and if THAT block's
+ * task isn't recurring the row has no label" resolution — without the
+ * O(rows x (blocks + tasks)) rescan a per-row call costs inside a list item.
+ */
+fun overdueOccurrenceLabels(
+    rowIds: Collection<String>,
+    tasks: List<TaskItem>,
+    blocks: List<CalBlock>,
+    todayIso: String,
+): Map<String, String> {
+    if (rowIds.isEmpty()) return emptyMap()
+    val wanted = rowIds.toHashSet()
+    val recurringIds = HashSet<String>()
+    for (t in tasks) if (t.recurrence != null) recurringIds.add(t.id)
+    if (recurringIds.isEmpty()) return emptyMap()
+    val out = HashMap<String, String>()
+    val resolved = HashSet<String>()   // ids whose FIRST task-shaped block we've seen
+    for (b in blocks) {
+        if (!isTaskBlock(b) || b.id !in wanted || !resolved.add(b.id)) continue
+        if (b.taskId !in recurringIds) continue
+        overdueLabelFor(b, todayIso)?.let { out[b.id] = it }
+    }
+    return out
+}
+
+private fun overdueLabelFor(b: CalBlock, todayIso: String): String? {
     if (b.date >= todayIso) return null
     val ms = Time.parseMillis(b.date) ?: return "Overdue"
     return "Overdue · ${OVERDUE_DOW[Time.dayOfWeekJs(ms)]}"

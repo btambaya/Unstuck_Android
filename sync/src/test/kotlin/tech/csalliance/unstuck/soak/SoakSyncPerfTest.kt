@@ -1,9 +1,23 @@
 package tech.csalliance.unstuck.soak
 
+import androidx.room.InvalidationTracker
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import org.junit.After
@@ -237,6 +251,87 @@ class SoakSyncPerfTest {
             }
         }
     }
+
+    /**
+     * END-TO-END invalidation cost with LIVE collectors mounted on all five big
+     * collections, comparing the two invalidation models on the SAME database in
+     * the SAME run:
+     *   • LEGACY — a Room Flow over the shared `records` table: any write wakes
+     *     every collector, each re-runs its own SELECT, and distinctUntilChanged
+     *     then throws the identical rows away. ([legacyObserve] below reproduces
+     *     the chain LocalStore had, via Room's InvalidationTracker on `records`.)
+     *   • CURRENT — LocalStore's per-logical-table version counters: a tasks
+     *     write only wakes the tasks collector.
+     * The workload is a batch of single-row task writes (a user ticking rows off)
+     * settled to the last value the tasks collector sees.
+     */
+    @Test fun soak_invalidation_live_collectors(): Unit = runBlocking {
+        store.replace(Tables.TASKS, tasks, TaskItem.serializer(), { it.id })
+        store.replace(Tables.CAL_BLOCKS, blocks, CalBlock.serializer(), { it.id })
+        store.replace(Tables.SESSIONS, sessions, Session.serializer(), { it.id })
+        store.replace(Tables.CAPTURES, captures, Capture.serializer(), { it.id })
+        store.replace(Tables.COLLECTIONS, collections, ItemCollection.serializer(), { it.id })
+        val subject = tasks.first { !it.done }
+
+        suspend fun batch(latest: () -> String?, write: suspend (String) -> Unit, n: Int) {
+            var name = ""
+            for (i in 0 until n) {
+                name = "soak-write-$i-${System.nanoTime()}"
+                write(name)
+            }
+            withTimeout(30_000) { while (latest() != name) delay(1) }
+        }
+
+        for (mode in listOf("LEGACY (Room flow on shared `records`)", "CURRENT (per-table version)")) {
+            val scope = CoroutineScope(Dispatchers.Default + Job())
+            val latestTask = java.util.concurrent.atomic.AtomicReference<String?>(null)
+            val emissions = java.util.concurrent.atomic.AtomicInteger(0)
+            val legacy = mode.startsWith("LEGACY")
+            fun <T> flowFor(table: String, ser: kotlinx.serialization.KSerializer<T>) =
+                if (legacy) legacyObserve(table, ser) else store.observeTable(table, ser)
+            scope.launch {
+                flowFor(Tables.TASKS, TaskItem.serializer()).collect { rows ->
+                    emissions.incrementAndGet()
+                    latestTask.set(rows.firstOrNull { it.id == subject.id }?.name)
+                }
+            }
+            scope.launch { flowFor(Tables.CAL_BLOCKS, CalBlock.serializer()).collect { } }
+            scope.launch { flowFor(Tables.SESSIONS, Session.serializer()).collect { } }
+            scope.launch { flowFor(Tables.CAPTURES, Capture.serializer()).collect { } }
+            scope.launch { flowFor(Tables.COLLECTIONS, ItemCollection.serializer()).collect { } }
+            withTimeout(30_000) { while (latestTask.get() == null) delay(1) }
+
+            val write: suspend (String) -> Unit = { n ->
+                store.upsert(Tables.TASKS, subject.copy(name = n), TaskItem.serializer(), subject.id)
+            }
+            repeat(2) { batch({ latestTask.get() }, write, 10) }   // warm up
+            val before = emissions.get()
+            val r = Bench.run("live collectors: 25 task writes settled — $mode", warmup = 0, iters = 5) {
+                runBlocking { batch({ latestTask.get() }, write, 25) }
+            }
+            println("PERF | $mode tasks emissions during bench = ${emissions.get() - before} (r=${r.medianMs})")
+            scope.cancel()
+        }
+    }
+
+    /** The chain LocalStore used before per-table invalidation: re-query on ANY
+     *  `records` write, then drop the identical rows. Test-only, for the A/B above. */
+    private fun <T> legacyObserve(table: String, ser: kotlinx.serialization.KSerializer<T>): Flow<List<T>> =
+        callbackFlow {
+            val obs = object : InvalidationTracker.Observer(arrayOf("records")) {
+                override fun onInvalidated(tables: Set<String>) { trySend(Unit) }
+            }
+            db.invalidationTracker.addObserver(obs)
+            trySend(Unit)
+            awaitClose { db.invalidationTracker.removeObserver(obs) }
+        }
+            .map { db.records().get(table) }
+            .distinctUntilChanged()
+            .map { rows -> rows.mapNotNull { runCatching { legacyJson.decodeFromString(ser, it.data) }.getOrNull() } }
+            .distinctUntilChanged()
+            .flowOn(Dispatchers.Default)
+
+    private val legacyJson = Json { ignoreUnknownKeys = true; encodeDefaults = true; isLenient = true }
 
     private fun unusedJson() = Json
     private fun unusedRejected() = RpcRejected(400, "x")

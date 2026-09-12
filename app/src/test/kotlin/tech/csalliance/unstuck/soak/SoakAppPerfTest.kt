@@ -37,8 +37,11 @@ import tech.csalliance.unstuck.ui.assistant.GatewayInputs
 import tech.csalliance.unstuck.ui.assistant.TaskShareInfo
 import tech.csalliance.unstuck.ui.assistant.buildAssistantContext
 import tech.csalliance.unstuck.ui.assistant.deriveGateway
+import tech.csalliance.unstuck.ui.assistant.nextLiveBlockByTask
+import tech.csalliance.unstuck.ui.assistant.topByDescendingStable
 import tech.csalliance.unstuck.ui.assistant.visibleAssistantTurns
 import tech.csalliance.unstuck.ui.calendar.layoutLanes
+import tech.csalliance.unstuck.ui.today.weekFocusMinutes
 import java.time.Instant
 
 /**
@@ -183,7 +186,7 @@ class SoakAppPerfTest {
 
     // ── a stand-in for the app's AssistantApi (reads only) ──────────────────
 
-    private class SoakApi(
+    internal class SoakApi(
         val tasksL: List<TaskItem>, val blocksL: List<CalBlock>, val sessionsL: List<Session>,
         val capturesL: List<Capture>, val collectionsL: List<ItemCollection>,
     ) : AssistantApi {
@@ -280,6 +283,59 @@ class SoakAppPerfTest {
         Bench.run("ctx: captures sortedByDescending + take(12)", iters = 100) {
             captures.sortedByDescending { it.at }.take(12)
         }
+    }
+
+    /**
+     * SAME-RUN A/B for the perf-soak fixes (2026-09-12) — cross-run medians of
+     * these micro-benches are too noisy to compare, so BEFORE (the expression
+     * each change replaced, verbatim) is timed against AFTER in one process.
+     * AssistantContextParityTest / WeekFocusMinutesTest assert the two agree.
+     */
+    @Test fun soak_ab_optimisations() {
+        // 1. next-live block per task: full sort vs one min-pass.
+        Bench.run("A/B ctx next-live map BEFORE: sort 4000 + scan", iters = 40) {
+            val m = HashMap<String, CalBlock>()
+            for (b in blocks.sortedBy { it.date + it.startTime }) {
+                val tid = b.taskId?.takeIf { it.isNotEmpty() } ?: continue
+                if (b.done || b.skipped || b.date < today) continue
+                if (m[tid] == null) m[tid] = b
+            }
+            m
+        }
+        Bench.run("A/B ctx next-live map AFTER : one min-pass", iters = 40) { nextLiveBlockByTask(blocks, today) }
+
+        // 2. newest-12 captures: sort-then-truncate vs stable selection.
+        Bench.run("A/B ctx captures BEFORE: sortedByDescending.take(12)", iters = 100) {
+            captures.sortedByDescending { it.at }.take(12)
+        }
+        Bench.run("A/B ctx captures AFTER : top-12 selection", iters = 100) {
+            topByDescendingStable(captures, 12) { it.at }
+        }
+
+        // 3. week[].name + live focus: firstOrNull per row vs a task map.
+        val weekFrom = tech.csalliance.unstuck.core.logic.IsoDate.mondayOf(today)
+        val week = blocks.filter { it.date >= weekFrom && it.date < tech.csalliance.unstuck.core.logic.addDaysIso(weekFrom, 7) }
+            .sortedBy { it.date + it.startTime }.take(60)
+        Bench.run("A/B ctx week names BEFORE: firstOrNull over 800/row", iters = 100) {
+            week.map { b -> b.taskId?.let { id -> tasks.firstOrNull { it.id == id } }?.name }
+        }
+        Bench.run("A/B ctx week names AFTER : task map", iters = 100) {
+            val byId = HashMap<String, TaskItem>()
+            for (t in tasks) if (!byId.containsKey(t.id)) byId[t.id] = t
+            week.map { b -> b.taskId?.let { byId[it] }?.name }
+        }
+
+        // 4. the Today header's 7-day focus roll-up, per minute tick.
+        val completedMs = sessions.map { tech.csalliance.unstuck.core.time.Time.parseMillis(it.completedAt) ?: 0L }
+        Bench.run("A/B weekMin BEFORE: parse every session per tick") {
+            sessions.filter { (now - (tech.csalliance.unstuck.core.time.Time.parseMillis(it.completedAt) ?: 0)) in 0..(7L * 86_400_000) }
+                .sumOf { it.actualSec } / 60
+        }
+        Bench.run("A/B weekMin AFTER : parse hoisted out of the tick") { weekFocusMinutes(sessions, completedMs, now) }
+
+        // 5. the whole context build.
+        val api = SoakApi(tasks, blocks, sessions, captures, collections)
+        Bench.run("A/B buildAssistantContext AFTER (per turn)", iters = 20) { runBlocking { buildAssistantContext(api) } }
     }
 
 }

@@ -8,12 +8,14 @@ import org.junit.Test
 import tech.csalliance.unstuck.core.logic.isTemplate
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
 import tech.csalliance.unstuck.core.logic.overdueOccurrenceLabel
+import tech.csalliance.unstuck.core.logic.overdueOccurrenceLabels
 import tech.csalliance.unstuck.core.logic.projectOccurrences
 import tech.csalliance.unstuck.core.logic.projectOverdueOccurrences
 import tech.csalliance.unstuck.core.logic.taskForBlock
 import tech.csalliance.unstuck.core.logic.visibleTasks
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.TaskListView
+import tech.csalliance.unstuck.core.time.Clock
 
 // Parity with lib/occurrences.test.ts.
 class OccurrencesTest {
@@ -187,5 +189,42 @@ class OccurrencesTest {
         val future = listOf(mkBlock(id = "fut", taskId = "t1", date = "2026-06-19"))
         assertNull(overdueOccurrenceLabel("fut", listOf(weekly), future, TODAY))
         assertNull(overdueOccurrenceLabel("nope", listOf(weekly), blocks, TODAY))
+    }
+
+    // The batched form (used by the Backlog list so the label isn't recomputed
+    // per row per frame) must agree with the per-row form on EVERY id — the
+    // small hand-built cases here and the heavy soak account below.
+    @Test fun batchedLabelsMatchPerRowLabels_smallCases() {
+        val weekly = template.copy(recurrence = Recurrence.Weekly(listOf(5)))
+        val plain = mkTask(id = "t2", name = "One-off")
+        val blocks = listOf(
+            mkBlock(id = "b-missed", taskId = "t1", date = "2026-06-12"),
+            mkBlock(id = "b-today", taskId = "t1", date = TODAY),
+            mkBlock(id = "b-future", taskId = "t1", date = "2026-06-26"),
+            mkBlock(id = "b-plain", taskId = "t2", date = "2026-06-12"),
+        )
+        val tasks = listOf(weekly, plain)
+        val ids = listOf("b-missed", "b-today", "b-future", "b-plain", "t2", "absent")
+        val batched = overdueOccurrenceLabels(ids, tasks, blocks, TODAY)
+        for (id in ids) assertEquals(id, overdueOccurrenceLabel(id, tasks, blocks, TODAY), batched[id])
+        assertEquals("no recurring tasks -> no labels", emptyMap<String, String>(), overdueOccurrenceLabels(ids, listOf(plain), blocks, TODAY))
+        assertEquals("no rows -> no labels", emptyMap<String, String>(), overdueOccurrenceLabels(emptyList(), tasks, blocks, TODAY))
+    }
+
+    @Test fun batchedLabelsMatchPerRowLabels_heavyAccount() {
+        val tasks = SoakSeed.tasks()
+        val blocks = SoakSeed.blocks(tasks)
+        val today = Clock.todayIso()
+        val rows = visibleTasks(TaskListView.BACKLOG, tasks, blocks, System.currentTimeMillis(), null, null, false)
+        assertTrue("fixture must have backlog rows", rows.size > 100)
+        val ids = rows.map { it.id }
+        val batched = overdueOccurrenceLabels(ids, tasks, blocks, today)
+        var labelled = 0
+        for (id in ids) {
+            val one = overdueOccurrenceLabel(id, tasks, blocks, today)
+            assertEquals(id, one, batched[id])
+            if (one != null) labelled++
+        }
+        assertTrue("fixture must produce some overdue labels", labelled > 0)
     }
 }

@@ -21,6 +21,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.channels.BufferOverflow
@@ -2694,7 +2695,15 @@ class AppViewModel(
                 todayIso = Clock.dateIso(now), minute = GatewayInputs.minute(now),
             )
             gatewayMemo.value(key) { deriveGateway(key, now) }
-        }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), GatewayDerived.EMPTY)
+        }
+            // composeBrief + pickMoment (derivePatterns over every block) is ~3 ms of
+            // pure computation and stateIn(viewModelScope) would run it on
+            // Dispatchers.Main.immediate — on the main thread, on every row emission
+            // AND every 60 s minute tick while Today sits open. The derivation is
+            // pure; only the resulting StateFlow needs to reach the UI thread, and
+            // stateIn still publishes it there.
+            .flowOn(Dispatchers.Default)
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), GatewayDerived.EMPTY)
     }
 
     /** How many times the gateway derivation actually ran (memo diagnostics). */

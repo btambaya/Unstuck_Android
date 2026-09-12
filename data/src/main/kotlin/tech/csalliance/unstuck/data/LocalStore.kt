@@ -1,10 +1,13 @@
 package tech.csalliance.unstuck.data
 
+import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.update
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
 import tech.csalliance.unstuck.core.model.CalBlock
@@ -45,21 +48,40 @@ class LocalStore(private val db: UnstuckDatabase) {
 
     // --- reactive reads ---
 
-    // The whole local store lives in ONE `records` table, so Room's per-table
-    // InvalidationTracker re-runs EVERY observe() query on ANY write — a single
-    // task toggle re-emits the full row set to all ~9 collectors. The expensive
-    // part is the per-row JSON decode (O(total rows) per write), so the FIRST
-    // distinctUntilChanged is BEFORE the decode, on the raw List<RecordEntity>
-    // (a data class → value equality): an unrelated table's write re-emits
-    // byte-identical rows for this table, which we drop here and SKIP the decode
-    // entirely — the cross-table re-decode the audit flagged. The decode then
-    // runs off the main thread (flowOn Default), and a second distinctUntilChanged
-    // suppresses the rare case where raw rows differ but the decoded list doesn't.
-    // (The 9 cheap indexed query re-runs remain — eliminating those needs a
-    // per-domain table split + a live-data migration; deferred as not worth the
-    // risk once the decode is gone.) Chain stays cold (one decode per collector).
+    // PER-LOGICAL-TABLE INVALIDATION. Every synced row lives in ONE Room
+    // `records` table, so Room's per-table InvalidationTracker fires for ALL of
+    // them on ANY write: a single task toggle used to re-run EVERY observe()
+    // SELECT (measured 24 ms for 5 of the ~10 observed tables on a heavy
+    // account — the cal_blocks SELECT alone materialises 4000 rows with their
+    // JSON blobs). The distinctUntilChanged below skipped the DECODE, never the
+    // QUERY.
+    //
+    // So the invalidation signal is ours, not Room's: one version counter per
+    // LOGICAL table, bumped by [invalidate] from every write path in this class
+    // — this class is the only holder of RecordDao, so no write can bypass it.
+    // A cal_blocks write no longer touches the tasks query at all. Semantics are
+    // otherwise identical: the StateFlow always has a current value so a new
+    // collector queries immediately (Room's initial emission), the bump happens
+    // AFTER the write/transaction commits, and the same SQL returns the same
+    // rows in the same order as before. Both distinctUntilChangeds stay — the
+    // first (raw List<RecordEntity>, a data class → value equality) drops a
+    // no-op write before the decode, the second the rare case where raw rows
+    // differ but the decoded list doesn't. Decode still runs off the main
+    // thread. Chain stays cold (one decode per collector).
+    private val versions = ConcurrentHashMap<String, MutableStateFlow<Long>>()
+
+    private fun version(table: String): MutableStateFlow<Long> =
+        versions.getOrPut(table) { MutableStateFlow(0L) }
+
+    /** Signal "rows of [table] changed" to that table's observers — and only
+     *  to them. Called after the write has committed. */
+    private fun invalidate(table: String) {
+        version(table).update { it + 1 }
+    }
+
     private fun <T> observe(table: String, ser: KSerializer<T>): Flow<List<T>> =
-        records.observe(table)
+        version(table)
+            .map { records.get(table) }
             .distinctUntilChanged()
             .map { rows -> rows.mapNotNull { runCatching { json.decodeFromString(ser, it.data) }.getOrNull() } }
             .distinctUntilChanged()
@@ -98,6 +120,7 @@ class LocalStore(private val db: UnstuckDatabase) {
 
     suspend fun <T> upsert(table: String, model: T, ser: KSerializer<T>, id: String, updatedAt: String? = null) {
         records.upsertOne(entity(table, model, ser, id, updatedAt))
+        invalidate(table)
     }
 
     /** Last-write-wins guarded upsert for INCOMING remote rows (realtime mirror).
@@ -115,10 +138,14 @@ class LocalStore(private val db: UnstuckDatabase) {
             if (incoming != null && local != null && local > incoming) return false
         }
         records.upsertOne(entity(table, model, ser, id, incomingUpdatedAt))
+        invalidate(table)
         return true
     }
 
-    suspend fun delete(table: String, id: String) = records.deleteById(table, id)
+    suspend fun delete(table: String, id: String) {
+        records.deleteById(table, id)
+        invalidate(table)
+    }
 
     /** Replace-per-table hydrate. cal_blocks preserve local external `g_` rows.
      *  [keepPendingUpserts] keeps every local row that still has a queued outbox
@@ -137,6 +164,7 @@ class LocalStore(private val db: UnstuckDatabase) {
         val rows = items.map { RecordEntity(table, id(it), json.encodeToString(ser, it), updatedAt(it)) }
         if (keepPendingUpserts) records.replaceTableKeepingPending(table, rows, preservePrefix)
         else records.replaceTable(table, rows, preservePrefix)
+        invalidate(table)
     }
 
     /** Sign-out / user-switch wipe. Deliberately leaves `parked_outbox` alone: those
@@ -145,6 +173,9 @@ class LocalStore(private val db: UnstuckDatabase) {
         records.clearAll()
         outboxDao.clear()
         liveDao.clear()
+        // Every table lost its rows — signal each one that has an observer
+        // (a table with no counter yet has no collector to tell).
+        for (v in versions.values) v.update { it + 1 }
     }
 
     // --- outbox ---

@@ -2,7 +2,10 @@ package tech.csalliance.unstuck.data
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.withTimeoutOrNull
@@ -176,6 +179,56 @@ class LocalStoreTest {
     @Test fun parkOutbox_withNothingQueuedParksNothing() = runTest {
         assertEquals(0, store.parkOutbox("u1"))
         assertEquals(0, store.parkedCount("u1"))
+    }
+
+    // --- per-logical-table invalidation (perf: one `records` table, ~10 observers) ---
+
+    // A write to ANOTHER logical table must not wake this table's collector at
+    // all (it used to re-run the SELECT and rely on distinctUntilChanged to hide
+    // it), and the value it already holds must stay correct.
+    @Test fun writeToAnotherTableDoesNotReEmit() = runBlocking {
+        store.upsert(Tables.TASKS, task("a", "First"), TaskItem.serializer(), "a")
+        val seen = mutableListOf<List<String>>()
+        val job = launch(Dispatchers.Default) { store.tasks().collect { seen.add(it.map { t -> t.name }) } }
+        withTimeoutOrNull(5_000) { while (seen.isEmpty()) delay(5) }
+        assertEquals(listOf(listOf("First")), seen.toList())
+        // 20 unrelated cal_block writes — none of them concerns tasks().
+        repeat(20) { i ->
+            val b = CalBlock(id = "b$i", taskId = "a", taskName = "B$i", startTime = "10:00", durationMinutes = 25, date = "2026-05-21", kind = CalBlockKind.TASK)
+            store.upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id)
+        }
+        delay(200)
+        assertEquals("an unrelated table's writes must not re-emit tasks", listOf(listOf("First")), seen.toList())
+        // ...and a genuine tasks write still lands on the same live collector.
+        store.upsert(Tables.TASKS, task("a", "Renamed"), TaskItem.serializer(), "a")
+        withTimeoutOrNull(5_000) { while (seen.size < 2) delay(5) }
+        assertEquals(listOf(listOf("First"), listOf("Renamed")), seen.toList())
+        // The unrelated writes did land — they are just delivered on blocks().
+        assertEquals(20, store.blocks().first().size)
+        job.cancel()
+    }
+
+    // delete() / replace() / clearAll() must each reach a LIVE collector (the
+    // version bump has to fire from every write path, not just upsert).
+    @Test fun everyWritePathReachesALiveCollector() = runBlocking {
+        store.upsert(Tables.TASKS, task("a", "First"), TaskItem.serializer(), "a")
+        val seen = mutableListOf<List<String>>()
+        val job = launch(Dispatchers.Default) { store.tasks().collect { seen.add(it.map { t -> t.id }) } }
+        suspend fun await(n: Int) = withTimeoutOrNull(5_000) { while (seen.size < n) delay(5) }
+        await(1)
+        store.replace(Tables.TASKS, listOf(task("a"), task("b")), TaskItem.serializer(), { it.id })
+        await(2)
+        assertEquals(listOf("a", "b"), seen.last().sorted())
+        store.delete(Tables.TASKS, "b")
+        await(3)
+        assertEquals(listOf("a"), seen.last())
+        store.upsertIfNewer(Tables.CAPTURES, task("c"), TaskItem.serializer(), "c", null)  // other table: silent
+        delay(100)
+        assertEquals(3, seen.size)
+        store.clearAll()
+        await(4)
+        assertEquals(emptyList<String>(), seen.last())
+        job.cancel()
     }
 
     @Test fun latestPendingUpsert_andRewrite() = runTest {

@@ -39,7 +39,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.daysSinceCreated
-import tech.csalliance.unstuck.core.logic.overdueOccurrenceLabel
+import tech.csalliance.unstuck.core.logic.overdueOccurrenceLabels
 import tech.csalliance.unstuck.core.logic.ShareViewMode
 import tech.csalliance.unstuck.core.logic.visibleShares
 import tech.csalliance.unstuck.core.logic.visibleTasks
@@ -120,6 +120,17 @@ fun TasksScreen(
     }
     val sharedVisible = remember(sharedWithMe, shareMode, nowState, activeArea) {
         shareMode?.let { visibleShares(sharedWithMe, it, nowState, Clock.dateIso(nowState), activeArea = activeArea) } ?: emptyList()
+    }
+    // "Overdue · Fri" badges for the Backlog rows, resolved for the WHOLE list in
+    // one indexed pass. Called per row inside the item body (as it was) this
+    // rescanned every cal_block and every task for EVERY row on EVERY composition
+    // — the one genuinely per-frame O(n) cost on this screen. Same label per row.
+    val overdueLabels = remember(view, list, tasks, blocks, nowState) {
+        // Same Clock.todayIso() the per-row call used (and the same one visibleTasks
+        // buckets against); nowState is only in the key so the badges roll over at
+        // the minute tick, exactly like the list and the age badges beside them.
+        if (view == TaskListView.BACKLOG) overdueOccurrenceLabels(list.map { it.id }, tasks, blocks, Clock.todayIso())
+        else emptyMap()
     }
 
     Column(Modifier.fillMaxSize()) {
@@ -207,7 +218,7 @@ fun TasksScreen(
                             // weekday) so it's obvious why it's here; everything else shows its
                             // age. The occurrence row's createdAt is the template's, so the age
                             // badge would be meaningless for it.
-                            val overdue = overdueOccurrenceLabel(t.id, tasks, blocks, Clock.todayIso())
+                            val overdue = overdueLabels[t.id]
                             if (overdue != null) {
                                 Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
                                     Text(overdue, style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)

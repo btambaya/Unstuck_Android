@@ -10,9 +10,11 @@ import kotlinx.coroutines.flow.Flow
 
 @Dao
 interface RecordDao {
-    @Query("SELECT * FROM records WHERE tableName = :table")
-    fun observe(table: String): Flow<List<RecordEntity>>
-
+    /** The ONE read every reactive collection re-runs. Deliberately NOT a Room
+     *  `Flow<...>`: all synced rows share this table, so Room's per-table
+     *  InvalidationTracker would fire every collector's query on every write.
+     *  LocalStore drives the re-query from its own per-logical-table version
+     *  counters instead — see the note on LocalStore.observe(). */
     @Query("SELECT * FROM records WHERE tableName = :table")
     suspend fun get(table: String): List<RecordEntity>
 

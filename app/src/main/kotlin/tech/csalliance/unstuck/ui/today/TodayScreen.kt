@@ -151,19 +151,20 @@ fun TodayScreen(
         while (live != null && live?.paused != true) { nowTick = System.currentTimeMillis(); kotlinx.coroutines.delay(1000) }
     }
 
-    // Start-Next hero — scoped to TODAY (next-scheduled by time → else
-    // shortest-estimate → else null so the hero points to the Backlog instead of
-    // pulling a backlog task). Excludes the live-focused task + honours the area.
-    // Memoized on the bucketing-relevant inputs (coarse 60s `now`, NOT the 1s
-    // `nowTick`) so these don't recompute every live-session frame.
-    val startNext = remember(tasks, blocks, now, liveId, areaFilter, assignedOut) {
-        // excludeIds = tasks I assigned away — never the hero (they're in Delegated).
-        pickTodayHero(tasks, blocks, now, liveId, areaFilter, assignedOut.keys)
-    }
     // Today = open tasks scheduled/intended for today, plus anything completed today
     // (sorted last), matching the web today-list which keeps today's completions visible.
     val todayOpen = remember(tasks, blocks, now) {
         visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false)
+    }
+    // Start-Next hero — scoped to TODAY (next-scheduled by time → else
+    // shortest-estimate → else null so the hero points to the Backlog instead of
+    // pulling a backlog task). Excludes the live-focused task + honours the area.
+    // Memoized on the bucketing-relevant inputs (coarse 60s `now`, NOT the 1s
+    // `nowTick`) so these don't recompute every live-session frame. It is handed
+    // `todayOpen` — the very list it would otherwise re-bucket internally.
+    val startNext = remember(todayOpen, tasks, blocks, now, liveId, areaFilter, assignedOut) {
+        // excludeIds = tasks I assigned away — never the hero (they're in Delegated).
+        pickTodayHero(tasks, blocks, now, liveId, areaFilter, assignedOut.keys, todayOpen)
     }
     // Completed-today = real tasks + today's occurrences (NOT recurring
     // templates), so a ticked-off occurrence stays visible as a win and a done
@@ -220,9 +221,11 @@ fun TodayScreen(
     // "Company" (tasks shared WITH me) also counts as content, so a user whose only
     // rows are shared-with-you still sees them instead of the all-clear empty hero.
     val empty = todayAll.isEmpty() && live == null && backlogAll.isEmpty() && startNext == null && sharedTodayAll.isEmpty() && delegatedRows.isEmpty()
-    val weekMin = remember(sessions, now) {
-        sessions.filter { (now - (it.completedAtMs() ?: 0)) in 0..(7L * 86_400_000) }.sumOf { it.actualSec } / 60
-    }
+    // The 7-day focus roll-up re-ran an ISO parse for every session on every
+    // minute tick. Parse once per sessions list; the per-tick pass is then
+    // arithmetic. Unparseable stays 0L, i.e. still outside the window.
+    val sessionCompletedMs = remember(sessions) { sessions.map { it.completedAtMs() ?: 0L } }
+    val weekMin = remember(sessionCompletedMs, now) { weekFocusMinutes(sessions, sessionCompletedMs, now) }
 
     Column(Modifier.fillMaxWidth()) {
         // ── Pinned header: avatar + bell, greeting, and (when there's content) the
@@ -608,3 +611,20 @@ private fun EmptyHero(onAdd: () -> Unit) {
 
 private fun tech.csalliance.unstuck.core.model.Session.completedAtMs(): Long? =
     tech.csalliance.unstuck.core.time.Time.parseMillis(completedAt)
+
+/** Minutes focused in the 7 days up to [now] — the Today header's week total.
+ *  [completedMs] is `sessions.map { it.completedAtMs() ?: 0L }`, hoisted out of
+ *  the minute ticker so the roll-up doesn't re-parse every session's timestamp
+ *  once a minute. Same total as summing `actualSec` over the sessions whose
+ *  completion falls in `[now - 7d, now]` and dividing by 60. */
+internal fun weekFocusMinutes(
+    sessions: List<tech.csalliance.unstuck.core.model.Session>,
+    completedMs: List<Long>,
+    now: Long,
+): Int {
+    var sec = 0
+    for (i in sessions.indices) {
+        if ((now - completedMs[i]) in 0..(7L * 86_400_000)) sec += sessions[i].actualSec
+    }
+    return sec / 60
+}

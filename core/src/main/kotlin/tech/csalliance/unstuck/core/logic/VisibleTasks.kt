@@ -57,41 +57,66 @@ fun visibleTasks(
     slipMode: Boolean,
 ): List<TaskItem> {
     val today = Clock.todayIso()
-    val nonTemplates = tasks.filter { !isTemplate(it) }
-    val templateIds = tasks.filter { it.recurrence != null }.map { it.id }.toSet()
+    // One pass over `tasks` for both splits (templates vs the rest).
+    val nonTemplates = ArrayList<TaskItem>(tasks.size)
+    val templateIds = HashSet<String>()
+    for (t in tasks) {
+        if (isTemplate(t)) templateIds.add(t.id) else nonTemplates.add(t)
+    }
 
+    // ONE pass over `blocks` for every id set below. This used to be six
+    // separate full scans of the (up to several thousand) blocks; the sets and
+    // their contents are identical, only the number of traversals changed.
+    //
     // Recurring occurrences surface ONLY in Today (the due day) + the single
     // NEXT upcoming one in Upcoming — never in All / Backlog / Later / Completed
     // (a repeating task would otherwise list once per horizon date). The template
     // itself lives only in the Recurring view. occurrence row id == its block id.
-    val occBlocks = blocks.filter { isTaskBlock(it) && !it.skipped && it.taskId in templateIds && it.date >= today }
-    val todayOccIds = occBlocks.filter { it.date == today }.map { it.id }.toSet()
+    val todayOccIds = HashSet<String>()
     val nextPerTemplate = HashMap<String, CalBlock>()   // template id -> its earliest FUTURE occurrence block
-    for (b in occBlocks) {
-        if (b.date <= today) continue
+    // Non-template task bucketing — over NON-recurring task blocks only (an
+    // occurrence block's taskId is its template, never a row in these buckets).
+    val todayTaskIds = HashSet<String>()
+    val upcomingTaskIds = HashSet<String>()
+    val scheduledTaskIds = HashSet<String>()
+    for (b in blocks) {
+        if (!isTaskBlock(b)) continue
         val tid = b.taskId ?: continue
-        val cur = nextPerTemplate[tid]
-        if (cur != null && cur.date <= b.date) continue
-        nextPerTemplate[tid] = b
+        if (tid in templateIds) {
+            if (b.skipped || b.date < today) continue
+            if (b.date == today) {
+                todayOccIds.add(b.id)
+            } else {
+                val cur = nextPerTemplate[tid]
+                if (cur == null || cur.date > b.date) nextPerTemplate[tid] = b
+            }
+        } else {
+            scheduledTaskIds.add(tid)
+            if (b.date == today) todayTaskIds.add(tid)
+            else if (b.date > today) upcomingTaskIds.add(tid)
+        }
     }
-    val nextUpcomingOccIds = nextPerTemplate.values.map { it.id }.toSet()
-    val projected = projectOccurrences(tasks, blocks, today)
-    val todayOccurrences = projected.filter { it.id in todayOccIds }
-    val upcomingOccurrences = projected.filter { it.id in nextUpcomingOccIds }
+    val nextUpcomingOccIds = nextPerTemplate.values.mapTo(HashSet()) { it.id }
+
+    // The occurrence projections are only read by the view that shows them —
+    // ALL / LATER / COMPLETED / RECURRING never did anything with these lists.
+    val todayOccurrences by lazy(LazyThreadSafetyMode.NONE) {
+        projectOccurrences(tasks, blocks, today).filter { it.id in todayOccIds }
+    }
+    val upcomingOccurrences by lazy(LazyThreadSafetyMode.NONE) {
+        projectOccurrences(tasks, blocks, today).filter { it.id in nextUpcomingOccIds }
+    }
     // Missed recurring occurrences: one overdue row per template whose most-
     // recent past occurrence went undone — surfaced in Backlog so a skipped
     // "every Friday" task doesn't silently vanish until next Friday.
-    val overdueOccurrences = projectOverdueOccurrences(tasks, blocks, today)
-
-    // Non-template task bucketing — over NON-recurring task blocks only (an
-    // occurrence block's taskId is its template, never a row in these buckets).
-    val taskBlocks = blocks.filter { isTaskBlock(it) && it.taskId !in templateIds }
-    val todayTaskIds = taskBlocks.filter { it.date == today }.mapNotNull { it.taskId }.toSet()
-    val upcomingTaskIds = taskBlocks.filter { it.date > today }.mapNotNull { it.taskId }.toSet()
-    val scheduledTaskIds = taskBlocks.mapNotNull { it.taskId }.toSet()
+    val overdueOccurrences by lazy(LazyThreadSafetyMode.NONE) { projectOverdueOccurrences(tasks, blocks, today) }
     // Tasks whose only task-shaped cal_blocks are dated before today —
     // planned for a past day but never done. These are "overdue" → Backlog.
-    val pastOnlyTaskIds = scheduledTaskIds.filter { it !in todayTaskIds && it !in upcomingTaskIds }.toSet()
+    val pastOnlyTaskIds by lazy(LazyThreadSafetyMode.NONE) {
+        scheduledTaskIds.filterTo(HashSet()) { it !in todayTaskIds && it !in upcomingTaskIds }
+    }
+    // Local-midnight once instead of once per isCreatedToday/isCompletedToday call.
+    val dayStart = Time.startOfDayMillis(now)
 
     val byView = when (view) {
         TaskListView.RECURRING ->
@@ -102,7 +127,7 @@ fun visibleTasks(
             // scheduled for a future day — plus today's recurring occurrences.
             val nt = nonTemplates.filter { t ->
                 !t.done && t.later != true && (
-                    t.id in todayTaskIds || (isCreatedToday(t, now) && t.id !in upcomingTaskIds)
+                    t.id in todayTaskIds || (isCreatedTodayIn(t, dayStart) && t.id !in upcomingTaskIds)
                 )
             }
             nt + todayOccurrences.filter { !it.done }
@@ -111,10 +136,12 @@ fun visibleTasks(
             // Open work not actively planned AND sitting ≥ a day: never scheduled, or
             // only ever scheduled in the past (overdue). PLUS one overdue row per
             // recurring template whose most-recent occurrence was missed.
+            // (Same predicate, cheap set lookups first: the createdAt parse then
+            // only runs for rows the id checks have already kept.)
             nonTemplates.filter { t ->
-                !t.done && t.later != true && !isCreatedToday(t, now) && (
+                !t.done && t.later != true && (
                     t.id !in scheduledTaskIds || t.id in pastOnlyTaskIds
-                )
+                ) && !isCreatedTodayIn(t, dayStart)
             } + overdueOccurrences
         TaskListView.UPCOMING -> {
             // Future-scheduled tasks + the single NEXT occurrence per recurring series.
@@ -127,7 +154,7 @@ fun visibleTasks(
             nonTemplates.filter { it.done }
         TaskListView.ALL ->
             // The master list of distinct tasks — NO per-day occurrence rows.
-            nonTemplates.filter { !it.done || isCompletedToday(it, now) }
+            nonTemplates.filter { !it.done || isCompletedTodayIn(it, dayStart) }
     }
 
     // Today is area-agnostic on purpose.

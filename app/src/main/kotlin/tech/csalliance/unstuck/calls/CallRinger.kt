@@ -106,28 +106,33 @@ object CallRinger {
      *  service) — null once its outcome has been settled, and null for a STALE
      *  record ([staleOutcome]): an unsettled ring left behind by a reboot or a
      *  process kill must never make every FUTURE call report `busy` (Push.kt)
-     *  for the life of the install. [recover] reports what it left pending. */
-    fun activeCallId(context: Context): String? = synchronized(lock) {
+     *  for the life of the install. [recover] reports what it left pending.
+     *
+     *  [nowMs] is the clock the staleness bound is measured against: ONE decision
+     *  must run on ONE clock. The FCM path stamps the record with the `nowMs` it
+     *  was handed, so it reads it back with the same one (Push.kt passes its own
+     *  here and to [recover]); everything else takes the system clock default. */
+    fun activeCallId(context: Context, nowMs: Long = System.currentTimeMillis()): String? = synchronized(lock) {
         val p = prefs(context)
         if (p.getBoolean(K_SETTLED, true)) null
-        else if (staleOutcome(p, System.currentTimeMillis()) != null) null
+        else if (staleOutcome(p, nowMs) != null) null
         else p.getString(K_CALL_ID, null)
     }
 
     /** The payload of the call that is still RINGING (unsettled, not stale), for
      *  the activity to restore itself from / a deep link to resume into. */
-    fun ringing(context: Context): IncomingCallPayload? = synchronized(lock) {
+    fun ringing(context: Context, nowMs: Long = System.currentTimeMillis()): IncomingCallPayload? = synchronized(lock) {
         val p = prefs(context)
         if (p.getBoolean(K_SETTLED, true) || p.getString(K_PHASE, PHASE_RINGING) != PHASE_RINGING) return null
-        if (staleOutcome(p, System.currentTimeMillis()) != null) return null
+        if (staleOutcome(p, nowMs) != null) return null
         decodePayload(p.getString(K_PAYLOAD, null))
     }
 
     /** When the current ring started (epoch ms), or null when nothing rings. */
-    fun ringStartedMs(context: Context): Long? = synchronized(lock) {
+    fun ringStartedMs(context: Context, nowMs: Long = System.currentTimeMillis()): Long? = synchronized(lock) {
         val p = prefs(context)
         if (p.getBoolean(K_SETTLED, true)) null
-        else if (staleOutcome(p, System.currentTimeMillis()) != null) null
+        else if (staleOutcome(p, nowMs) != null) null
         else p.getLong(K_STARTED, 0L).takeIf { it > 0 }
     }
 

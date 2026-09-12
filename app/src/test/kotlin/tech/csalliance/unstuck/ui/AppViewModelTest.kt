@@ -1,9 +1,12 @@
 package tech.csalliance.unstuck.ui
 
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
@@ -126,10 +129,43 @@ class AppViewModelTest {
         // briefly after runTest cancels its collectors. Closing the db would race
         // that lingering read → "connection pool closed". The in-memory db is
         // per-builder and GC'd with the test; Robolectric sandboxes each test.
+        //
+        // DO drain the main looper. Every AppViewModel built here posts to it
+        // (AppViewModel.init → CallVoiceService.bind → main().post { … }) and nothing
+        // in these tests ever runs that, so each test used to END with runnables still
+        // queued — which is where Robolectric's "Main looper has queued unexecuted
+        // runnables" note on every failure in this class came from, and which leaves
+        // one test's posted work to fire inside whichever test idles the looper next.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
         Dispatchers.resetMain()
     }
 
-    private fun vm(
+    /**
+     * Build the SUT — and make sure it DIES WITH THE TEST.
+     *
+     * Nothing else clears these ViewModels: `onCleared()` only runs under a real
+     * ViewModelStore, so every AppViewModel a test built used to keep its
+     * `viewModelScope` alive for the rest of the JVM — the WhileSubscribed
+     * StateFlows still collecting Room on a real Dispatchers.Default thread, the
+     * co-focus collectors, the divergence-grace `delay`, any `launchWrite` still in
+     * flight. Two things followed, and between them they were this suite's wandering
+     * order-dependent flake (a different innocent test failing each run):
+     *
+     *  - `viewModelScope` is `Dispatchers.Main`, which @Before/@After swap per test.
+     *    A leaked Room continuation resuming on its real executor thread would touch
+     *    Main exactly as `setMain`/`resetMain` wrote it, and kotlinx-coroutines-test
+     *    threw "Dispatchers.Main is used concurrently with setting it" — sometimes at
+     *    `teardown`, sometimes inside whichever test was mid-flight.
+     *  - Worse, once the next test called `setMain`, a previous test's leftover
+     *    coroutines resumed onto the NEW test's scheduler — foreign tasks (and
+     *    foreign `delay`s) inside `advanceUntilIdle()`.
+     *
+     * `runTest` cancels `backgroundScope` after the body and then drains the
+     * scheduler, so hooking the cancellation there unwinds the ViewModel while the
+     * scheduler is still live — by the time @After resets Main, nothing of this test
+     * is left running.
+     */
+    private fun TestScope.vm(
         coFocus: ((String) -> tech.csalliance.unstuck.sync.CoFocusChannel?)? = null,
     ): AppViewModel = AppViewModel(
         graph = graph,
@@ -138,7 +174,11 @@ class AppViewModelTest {
         currentNameProvider = { displayName },
         nowProvider = { nowMs },
         coFocusChannelFactory = coFocus,
-    )
+    ).also { created ->
+        backgroundScope.coroutineContext.job.invokeOnCompletion {
+            runCatching { created.viewModelScope.cancel() }
+        }
+    }
 
     /**
      * Keep the WhileSubscribed StateFlows hot for the duration of the test so that
@@ -233,6 +273,33 @@ class AppViewModelTest {
     private suspend fun awaitLiveSession(predicate: (LiveSession?) -> Boolean): LiveSession? =
         store.liveSession().first(predicate)
 
+    /**
+     * Suspend until the OUTBOX satisfies [predicate], then return that snapshot.
+     *
+     * Reading `store.pending()` straight after an `awaitXxx { row }` was a RACE, and
+     * the suite's worst flake. A VM write is ONE coroutine that writes the record
+     * first and queues its outbox op second (WriteThrough.upsertX / the shared-list
+     * `rpc` path), and BOTH hops leave the test scheduler — Room's executor and
+     * LocalStore's flowOn(Default). So `advanceUntilIdle()` returns while the write
+     * is still in flight, and gating on the record only proves the FIRST half landed:
+     * the outbox read that followed found nothing about half the time under load.
+     *
+     * `pendingCount()` is the outbox table's OWN Room flow, so this gate is
+     * event-driven like every other awaitXxx here — no polling, no sleep, no
+     * timeout: it re-reads the queue on the initial emission and on every later
+     * outbox change, and returns the first snapshot that satisfies [predicate].
+     *
+     * The outbox op is the LAST durable thing a write does, so after this the rest
+     * of the write coroutine is pure in-memory work queued on the test dispatcher —
+     * one `advanceUntilIdle()` flushes it (that is how the in-memory assertions that
+     * follow, e.g. `momentDone` / a receipt's `undone`, become deterministic too).
+     */
+    private suspend fun awaitPending(predicate: (List<OutboxEntity>) -> Boolean): List<OutboxEntity> {
+        var snapshot: List<OutboxEntity> = emptyList()
+        store.pendingCount().first { snapshot = store.pending(); predicate(snapshot) }
+        return snapshot
+    }
+
     // -----------------------------------------------------------------------
     // toggleDone: recurring OCCURRENCE vs plain task vs template semantics
     // -----------------------------------------------------------------------
@@ -276,7 +343,7 @@ class AppViewModelTest {
         val done = awaitTask("t1") { it.done }
         assertNotNull("completedAt stamped on first completion", done.completedAt)
         // The write went through the real WriteThrough → an outbox upsert is queued.
-        assertTrue(store.pending().any { it.recordTable == Tables.TASKS && it.recordId == "t1" && it.op == "upsert" })
+        awaitPending { l -> l.any { it.recordTable == Tables.TASKS && it.recordId == "t1" && it.op == "upsert" } }
     }
 
     // -----------------------------------------------------------------------
@@ -357,8 +424,24 @@ class AppViewModelTest {
         vm.startSharedFocus("owners-task", title = "Watching only", estimateMin = 25, level = ShareLevel.VIEW)
         advanceUntilIdle()
 
-        // View is read-only company — no focus session starts.
-        awaitLiveSession { it == null }
+        // View is read-only company — no focus session starts. Proving that needs a
+        // POSITIVE follow-up: the live session begins as null, so the old
+        // `awaitLiveSession { it == null }` returned on the very first emission and
+        // could not fail however the VIEW start behaved.
+        //
+        // The same task at PARTNER level is the probe. startSharedFocus keeps the
+        // state of a session already running for that task ("already focusing this
+        // shared task"), so if the VIEW start HAD taken, this second call would be a
+        // no-op and the session we read back would be the read-only one. The level
+        // and title we end up with are therefore the proof that only the partner
+        // start ever made a session.
+        vm.startSharedFocus("owners-task", title = "Their brief", estimateMin = 45, level = ShareLevel.PARTNER)
+        advanceUntilIdle()
+
+        val live = awaitLiveSession { it?.taskId == "owners-task" }!!
+        assertEquals("the VIEW start made no session for the partner start to inherit", "partner", live.sharedLevel)
+        assertEquals("Their brief", live.sharedTitle)
+        assertEquals(45, live.sessionEstimateMin)
     }
 
     @Test fun finishFocus_sharedSession_clearsLiveAndWritesNoOwnRows() = runTest(dispatcher) {
@@ -491,7 +574,13 @@ class AppViewModelTest {
         vm.scheduleTask(t, chosen, "08:00")
         advanceUntilIdle()
 
-        val blocks = awaitBlocks { l -> l.count { it.taskId == "tpl" } > 5 }.filter { it.taskId == "tpl" }
+        // Gate on the WHOLE post-condition, not just the count: the horizon lands one
+        // block at a time, so `count > 5` was satisfiable before the chosen slot itself
+        // had been written, and the next line then read a half-finished regen.
+        val blocks = awaitBlocks { l ->
+            val mine = l.filter { it.taskId == "tpl" }
+            mine.size > 5 && mine.any { it.date == chosen && it.startTime == "08:00" }
+        }.filter { it.taskId == "tpl" }
         assertTrue("daily regen materializes many future occurrences", blocks.size > 5)
         assertTrue("the chosen date/time is covered", blocks.any { it.date == chosen && it.startTime == "08:00" })
         blocks.forEach { assertTrue(isTaskBlock(it)) }
@@ -553,10 +642,8 @@ class AppViewModelTest {
         advanceUntilIdle()
 
         assertEquals("Shopping", awaitCollection("c1") { it.name == "Shopping" }.name)
-        assertTrue(
-            "solo path enqueues an outbox collections upsert",
-            store.pending().any { it.recordTable == Tables.COLLECTIONS && it.recordId == "c1" && it.op == "upsert" },
-        )
+        // "solo path enqueues an outbox collections upsert" — awaited, not sampled.
+        awaitPending { l -> l.any { it.recordTable == Tables.COLLECTIONS && it.recordId == "c1" && it.op == "upsert" } }
     }
 
     @Test fun addCollectionItem_sharedList_optimisticLocalWrite_andQueuedItemRpc() = runTest(dispatcher) {
@@ -580,6 +667,10 @@ class AppViewModelTest {
 
         val items = awaitCollection("c2") { it.items.isNotEmpty() }.items
         assertEquals("optimistic local append applied", "pack sunscreen", items.single().body)
+        awaitPending { l -> l.any { it.recordTable == Tables.COLLECTIONS && it.recordId == "c2" } }
+        advanceUntilIdle()   // the write is past its last durable hop; flush its tail
+        // Re-read AFTER the tail has run: "exactly one op" has to be measured on a
+        // finished write, not on the snapshot that first satisfied the gate.
         val ops = store.pending().filter { it.recordTable == Tables.COLLECTIONS && it.recordId == "c2" }
         assertEquals("exactly one queued op, and it is an rpc (never a whole-row upsert)", listOf("rpc"), ops.map { it.op })
         val call = tech.csalliance.unstuck.sync.OutboxFlusher.decodeRpc(ops.single().payload!!)!!
@@ -601,7 +692,8 @@ class AppViewModelTest {
         advanceUntilIdle()
 
         assertTrue(awaitCollection("c2") { it.items.single().done == true }.items.single().done == true)
-        val op = store.pending().single { it.recordTable == Tables.COLLECTIONS && it.recordId == "c2" }
+        val op = awaitPending { l -> l.any { it.recordTable == Tables.COLLECTIONS && it.recordId == "c2" } }
+            .single { it.recordTable == Tables.COLLECTIONS && it.recordId == "c2" }
         val call = tech.csalliance.unstuck.sync.OutboxFlusher.decodeRpc(op.payload!!)!!
         assertEquals("collection_set_item_flag", call.first)
         assertEquals("\"done\"", call.second["p_flag"].toString())
@@ -621,7 +713,7 @@ class AppViewModelTest {
         val items = awaitCollection("c1") { it.items.isNotEmpty() }.items
         assertEquals(1, items.size)
         assertEquals("trimmed body", "buy milk", items.single().body)
-        assertTrue(store.pending().any { it.recordTable == Tables.COLLECTIONS && it.recordId == "c1" && it.op == "upsert" })
+        awaitPending { l -> l.any { it.recordTable == Tables.COLLECTIONS && it.recordId == "c1" && it.op == "upsert" } }
     }
 
     @Test fun isSharedClassification_guardsOnKnownUid() = runTest(dispatcher) {
@@ -664,16 +756,26 @@ class AppViewModelTest {
 
     @Test fun moveItemToTask_alreadyPromotedInFlight_isNoOp() = runTest(dispatcher) {
         uid = "me"
-        val item = CollectionItem(id = "i1", body = "Done already", at = "2026-05-21T10:00:00.000Z", promoted = true, promotedDone = false)
-        val c = ItemCollection(id = "c1", name = "Home", color = "indigo", items = listOf(item), sortOrder = 0, ownerId = "me")
+        val inFlight = CollectionItem(id = "i1", body = "Done already", at = "2026-05-21T10:00:00.000Z", promoted = true, promotedDone = false)
+        // The CONTROL. On its own, "no task named X exists" is true before the write
+        // path has done anything at all, so the assertion could not fail however
+        // moveItemToTask behaved. An un-promoted sibling promoted straight after gives
+        // a positive post-condition to wait for: the guarded item is refused
+        // synchronously (the guard is the first line of moveItemToTaskNow, before any
+        // suspension), so by the time the sibling's task is readable the guarded one
+        // has had — and lost — its chance to mint one.
+        val fresh = CollectionItem(id = "i2", body = "Fresh one", at = "2026-05-21T10:00:00.000Z")
+        val c = ItemCollection(id = "c1", name = "Home", color = "indigo", items = listOf(inFlight, fresh), sortOrder = 0, ownerId = "me")
         seedCollection(c)
         val vm = vm()
         subscribeReads(vm, vm.collections, vm.tasks, vm.blocks)
 
-        vm.moveItemToTask(c, item, AppViewModel.PromoteMode.SELF)
+        vm.moveItemToTask(c, inFlight, AppViewModel.PromoteMode.SELF)
+        vm.moveItemToTask(c, fresh, AppViewModel.PromoteMode.SELF)
         advanceUntilIdle()
 
-        assertTrue("no duplicate task minted for an in-flight promotion", store.tasks().first().none { it.name == "Done already" })
+        val tasks = awaitTasks { l -> l.any { it.name == "Fresh one" } }
+        assertTrue("no duplicate task minted for an in-flight promotion", tasks.none { it.name == "Done already" })
     }
 
     // -----------------------------------------------------------------------
@@ -1444,6 +1546,12 @@ class AppViewModelTest {
         val session = awaitSessions { it.isNotEmpty() }.single()
         assertEquals("sess-shared", session.id)
         assertEquals(600, session.actualSec)
+        // finishFocus clears the live session AFTER every row write, so waiting for
+        // that is what makes the NEGATIVE assertions below mean anything: sampled
+        // mid-write they would have passed simply because nothing had been written yet.
+        assertNull("live session cleared", awaitLiveSession { it == null })
+        awaitPending { l -> l.any { it.recordTable == Tables.SESSIONS && it.recordId == "sess-shared" } }
+        advanceUntilIdle()
         // …but NO direct bump: the total accrues exclusively through the ledger.
         assertEquals("no direct totalFocused bump on a shared-broadcast session", 120, loadTask("t1")!!.totalFocused)
         assertFalse(
@@ -1455,7 +1563,6 @@ class AppViewModelTest {
         assertNotNull("ledger retry persisted", raw)
         assertTrue(raw!!.contains("sess-shared"))
         assertTrue(raw.contains("\"sec\":600"))
-        assertNull(store.getLiveSession())
     }
 
     @Test fun finishFocus_plainOwnSession_noStamps_stillDirectBump() = runTest(dispatcher) {
@@ -1490,7 +1597,7 @@ class AppViewModelTest {
         assertEquals("s-out", session.id)
         assertEquals(300, session.actualSec)
         assertEquals(330, awaitTask("t1") { it.totalFocused == 330 }.totalFocused)
-        assertTrue(store.pending().any { it.recordTable == Tables.SESSIONS && it.recordId == "s-out" })
+        awaitPending { l -> l.any { it.recordTable == Tables.SESSIONS && it.recordId == "s-out" } }
         assertNull("live session cleared before the wipe", awaitLiveSession { it == null })
     }
 
@@ -1612,6 +1719,12 @@ class AppViewModelTest {
         advanceUntilIdle()
 
         awaitTasks { l -> l.size == 2 && l.none { it.done } }
+        // Both un-completions ride the outbox — the undo's LAST durable step. The
+        // receipt's `undone` flag is set after that, on the test dispatcher, so gate
+        // on the queue and then flush the tail; asserting `undone` straight off the
+        // task rows raced the second half of the same coroutine.
+        awaitPending { l -> l.count { it.recordTable == Tables.TASKS && it.op == "upsert" } >= 2 }
+        advanceUntilIdle()
         assertTrue("receipt marked used", vm.assistantHistory.first().receipts!![0].undone)
     }
 
@@ -1668,8 +1781,11 @@ class AppViewModelTest {
         // honest slip counter, and the change queued for the account (outbox).
         awaitBlock("b1") { it.date == tomorrow && !it.skipped }
         assertEquals(1, awaitTask("a") { it.moveCount == 1 }.moveCount)
-        assertTrue(store.pending().any { it.recordTable == Tables.CAL_BLOCKS && it.recordId == "b1" })
-        assertTrue(store.pending().any { it.recordTable == Tables.TASKS && it.recordId == "a" })
+        awaitPending { l ->
+            l.any { it.recordTable == Tables.CAL_BLOCKS && it.recordId == "b1" } &&
+                l.any { it.recordTable == Tables.TASKS && it.recordId == "a" }
+        }
+        advanceUntilIdle()   // past the last durable hop; the moment's in-memory tail runs now
         assertTrue("the moment is settled", vm.isMomentDismissed("m1"))
         assertEquals("Carried 1 to tomorrow.", vm.momentDone.value)
         vm.clearMomentDone("someone else's ✓")
@@ -1705,7 +1821,8 @@ class AppViewModelTest {
         assertEquals("18:30", b.startTime)
         assertEquals(45, b.durationMinutes)
         assertEquals(CalBlockKind.TASK, b.kind)
-        assertTrue(store.pending().any { it.recordTable == Tables.CAL_BLOCKS && it.recordId == b.id })
+        awaitPending { l -> l.any { it.recordTable == Tables.CAL_BLOCKS && it.recordId == b.id } }
+        advanceUntilIdle()   // past the last durable hop; the moment's in-memory tail runs now
         assertNull("booking a habit gap isn't a slip", loadTask("a")!!.moveCount)
         assertTrue(vm.isMomentDismissed("m1"))
         assertEquals("Blocked — Gym, 2031-01-07 18:30.", vm.momentDone.value)
@@ -1731,7 +1848,8 @@ class AppViewModelTest {
         assertEquals("Call mum", t.name)
         assertEquals(25, t.estimateMin)
         assertFalse(t.done)
-        assertTrue(store.pending().any { it.recordTable == Tables.TASKS && it.recordId == t.id })
+        awaitPending { l -> l.any { it.recordTable == Tables.TASKS && it.recordId == t.id } }
+        advanceUntilIdle()   // past the last durable hop; the moment's in-memory tail runs now
         assertEquals("Added “Call mum”.", vm.momentDone.value)
         assertTrue(vm.isMomentDismissed("m1"))
     }

@@ -94,7 +94,10 @@ object CallPushHandler {
         // ring in place (CallRinger ignores it once answered), and touch nothing —
         // not the 30 s clock, not the outcome. A push for ANOTHER call while one is
         // up ends as busy (one call at a time, like CallKit's maximumCallGroups=1).
-        val active = CallRinger.activeCallId(context)
+        // Same clock as recover() above and as CallRinger.ring() below stamps the
+        // record with — asking the system clock here instead would let one decision
+        // straddle two clocks (the record "live" to recover() and "stale" to this).
+        val active = CallRinger.activeCallId(context, nowMs)
         if (active != null) {
             if (active == payload.callId) {
                 CallRinger.ring(context, payload, nowMs)

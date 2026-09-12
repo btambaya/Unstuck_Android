@@ -8,8 +8,11 @@ import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import org.junit.After
+import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
@@ -47,6 +50,51 @@ class CallVoiceServiceTest {
 
     private fun tool(name: String) = buildJsonObject { put("type", "function"); put("name", name); put("description", "d") }
     private fun registry(vararg names: String): JsonArray = buildJsonArray { names.forEach { add(tool(it)) } }
+
+    /**
+     * The COLD-START shape these service tests describe: nothing has bound the
+     * app-side seams, so `begin()` posts its launcher grace and leaves the call
+     * STARTING (foreground notification up, `activeCallId` set) instead of dialling.
+     *
+     * This has to be asserted, not assumed. `CallVoiceService.deps` is a static, and
+     * Robolectric reuses ONE sandbox — one class loader, one set of statics — for
+     * every test class with the same @Config. `AppViewModel.init` binds itself into
+     * that static and only `onCleared` unbinds it, which never runs in a unit test:
+     * so every AppViewModel built by a sibling suite (AppViewModelTest,
+     * AssistantMemoryHooksTest) leaves a DEAD view model bound here. Whenever
+     * Gradle happened to run one of those classes first, `begin()` found deps,
+     * dialled the corpse, got `isVoiceConfigured() == false`, and finished the call
+     * on the spot — which calls stopForeground(true) (Robolectric clears
+     * lastForegroundNotification with it) and nulls activeCallId. Both service tests
+     * then failed together, in about half of all full-suite runs and never alone.
+     *
+     * bind() then unbind() of our own object is the public way to claim the seam and
+     * put it back to null regardless of who held it. bind() also posts a re-dial to
+     * the main looper, so drain it before the test runs.
+     */
+    private val noDeps = object : CallVoiceService.Deps {
+        override fun isVoiceConfigured() = false
+        override fun accessToken(): String? = null
+        override val proxyUrl get() = ""
+        override val model get() = ""
+        override suspend fun voiceInstructions() = ""
+        override fun voiceTools(): JsonArray = buildJsonArray { }
+        override suspend fun runAppTool(name: String, args: JsonObject) = ""
+    }
+
+    @Before fun coldStart() {
+        CallVoiceService.bind(noDeps)
+        CallVoiceService.unbind(noDeps)
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+    }
+
+    /** …and leave the statics as we found them, for whoever runs next in this
+     *  sandbox (the service tests below own `instance` / `activeCallId`). */
+    @After fun releaseSeam() {
+        CallVoiceService.bind(noDeps)
+        CallVoiceService.unbind(noDeps)
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+    }
 
     @Test fun `compose - base instructions plus the call script, the opening in the primer`() {
         val comp = CallVoiceService.compose(payload, "BASE VOICE INSTRUCTIONS", registry("create_task", "complete_task", "add_capture", "schedule_task", "start_focus", "update_call"), nowMs = 0L)

@@ -30,6 +30,13 @@ import tech.csalliance.unstuck.surface.NotificationChannels
 class CallRingerTest {
     private val context: Context get() = ApplicationProvider.getApplicationContext()
     private val nm: NotificationManager get() = context.getSystemService(NotificationManager::class.java)
+    /**
+     * The synthetic clock the first half of this suite rings on. Every read of the
+     * persisted ring state below is handed it too: the staleness bound measures the
+     * record's stamp against the clock it is GIVEN, so a fixed instant read back
+     * against the real system clock would rot into "stale" (or, if the instant is
+     * in the future, pass for the wrong reason until that date arrives).
+     */
     private val now = 1_800_000_000_000L
     private val payload = IncomingCallPayload(
         callId = "0b8a7e60-1111-4222-8333-444455556666", label = "speak to James", notes = listOf("A", "B"),
@@ -50,8 +57,8 @@ class CallRingerTest {
         assertNotNull(notice)
         assertEquals("I called about speak to James", notice.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
         assertEquals("A\nB", notice.extras.getCharSequence(Notification.EXTRA_BIG_TEXT).toString())
-        assertNull(CallRinger.activeCallId(context))
-        assertNull(CallRinger.ringing(context))
+        assertNull(CallRinger.activeCallId(context, now))
+        assertNull(CallRinger.ringing(context, now))
         assertTrue(shadowOf(context.getSystemService(AlarmManager::class.java)).scheduledAlarms.isEmpty())
 
         // A second fire (a duplicate alarm, or the activity's own countdown) is a no-op.
@@ -68,7 +75,7 @@ class CallRingerTest {
         fire(MissedCallReceiver.ACTION_MISSED, callId = "some-other-call")
         assertTrue(queued().isEmpty())
         assertNotNull(shadowOf(nm).getNotification(NotifIds.CALL))
-        assertEquals(payload.callId, CallRinger.activeCallId(context))
+        assertEquals(payload.callId, CallRinger.activeCallId(context, now))
     }
 
     @Test fun `Decline from the shade reports DECLINED with no notice, and the alarm after it is a no-op`() {
@@ -89,7 +96,7 @@ class CallRingerTest {
         assertEquals(10, item.snoozeMin)
         val ack = shadowOf(nm).getNotification(NotifIds.callResult(payload.callId))
         assertEquals("I'll call back in 10 minutes", ack.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
-        assertNull(CallRinger.activeCallId(context))
+        assertNull(CallRinger.activeCallId(context, now))
     }
 
     @Test fun `answering keeps the call ACTIVE for the voice service and blocks missed or declined`() {
@@ -100,8 +107,8 @@ class CallRingerTest {
         assertEquals(listOf(CallOutcome.ANSWERED), queued().map { it.outcome })
         assertNull("ring notification down", shadowOf(nm).getNotification(NotifIds.CALL))
         assertTrue(shadowOf(context.getSystemService(AlarmManager::class.java)).scheduledAlarms.isEmpty())
-        assertEquals("still the active call", payload.callId, CallRinger.activeCallId(context))
-        assertNull("but no longer ringing", CallRinger.ringing(context))
+        assertEquals("still the active call", payload.callId, CallRinger.activeCallId(context, now))
+        assertNull("but no longer ringing", CallRinger.ringing(context, now))
         // The alarm / a stale Decline can't undo an answer.
         fire(MissedCallReceiver.ACTION_MISSED)
         fire(MissedCallReceiver.ACTION_DECLINE)
@@ -113,7 +120,7 @@ class CallRingerTest {
         // The voice service ends it: done (or snoozed) settles the active call.
         assertTrue(CallRinger.settle(context, payload.callId, CallOutcome.DONE))
         assertEquals(listOf(CallOutcome.ANSWERED, CallOutcome.DONE), queued().map { it.outcome })
-        assertNull(CallRinger.activeCallId(context))
+        assertNull(CallRinger.activeCallId(context, now))
         assertFalse(CallRinger.settle(context, payload.callId, CallOutcome.SNOOZED, snoozeMin = 5))
     }
 
@@ -122,9 +129,9 @@ class CallRingerTest {
         fire(MissedCallReceiver.ACTION_MISSED)
         val second = payload.copy(callId = "second", label = "the 3 o'clock", notes = emptyList(), taskId = null, blockId = null)
         CallRinger.ring(context, second, now + 60_000)
-        assertEquals("second", CallRinger.activeCallId(context))
-        assertEquals(second, CallRinger.ringing(context))
-        assertEquals(now + 60_000, CallRinger.ringStartedMs(context))
+        assertEquals("second", CallRinger.activeCallId(context, now + 60_000))
+        assertEquals(second, CallRinger.ringing(context, now + 60_000))
+        assertEquals(now + 60_000, CallRinger.ringStartedMs(context, now + 60_000))
         assertNotNull(shadowOf(nm).getNotification(NotifIds.CALL))
         val alarm = shadowOf(context.getSystemService(AlarmManager::class.java)).nextScheduledAlarm
         assertEquals(now + 60_000 + CallRinger.MISSED_AFTER_MS, alarm!!.triggerAtTime)
@@ -133,7 +140,7 @@ class CallRingerTest {
     @Test fun `clear() forgets the ring without reporting (sign-out)`() {
         ring()
         CallRinger.clear(context)
-        assertNull(CallRinger.activeCallId(context))
+        assertNull(CallRinger.activeCallId(context, now))
         assertNull(shadowOf(nm).getNotification(NotifIds.CALL))
         assertTrue(queued().isEmpty())
         assertFalse(CallRinger.settle(context, payload.callId, CallOutcome.MISSED))

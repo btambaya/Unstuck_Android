@@ -1,9 +1,12 @@
 package tech.csalliance.unstuck.ui
 
+import androidx.lifecycle.viewModelScope
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceUntilIdle
@@ -72,9 +75,34 @@ class AssistantMemoryHooksTest {
         write = WriteThrough(graph.store)
     }
 
-    @After fun teardown() { Dispatchers.resetMain() }
+    @After fun teardown() {
+        // Drain the main looper first. Each AppViewModel built here posts to it
+        // (init → CallVoiceService.bind → main().post { … }) and nothing here runs
+        // that, so a test used to end with runnables still queued — Robolectric's
+        // "Main looper has queued unexecuted runnables" note, and one test's work
+        // left to fire inside whichever test idles the looper next.
+        org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        Dispatchers.resetMain()
+    }
 
-    private fun vm() = AppViewModel(graph = graph, writeOverride = write, currentUidProvider = { uid }, currentNameProvider = { "Ada" })
+    /**
+     * Build the SUT — and make sure it DIES WITH THE TEST. `onCleared()` never runs
+     * in a unit test, so without this every AppViewModel kept its `viewModelScope`
+     * (WhileSubscribed StateFlows collecting Room on a real Default thread, plus any
+     * in-flight write) alive past the test. `viewModelScope` is Dispatchers.Main,
+     * which @Before/@After swap per test: a leaked Room continuation resuming just
+     * as Main was swapped threw "Dispatchers.Main is used concurrently with setting
+     * it", and once the next test called setMain the leftovers resumed onto the NEXT
+     * test's scheduler. runTest cancels backgroundScope after the body and then
+     * drains the scheduler, so unwinding here happens while it is still live.
+     */
+    private fun kotlinx.coroutines.test.TestScope.vm() =
+        AppViewModel(graph = graph, writeOverride = write, currentUidProvider = { uid }, currentNameProvider = { "Ada" })
+            .also { created ->
+                backgroundScope.coroutineContext.job.invokeOnCompletion {
+                    runCatching { created.viewModelScope.cancel() }
+                }
+            }
 
     /** Drive the VM's coroutines until the turn has settled. The style save awaits
      *  Room suspend calls on a REAL executor thread, which the virtual scheduler

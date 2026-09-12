@@ -33,7 +33,13 @@ import tech.csalliance.unstuck.core.logic.PendingOutcome
 class PushTest {
     private val context: Context get() = ApplicationProvider.getApplicationContext()
     private val nm: NotificationManager get() = context.getSystemService(NotificationManager::class.java)
-    /** 30 s after the contract's `scheduledAt` — a ring due more than 10 min ago is stale by rule. */
+    /**
+     * 30 s after the contract's `scheduledAt` — a ring due more than 10 min ago is
+     * stale by rule. Every read of the persisted ring state below passes THIS clock
+     * (CallRinger.activeCallId/ringStartedMs take one, as CallPushHandler does):
+     * a fixed instant stamped into the record and then measured against the real
+     * system clock would go "stale" as soon as the wall clock moved past it.
+     */
     private val now = java.time.Instant.parse("2026-09-09T13:45:30Z").toEpochMilli()
 
     private val contract = mapOf(
@@ -95,8 +101,8 @@ class PushTest {
         assertEquals(AlarmManager.RTC_WAKEUP, alarm.type)
         // Nothing reported yet: the outcome is whatever settles the ring first.
         assertTrue(queued().isEmpty())
-        assertEquals(callId, CallRinger.activeCallId(context))
-        assertEquals(now, CallRinger.ringStartedMs(context))
+        assertEquals(callId, CallRinger.activeCallId(context, now))
+        assertEquals(now, CallRinger.ringStartedMs(context, now))
         // Logged to the in-app notification centre under kind=call.
         val entry = NotificationLog.items.value.first()
         assertEquals("call", entry.kind)
@@ -107,7 +113,7 @@ class PushTest {
         assertTrue(handle(at = now))
         assertTrue(handle(at = now + 12_000))
         assertEquals(1, shadowOf(nm).size())
-        assertEquals(now, CallRinger.ringStartedMs(context))
+        assertEquals(now, CallRinger.ringStartedMs(context, now + 12_000))
         assertEquals(1, shadowOf(context.getSystemService(AlarmManager::class.java)).scheduledAlarms.size)
         assertTrue(queued().isEmpty())
     }
@@ -121,7 +127,7 @@ class PushTest {
         assertNotNull(n)
         assertEquals(CallNotificationCopy.busy(IncomingCallPayload.fromData(second)!!).title, n.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
         // The first ring is untouched.
-        assertEquals(callId, CallRinger.activeCallId(context))
+        assertEquals(callId, CallRinger.activeCallId(context, now))
         assertNotNull(shadowOf(nm).getNotification(NotifIds.CALL))
     }
 
@@ -129,7 +135,7 @@ class PushTest {
         assertTrue(handle(env = ringEnv.copy(signedIn = false)))
         assertEquals(0, shadowOf(nm).size())
         assertTrue(queued().isEmpty())
-        assertNull(CallRinger.activeCallId(context))
+        assertNull(CallRinger.activeCallId(context, now))
     }
 
     @Test fun `outside the call hours → declined + the hours notice with Start and Reschedule`() {

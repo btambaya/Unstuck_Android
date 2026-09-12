@@ -31,9 +31,10 @@ import tech.csalliance.unstuck.core.model.CalBlock
 
 /** Compact snapshot of the user's world for the model: today + precomputed
  *  dates, local time + free windows, name preferences, profile facts, tone,
- *  what's been noticed, this week's blocks, areas/tags, open captures, the
- *  circle, a live focus session, ≤60 open tasks (with their NEXT live block)
- *  and ≤12 lists × 25 items. */
+ *  what's been noticed, this week's blocks, areas/tags, open captures (ids +
+ *  tags, no text), how many people are in the circle, a live focus session,
+ *  ≤60 open tasks (with their NEXT live block) and ≤12 lists (names + counts,
+ *  no items). */
 suspend fun buildAssistantContext(api: AssistantApi): JsonObject {
     val tasks = api.getTasks()
     val blocks = api.getBlocks()
@@ -106,15 +107,32 @@ suspend fun buildAssistantContext(api: AssistantApi): JsonObject {
         putJsonArray("areas") { areas.forEach { add(it) } }
         putJsonArray("tags") { tags.forEach { add(it) } }
         // The rest of the app, so the model knows what exists.
+        //
+        // DATA MINIMISATION (privacy audit, 2026-09-12 — 1:1 with the web's
+        // buildAssistantContext): this snapshot goes to a third-party model
+        // provider on EVERY turn, so it carries the INVENTORY (what exists,
+        // with ids) and not the CONTENTS. Capture text, list-item text and the
+        // circle members' names are fetched only when a request actually needs
+        // them — get_captures / get_lists are read tools the model already has,
+        // and share_task resolves a person by the name the user said
+        // (client-side, against getShareCandidates()). Keep it that way: adding
+        // a body back here re-widens what leaves the device for a plain "hi".
         putJsonArray("captures") {
             captures.forEach { c ->
                 addJsonObject {
-                    put("id", c.id); put("tag", c.tag.name.lowercase().replace('_', '-')); put("body", c.body.take(120))
+                    // no body — get_captures reads them
+                    put("id", c.id); put("tag", c.tag.name.lowercase().replace('_', '-'))
                     c.taskId?.let { put("taskId", it) }
                 }
             }
         }
-        putJsonArray("people") { api.getCirclePeople().forEach { p -> addJsonObject { put("name", p.name); put("status", p.status) } } }
+        // Counts, not names: circle members are OTHER people, and the model
+        // never needs their names to stage a share.
+        putJsonObject("people") {
+            val p = api.getCirclePeople()
+            val active = p.count { it.status == "active" }
+            put("active", active); put("pending", p.size - active)
+        }
         if (live != null) {
             val t = tasks.firstOrNull { it.id == live.taskId }
             val mins = Math.round((nowMs - (live.sessionStart ?: nowMs)) / 60_000.0).toInt()
@@ -134,17 +152,17 @@ suspend fun buildAssistantContext(api: AssistantApi): JsonObject {
                 }
             }
         }
-        // Bounded: 12 lists × 25 items keeps a hoarder account's context well
-        // under the request cap without losing anything the model acts on.
+        // Names + counts only — the items themselves (including items another
+        // person wrote in a list shared WITH this user) go to the provider only
+        // when the turn is actually about a list, via get_lists.
         putJsonArray("lists") {
             lists.forEach { c ->
                 addJsonObject {
                     put("id", c.id); put("name", c.name)
-                    putJsonArray("items") {
-                        c.items.take(25).forEach { i ->
-                            addJsonObject { put("id", i.id); put("body", i.body); if (i.done == true) put("done", true) }
-                        }
-                    }
+                    put("items", c.items.size)
+                    put("open", c.items.count { it.done != true })
+                    // Owned by someone else: read/act on it only when asked.
+                    if (c.myRole != null && c.myRole != "owner") put("sharedWithYou", true)
                 }
             }
         }

@@ -5,6 +5,7 @@ import androidx.lifecycle.viewModelScope
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.status.SessionSource
 import io.github.jan.supabase.auth.status.SessionStatus
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.combine
@@ -122,6 +123,8 @@ import tech.csalliance.unstuck.core.logic.adoptable
 import tech.csalliance.unstuck.core.logic.applyCompletion
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
 import tech.csalliance.unstuck.core.logic.canonicalElapsedSec
+import tech.csalliance.unstuck.core.logic.clearLaterOnSchedule
+import tech.csalliance.unstuck.core.logic.liveOccurrenceBlockForTemplate
 import tech.csalliance.unstuck.core.logic.newUuid
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
 import tech.csalliance.unstuck.core.logic.resolveDivergence
@@ -586,7 +589,18 @@ class AppViewModel(
     fun scheduleTask(task: TaskItem, date: String, startTime: String) = launchWrite { scheduleTaskNow(task, date, startTime) }
 
     /** [scheduleTask], committed before returning. */
-    private suspend fun scheduleTaskNow(task: TaskItem, date: String, startTime: String) {
+    private suspend fun scheduleTaskNow(original: TaskItem, date: String, startTime: String) {
+        // Giving a task a real slot ends its "Later" parking — done HERE, the one
+        // choke point every scheduling surface goes through (the task-detail sheet,
+        // the create sheet, a calendar drop, promote-to-loop), instead of only at
+        // the detail sheet's own call site as before: a task scheduled from the
+        // calendar or by the assistant stayed parked, sitting on the calendar at
+        // the chosen time while Today, Backlog and Start-next all filtered it out.
+        // The cleared row then REPLACES `task` below, so the move-count bump's
+        // whole-row upsert can't write later=true straight back.
+        val cleared = clearLaterOnSchedule(original, isoNow())
+        cleared?.let { write?.upsertTask(it) }
+        val task = cleared ?: original
         val recurrence = task.recurrence
         val existing = blocks.value.filter { it.taskId == task.id && tech.csalliance.unstuck.core.logic.isTaskBlock(it) }
         if (recurrence != null) {
@@ -631,11 +645,22 @@ class AppViewModel(
 
     /** Reschedule / resize an existing block (drag or the block-edit sheet). */
     fun moveBlock(block: CalBlock, date: String, startTime: String) = launchWrite {
-        write?.upsertCalBlock(block.copy(date = date, startTime = startTime))
+        val moved = block.copy(date = date, startTime = startTime)
+        write?.upsertCalBlock(moved)
+        // Dragging a task onto a slot is scheduling it, so it ENDS the "Later"
+        // parking here too — scheduleTaskNow is not the only scheduling surface,
+        // and a parked task dragged on the calendar used to sit there while
+        // Today, Backlog and Start-next all filtered it out as deferred.
+        val owner = block.taskId?.let { id -> tasks.value.firstOrNull { it.id == id } }
+        val unparked = owner?.let { clearLaterOnSchedule(it, isoNow()) }
         // Bump the owning task's moveCount on a real move (web parity) so the slip
-        // detector / analytics count every drag-reschedule.
-        if ((block.date != date || block.startTime != startTime) && block.taskId != null) {
-            tasks.value.firstOrNull { it.id == block.taskId }?.let { write?.upsertTask(bumpMoveCount(it, isoNow())) }
+        // detector / analytics count every drag-reschedule. Built from the CLEARED
+        // row: the bump is a whole-row upsert, so bumping the pre-un-park snapshot
+        // would write later=true straight back over it.
+        val bumping = (block.date != date || block.startTime != startTime) && owner != null
+        when {
+            bumping -> write?.upsertTask(bumpMoveCount(unparked ?: owner!!, isoNow()))
+            unparked != null -> write?.upsertTask(unparked)
         }
     }
     fun resizeBlock(block: CalBlock, durationMinutes: Int) = launchWrite {
@@ -1554,7 +1579,18 @@ class AppViewModel(
         // Focusing a recurring OCCURRENCE: run the session on the TEMPLATE (so
         // totalFocused accrues on the series) but remember the occurrence block so
         // completion marks just this day. Resolve before the same-task guard.
+        //
+        // Two shapes reach here, and BOTH must end up bound to (template, day's
+        // block). Every in-app Start hands us the projected occurrence row, whose id
+        // is the block id (occurrenceBlockFor). The reminder notification's "Start"
+        // action instead deep-links `unstuck://focus/<block.task_id>` — the hidden
+        // TEMPLATE — and that path used to open a session on the template with NO
+        // occurrence attached: the minutes accrued on the series but "Done" flipped
+        // `done` on the template (a row no list shows, which keeps generating) while
+        // today's occurrence stayed open. liveOccurrenceBlockForTemplate closes that
+        // at the same choke point.
         val occ = occurrenceBlockFor(task.id, tasks.value, blocks.value)
+            ?: liveOccurrenceBlockForTemplate(task.id, tasks.value, blocks.value, Clock.todayIso())
         if (occ != null) {
             val tpl = tasks.value.firstOrNull { it.id == occ.taskId }
             if (tpl != null) {
@@ -1729,8 +1765,13 @@ class AppViewModel(
         // totalFocused always accrue on the TEMPLATE; completion marks the DAY's
         // block. This guarantees we never upsert a task whose id is a block id
         // (which would mint a phantom occurrence-as-task).
+        // The last fallback is the BACKSTOP for a session minted before startFocus
+        // resolved a TEMPLATE (the notification "Start" path, incl. one persisted
+        // across that upgrade): without it, finishing with Done flipped the hidden
+        // template's own `done` and today's occurrence never ticked.
         val occBlock = live.occurrenceBlockId?.let { id -> blocks.value.firstOrNull { it.id == id } }
             ?: occurrenceBlockFor(task.id, tasks.value, blocks.value)
+            ?: liveOccurrenceBlockForTemplate(task.id, tasks.value, blocks.value, Clock.todayIso())
         val realTask = occBlock?.let { b -> tasks.value.firstOrNull { it.id == b.taskId } } ?: task
         // One-true-shared-session accrual (owner side): EVERY session on a partner-
         // shared task accrues total_focused EXCLUSIVELY via the log_shared_focus ledger
@@ -1753,7 +1794,13 @@ class AppViewModel(
             val focused =
                 if (partnerShared) realTask.copy(updatedAt = isoNow())   // total via the ledger
                 else realTask.copy(totalFocused = realTask.totalFocused + elapsed, updatedAt = isoNow())
-            if (markDone) {
+            // NEVER flip `done` on a recurring TEMPLATE: that ends the whole series
+            // (the template stops generating and shows in no list), which is not what
+            // "I finished this session" means. Reachable from the starts-now
+            // notification's "Start" when today's occurrence was ticked or skipped
+            // between the notification and the tap, so no block resolves here. The
+            // time still accrues on the series; no day is falsely marked off.
+            if (markDone && realTask.recurrence == null) {
                 write?.upsertTask(applyCompletion(focused.copy(done = true), prior = realTask, nowISO = isoNow()))
             } else if (!partnerShared) {
                 write?.upsertTask(focused)
@@ -1772,7 +1819,10 @@ class AppViewModel(
         }
         // Completing a promoted shared-collection task from Focus must also flip the
         // shared item + notify members (same as toggleDone).
-        if (markDone && occBlock == null && realTask.sourceCollectionId != null && realTask.sourceItemId != null) {
+        // (…and only when the row was ACTUALLY completed above — a template is not.)
+        if (markDone && occBlock == null && realTask.recurrence == null &&
+            realTask.sourceCollectionId != null && realTask.sourceItemId != null
+        ) {
             share?.taskDone(realTask.sourceCollectionId!!, realTask.sourceItemId!!, realTask.name, currentName ?: "Someone")
         }
         // Session-end recap (design moment B3): records an in-app card always; the
@@ -2041,20 +2091,37 @@ class AppViewModel(
             if (next != cur) store.upsert(tech.csalliance.unstuck.data.db.Tables.COLLECTIONS, next, ItemCollection.serializer(), next.id)
         }
     }
-    suspend fun unshareCollection(collectionId: String, userId: String) {
-        share?.unshare(collectionId, userId); graph.coordinator?.refreshCollections()
+    // Revoking access ANSWERS whether the server did it. A refusal (not the owner,
+    // 5xx, offline) used to be swallowed and reported as a successful revocation —
+    // the member kept full access while the sheet said they were removed. False =
+    // nothing changed; the caller says so and leaves the row in place.
+    suspend fun unshareCollection(collectionId: String, userId: String): Boolean {
+        val ok = share?.unshare(collectionId, userId) ?: false
+        if (ok) graph.coordinator?.refreshCollections()
+        return ok
     }
-    suspend fun cancelCollectionInvite(collectionId: String, email: String) {
-        share?.cancelInvite(collectionId, email); graph.coordinator?.refreshCollections()
+    suspend fun cancelCollectionInvite(collectionId: String, email: String): Boolean {
+        val ok = share?.cancelInvite(collectionId, email) ?: false
+        if (ok) graph.coordinator?.refreshCollections()
+        return ok
     }
-    // Fire-and-forget on viewModelScope (not the screen's): the caller pops the
-    // screen immediately, which would cancel a screen-scoped coroutine before the
-    // leave RPC + local drop committed.
-    fun leaveCollection(collectionId: String) = launchWrite {
-        share?.leave(collectionId)
-        store.delete(tech.csalliance.unstuck.data.db.Tables.COLLECTIONS, collectionId)   // lose access → drop locally
-        graph.coordinator?.refreshCollections()   // membership changed server-side — resync the rest
-    }
+    /**
+     * Leave a list shared WITH me. TRUE only when the server confirmed it — the
+     * local row is dropped (I lost access) ONLY then. Dropping it on a refused or
+     * offline leave looked like it worked and the list came straight back on the
+     * next hydrate, so the screen now stays put and says so instead.
+     *
+     * The work runs on viewModelScope, not the caller's: the screen pops itself the
+     * moment this answers true, and a screen-scoped coroutine would be cancelled
+     * mid-RPC (before the local drop committed) if the user backed out first.
+     */
+    suspend fun leaveCollection(collectionId: String): Boolean =
+        viewModelScope.async {
+            if (share?.leave(collectionId) != true) return@async false
+            store.delete(tech.csalliance.unstuck.data.db.Tables.COLLECTIONS, collectionId)   // lost access → drop locally
+            graph.coordinator?.refreshCollections()   // membership changed server-side — resync the rest
+            true
+        }.await()
     suspend fun listCollectionMembers(collectionId: String): List<tech.csalliance.unstuck.sync.CollectionMemberInfo> =
         share?.listMembers(collectionId) ?: emptyList()
 

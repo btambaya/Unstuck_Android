@@ -85,9 +85,20 @@ fun ShareCollectionSheet(vm: AppViewModel, collectionId: String, collectionName:
 
     fun removeMember(m: CollectionMemberInfo) {
         members = members.filterNot { it === m }   // optimistic
+        message = null
         scope.launch {
-            runCatching {
+            // The revoke now ANSWERS whether the server did it. A refusal (not the
+            // owner any more, 5xx, offline) used to be swallowed: the row vanished
+            // and the owner believed access was gone while the member still had it.
+            // Say so — the refresh below puts the row back either way.
+            val ok = runCatching {
                 if (m.pending) vm.cancelCollectionInvite(collectionId, m.email) else vm.unshareCollection(collectionId, m.userId)
+            }.getOrDefault(false)
+            if (!ok) {
+                message = false to (
+                    if (m.pending) "Couldn't cancel that invite — they still have it. Try again."
+                    else "Couldn't remove ${m.email} — they still have access. Try again."
+                    )
             }
             refresh()   // reconcile against the server — the member reappears if it failed
         }

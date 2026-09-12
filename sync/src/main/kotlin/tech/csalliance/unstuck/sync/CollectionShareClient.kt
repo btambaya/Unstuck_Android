@@ -54,14 +54,14 @@ class CollectionShareClient(private val client: SupabaseClient) {
     )
 
     @Serializable
-    private data class MemberRow(
+    internal data class MemberRow(
         @SerialName("user_id") val userId: String = "",
         val email: String = "",
         val role: String? = null,
     )
 
     @Serializable
-    private data class ShareResponse(
+    internal data class ShareResponse(
         val ok: Boolean? = null,
         val invited: Boolean? = null,
         val userId: String? = null,
@@ -130,19 +130,39 @@ class CollectionShareClient(private val client: SupabaseClient) {
         return ShareResult(outcome, r.members?.map { it.userId }?.filter { it.isNotBlank() })
     }
 
-    /** Remove a joined member (owner-only). */
-    suspend fun unshare(collectionId: String, userId: String) {
-        runCatching { call(ShareBody("remove", collectionId, userId = userId)) }
-    }
+    // ── revocation: unshare / cancel invite / leave ────────────────────────
+    //
+    // All three ANSWER whether the server actually did it. They used to swallow
+    // every outcome in a bare runCatching, so a refusal (403 not the owner, a 5xx,
+    // offline, rate-limited) reached the caller as success: the sheet said the
+    // member was removed while they still had full access, and Leave dropped the
+    // list from this device while the membership stood. A revocation the server
+    // did not perform must never be reported as one.
 
-    /** Cancel a pending email invite (owner-only). */
-    suspend fun cancelInvite(collectionId: String, email: String) {
-        runCatching { call(ShareBody("remove", collectionId, email = email)) }
-    }
+    /** Remove a joined member (owner-only). True only when the server removed them. */
+    suspend fun unshare(collectionId: String, userId: String): Boolean =
+        revoked(callOrError(ShareBody("remove", collectionId, userId = userId)))
 
-    /** Leave a collection shared WITH me. */
-    suspend fun leave(collectionId: String) {
-        runCatching { call(ShareBody("leave", collectionId)) }
+    /** Cancel a pending email invite (owner-only). True only when the server cancelled it. */
+    suspend fun cancelInvite(collectionId: String, email: String): Boolean =
+        revoked(callOrError(ShareBody("remove", collectionId, email = email)))
+
+    /** Leave a collection shared WITH me. True only when the server removed me. */
+    suspend fun leave(collectionId: String): Boolean =
+        revoked(callOrError(ShareBody("leave", collectionId)))
+
+    companion object {
+        /**
+         * Did the server actually perform the revocation?
+         *
+         * Every success branch of the share-collection function answers
+         * `{ ok: true }`; every refusal answers a non-2xx carrying `{ error }`,
+         * and a transport failure (offline, DNS, timeout) produces no response at
+         * all — [callOrError] maps that to null. Anything that is not an explicit
+         * `ok` with no `error` is a NO, so a refusal can never be reported to the
+         * owner as "access removed".
+         */
+        internal fun revoked(r: ShareResponse?): Boolean = r != null && r.ok == true && r.error == null
     }
 
     /** Joined members + pending invites for the share sheet. */

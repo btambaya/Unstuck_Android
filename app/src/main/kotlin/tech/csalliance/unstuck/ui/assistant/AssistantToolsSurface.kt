@@ -32,6 +32,14 @@ object AssistantScreens {
     )
 }
 
+/** Refusal for an OWNER-only list action attempted on a list shared WITH the
+ *  user. The server accepts an editor's metadata write and discards it (the
+ *  `lock_collection_metadata` trigger / an owner-only delete policy matching
+ *  zero rows), so this has to be caught here or the assistant reports a change
+ *  that snaps back a second later. Same wording as web + iOS. */
+private fun ownerOnly(name: String, verb: String): String =
+    "error: \"$name\" is shared with you by its owner — only they can $verb it. You can still add, edit and tick items."
+
 private fun captureTagOf(raw: String): CaptureTag? = when (raw) {
     "follow-up" -> CaptureTag.FOLLOW_UP
     "idea" -> CaptureTag.IDEA
@@ -305,25 +313,31 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
         }
 
         // ── LISTS ──
+        // Rename / archive / delete are OWNER-only (the list screen shows those
+        // affordances to the owner alone, and the server discards an editor's
+        // metadata write) — gating them on canEditCollection let an EDITOR be told
+        // a shared list was renamed / archived / deleted, seconds before it
+        // reverted. A list created earlier in THIS turn is the user's own, so it
+        // never needs the ownership round-trip.
         "rename_list" -> {
             val c = findList(args.str("listId"), api, scratch) ?: return "error: list not found"
             val nm = args.str("name") ?: return "error: name required"
-            if (!api.canEditCollection(c.id)) return "error: you can't edit \"${c.name}\""
+            if (scratch.newLists[c.id] == null && !api.isCollectionOwner(c.id)) return ownerOnly(c.name, "rename")
             api.renameCollection(c.id, nm)
             "ok: renamed list \"${c.name}\" → \"$nm\""
         }
 
         "archive_list" -> {
             val c = findList(args.str("listId"), api, scratch) ?: return "error: list not found"
-            if (!api.canEditCollection(c.id)) return "error: you can't edit \"${c.name}\""
             val archived = args.bool("archived") ?: true
+            if (scratch.newLists[c.id] == null && !api.isCollectionOwner(c.id)) return ownerOnly(c.name, if (archived) "archive" else "unarchive")
             api.updateCollection(c.id, archived, null)
             "ok: ${if (archived) "archived" else "unarchived"} list \"${c.name}\""
         }
 
         "delete_list" -> {
             val c = findList(args.str("listId"), api, scratch) ?: return "error: list not found"
-            if (!api.canEditCollection(c.id)) return "error: you can't edit \"${c.name}\""
+            if (scratch.newLists[c.id] == null && !api.isCollectionOwner(c.id)) return ownerOnly(c.name, "delete")
             api.removeCollection(c.id)
             scratch.newLists.remove(c.id)
             "ok: deleted list \"${c.name}\""

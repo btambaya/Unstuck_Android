@@ -29,6 +29,7 @@ import org.robolectric.annotation.Config
 import tech.csalliance.unstuck.AppGraph
 import tech.csalliance.unstuck.core.logic.SharedSessionState
 import tech.csalliance.unstuck.core.logic.isTaskBlock
+import tech.csalliance.unstuck.core.logic.visibleTasks
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.CollectionItem
@@ -41,6 +42,7 @@ import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.model.TaskListView
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.OutboxEntity
@@ -1653,6 +1655,196 @@ class AppViewModelTest {
         advanceUntilIdle()
         awaitBlock("occT") { it.done }
         assertFalse("yesterday's occurrence untouched", loadBlock("occY")!!.done)
+    }
+
+    // -----------------------------------------------------------------------
+    // Regressions from the 2026-09-12 core review (web commit 964a7a9)
+    // -----------------------------------------------------------------------
+
+    @Test fun startFocus_fromTheReminderNotification_bindsATemplateToTodaysOccurrence() = runTest(dispatcher) {
+        // The at-start reminder's "Start" action deep-links unstuck://focus/<taskId>,
+        // and a recurring block's task_id is the hidden TEMPLATE — so this entry
+        // point hands startFocus the template itself, not the projected occurrence
+        // row every in-app Start passes. It used to open a session with NO
+        // occurrence attached: the minutes accrued on the series but "Done" flipped
+        // the template's own `done` (a row no list shows, which keeps generating)
+        // while today's occurrence stayed open.
+        val today = Clock.todayIso()
+        val template = task("tpl", name = "Run", recurrence = Recurrence.Daily(), totalFocused = 60)
+        val occ = CalBlock(id = "occT", taskId = "tpl", taskName = "Run", startTime = "07:00", durationMinutes = 30, date = today, kind = CalBlockKind.TASK)
+        seedTask(template); seedBlock(occ)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.startFocus(template)   // exactly what MainScaffold's deep-link branch does
+        advanceUntilIdle()
+
+        val live = awaitLiveSession { it?.sessionStart != null }!!
+        assertEquals("the session runs on the template (totalFocused accrues on the series)", "tpl", live.taskId)
+        assertEquals("…with THIS day's occurrence attached for completion", "occT", live.occurrenceBlockId)
+
+        vm.finishFocus(template, markDone = true)
+        advanceUntilIdle()
+        awaitBlock("occT") { it.done }
+        assertFalse("the hidden template is never flipped done", loadTask("tpl")!!.done)
+    }
+
+    @Test fun finishFocus_backstopsALiveSessionThatCarriesOnlyTheTemplate() = runTest(dispatcher) {
+        // A session minted BEFORE that fix (or persisted across the upgrade) has no
+        // occurrenceBlockId and a template taskId. Finishing it must still tick the
+        // day's block rather than the template.
+        val today = Clock.todayIso()
+        val template = task("tpl", name = "Run", recurrence = Recurrence.Daily(), totalFocused = 60)
+        val occ = CalBlock(id = "occT", taskId = "tpl", taskName = "Run", startTime = "07:00", durationMinutes = 30, date = today, kind = CalBlockKind.TASK)
+        seedTask(template); seedBlock(occ)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        store.setLiveSession(
+            LiveSession(id = "sessLegacy", taskId = "tpl", sessionStart = nowMs - 300_000L, sessionEstimateMin = 30, treatment = FocusTreatment.AMBIENT, priorAccumulatedSec = 60),
+        )
+        advanceUntilIdle()
+
+        vm.finishFocus(template, markDone = true)
+        advanceUntilIdle()
+
+        awaitBlock("occT") { it.done }
+        assertFalse("the hidden template is never flipped done", loadTask("tpl")!!.done)
+    }
+
+    @Test fun leaveCollection_keepsTheListWhenTheServerDidNotConfirm() = runTest(dispatcher) {
+        // Revoking access must never be REPORTED as done when the server didn't do
+        // it. The three revoke calls used to swallow every outcome, so a refusal
+        // (403 / 5xx / offline — here: no share client at all) read as success and
+        // Leave dropped the list from this device while the membership stood; it
+        // came straight back on the next hydrate.
+        val shared = ItemCollection(id = "c1", name = "Team reads", color = "indigo", items = emptyList(), sortOrder = 0, ownerId = "grace", myRole = "editor")
+        seedCollection(shared)
+        val vm = vm()
+        subscribeReads(vm, vm.collections)
+
+        assertFalse("no confirmation → not left", vm.leaveCollection("c1"))
+        advanceUntilIdle()
+        assertNotNull("the list is still here, so the screen can say so", loadCollection("c1"))
+        assertFalse("…and neither revoke claims success either", vm.unshareCollection("c1", "someone"))
+        assertFalse(vm.cancelCollectionInvite("c1", "someone@example.com"))
+    }
+
+    @Test fun scheduleTask_clearsTheLaterParking_andTheMoveBumpCannotBringItBack() = runTest(dispatcher) {
+        // Giving a parked task a real slot ends "Later" — otherwise it sat on the
+        // calendar at the chosen time while Today, Backlog and Start-next all
+        // filtered it out as deferred. Only the task-detail sheet used to do this,
+        // at its own call site; the calendar, the create sheet and the assistant
+        // did not.
+        val parked = task("t1", name = "Call").copy(later = true)
+        seedTask(parked)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        val date = Clock.dateIso(nowMs + 3 * 86_400_000L)
+        vm.scheduleTask(parked, date, "14:00")
+        advanceUntilIdle()
+        assertEquals(false, awaitTask("t1") { it.later == false }.later)
+        // Gate on the VM's OWN blocks snapshot before scheduling again: the second
+        // call reads `blocks.value` to find the anchor to move, and that mirror
+        // lands on a real Room thread — without this the move could read an empty
+        // list, create a second block instead of moving one, and never bump.
+        val placed = awaitBlocks { l -> l.any { it.taskId == "t1" } }.first { it.taskId == "t1" }
+        vm.blocks.first { l -> l.any { it.id == placed.id } }
+
+        // Re-schedule with the STALE row the caller is still holding (later = true):
+        // the move-count bump is a WHOLE-ROW upsert, so it must be built from the
+        // cleared row, not the caller's snapshot, or it writes later=true back.
+        vm.scheduleTask(parked, date, "16:30")
+        advanceUntilIdle()
+        val moved = awaitTask("t1") { it.moveCount == 1 }
+        assertEquals("the move bump must not resurrect the Later flag", false, moved.later)
+    }
+
+    @Test fun scheduleTask_leavesARecurringTemplatesLaterFlagAlone() = runTest(dispatcher) {
+        // A template's occurrence blocks are generated horizon fill, not a
+        // per-task scheduling decision (and projected rows are later=false already).
+        val template = task("tpl", name = "Meditate", recurrence = Recurrence.Daily()).copy(later = true)
+        seedTask(template)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        val chosen = Clock.dateIso(System.currentTimeMillis() + 2 * 86_400_000L)
+        vm.scheduleTask(template, chosen, "08:00")
+        advanceUntilIdle()
+        awaitBlocks { l -> l.any { it.taskId == "tpl" && it.date == chosen } }
+        assertEquals(true, loadTask("tpl")!!.later)
+    }
+
+    // ── verifier pass, 2026-09-12: holes the first port left open ────────────
+
+    @Test fun moveBlock_onTheCalendar_alsoEndsTheLaterParking() = runTest(dispatcher) {
+        // Dragging a block to a new slot IS scheduling, but it bypasses
+        // scheduleTaskNow — so a parked task dragged on the calendar stayed
+        // parked: on the grid at the chosen time, filtered out of Today,
+        // Backlog and Start-next as deferred. The move-count bump is a
+        // WHOLE-ROW upsert, so it has to carry the cleared flag too.
+        val parked = task("t1", name = "Call the bank").copy(later = true)
+        val today = Clock.todayIso()
+        val block = CalBlock(id = "b1", taskId = "t1", taskName = "Call the bank", startTime = "09:00", durationMinutes = 25, date = today, kind = CalBlockKind.TASK)
+        seedTask(parked); seedBlock(block)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.moveBlock(block, today, "15:30")
+        advanceUntilIdle()
+
+        awaitBlock("b1") { it.startTime == "15:30" }
+        val moved = awaitTask("t1") { it.moveCount == 1 }
+        assertEquals("the drag ends the Later parking", false, moved.later)
+        // …and the task is now offered by the active lists instead of hidden.
+        assertTrue(
+            visibleTasks(TaskListView.TODAY, listOf(moved), listOf(block.copy(startTime = "15:30")), System.currentTimeMillis(), null, slipMode = false)
+                .any { it.id == "t1" },
+        )
+    }
+
+    @Test fun moveBlock_leavesAnUnparkedTaskExactlyAsBefore() = runTest(dispatcher) {
+        // The un-park must not invent a write for a task that was never parked.
+        val plain = task("t1", name = "Write memo")
+        val today = Clock.todayIso()
+        val block = CalBlock(id = "b1", taskId = "t1", taskName = "Write memo", startTime = "09:00", durationMinutes = 25, date = today, kind = CalBlockKind.TASK)
+        seedTask(plain); seedBlock(block)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.moveBlock(block, today, "11:00")
+        advanceUntilIdle()
+        val moved = awaitTask("t1") { it.moveCount == 1 }
+        assertNull("no Later flag is invented", moved.later)
+    }
+
+    @Test fun finishFocus_withDone_neverEndsARecurringSeries() = runTest(dispatcher) {
+        // The notification's "Start" hands focus the hidden TEMPLATE. When today's
+        // occurrence was ticked or skipped between the notification and the tap,
+        // NO block resolves — and "Done" then flipped the template's own `done`,
+        // which stops the series generating and hides it from every list. The
+        // session's minutes must still accrue; only the completion is withheld.
+        val today = Clock.todayIso()
+        val template = task("tpl", name = "Run", recurrence = Recurrence.Daily(), totalFocused = 60)
+        val alreadyDone = CalBlock(id = "occT", taskId = "tpl", taskName = "Run", startTime = "07:00", durationMinutes = 30, date = today, kind = CalBlockKind.TASK, done = true, completedAt = "2026-05-21T08:00:00.000Z")
+        seedTask(template); seedBlock(alreadyDone)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        store.setLiveSession(
+            LiveSession(id = "sessX", taskId = "tpl", sessionStart = nowMs - 600_000L, sessionEstimateMin = 30, treatment = FocusTreatment.AMBIENT, priorAccumulatedSec = 60),
+        )
+        advanceUntilIdle()
+
+        vm.finishFocus(template, markDone = true)
+        advanceUntilIdle()
+
+        val after = awaitTask("tpl") { it.totalFocused > 60 }
+        assertFalse("the series survives — the template is never flipped done", after.done)
+        assertNull(after.completedAt)
+        assertTrue("the session's time still accrues on the series", after.totalFocused > 60)
+        // The day that was already ticked is untouched, and the session is recorded.
+        assertTrue(loadBlock("occT")!!.done)
+        awaitSessions { l -> l.any { it.taskId == "tpl" } }
     }
 
     @Test fun assistant_promoteItemToTask_refusesAnInFlightPromotion() = runTest(dispatcher) {

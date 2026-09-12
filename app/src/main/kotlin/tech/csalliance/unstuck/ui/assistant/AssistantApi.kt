@@ -107,6 +107,13 @@ interface AssistantApi {
     suspend fun removeCollectionItem(collectionId: String, itemId: String)
     /** Unknown → false (the web's use-assistant-api rule); else editable unless viewer. */
     suspend fun canEditCollection(id: String): Boolean
+    /** Rename / archive / delete are OWNER-only — in the list UI (the pencil,
+     *  archive and delete affordances only render for the owner) and on the
+     *  server (`lock_collection_metadata` + the owner-only delete policy), which
+     *  accept an editor's write and silently discard it. Gating those three tools
+     *  on [canEditCollection] let the assistant tell an EDITOR the list was
+     *  renamed / archived / deleted a moment before it snapped back. */
+    suspend fun isCollectionOwner(id: String): Boolean
 
     // ── sharing ──
     fun getShareCandidates(): List<ShareCandidate>

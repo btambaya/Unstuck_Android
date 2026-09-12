@@ -122,8 +122,10 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
             android.app.TimePickerDialog(context, { _, h, min ->
                 val dateIso = java.time.LocalDate.of(y, m + 1, day).toString()
                 val timeIso = "%02d:%02d".format(h, min)
+                // vm.scheduleTask clears "Later" itself now (AppViewModel
+                // .scheduleTaskNow) — for EVERY scheduling surface, not just this
+                // one — so the second whole-row write that used to live here is gone.
                 vm.scheduleTask(task, dateIso, timeIso)
-                if (task.later == true) vm.setLater(task, false)
                 scheduled = "${dateIso.takeLast(5)} ${formatTime(timeIso)}"
             }, t0.hour, t0.minute, false).show()
         }, d0.year, d0.monthValue - 1, d0.dayOfMonth)

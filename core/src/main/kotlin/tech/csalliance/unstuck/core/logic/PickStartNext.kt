@@ -88,10 +88,13 @@ fun pickTodayHero(
      *  is identical either way. */
     todayRows: List<TaskItem>? = null,
 ): TaskItem? {
-    // Today's open rows (non-template today tasks + today's occurrences), minus the
+    // Today's OPEN rows (non-template today tasks + today's occurrences), minus the
     // live-focused task and anything assigned away, narrowed by the active area.
+    // `!done` is explicit: the Today bucket keeps a recurring occurrence ticked
+    // TODAY (so the win stays visible and un-doable), and the hero must never
+    // offer to start work that is already finished.
     val rows = (todayRows ?: visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false))
-        .filter { it.id != liveTaskId && it.id !in (excludeIds ?: emptySet()) && matchesArea(it.lifeArea, areaFilter) }
+        .filter { !it.done && it.id != liveTaskId && it.id !in (excludeIds ?: emptySet()) && matchesArea(it.lifeArea, areaFilter) }
     if (rows.isEmpty()) return null
 
     val today = Clock.todayIso()

@@ -106,6 +106,39 @@ fun occurrenceBlockFor(rowId: String, tasks: List<TaskItem>, blocks: List<CalBlo
 }
 
 /**
+ * TODAY's live occurrence block of a recurring TEMPLATE — the block a focus
+ * session started on the template itself must attach to.
+ *
+ * Every in-app "Start" hands the timer the row the user tapped, and for a
+ * repeating task that row is an OCCURRENCE ([occurrenceBlockFor] maps it back).
+ * But the reminder notification's **Start** action deep-links
+ * `unstuck://focus/<taskId>` with the block's `task_id` — the TEMPLATE id — so
+ * that entry point handed startFocus the hidden template with no occurrence
+ * attached: the session's time accrued on the series, but "Done" flipped
+ * `done` on the TEMPLATE (a row no list shows, and which keeps generating)
+ * while today's occurrence stayed open. Resolving the day's block here closes
+ * that hole at the same choke point the tapped-row path uses.
+ *
+ * Today only, and only an OPEN one (not done, not skipped): the at-start and
+ * didn't-start reminders both fire on the block's own day, and a finished /
+ * cancelled day must not be re-ticked by a later session. Earliest start time
+ * wins when a template has several blocks today. Returns null for anything that
+ * isn't a recurring template's id, so callers can `?:` it after
+ * [occurrenceBlockFor] and leave every other case untouched.
+ */
+fun liveOccurrenceBlockForTemplate(
+    rowId: String,
+    tasks: List<TaskItem>,
+    blocks: List<CalBlock>,
+    todayIso: String,
+): CalBlock? {
+    if (!tasks.any { it.id == rowId && it.recurrence != null }) return null
+    return blocks
+        .filter { isTaskBlock(it) && it.taskId == rowId && it.date == todayIso && !it.done && !it.skipped }
+        .minByOrNull { it.startTime }
+}
+
+/**
  * "Overdue · Fri"-style label for a Backlog row that is a MISSED recurring
  * occurrence, or null if the row is anything else. Mirrors the indicator the
  * web shows on overdue occurrence rows. A row is an overdue occurrence when its

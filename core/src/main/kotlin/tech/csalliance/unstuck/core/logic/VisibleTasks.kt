@@ -87,6 +87,12 @@ fun visibleTasks(
             if (b.date == today) {
                 todayOccIds.add(b.id)
             } else {
+                // A DONE future occurrence is skipped HERE, not filtered after the
+                // pick: choosing the earliest future block and only then dropping it
+                // for being done removed the SERIES from Upcoming — completing
+                // tomorrow's occurrence hid a daily task entirely instead of
+                // advancing to the next open day.
+                if (b.done) continue
                 val cur = nextPerTemplate[tid]
                 if (cur == null || cur.date > b.date) nextPerTemplate[tid] = b
             }
@@ -99,7 +105,8 @@ fun visibleTasks(
     val nextUpcomingOccIds = nextPerTemplate.values.mapTo(HashSet()) { it.id }
 
     // The occurrence projections are only read by the view that shows them —
-    // ALL / LATER / COMPLETED / RECURRING never did anything with these lists.
+    // ALL / LATER / RECURRING never do anything with these lists. (COMPLETED now
+    // reads `todayOccurrences` for the day's ticked occurrence rows.)
     val todayOccurrences by lazy(LazyThreadSafetyMode.NONE) {
         projectOccurrences(tasks, blocks, today).filter { it.id in todayOccIds }
     }
@@ -130,7 +137,13 @@ fun visibleTasks(
                     t.id in todayTaskIds || (isCreatedTodayIn(t, dayStart) && t.id !in upcomingTaskIds)
                 )
             }
-            nt + todayOccurrences.filter { !it.done }
+            // A ticked occurrence STAYS in today's bucket (the rule Today already
+            // uses for a real task completed today, and the one TodayScreen applies
+            // to its own completed-today group): dropping it on completion made it
+            // vanish from Tasks entirely — Completed and All never carried
+            // occurrence rows — so the win was invisible and there was no row left
+            // to un-tick it from.
+            nt + todayOccurrences.filter { !it.done || isCompletedTodayIn(it, dayStart) }
         }
         TaskListView.BACKLOG ->
             // Open work not actively planned AND sitting ≥ a day: never scheduled, or
@@ -151,7 +164,10 @@ fun visibleTasks(
         TaskListView.LATER ->
             nonTemplates.filter { !it.done && it.later == true }
         TaskListView.COMPLETED ->
-            nonTemplates.filter { it.done }
+            // Occurrence rows carry their own done/completedAt (on the cal_block),
+            // so a ticked recurring occurrence belongs here too — otherwise it
+            // existed in NO Tasks view at all once Today stopped showing it.
+            nonTemplates.filter { it.done } + todayOccurrences.filter { it.done }
         TaskListView.ALL ->
             // The master list of distinct tasks — NO per-day occurrence rows.
             nonTemplates.filter { !it.done || isCompletedTodayIn(it, dayStart) }

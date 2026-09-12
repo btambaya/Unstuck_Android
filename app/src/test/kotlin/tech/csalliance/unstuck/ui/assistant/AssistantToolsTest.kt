@@ -143,6 +143,11 @@ class AssistantToolsTest {
             val c = state.collections.firstOrNull { it.id == id } ?: return false
             return c.myRole != "viewer"
         }
+        // Mirrors AppViewModel.isOwner: a local/demo row (no ownerId) is mine.
+        override suspend fun isCollectionOwner(id: String): Boolean {
+            val c = state.collections.firstOrNull { it.id == id } ?: return false
+            return c.ownerId == null || c.ownerId == state.userId
+        }
         override fun getShareCandidates(): List<ShareCandidate> = emptyList()
         override fun stageShare(p: PendingShare) { state.staged += p }
         override fun getCirclePeople() = state.people.toList()
@@ -233,8 +238,12 @@ class AssistantToolsTest {
         CalBlock(id = id, taskId = taskId, taskName = taskId, startTime = startTime, durationMinutes = durationMinutes, date = date, kind = CalBlockKind.TASK, done = done, skipped = skipped)
     private fun capture(id: String, body: String, at: String = "2026-09-01T08:00:00.000Z", tag: CaptureTag = CaptureTag.IDEA, taskId: String? = null) =
         Capture(id = id, taskId = taskId, sessionId = null, tag = tag, body = body, at = at)
-    private fun list(id: String, name: String, items: List<Pair<String, String>> = emptyList(), myRole: String? = null) =
-        ItemCollection(id = id, name = name, color = "indigo", subtitle = null, items = items.map { (iid, body) -> CollectionItem(iid, body, at = PAST_CREATED) }, sortOrder = 0, myRole = myRole)
+    private fun list(id: String, name: String, items: List<Pair<String, String>> = emptyList(), myRole: String? = null, ownerId: String? = null) =
+        ItemCollection(id = id, name = name, color = "indigo", subtitle = null, items = items.map { (iid, body) -> CollectionItem(iid, body, at = PAST_CREATED) }, sortOrder = 0, myRole = myRole, ownerId = ownerId)
+    /** The production refusal for an owner-only list action (AssistantToolsSurface). */
+    private fun ownerOnly(name: String, verb: String) =
+        "error: \"$name\" is shared with you by its owner — only they can $verb it. You can still add, edit and tick items."
+
     private fun fact(id: String, text: String) =
         ProfileFact(id, ProfileFactCategory.PERSON, text, ProfileFactSource.CHAT, null, true, PAST_CREATED, PAST_CREATED)
     private fun liveSession(taskId: String, paused: Boolean = false, estimate: Int = 25) = LiveSession(
@@ -791,12 +800,51 @@ class AssistantToolsTest {
         assertEquals("New", h.state.collections[0].name)
     }
 
-    @Test fun `rename_list errors on a view-only list, missing name or unknown list`() = runTest {
-        val h = makeApi { collections += listOf(list("v", "Shared", myRole = "viewer"), list("l1", "Mine")) }
-        assertEquals("error: you can't edit \"Shared\"", h.run("rename_list", "listId" to "v", "name" to "Hijack"))
+    @Test fun `rename_list errors on a list shared with you, missing name or unknown list`() = runTest {
+        val h = makeApi { collections += listOf(list("v", "Shared", myRole = "viewer", ownerId = "grace"), list("l1", "Mine")) }
+        assertEquals(ownerOnly("Shared", "rename"), h.run("rename_list", "listId" to "v", "name" to "Hijack"))
         assertEquals("error: name required", h.run("rename_list", "listId" to "l1"))
         assertEquals("error: list not found", h.run("rename_list", "listId" to "zz", "name" to "X"))
         assertEquals(listOf("Shared", "Mine"), h.state.collections.map { it.name })
+    }
+
+    // Rename / archive / delete are OWNER-only — the list screen only offers them
+    // to the owner, and the server accepts an EDITOR's metadata write and silently
+    // discards it. Gating these three on "can edit" let the assistant tell an
+    // editor the shared list had been renamed / archived / deleted a moment before
+    // it snapped back. (Web fix 964a7a9; the editor keeps every ITEM power.)
+    @Test fun `an editor cannot rename, archive or delete a list its owner shared with them`() = runTest {
+        val h = makeApi {
+            collections += list("s", "Team groceries", listOf("i1" to "Milk"), myRole = "editor", ownerId = "grace")
+            userId = "me"
+        }
+        assertEquals(ownerOnly("Team groceries", "rename"), h.run("rename_list", "listId" to "s", "name" to "Mine now"))
+        assertEquals(ownerOnly("Team groceries", "archive"), h.run("archive_list", "listId" to "s"))
+        assertEquals(ownerOnly("Team groceries", "unarchive"), h.run("archive_list", "listId" to "s", "archived" to false))
+        assertEquals(ownerOnly("Team groceries", "delete"), h.run("delete_list", "listId" to "s"))
+        // Nothing changed, and the list is still there.
+        assertEquals(listOf("Team groceries"), h.state.collections.map { it.name })
+        assertNull(h.state.collections[0].archived)
+        // …while the editor's ITEM powers are untouched.
+        assertEquals("ok: added to \"Team groceries\"", h.run("add_to_list", "listId" to "s", "body" to "Bread"))
+        assertEquals(listOf("Milk", "Bread"), h.state.collections[0].items.map { it.body })
+    }
+
+    @Test fun `the owner of a shared list can still rename, archive and delete it`() = runTest {
+        val h = makeApi { collections += list("s", "My shared list", myRole = "owner", ownerId = "me"); userId = "me" }
+        assertEquals("ok: renamed list \"My shared list\" → \"Renamed\"", h.run("rename_list", "listId" to "s", "name" to "Renamed"))
+        assertEquals("ok: archived list \"Renamed\"", h.run("archive_list", "listId" to "s"))
+        assertEquals("ok: deleted list \"Renamed\"", h.run("delete_list", "listId" to "s"))
+        assertTrue(h.state.collections.isEmpty())
+    }
+
+    @Test fun `a list created this turn is renameable without an ownership round-trip`() = runTest {
+        // create_list answers before the row carries an ownerId, so the scratch
+        // exemption (the same one add_to_list uses) has to cover these tools too.
+        val h = makeApi { }
+        val created = h.run("create_list", "name" to "Fresh")
+        val id = Regex("id=(\\S+) ").find(created)!!.groupValues[1]
+        assertEquals("ok: renamed list \"Fresh\" → \"Fresher\"", h.run("rename_list", "listId" to id, "name" to "Fresher"))
     }
 
     @Test fun `archive_list archives by default, unarchives with archived false, delete_list deletes`() = runTest {

@@ -41,6 +41,8 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.launch
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -100,6 +102,10 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     // A shared-list edit the server refused: the row was rolled back to the server's
     // copy already (SyncCoordinator) — say so instead of letting it vanish silently.
     var syncError by remember { mutableStateOf<String?>(null) }
+    // Leaving a shared list awaits the server's answer (AppViewModel.leaveCollection
+    // runs the RPC on the ViewModel's own scope, so backing out mid-call can't
+    // cancel it) — this scope only carries the await + the navigation.
+    val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { vm.collectionSyncErrors.collect { syncError = it } }
 
     // Move-to-task: solo list → straight to "for me"; shared list → ask via the chooser.
@@ -164,7 +170,17 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                             Icon(Icons.Filled.Share, contentDescription = "Share", tint = c.ink2, modifier = Modifier.size(22.dp).clip(CircleShape).clickable { showShare = true })
                         }
                     } else {
-                        Text("Leave", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { vm.leaveCollection(col.id); onBack() }.padding(horizontal = 6.dp, vertical = 4.dp))
+                        // Leave only closes the screen once the SERVER confirms it.
+                        // Popping optimistically (and dropping the list locally)
+                        // told the user they had left while the membership stood —
+                        // the list reappeared on the next hydrate. A refusal keeps
+                        // them here with the reason.
+                        Text("Leave", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable {
+                            scope.launch {
+                                if (vm.leaveCollection(col.id)) onBack()
+                                else syncError = "Couldn't leave “${col.name}” — check your connection and try again."
+                            }
+                        }.padding(horizontal = 6.dp, vertical = 4.dp))
                     }
                 }
             }

@@ -85,6 +85,19 @@ class PickStartNextTest {
         assertEquals("lowest-friction (shortest estimate) when nothing is scheduled today", "b", hero?.id)
     }
 
+    @Test fun heroNeverOffersAnAlreadyCompletedOccurrence() {
+        // Today KEEPS a recurring occurrence that was ticked today (so the win stays
+        // visible and un-doable), and the hero is handed exactly that list — it must
+        // not offer to "start" the finished one.
+        val template = mkTask(id = "tpl", name = "Run").copy(recurrence = tech.csalliance.unstuck.core.model.Recurrence.Daily())
+        val now = System.currentTimeMillis()
+        val plain = mkTask(id = "plain", estimateMin = 45, createdAt = iso(now))
+        val doneOcc = mkBlock(id = "occ", taskId = "tpl", startTime = "07:00", date = todayPlus(0))
+            .copy(done = true, completedAt = iso(now))
+        val hero = pickTodayHero(listOf(template, plain), listOf(doneOcc), now)
+        assertEquals("plain", hero?.id)
+    }
+
     @Test fun heroNullWhenNoTodayTasks() {
         val old = mkTask(id = "old", createdAt = "2026-04-01T10:00:00.000Z")   // backlog, not today
         assertNull("the hero never pulls from the backlog", pickTodayHero(listOf(old), emptyList(), NOW))

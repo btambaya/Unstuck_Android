@@ -116,6 +116,11 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
         val c = collection(id) ?: return false
         return vm.canEdit(c)
     }
+    /** The SAME predicate the list screen gates rename / archive / delete on. */
+    override suspend fun isCollectionOwner(id: String): Boolean {
+        val c = collection(id) ?: return false
+        return vm.isOwner(c)
+    }
 
     // ── sharing ──
     override fun getShareCandidates(): List<ShareCandidate> = vm.shareCandidates()

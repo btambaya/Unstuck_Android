@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.isTemplate
+import tech.csalliance.unstuck.core.logic.liveOccurrenceBlockForTemplate
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
 import tech.csalliance.unstuck.core.logic.overdueOccurrenceLabel
 import tech.csalliance.unstuck.core.logic.overdueOccurrenceLabels
@@ -226,5 +227,70 @@ class OccurrencesTest {
             if (one != null) labelled++
         }
         assertTrue("fixture must produce some overdue labels", labelled > 0)
+    }
+
+    // ── regressions from the 2026-09-12 core review (web commit 964a7a9) ──────
+
+    /** Upcoming must ADVANCE to the next open day when a future occurrence is
+     *  ticked, not drop the whole series: the next-per-series pick used to take
+     *  the earliest future block and only then discard it for being done, so
+     *  completing tomorrow's occurrence hid a daily task from Upcoming entirely. */
+    @Test fun upcomingAdvancesToTheNextOpenOccurrenceWhenAFutureOneIsDone() {
+        val blocks = listOf(
+            mkBlock(id = "b1", taskId = "t1", date = todayPlus(1)).copy(done = true, completedAt = iso(NOW)),
+            mkBlock(id = "b2", taskId = "t1", date = todayPlus(2)),
+            mkBlock(id = "b3", taskId = "t1", date = todayPlus(3)),
+        )
+        val up = visibleTasks(TaskListView.UPCOMING, listOf(template), blocks, NOW, null, slipMode = false)
+        assertEquals(listOf("b2"), up.map { it.id })
+    }
+
+    /** A recurring occurrence completed TODAY has to live somewhere: it stays in
+     *  Today as the day's win (where it can be un-ticked) and it is listed under
+     *  Completed. Before the fix it appeared in NO Tasks view at all. */
+    @Test fun anOccurrenceCompletedTodayStaysInTodayAndAppearsInCompleted() {
+        val now = System.currentTimeMillis()
+        val blocks = listOf(
+            mkBlock(id = "b-today", taskId = "t1", date = todayPlus(0)).copy(done = true, completedAt = iso(now)),
+        )
+        val today = visibleTasks(TaskListView.TODAY, listOf(template), blocks, now, null, slipMode = false)
+        assertEquals(listOf("b-today"), today.map { it.id })
+        val completed = visibleTasks(TaskListView.COMPLETED, listOf(template), blocks, now, null, slipMode = false)
+        assertEquals(listOf("b-today"), completed.map { it.id })
+    }
+
+    /** …and an OPEN occurrence is still only in Today. */
+    @Test fun anOpenOccurrenceIsNotListedUnderCompleted() {
+        val blocks = listOf(mkBlock(id = "b-today", taskId = "t1", date = todayPlus(0)))
+        val now = System.currentTimeMillis()
+        assertEquals(listOf("b-today"), visibleTasks(TaskListView.TODAY, listOf(template), blocks, now, null, slipMode = false).map { it.id })
+        assertTrue(visibleTasks(TaskListView.COMPLETED, listOf(template), blocks, now, null, slipMode = false).isEmpty())
+    }
+
+    // liveOccurrenceBlockForTemplate — the reminder notification's "Start" action
+    // deep-links the block's task_id (the hidden TEMPLATE), so focus started from
+    // the shade has to find the day's block itself or "Done" ticks the template.
+    @Test fun liveOccurrenceForTemplateFindsTodaysOpenBlock() {
+        val blocks = listOf(
+            mkBlock(id = "b-yesterday", taskId = "t1", date = "2026-06-09", startTime = "07:00"),
+            mkBlock(id = "b-today-late", taskId = "t1", date = "2026-06-10", startTime = "18:00"),
+            mkBlock(id = "b-today", taskId = "t1", date = "2026-06-10", startTime = "07:00"),
+            mkBlock(id = "b-tomorrow", taskId = "t1", date = "2026-06-11", startTime = "07:00"),
+        )
+        // Earliest start time on TODAY wins; other days are never touched.
+        assertEquals("b-today", liveOccurrenceBlockForTemplate("t1", listOf(template), blocks, "2026-06-10")?.id)
+    }
+
+    @Test fun liveOccurrenceForTemplateIgnoresDoneSkippedAndNonTemplates() {
+        val doneToday = mkBlock(id = "b1", taskId = "t1", date = "2026-06-10").copy(done = true)
+        val skippedToday = mkBlock(id = "b2", taskId = "t1", date = "2026-06-10", startTime = "10:00").copy(skipped = true)
+        assertNull("a finished / cancelled day is never re-ticked by a later session",
+            liveOccurrenceBlockForTemplate("t1", listOf(template), listOf(doneToday, skippedToday), "2026-06-10"))
+        // A plain task's id resolves to nothing — only recurring templates do.
+        val plain = mkTask(id = "t2")
+        val plainBlock = mkBlock(id = "b3", taskId = "t2", date = "2026-06-10")
+        assertNull(liveOccurrenceBlockForTemplate("t2", listOf(template, plain), listOf(plainBlock), "2026-06-10"))
+        // And an occurrence ROW id (a block id) is not a template id either.
+        assertNull(liveOccurrenceBlockForTemplate("b3", listOf(template, plain), listOf(plainBlock), "2026-06-10"))
     }
 }

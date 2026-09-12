@@ -20,6 +20,7 @@ import tech.csalliance.unstuck.core.logic.rejectPastDate
 import tech.csalliance.unstuck.core.logic.rejectPastTime
 import tech.csalliance.unstuck.core.logic.ReceiptArgs
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
+import tech.csalliance.unstuck.core.logic.clearLaterOnSchedule
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.materializeOccurrences
 import tech.csalliance.unstuck.core.logic.newUuid
@@ -138,6 +139,11 @@ private fun localMidnightMs(iso: String): Long =
 private suspend fun scheduleTask(api: AssistantApi, task: TaskItem, date: String, startTime: String?): String {
     val blocks = api.getBlocks()
     val today = api.todayIso()
+    // Scheduling ends a task's "Later" parking — the same rule AppViewModel
+    // .scheduleTaskNow applies to every in-app scheduling surface. Without it the
+    // assistant could put a parked task on the calendar and leave it invisible to
+    // Today, Backlog and Start-next, still reporting "Schedule: Later".
+    clearLaterOnSchedule(task, api.nowIso())?.let { api.upsertTask(it) }
     // The anchor to move is the task's NEXT LIVE block — first-in-array grabbed
     // an old done/skipped occurrence on real accounts (tester round, 2026-09-01).
     val live = blocks.filter { it.taskId == task.id && !it.done && !it.skipped }.sortedBy { it.date + it.startTime }

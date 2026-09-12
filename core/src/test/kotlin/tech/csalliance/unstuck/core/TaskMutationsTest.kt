@@ -7,7 +7,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.applyCompletion
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
+import tech.csalliance.unstuck.core.logic.clearLaterOnSchedule
 import tech.csalliance.unstuck.core.logic.isCompletedToday
+import tech.csalliance.unstuck.core.model.Recurrence
 
 // Ports TaskMutationsTests.swift: completion-stamp rules (lib/use-tasks.ts) +
 // the isCompletedToday boundary cases (lib/task-completion.test.ts).
@@ -73,5 +75,26 @@ class TaskMutationsTest {
 
     @Test fun isCompletedTodayFalseTheMomentTomorrowStarts() {
         assertFalse(isCompletedToday(mkTask(completedAt = localIso(2026, 5, 21, 0, 0)), nowMs))
+    }
+
+    // ── clearLaterOnSchedule: scheduling ends the "Later" parking ─────────────
+
+    @Test fun schedulingAParkedTaskClearsLaterAndStampsUpdatedAt() {
+        val out = clearLaterOnSchedule(mkTask(id = "t", later = true), now)
+        assertEquals(false, out?.later)
+        assertEquals(now, out?.updatedAt)
+    }
+
+    @Test fun clearLaterIsANoOpWhenTheTaskIsNotParked() {
+        // null / false both mean "not parked" — no write, so no pointless upsert
+        // (and no stale whole-row payload racing a concurrent edit).
+        assertNull(clearLaterOnSchedule(mkTask(id = "t", later = null), now))
+        assertNull(clearLaterOnSchedule(mkTask(id = "t", later = false), now))
+    }
+
+    @Test fun clearLaterLeavesRecurringTemplatesAlone() {
+        // A template's blocks are generated horizon fill, not a scheduling decision.
+        val template = mkTask(id = "t", later = true).copy(recurrence = Recurrence.Daily())
+        assertNull(clearLaterOnSchedule(template, now))
     }
 }

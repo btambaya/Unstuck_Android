@@ -214,6 +214,7 @@ class SoakAppPerfTest {
         override suspend fun updateCollectionItem(collectionId: String, itemId: String, body: String?, done: Boolean?) = Unit
         override suspend fun removeCollectionItem(collectionId: String, itemId: String) = Unit
         override suspend fun canEditCollection(id: String) = true
+        override suspend fun isCollectionOwner(id: String) = true
         override fun getShareCandidates(): List<ShareCandidate> = emptyList()
         override fun stageShare(p: PendingShare) = Unit
         override fun getCirclePeople(): List<CirclePerson> = listOf(CirclePerson("A", "active"), CirclePerson("B", "pending"))

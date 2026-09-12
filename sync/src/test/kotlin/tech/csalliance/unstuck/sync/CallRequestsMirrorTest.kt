@@ -52,6 +52,10 @@ class CallRequestsMirrorTest {
             failRpc?.let { throw it }
             rpcs += fn to params
         }
+        override suspend fun fetchSince(table: String, column: String, since: String, limit: Int) =
+            FakeRemoteSupport.since(rows[table].orEmpty(), column, since, limit)
+        override suspend fun fetchIds(table: String, offset: Int, limit: Int) =
+            FakeRemoteSupport.ids(rows[table].orEmpty(), offset, limit)
     }
 
     @Before fun setup() {

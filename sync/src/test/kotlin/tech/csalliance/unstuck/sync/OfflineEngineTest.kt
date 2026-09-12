@@ -61,6 +61,10 @@ class OfflineEngineTest {
             if (failRpc) throw RuntimeException("simulated 5xx")
             rpcs.add(fn to params)
         }
+        override suspend fun fetchSince(table: String, column: String, since: String, limit: Int) =
+            FakeRemoteSupport.since(serverRows[table].orEmpty(), column, since, limit)
+        override suspend fun fetchIds(table: String, offset: Int, limit: Int) =
+            FakeRemoteSupport.ids(serverRows[table].orEmpty(), offset, limit)
     }
 
     private fun task(id: String, updatedAt: String, name: String = "T") = TaskItem(
@@ -361,6 +365,8 @@ class OfflineEngineTest {
             override suspend fun fetchAll(table: String): List<JsonObject> = emptyList()
             override suspend fun upsert(table: String, row: JsonObject, userId: String) {}
             override suspend fun delete(table: String, id: String) {}
+            override suspend fun fetchSince(table: String, column: String, since: String, limit: Int): List<JsonObject> = emptyList()
+            override suspend fun fetchIds(table: String, offset: Int, limit: Int): List<String> = emptyList()
             override suspend fun rpc(fn: String, params: JsonObject) {
                 calls.add(fn to params)
                 if ("p_item" in params) throw RpcRejected(404, "PGRST202: Could not find the function public.collection_add_item(p_collection_id, p_item)")
@@ -478,6 +484,8 @@ class OfflineEngineTest {
             override suspend fun upsert(table: String, row: JsonObject, userId: String) {}
             override suspend fun delete(table: String, id: String) {}
             override suspend fun rpc(fn: String, params: JsonObject) {}
+            override suspend fun fetchSince(table: String, column: String, since: String, limit: Int): List<JsonObject> = emptyList()
+            override suspend fun fetchIds(table: String, offset: Int, limit: Int): List<String> = emptyList()
         }
         Hydrator(remote, store).hydrateCollections("me")
         val after = store.collections().first().associateBy { it.id }

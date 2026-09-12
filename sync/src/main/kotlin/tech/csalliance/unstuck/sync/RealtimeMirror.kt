@@ -8,20 +8,9 @@ import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.postgresChangeFlow
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
-import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.jsonPrimitive
-import tech.csalliance.unstuck.core.model.CalBlock
-import tech.csalliance.unstuck.core.model.Capture
-import tech.csalliance.unstuck.core.model.ItemCollection
-import tech.csalliance.unstuck.core.model.LifeArea
-import tech.csalliance.unstuck.core.model.ProfileFact
-import tech.csalliance.unstuck.core.model.ReasonLog
-import tech.csalliance.unstuck.core.model.Session
-import tech.csalliance.unstuck.core.model.TagRow
-import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.Tables
 
@@ -37,85 +26,48 @@ class RealtimeMirror(
     private val scope: CoroutineScope,
     // Invoked when a channel that HAD been SUBSCRIBED drops to UNSUBSCRIBED while the
     // socket stays connected (a server-side channel close). The socket-status observer
-    // never fires for this, so without a per-channel heal only the ~60s pull recovers
-    // it. The callback must be cheap/non-blocking (it launches the heal itself) and is
-    // expected to coalesce (several channels can close at once). See BUG 4.
+    // never fires for this, so without a per-channel heal only the catch-up pull
+    // recovers it. The callback must be cheap/non-blocking (it launches the heal
+    // itself) and is expected to coalesce (several channels can close at once).
     private val onChannelClosed: () -> Unit = {},
+    // EVERY realtime event, any table, before it is applied. The freshness owner is
+    // the only consumer: time-since-last-event is the one honest signal that the
+    // socket is actually delivering (channel status is not — a channel can report
+    // SUBSCRIBED and be permanently deaf).
+    private val onEvent: () -> Unit = {},
+    // A channel reached SUBSCRIBED. Everything written while it was down was never
+    // broadcast (postgres_changes has no replay), so the owner pulls.
+    private val onSubscribed: () -> Unit = {},
+    // A row of user_preferences / notification_preferences changed on another
+    // device. Those tables are not row-mirrored into the local store (the app reads
+    // them through PreferencesClient), so the mirror just says "re-read them".
+    private val onPreferencesChanged: () -> Unit = {},
 ) {
     private val channels = mutableListOf<RealtimeChannel>()
     private val jobs = mutableListOf<Job>()
 
     suspend fun subscribeAll(userId: String, onMembersChanged: suspend () -> Unit = {}) {
         unsubscribeAll()
-        // Timestamp-bearing tables go through upsertIfNewer: an incoming remote
-        // UPDATE is SKIPPED when the local row is strictly newer by its timestamp
-        // (instant compare), so a delayed/out-of-order echo can't clobber a newer
-        // local edit (the data-loss bug). Tables with no comparable timestamp
-        // (cal_blocks, tags, life_areas, collections) stay last-write-wins.
-        subscribe(Tables.TASKS, userId,
-            { o -> val m = DbRowCodec.decodeTask(o); store.upsertIfNewer(Tables.TASKS, m, TaskItem.serializer(), m.id, m.updatedAt) },
-            { id -> store.delete(Tables.TASKS, id) })
-        subscribe(Tables.SESSIONS, userId,
-            { o -> val m = DbRowCodec.decodeSession(o); store.upsertIfNewer(Tables.SESSIONS, m, Session.serializer(), m.id, m.completedAt) },
-            { id -> store.delete(Tables.SESSIONS, id) })
-        subscribe(Tables.CAL_BLOCKS, userId,
-            { o -> val m = DbRowCodec.decodeCalBlock(o); store.upsert(Tables.CAL_BLOCKS, m, CalBlock.serializer(), m.id) },
-            { id -> store.delete(Tables.CAL_BLOCKS, id) })
-        subscribe(Tables.CAPTURES, userId,
-            { o -> val m = DbRowCodec.decodeCapture(o); store.upsertIfNewer(Tables.CAPTURES, m, Capture.serializer(), m.id, m.at) },
-            { id -> store.delete(Tables.CAPTURES, id) })
-        subscribe(Tables.REASON_LOGS, userId,
-            { o -> val m = DbRowCodec.decodeReasonLog(o); store.upsertIfNewer(Tables.REASON_LOGS, m, ReasonLog.serializer(), m.id, m.at) },
-            { id -> store.delete(Tables.REASON_LOGS, id) })
-        // Collections: shared rows are owned by someone else, so subscribe
-        // WITHOUT the user_id filter and rely on RLS for delivery (members get
-        // the owner's edits). Preserve the client-only members/myRole across the
-        // incoming row (it carries neither). Port of realtime.ts mergeKeep.
-        subscribe(Tables.COLLECTIONS, userId,
-            onUpsert = { o ->
-                val m = DbRowCodec.decodeCollection(o)
-                val existing = store.collections().first().firstOrNull { it.id == m.id }
-                val merged = m.copy(
-                    members = existing?.members ?: emptyList(),
-                    myRole = existing?.myRole ?: (if (m.ownerId == userId) "owner" else null),
-                )
-                store.upsert(Tables.COLLECTIONS, merged, ItemCollection.serializer(), m.id)
-            },
-            onDelete = { id -> store.delete(Tables.COLLECTIONS, id) },
-            noUserFilter = true)
-        subscribe(Tables.TAGS, userId,
-            { o -> val m = DbRowCodec.decodeTag(o); store.upsert(Tables.TAGS, m, TagRow.serializer(), m.id) },
-            { id -> store.delete(Tables.TAGS, id) })
-        subscribe(Tables.LIFE_AREAS, userId,
-            { o -> val m = DbRowCodec.decodeLifeArea(o); store.upsert(Tables.LIFE_AREAS, m, LifeArea.serializer(), m.id) },
-            { id -> store.delete(Tables.LIFE_AREAS, id) })
-        // profile_facts (migration 055: in the publication, replica identity FULL so
-        // an UPDATE to active=false carries the whole row): a "forget" on another
-        // device arrives as an UPDATE and is saved as a local tombstone, which every
-        // read filters out. Same updated_at last-write-wins guard as tasks so a stale
-        // echo can't clobber a newer local save.
-        subscribe(Tables.PROFILE_FACTS, userId,
-            { o -> val m = DbRowCodec.decodeProfileFact(o); store.upsertIfNewer(Tables.PROFILE_FACTS, m, ProfileFact.serializer(), m.id, m.updatedAt) },
-            { id -> store.delete(Tables.PROFILE_FACTS, id) })
-        // call_requests (051: in the publication, replica identity FULL; 053's
-        // BEFORE UPDATE guard owns status on the server): a READ-ONLY mirror so
-        // get_calls / the task editor read locally and a ring / snooze / cancel made
-        // on another device or by the dispatcher shows up live. Same updated_at
-        // last-write-wins guard as tasks; there is never a local write to protect
-        // (the table is not in the outbox), so this only orders out-of-order echoes.
-        subscribe(Tables.CALL_REQUESTS, userId,
-            { o -> val m = DbRowCodec.decodeCallRequest(o); store.upsertIfNewer(Tables.CALL_REQUESTS, m, CallRequest.serializer(), m.id, m.updatedAt) },
-            { id -> store.delete(Tables.CALL_REQUESTS, id) })
+        // How an incoming row is applied lives in ONE place — RowApply — shared with
+        // the catch-up pull, so the live path and the recovery path can never drift
+        // apart on decode or on the last-write-wins rules.
+        for (table in MIRRORED_TABLES) {
+            subscribe(table, userId, noUserFilter = table == Tables.COLLECTIONS)
+        }
         // Membership changes for ME — a new share or a revocation. Re-hydrate
         // collections so the freshly-shared list appears / the revoked one drops.
         subscribeMembers(userId, onMembersChanged)
+        // SETTINGS ARE LIVE (migration 063: notification_preferences joined the
+        // publication and every published table is on replica identity FULL). A
+        // notification level / reminder lead / timezone change, or a struggles /
+        // rituals / interview-flag change, now reaches this device while it is open
+        // instead of waiting for the next process launch.
+        subscribePreferences(userId)
     }
 
     private suspend fun subscribe(
         tableName: String,
         userId: String,
-        onUpsert: suspend (JsonObject) -> Unit,
-        onDelete: suspend (String) -> Unit,
         noUserFilter: Boolean = false,
     ) {
         val channel = client.channel("unstuck_${tableName}_$userId")
@@ -127,11 +79,12 @@ class RealtimeMirror(
         // required field) must NOT throw out of onEach and permanently kill this
         // table's live mirror — skip it and keep the stream alive (iOS does the same).
         val job = flow.onEach { action ->
+            onEvent()
             runCatching {
                 when (action) {
-                    is PostgresAction.Insert -> onUpsert(action.record)
-                    is PostgresAction.Update -> onUpsert(action.record)
-                    is PostgresAction.Delete -> action.oldRecord["id"]?.let { onDelete(it.jsonPrimitive.content) }
+                    is PostgresAction.Insert -> RowApply.apply(tableName, action.record, store, userId)
+                    is PostgresAction.Update -> RowApply.apply(tableName, action.record, store, userId)
+                    is PostgresAction.Delete -> action.oldRecord["id"]?.let { store.delete(tableName, it.jsonPrimitive.content) }
                     else -> {}
                 }
             }.onFailure { println("[realtime] $tableName event skipped: $it") }
@@ -147,6 +100,31 @@ class RealtimeMirror(
         jobs += statusJob
     }
 
+    /** user_preferences + notification_preferences (migration 063). Neither is
+     *  row-mirrored into the local store — the app reads them through
+     *  PreferencesClient — so an event just asks the app layer to re-read. Both are
+     *  keyed by user_id (no `id` column), which is also the filter column. */
+    private suspend fun subscribePreferences(userId: String) {
+        for (table in PREFERENCE_TABLES) {
+            val channel = client.channel("unstuck_${table}_$userId")
+            val flow = channel.postgresChangeFlow<PostgresAction>(schema = "public") {
+                this.table = table
+                filter("user_id", FilterOperator.EQ, userId)
+            }
+            val job = flow.onEach {
+                onEvent()
+                runCatching { onPreferencesChanged() }
+                    .onFailure { println("[realtime] $table refresh failed: $it") }
+            }.launchIn(scope)
+            runCatching { channel.subscribe() }
+                .onFailure { println("[realtime] subscribe $table failed: $it") }
+            val statusJob = observeChannelStatus(channel, table)
+            channels += channel
+            jobs += job
+            jobs += statusJob
+        }
+    }
+
     /** Observe one channel's status: log every transition (a silent (re)subscribe
      *  failure must be visible) AND self-heal (BUG 4). If the channel had reached
      *  SUBSCRIBED and then drops to UNSUBSCRIBED (a server-side close while the socket
@@ -159,7 +137,12 @@ class RealtimeMirror(
         return channel.status.onEach { status ->
             println("[realtime] $label channel status: $status")
             when (status) {
-                RealtimeChannel.Status.SUBSCRIBED -> wasSubscribed = true
+                RealtimeChannel.Status.SUBSCRIBED -> {
+                    wasSubscribed = true
+                    // Everything written while this channel was down was never
+                    // broadcast — the owner decides what to pull.
+                    onSubscribed()
+                }
                 RealtimeChannel.Status.UNSUBSCRIBED -> if (wasSubscribed) {
                     wasSubscribed = false   // fire once per close; the rebuild starts fresh
                     println("[realtime] $label channel closed while socket up — requesting heal")
@@ -190,6 +173,7 @@ class RealtimeMirror(
             table = "collection_members"
         }
         val job = flow.onEach {
+            onEvent()
             runCatching { onChanged() }.onFailure { println("[realtime] collection_members refresh failed: $it") }
         }.launchIn(scope)
         runCatching { channel.subscribe() }
@@ -205,5 +189,30 @@ class RealtimeMirror(
         jobs.clear()
         channels.forEach { runCatching { it.unsubscribe() } }
         channels.clear()
+    }
+
+    companion object {
+        /** The row tables mirrored into the local store. calendar_connections is
+         *  deliberately absent — its encrypted credentials must never be broadcast. */
+        internal val MIRRORED_TABLES: List<String> = listOf(
+            Tables.TASKS,
+            Tables.SESSIONS,
+            Tables.CAL_BLOCKS,
+            Tables.CAPTURES,
+            Tables.REASON_LOGS,
+            // Shared collections are owned by someone else, so this one subscribes
+            // WITHOUT the user_id filter and lets RLS decide delivery (members get
+            // the owner's edits).
+            Tables.COLLECTIONS,
+            Tables.TAGS,
+            Tables.LIFE_AREAS,
+            Tables.PROFILE_FACTS,
+            Tables.CALL_REQUESTS,
+        )
+
+        /** Account-wide settings tables (migration 063). Not row-mirrored: the app
+         *  reads them through PreferencesClient, so an event means "re-read".
+         *  sharing_preferences is published too but nothing on Android reads it. */
+        internal val PREFERENCE_TABLES: List<String> = listOf("user_preferences", "notification_preferences")
     }
 }

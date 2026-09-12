@@ -59,6 +59,10 @@ class ProfileFactsSyncTest {
         override suspend fun upsert(table: String, row: JsonObject, userId: String) { upserts.add(table to row) }
         override suspend fun delete(table: String, id: String) { deletes.add(table to id) }
         override suspend fun rpc(fn: String, params: JsonObject) {}
+        override suspend fun fetchSince(table: String, column: String, since: String, limit: Int) =
+            FakeRemoteSupport.since(serverRows[table].orEmpty(), column, since, limit)
+        override suspend fun fetchIds(table: String, offset: Int, limit: Int) =
+            FakeRemoteSupport.ids(serverRows[table].orEmpty(), offset, limit)
     }
 
     @Before fun setup() {

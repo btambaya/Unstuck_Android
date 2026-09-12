@@ -2,6 +2,11 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Connectivity signal for the sync freshness owner: a network that comes back
+         (tunnel, wifi→cellular) means everything written during the gap was never
+         broadcast (postgres_changes has no replay), so we catch up at once instead
+         of waiting for the next 60s floor pull. Read-only, no location implication. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />

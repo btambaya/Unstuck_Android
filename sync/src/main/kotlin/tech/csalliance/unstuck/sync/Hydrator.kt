@@ -91,7 +91,21 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
         }
     }
 
-    suspend fun hydrate(userId: String) {
+    /** The newest SERVER stamp seen per table during the last [hydrate] — the
+     *  seed for the catch-up's high-water marks. Server values only: seeding from
+     *  a local row would adopt this device's wall clock and a fast clock would
+     *  then skip real server rows for ever. A table whose fetch FAILED is absent
+     *  (it isn't converged, so it must not get a mark). */
+    private val serverMaxima = LinkedHashMap<String, String>()
+
+    /**
+     * Full server-canonical pull (the cold-start / no-cursor path). Returns the
+     * per-table server maxima so the caller can seed the catch-up cursors. Every
+     * row in the snapshot is at or below its table's maximum, so a later catch-up
+     * starting there can only re-see rows, never skip one.
+     */
+    suspend fun hydrate(userId: String): Map<String, String> {
+        serverMaxima.clear()
         replace(Tables.TASKS, TaskItem.serializer(), { it.id }, { it.updatedAt }) { DbRowCodec.decodeTask(it) }
         replace(Tables.SESSIONS, Session.serializer(), { it.id }, { it.completedAt }) { DbRowCodec.decodeSession(it) }
         replace(Tables.CAPTURES, Capture.serializer(), { it.id }, { it.at }) { DbRowCodec.decodeCapture(it) }
@@ -99,8 +113,6 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
         hydrateCollections(userId)
         replace(Tables.TAGS, TagRow.serializer(), { it.id }) { DbRowCodec.decodeTag(it) }
         replace(Tables.LIFE_AREAS, LifeArea.serializer(), { it.id }) { DbRowCodec.decodeLifeArea(it) }
-        replace(Tables.CALENDAR_CONNECTIONS, CalendarConnection.serializer(), { it.id }, { it.connectedAt }) { DbRowCodec.decodeConnection(it) }
-        hydrateCalBlocks()
         // profile_facts — the assistant's cross-device memory. Server tombstones
         // (active=false) land as local tombstones so "forget" propagates everywhere
         // and nothing resurrects; a local save / forget whose push hasn't landed
@@ -111,7 +123,18 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
         // call_requests — the read-only bookings mirror (no outbox ops exist for the
         // table, so keepPendingUpserts is a no-op here; server canonical, always).
         replace(Tables.CALL_REQUESTS, CallRequest.serializer(), { it.id }, { it.updatedAt }) { DbRowCodec.decodeCallRequest(it) }
+        hydrateNonCursorTables()
         pushTimezone()
+        return LinkedHashMap(serverMaxima)
+    }
+
+    /** cal_blocks + calendar_connections have NO monotonic column server-side, so
+     *  a cursor pull can't cover them: every catch-up pass full-replaces these two
+     *  (which also reconciles their deletions). Still far less work than the full
+     *  hydrate the 60s pull used to run over every table. */
+    suspend fun hydrateNonCursorTables() {
+        replace(Tables.CALENDAR_CONNECTIONS, CalendarConnection.serializer(), { it.id }, { it.connectedAt }) { DbRowCodec.decodeConnection(it) }
+        hydrateCalBlocks()
     }
 
     // ── timezone (migration 053 C, android-gateway-plan risk 8) ─────────────────
@@ -145,7 +168,9 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
         runCatching {
             // Per-row tolerant decode (see replace()): a single bad collection row
             // mustn't drop the user's entire list of collections.
-            val base = gateway.fetchAll(Tables.COLLECTIONS).mapNotNull { runCatching { DbRowCodec.decodeCollection(it) }.getOrNull() }
+            val collectionRows = gateway.fetchAll(Tables.COLLECTIONS)
+            noteServerMax(Tables.COLLECTIONS, collectionRows)
+            val base = collectionRows.mapNotNull { runCatching { DbRowCodec.decodeCollection(it) }.getOrNull() }
             // The membership select is a SEPARATE request: when it alone fails
             // (timeout, transient 5xx) the collections replace must NOT strip every
             // row's members[]/myRole — that flipped each shared list back to "solo"
@@ -193,7 +218,9 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
             // Per-ROW tolerant decode: one un-decodable row (e.g. a forward-compat
             // shape this build can't parse) must not abort the whole table and wipe
             // every good row off the UI. Drop only the bad row.
-            val models = gateway.fetchAll(table).mapNotNull { runCatching { decode(it) }.getOrNull() }
+            val rows = gateway.fetchAll(table)
+            noteServerMax(table, rows)
+            val models = rows.mapNotNull { runCatching { decode(it) }.getOrNull() }
             // keepPendingUpserts: every local row with a still-queued outbox upsert
             // survives the replace — whether or not the server also returned that id.
             // Rows NOT on the server (a transient flush failure) would otherwise vanish
@@ -203,6 +230,14 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
             // can't slip through the old read-then-replace gap.
             store.replace(table, models, ser, id, updatedAt, keepPendingUpserts = true)
         }.onFailure { println("[hydrate] $table failed, leaving local intact: $it") }
+    }
+
+    /** Record the newest SERVER stamp this table's fetch returned (the catch-up
+     *  cursor seed). An empty-but-successful fetch seeds the epoch, so the table
+     *  still gets a mark and the next pass is a cursor pull, not a full hydrate. */
+    private fun noteServerMax(table: String, rows: List<JsonObject>) {
+        val column = CatchUpPuller.cursorColumn(table) ?: return
+        serverMaxima[table] = CatchUpPuller.maxStamp(rows, column) ?: CatchUpPuller.EPOCH
     }
 
     private suspend fun hydrateCalBlocks() {

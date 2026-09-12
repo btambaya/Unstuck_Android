@@ -59,6 +59,27 @@ interface RecordDao {
     @Query("SELECT recordId FROM outbox WHERE recordTable = :table AND op = 'upsert'")
     suspend fun pendingUpsertIds(table: String): List<String>
 
+    /** DELETION RECONCILE — the catch-up pull's other half. A cursor pull by
+     *  `updated_at` can never see a HARD delete, so the freshness owner
+     *  periodically fetches just the server's ids for a table and calls this:
+     *  every local row the server no longer has is dropped. NEVER touches a row
+     *  with a queued outbox upsert (an offline create the server hasn't seen yet
+     *  would otherwise be swept away) nor a [preserveIdsPrefix] row (the
+     *  local-only Google `g_` blocks). Pending ids are read in the SAME
+     *  transaction as the deletes, so a write landing mid-sweep can't be lost.
+     *  Returns how many rows were dropped. */
+    @Transaction
+    suspend fun retainIds(table: String, serverIds: Set<String>, preserveIdsPrefix: String? = null): Int {
+        val pending = pendingUpsertIds(table).toSet()
+        val doomed = get(table).filter {
+            it.id !in serverIds &&
+                it.id !in pending &&
+                (preserveIdsPrefix == null || !it.id.startsWith(preserveIdsPrefix))
+        }
+        for (row in doomed) deleteById(table, row.id)
+        return doomed.size
+    }
+
     /** Replace-per-table that KEEPS every local row with a still-pending outbox
      *  upsert — even when the server also has that id. The local op is by
      *  construction the newer state (the engine reconciles it against the server
@@ -100,6 +121,13 @@ interface OutboxDao {
      *  edit of that row still measures against). */
     @Query("SELECT * FROM outbox WHERE recordTable = :table AND recordId = :id AND op = 'upsert' ORDER BY seq DESC LIMIT 1")
     suspend fun latestUpsert(table: String, id: String): OutboxEntity?
+
+    /** Does this device have a queued DELETE for that row? The catch-up pull
+     *  asks before applying a server row: the server still has it (our delete
+     *  hasn't landed), and re-applying it would resurrect something the user
+     *  removed here. */
+    @Query("SELECT COUNT(*) FROM outbox WHERE recordTable = :table AND recordId = :id AND op = 'delete'")
+    suspend fun pendingDeleteCount(table: String, id: String): Int
 
     /** Rewrite an op after a 3-way merge against a newer server row. */
     @Query("UPDATE outbox SET payload = :payload, base = :base WHERE seq = :seq")

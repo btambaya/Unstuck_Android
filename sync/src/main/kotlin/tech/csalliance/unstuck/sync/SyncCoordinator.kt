@@ -76,10 +76,25 @@ class SyncCoordinator(
 
     private val hydrator = Hydrator(gateway, store)
     private val flusher = OutboxFlusher(gateway, store)
+    // THE FRESHNESS LAYER (2026-09-12 sync contract). The cursor marks + the
+    // catch-up pull that is now the CORRECTNESS path: realtime is an optimisation
+    // (postgres_changes has no replay, and a channel can report SUBSCRIBED while
+    // being permanently deaf), so what keeps this device in step is a bounded pull
+    // of everything newer than the per-table high-water mark.
+    private val cursors = PrefsSyncCursors(context.getSharedPreferences("unstuck.sync", Context.MODE_PRIVATE))
+    private val catchUp = CatchUpPuller(gateway, store, cursors, log = { Log.i(TAG, it) })
     // onChannelClosed: a single channel closing server-side while the socket stays
     // CONNECTED (so startHealthObserver never fires) — self-heal by rebuilding the
-    // mirror + a coalesced backfill hydrate. See healClosedChannel (BUG 4).
-    private val realtime = RealtimeMirror(client, store, scope, onChannelClosed = { healClosedChannel() })
+    // mirror + a coalesced backfill pull. See healClosedChannel (BUG 4).
+    // onEvent / onSubscribed / onPreferencesChanged: the mirror REPORTS to the
+    // freshness owner; it never schedules a refresh of its own.
+    private val realtime = RealtimeMirror(
+        client, store, scope,
+        onChannelClosed = { healClosedChannel() },
+        onEvent = { freshness.noteRealtimeEvent() },
+        onSubscribed = { freshness.noteSubscribed() },
+        onPreferencesChanged = { _preferencesChanged.tryEmit(Unit) },
+    )
     // Live change SIGNALS for sharing (RPC-backed surfaces can't be table-mirrored;
     // recipients have no RLS read on raw task rows). ViewModels observe
     // collab.sharesChanged / .circleChanged and refetch via `circle`.
@@ -101,7 +116,9 @@ class SyncCoordinator(
     // hydrate calls. See RealtimeLifecycle.
     private val realtimeLifecycle = RealtimeLifecycle(
         scope = scope,
-        hydrate = { auth.currentUserId?.let { coalescedHydrate(it) } },
+        // The refresh half of resume() is now ONE line: ask the freshness owner.
+        // It decides catch-up vs full hydrate and coalesces with every other trigger.
+        hydrate = { freshness.request(FreshnessTrigger.FOREGROUND) },
         // Return TRUE only when a REAL subscribe happened (a user exists). A null
         // user (resume() racing the async session restore) must NOT leave the
         // lifecycle flag set, or the later SIGNED_IN would skip the real subscribe
@@ -111,13 +128,32 @@ class SyncCoordinator(
         onError = { Log.w(TAG, "realtime lifecycle step failed; will retry", it) },
     )
 
-    // --- Hydrate coalescer (BUG 3). The socket-reconnect heal, the ~60s periodic
-    // pull, the resume hydrate, and the auth-branch hydrate all issue the same full
-    // pull. Serialize them behind a Mutex + drop-if-in-flight coalescer so they can't
-    // run concurrently (redundant full-table replaces + a TOCTOU window in the
-    // non-transactional read-modify-write paths). ---
+    /** THE ONE FRESHNESS OWNER. Every trigger — foreground, network regained,
+     *  socket (re)connect, channel (re)subscribe, token refresh, the 60s floor,
+     *  suspected deafness, the worker, sign-in — goes through here, and nothing
+     *  else schedules a pull. It decides between the cursor catch-up (normal) and
+     *  the full hydrate (first run / no cursors), coalesces overlapping triggers
+     *  into one in-flight pull, and rebuilds the subscriptions when the evidence
+     *  says the socket is deaf. */
+    val freshness: FreshnessOwner = FreshnessOwner(
+        scope = scope,
+        currentUserId = { auth.currentUserId },
+        runFullHydrate = { uid -> fullHydrate(uid) },
+        runCatchUp = { uid, sweep -> catchUpPull(uid, sweep) },
+        needsFullHydrate = { uid -> !catchUp.hasCursors(uid) },
+        rebuildSubscriptions = { realtimeLifecycle.resubscribe() },
+        log = { Log.i(TAG, it) },
+    )
+
+    /** Connectivity: Android had NO network signal at all before this — a tunnel
+     *  or a wifi→cellular handover was only noticed at the next floor tick. */
+    private val networkWatcher = NetworkWatcher(context) { freshness.request(FreshnessTrigger.NETWORK) }
+
+    // --- Pull serialization. COALESCING now belongs to the freshness owner (it is
+    // the only thing that decides a pull is needed); this mutex is the last line of
+    // defence so a catch-up and a full hydrate can never interleave their
+    // read-modify-write over the same table. ---
     private val hydrateMutex = Mutex()
-    private val hydrateInFlight = AtomicBoolean(false)
     // Coalesces channel-close self-heals (BUG 4) so several channels dropping at
     // once collapse to a single mirror rebuild.
     private val healInFlight = AtomicBoolean(false)
@@ -133,6 +169,14 @@ class SyncCoordinator(
      *  capture archive, the onboarding flag) hang here rather than polling. */
     private val _hydrated = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val hydrated: SharedFlow<Unit> = _hydrated
+
+    /** A settings row changed on ANOTHER device (user_preferences /
+     *  notification_preferences — both live since migration 063). Those tables are
+     *  not row-mirrored into the local store, so the app layer re-reads them: the
+     *  notification level, reminder lead, timezone, struggles, rituals and the
+     *  assistant-interview flag now cross devices while the app is open. */
+    private val _preferencesChanged = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val preferencesChanged: SharedFlow<Unit> = _preferencesChanged
 
     /** Invoked (on the coordinator scope) right after the sign-out cache wipe, so the
      *  app layer can drop its own per-user device state in the same breath. */
@@ -167,33 +211,54 @@ class SyncCoordinator(
         flusher.flush(uid) { auth.currentUserId }
     }
 
-    /** Full server-canonical pull, ALWAYS preceded by an outbox drain (push before
-     *  pull — otherwise an unflushed edit is compared against, and for non-pending
-     *  rows overwritten by, a stale server snapshot). Serialized behind
-     *  [hydrateMutex] + [engineMutex] so no two overlap. Coalesced by default: a
-     *  caller arriving while a pull is in flight is DROPPED (the running one's fresh
-     *  snapshot already reflects whatever prompted this call). [waitIfBusy] callers
-     *  (the auth branch, the worker, calendar connect — the ones whose caller expects
-     *  a pull to have HAPPENED) queue behind the running pull instead. Deadlock-free:
-     *  the mutexes are only ever held around the engine calls, never across an
-     *  unrelated suspend. */
-    private suspend fun coalescedHydrate(uid: String, waitIfBusy: Boolean = false) {
-        val claimed = hydrateInFlight.compareAndSet(false, true)
-        if (!claimed && !waitIfBusy) return
-        try {
-            hydrateMutex.withLock {
-                engineMutex.withLock {
-                    // A failed drain (offline) must not block the pull: the pending
-                    // rows survive the replace regardless (Hydrator keeps them).
-                    runCatching { flushUnlocked(uid) }
-                        .onFailure { if (it is CancellationException) throw it; Log.w(TAG, "pre-pull flush failed; pulling anyway", it) }
-                    hydrator.hydrate(uid)
-                }
+    /** FULL server-canonical pull — the cold path (first run for this user, or the
+     *  cursors were cleared). ALWAYS preceded by an outbox drain (push before pull —
+     *  otherwise an unflushed edit is compared against, and for non-pending rows
+     *  overwritten by, a stale server snapshot). Serialized behind [hydrateMutex] +
+     *  [engineMutex] so no two pulls of any kind overlap. Seeds the catch-up cursors
+     *  from the SERVER stamps this pull actually saw, so every later pass is a
+     *  bounded delta. Only the freshness owner calls this. */
+    private suspend fun fullHydrate(uid: String): Boolean {
+        var ok = false
+        hydrateMutex.withLock {
+            engineMutex.withLock {
+                // A failed drain (offline) must not block the pull: the pending
+                // rows survive the replace regardless (Hydrator keeps them).
+                runCatching { flushUnlocked(uid) }
+                    .onFailure { if (it is CancellationException) throw it; Log.w(TAG, "pre-pull flush failed; pulling anyway", it) }
+                val maxima = hydrator.hydrate(uid)
+                catchUp.seedCursors(uid, maxima)
+                ok = maxima.isNotEmpty()
             }
-            _hydrated.tryEmit(Unit)
-        } finally {
-            if (claimed) hydrateInFlight.set(false)
         }
+        _hydrated.tryEmit(Unit)
+        return ok
+    }
+
+    /** CATCH-UP pull — the correctness path. Cursor delta per table, the two tables
+     *  with no monotonic column full-replaced, and (when [sweep]) the id-only
+     *  deletion reconcile. Same push-then-pull ordering and the same mutexes as the
+     *  full hydrate, so a catch-up can never run concurrently with a hydrate.
+     *  Emits [hydrated] on completion: the app-level reconciliations that hang off
+     *  a completed pull (capture archive, onboarding flag) keep their cadence. */
+    private suspend fun catchUpPull(uid: String, sweep: Boolean): CatchUpOutcome? {
+        var outcome: CatchUpOutcome? = null
+        hydrateMutex.withLock {
+            engineMutex.withLock {
+                runCatching { flushUnlocked(uid) }
+                    .onFailure { if (it is CancellationException) throw it; Log.w(TAG, "pre-pull flush failed; pulling anyway", it) }
+                val pulled = catchUp.catchUp(uid)
+                // cal_blocks + calendar_connections have no monotonic column on the
+                // server, so they still come in whole (which also reconciles their
+                // deletions).
+                runCatching { hydrator.hydrateNonCursorTables() }
+                    .onFailure { if (it is CancellationException) throw it; Log.w(TAG, "non-cursor tables failed", it) }
+                val deleted = if (sweep) runCatching { catchUp.reconcileDeletions(uid) }.getOrDefault(0) else 0
+                outcome = pulled.copy(deleted = deleted)
+            }
+        }
+        _hydrated.tryEmit(Unit)
+        return outcome
     }
 
     /** BUG-4 self-heal: rebuild the whole mirror (a fresh real subscribe) + a
@@ -201,13 +266,13 @@ class SyncCoordinator(
      *  coroutine so the resubscribe's teardown — which cancels the very status job
      *  that triggered this — can't cancel the heal itself. Coalesced via [healInFlight]. */
     private fun healClosedChannel() {
-        val uid = auth.currentUserId ?: return
+        auth.currentUserId ?: return
         if (!healInFlight.compareAndSet(false, true)) return
         scope.launch {
             try {
                 Log.i(TAG, "realtime channel closed while socket up — rebuilding mirror + backfilling")
                 realtimeLifecycle.resubscribe()
-                coalescedHydrate(uid)
+                freshness.requestAndWait(FreshnessTrigger.REALTIME)
             } catch (t: CancellationException) {
                 throw t
             } catch (t: Throwable) {
@@ -342,16 +407,18 @@ class SyncCoordinator(
      *  observer keeps running; a missed change is caught by the next hydrate on
      *  resume / the periodic SyncWorker. Also stops the foreground safety nets. */
     fun pauseRealtime() {
+        freshness.onHidden()
         stopForegroundNets()
         realtimeLifecycle.pause()
     }
 
-    /** Foreground: ALWAYS re-hydrate (pull anything missed while backgrounded) AND
-     *  ensure the live mirror is subscribed — never early-returns on a stale flag,
-     *  and serialized against pause so a quick background→foreground can't settle
-     *  unsubscribed with no refresh. Also (re)arms the foreground safety nets: the
-     *  socket-reconnect self-heal + the ~60s backstop pull. */
+    /** Foreground: tell the freshness owner we are visible (it pulls now and runs
+     *  the 60s floor), ensure the live mirror is subscribed — never early-returns on
+     *  a stale flag, and serialized against pause so a quick background→foreground
+     *  can't settle unsubscribed with no refresh — and (re)arm the socket watch +
+     *  the connectivity watch. */
     fun resumeRealtime() {
+        freshness.onVisible()
         realtimeLifecycle.resume()
         startForegroundNets()
         auth.currentUserId?.let { uid -> scope.launch { maybeRecordWakeWindow(uid) } }
@@ -375,19 +442,22 @@ class SyncCoordinator(
 
     private fun startForegroundNets() {
         startHealthObserver()
-        startPeriodicPull()
+        networkWatcher.start()
+        // The ~60s floor pull lives in the freshness owner now (one owner, one
+        // schedule) — started by freshness.onVisible() from resumeRealtime().
     }
 
     private fun stopForegroundNets() {
         healthJob?.cancel(); healthJob = null
-        periodicPullJob?.cancel(); periodicPullJob = null
+        networkWatcher.stop()
     }
 
-    /** REALTIME SELF-HEAL. Watch the socket status; when it RE-connects after a
-     *  drop (a network blip / doze), supabase-kt auto-rejoins the channels but any
-     *  change made while offline was missed — so pull server-canonical to backfill.
-     *  The first CONNECTED after (re)start is our own intentional subscribe and is
-     *  ignored (wasConnected starts false). Restarted fresh on each foreground. */
+    /** SOCKET WATCH. supabase-kt auto-rejoins the channels when the socket comes
+     *  back, but postgres_changes has NO replay: everything written during the gap
+     *  was never broadcast. So a re-CONNECT is reported to the freshness owner,
+     *  which pulls. The first CONNECTED after (re)start is our own intentional
+     *  subscribe and is ignored (wasConnected starts false). This observer decides
+     *  nothing — it only reports. Restarted fresh on each foreground. */
     private fun startHealthObserver() {
         if (healthJob?.isActive == true) return
         healthJob = scope.launch {
@@ -396,30 +466,11 @@ class SyncCoordinator(
                 Log.d(TAG, "realtime socket status: $status")
                 if (status == Realtime.Status.CONNECTED) {
                     if (wasConnected) {
-                        auth.currentUserId?.let { uid ->
-                            Log.i(TAG, "realtime reconnected after a drop — backfilling via hydrate")
-                            runCatching { coalescedHydrate(uid) }
-                                .onFailure { Log.w(TAG, "post-reconnect hydrate failed", it) }
-                        }
+                        Log.i(TAG, "realtime reconnected after a drop — asking for a catch-up")
+                        freshness.request(FreshnessTrigger.REALTIME)
                     }
                     wasConnected = true
                 }
-            }
-        }
-    }
-
-    /** FOREGROUND SAFETY-NET PULL. A lightweight periodic full pull (~60s) as a
-     *  backstop for the continuously-foregrounded case (user watching this device
-     *  while editing on another) where no socket event ever fires. It's the same
-     *  full hydrate — cheap at this cadence. Cancelled on background. */
-    private fun startPeriodicPull() {
-        if (periodicPullJob?.isActive == true) return
-        periodicPullJob = scope.launch {
-            while (isActive) {
-                delay(FOREGROUND_PULL_INTERVAL_MS)
-                val uid = auth.currentUserId ?: continue
-                runCatching { coalescedHydrate(uid) }
-                    .onFailure { Log.w(TAG, "foreground safety-net pull failed", it) }
             }
         }
     }
@@ -441,8 +492,8 @@ class SyncCoordinator(
      *  other hydrate path (waits for an in-flight pull rather than racing it). No-op
      *  when signed out. */
     suspend fun syncNow() {
-        val uid = auth.currentUserId ?: return
-        coalescedHydrate(uid, waitIfBusy = true)
+        auth.currentUserId ?: return
+        freshness.requestAndWait(FreshnessTrigger.WORKER)
         runCatching { pullCalendar() }
     }
 
@@ -473,7 +524,7 @@ class SyncCoordinator(
         // Push-then-pull through the serialized path: pulls the new calendar_connections
         // row so the UI flips to "Synced" now, not on next launch (and never races the
         // foreground pull into a double replace).
-        auth.currentUserId?.let { coalescedHydrate(it, waitIfBusy = true) }
+        freshness.requestAndWait(FreshnessTrigger.MANUAL)
         pullCalendar()
         true
     }.getOrElse { Log.w(TAG, "calendar connect failed", it); false }
@@ -640,10 +691,20 @@ class SyncCoordinator(
                     is SessionSource.SignIn, is SessionSource.SignUp, is SessionSource.External -> SyncAuthEvent.SIGNED_IN
                     is SessionSource.Storage -> SyncAuthEvent.INITIAL_SESSION
                     is SessionSource.UserChanged, is SessionSource.UserIdentitiesChanged -> SyncAuthEvent.USER_UPDATED
-                    else -> return // Refresh / Unknown — no cache action
+                    // TOKEN REFRESH. No cache action — but the realtime channels may
+                    // have (re)joined with a token RLS no longer accepts, which is
+                    // SILENT (the channel still reports SUBSCRIBED and delivers
+                    // nothing, proven 2026-09-12). So ask the owner for a catch-up.
+                    is SessionSource.Refresh -> { freshness.request(FreshnessTrigger.TOKEN_REFRESH); return }
+                    else -> return // Unknown — no cache action
                 }
                 val prev = prefs.getString(KEY_PREV_USER, null)
-                if (SyncDecision.shouldWipeCache(event, prev, uid)) store.clearAll()
+                if (SyncDecision.shouldWipeCache(event, prev, uid)) {
+                    store.clearAll()
+                    // The cache is gone, so the high-water marks describe nothing:
+                    // the next pull must be a full hydrate that re-seeds them.
+                    catchUp.clearCursors(uid)
+                }
                 prefs.edit().putString(KEY_PREV_USER, uid).apply()
                 // Push offline edits (stale task ops pruned / merged first so they can't
                 // clobber another platform's change), pull server-canonical, and mirror
@@ -660,7 +721,7 @@ class SyncCoordinator(
                     // first, ahead of the first drain. (Another account's stay parked.)
                     val restored = runCatching { store.restoreParkedOutbox(uid) }.getOrDefault(0)
                     if (restored > 0) Log.i(TAG, "restored $restored parked writes for $uid")
-                    coalescedHydrate(uid, waitIfBusy = true)
+                    freshness.requestAndWait(FreshnessTrigger.COLD_START)
                     // Parked child ops (a cal_block whose parent task row was wiped with
                     // the cache) are held by the flusher until the parent exists locally —
                     // it does now, after the pull — so drain once more.
@@ -689,7 +750,10 @@ class SyncCoordinator(
                 enqueueFlush.cancel()
                 stopForegroundNets()
                 realtimeLifecycle.forceUnsubscribe()
+                val goneUid = prefs.getString(KEY_PREV_USER, null)
                 store.clearAll()   // leaves parked_outbox alone (per-user, see LocalStore)
+                goneUid?.let { catchUp.clearCursors(it) }   // no marks without the rows they describe
+                freshness.reset()
                 prefs.edit().remove(KEY_PREV_USER).apply()
                 runCatching { onSignedOut?.invoke() }.onFailure { Log.w(TAG, "onSignedOut hook failed", it) }
             }
@@ -702,9 +766,6 @@ class SyncCoordinator(
         private const val KEY_PREV_USER = "unstuck.prevUserId"
         // After a 429 from the calendar function / provider, no pulls or pushes for this long.
         private const val CALENDAR_BACKOFF_MS = 5 * 60_000L
-        // Foreground backstop pull cadence — cheap full hydrate; catches the
-        // continuously-foregrounded case where no realtime socket event fires.
-        private const val FOREGROUND_PULL_INTERVAL_MS = 60_000L
         // Flush-on-enqueue debounce: a burst of edits (typing, a drag) collapses to one
         // drain ~1.5 s after the last one (same window as iOS).
         internal const val ENQUEUE_FLUSH_DEBOUNCE_MS = 1_500L

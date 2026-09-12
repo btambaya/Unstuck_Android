@@ -3612,7 +3612,12 @@ class AppViewModel(
         // onboarding flag against the server (each best-effort + independent).
         graph.coordinator?.let { c ->
             viewModelScope.launch {
-                c.hydrated.collect {
+                // Two sources, one handler: after every completed pull, AND the
+                // moment another device changes a settings row (user_preferences /
+                // notification_preferences are live since migration 063 — before
+                // this, a notification level picked on the web could not reach an
+                // open phone at all).
+                merge(c.hydrated, c.preferencesChanged).collect {
                     val uid = auth?.currentUserId ?: return@collect
                     runCatching { reconcileNotificationPrefs(uid) }
                     runCatching { reconcileCaptureArchive(uid) }

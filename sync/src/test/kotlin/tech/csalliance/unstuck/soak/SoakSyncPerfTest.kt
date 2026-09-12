@@ -67,6 +67,10 @@ class SoakSyncPerfTest {
         override suspend fun upsert(table: String, row: JsonObject, userId: String) { upserts++ }
         override suspend fun delete(table: String, id: String) { deletes++ }
         override suspend fun rpc(fn: String, params: JsonObject) = Unit
+        override suspend fun fetchSince(table: String, column: String, since: String, limit: Int) =
+            tech.csalliance.unstuck.sync.FakeRemoteSupport.since(rows[table].orEmpty(), column, since, limit)
+        override suspend fun fetchIds(table: String, offset: Int, limit: Int) =
+            tech.csalliance.unstuck.sync.FakeRemoteSupport.ids(rows[table].orEmpty(), offset, limit)
     }
 
     private fun serverRows(): Map<String, List<JsonObject>> = mapOf(

@@ -46,15 +46,22 @@ internal class RealtimeLifecycle(
 
     val isSubscribed: Boolean get() = subscribed.get()
 
-    /** Foreground: pull server-canonical (ALWAYS), then ensure the live mirror is
-     *  up. Cancels any in-flight pause so foreground is the winning final state. */
+    /** Foreground: ensure the live mirror is up, then ALWAYS ask for a refresh.
+     *  Cancels any in-flight pause so foreground is the winning final state. */
     fun resume() {
         job?.cancel()
         job = scope.launch {
             mutex.withLock {
                 runCatching {
-                    hydrate()
+                    // SUBSCRIBE FIRST, then refresh. The old order held the live
+                    // mirror hostage to a full serial REST pull on every foreground —
+                    // and left the whole session with NO mirror when that pull could
+                    // not complete (offline at launch). Nothing is lost by going live
+                    // first: the freshness owner's catch-up covers everything written
+                    // during the gap, and a change delivered live while the pull runs
+                    // is applied by the same rules.
                     ensureSubscribedLocked()
+                    hydrate()
                 }.onFailure(onError)
             }
         }

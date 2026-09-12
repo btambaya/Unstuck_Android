@@ -108,6 +108,16 @@ class LocalStore(private val db: UnstuckDatabase) {
     suspend fun <T> snapshot(table: String, ser: KSerializer<T>): List<T> =
         records.get(table).mapNotNull { runCatching { json.decodeFromString(ser, it.data) }.getOrNull() }
 
+    /** Whether a row is held locally and what stamp it was stored with — O(1), no
+     *  decode. The catch-up pull reads it to tell "this row is genuinely new to
+     *  this device" (absent, or older than the server's) from "the live mirror
+     *  already delivered it", which is how deafness is PROVEN rather than guessed.
+     *  A null [updatedAt] means the table stores no comparable stamp. */
+    data class RowMeta(val exists: Boolean, val updatedAt: String?)
+
+    suspend fun rowMeta(table: String, id: String): RowMeta =
+        records.getOne(table, id).let { RowMeta(it != null, it?.updatedAt) }
+
     /** One row by id (null when absent / undecodable). O(1) — the per-write base
      *  capture in WriteThrough must not decode the whole table. */
     suspend fun <T> getOne(table: String, id: String, ser: KSerializer<T>): T? =
@@ -167,6 +177,22 @@ class LocalStore(private val db: UnstuckDatabase) {
         invalidate(table)
     }
 
+    /** DELETION RECONCILE (a cursor catch-up by `updated_at` can never see a HARD
+     *  delete): drop every local row of [table] whose id the server no longer
+     *  returns. Rows with a queued outbox upsert — and [preservePrefix] rows (the
+     *  local-only Google `g_` blocks) — are never touched. Returns how many were
+     *  dropped, and bumps THIS table's version counter (and only this one) when
+     *  anything changed, so the removal reaches the UI without a relaunch. */
+    suspend fun retainIds(table: String, serverIds: Set<String>, preservePrefix: String? = null): Int {
+        val dropped = records.retainIds(table, serverIds, preservePrefix)
+        if (dropped > 0) invalidate(table)
+        return dropped
+    }
+
+    /** How many rows this table holds locally — the deletion reconcile's
+     *  "is the server's empty answer plausible?" guard reads it. */
+    suspend fun countRows(table: String): Int = records.get(table).size
+
     /** Sign-out / user-switch wipe. Deliberately leaves `parked_outbox` alone: those
      *  are another (or the same, returning) user's un-pushed edits. */
     suspend fun clearAll() {
@@ -187,6 +213,10 @@ class LocalStore(private val db: UnstuckDatabase) {
 
     /** The newest queued upsert for a row, if any (its `base` carries forward). */
     suspend fun latestPendingUpsert(table: String, id: String): OutboxEntity? = outboxDao.latestUpsert(table, id)
+
+    /** True when a local DELETE for that row is still queued. */
+    suspend fun hasPendingDelete(table: String, id: String): Boolean =
+        outboxDao.pendingDeleteCount(table, id) > 0
 
     /** Rewrite a queued op's payload + base after a 3-way merge. */
     suspend fun rewriteOutbox(seq: Long, payload: String?, base: String?) = outboxDao.rewrite(seq, payload, base)

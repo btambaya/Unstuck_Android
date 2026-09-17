@@ -1,5 +1,7 @@
 package tech.csalliance.unstuck.core.model
 
+import tech.csalliance.unstuck.core.logic.ShareAccess
+
 // Sharing + collaboration domain models + pure level logic. 1:1 port of the web
 // lib/share-levels.ts (level semantics) and the exported interfaces in
 // lib/use-circle.ts (CircleMember) + lib/use-task-shares.ts (ShareForTask,
@@ -22,12 +24,14 @@ enum class ShareLevel(val wire: String) {
      *  Mirrors levelCanComplete in share-levels.ts. */
     val canComplete: Boolean get() = this == PARTNER || this == ASSIGN
 
-    /** The chip on the OWNER's own task row / "shared with" line — the level granted.
-     *  Mirrors shareLevelLabel in share-levels.ts. */
+    /** The chip on the OWNER's own task row / "shared with" line — the level
+     *  granted, in the ONE vocabulary of unified sharing v1 (spec §2): the words
+     *  the sender picked on the Share screen ("can edit" / "can view"), never the
+     *  storage levels. Mirrors iOS `shareLevelLabel`. */
     val ownerLabel: String get() = when (this) {
-        VIEW -> "view"
-        ASSIGN -> "assigned"
-        PARTNER -> "partner"
+        VIEW -> ShareAccess.VIEW.label.lowercase()      // "can view"
+        ASSIGN -> "handed over"
+        PARTNER -> ShareAccess.EDIT.label.lowercase()   // "can edit"
     }
 
     companion object {
@@ -39,12 +43,14 @@ enum class ShareLevel(val wire: String) {
 }
 
 /** The quiet chip on a "shared with you" row, from the RECIPIENT's side.
- *  Mirrors shareStatusLabel in share-levels.ts. */
+ *  Unified sharing v1 (spec §2, "One vocabulary"): the recipient reads the SAME
+ *  words the sender picked — "can edit" / "can view" — not the storage levels
+ *  (`partner` / `watching`) the old sheet leaked. Mirrors iOS `shareStatusLabel`. */
 fun shareStatusLabel(level: ShareLevel, done: Boolean): String = when {
     done -> "done"
-    level == ShareLevel.VIEW -> "watching"
-    level == ShareLevel.ASSIGN -> "yours"
-    else -> "partner"
+    level == ShareLevel.VIEW -> ShareAccess.VIEW.label.lowercase()   // "can view"
+    level == ShareLevel.ASSIGN -> "yours"                            // handed over to them
+    else -> ShareAccess.EDIT.label.lowercase()                       // "can edit"
 }
 
 /** Status of a circle membership row. Mirrors the web union 'invited'|'active'|'revoked'. */

@@ -9,6 +9,7 @@ import tech.csalliance.unstuck.core.model.CoFocusTimer
 import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.model.coFocusElapsedSec
 import tech.csalliance.unstuck.core.model.coFocusRemainingSec
+import tech.csalliance.unstuck.core.logic.ShareAccess
 import tech.csalliance.unstuck.core.model.shareStatusLabel
 
 // Pure sharing-level logic — 1:1 with lib/share-levels.ts (levelCanComplete,
@@ -37,19 +38,32 @@ class SharingTest {
         assertTrue(ShareLevel.ASSIGN.canComplete)
     }
 
-    @Test fun `owner-side label matches shareLevelLabel`() {
-        assertEquals("view", ShareLevel.VIEW.ownerLabel)
-        assertEquals("partner", ShareLevel.PARTNER.ownerLabel)
-        assertEquals("assigned", ShareLevel.ASSIGN.ownerLabel)
+    // ONE vocabulary (unified sharing v1 §2, iOS shareLevelLabel /
+    // shareStatusLabel): every chip a person reads says what the SENDER picked on
+    // the Share screen — "can edit" / "can view" — never the storage levels
+    // (partner / watching) the old sheet leaked. The wire values above are
+    // unchanged; only the words shown to people moved.
+    @Test fun `owner-side label speaks the Share screen's vocabulary`() {
+        assertEquals("can view", ShareLevel.VIEW.ownerLabel)
+        assertEquals("can edit", ShareLevel.PARTNER.ownerLabel)
+        assertEquals("handed over", ShareLevel.ASSIGN.ownerLabel)
     }
 
-    @Test fun `recipient-side chip matches shareStatusLabel`() {
+    @Test fun `recipient-side chip speaks the Share screen's vocabulary`() {
         // done wins over level for every level.
         assertEquals("done", shareStatusLabel(ShareLevel.VIEW, done = true))
         assertEquals("done", shareStatusLabel(ShareLevel.ASSIGN, done = true))
-        assertEquals("watching", shareStatusLabel(ShareLevel.VIEW, done = false))
+        assertEquals("can view", shareStatusLabel(ShareLevel.VIEW, done = false))
         assertEquals("yours", shareStatusLabel(ShareLevel.ASSIGN, done = false))
-        assertEquals("partner", shareStatusLabel(ShareLevel.PARTNER, done = false))
+        assertEquals("can edit", shareStatusLabel(ShareLevel.PARTNER, done = false))
+    }
+
+    // The words the recipient reads are exactly the ones the sender chose.
+    @Test fun `both sides agree with the ShareAccess labels`() {
+        assertEquals(ShareAccess.EDIT.label.lowercase(), shareStatusLabel(ShareLevel.PARTNER, done = false))
+        assertEquals(ShareAccess.VIEW.label.lowercase(), shareStatusLabel(ShareLevel.VIEW, done = false))
+        assertEquals(ShareAccess.EDIT.label.lowercase(), ShareLevel.PARTNER.ownerLabel)
+        assertEquals(ShareAccess.VIEW.label.lowercase(), ShareLevel.VIEW.ownerLabel)
     }
 
     @Test fun `circle status decodes and degrades unknown to invited`() {

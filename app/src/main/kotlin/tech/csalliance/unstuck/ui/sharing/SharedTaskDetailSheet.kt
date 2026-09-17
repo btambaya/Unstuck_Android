@@ -41,6 +41,7 @@ import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.model.ShareSlot
 import tech.csalliance.unstuck.core.model.SharedTaskDetail
 import tech.csalliance.unstuck.core.model.SharedWithMe
+import tech.csalliance.unstuck.core.model.shareStatusLabel
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.design.component.AreaDotColor
@@ -109,7 +110,7 @@ fun SharedTaskDetailSheet(
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("from $ownerName", style = UFont.sans(13), color = c.ink3)
                 Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 9.dp, vertical = 3.dp)) {
-                    Text(level.recipientLabel, style = UFont.sans(10, FontWeight.Bold), color = c.primaryDeep)
+                    Text(shareStatusLabel(level, done), style = UFont.sans(10, FontWeight.Bold), color = c.primaryDeep)
                 }
             }
 
@@ -199,14 +200,6 @@ fun SharedTaskDetailSheet(
     }
 }
 
-/** Recipient-side wire label for a share level (the chip on THIS sheet). Distinct
- *  from the owner-side [ShareLevel.ownerLabel]. */
-private val ShareLevel.recipientLabel: String
-    get() = when (this) {
-        ShareLevel.VIEW -> "watching"
-        ShareLevel.PARTNER -> "partner"
-        ShareLevel.ASSIGN -> "yours"
-    }
 
 /** A YYYY-MM-DD label for an ISO due timestamp, or null when absent/unparseable. */
 private fun dueLabel(dueAt: String?): String? {

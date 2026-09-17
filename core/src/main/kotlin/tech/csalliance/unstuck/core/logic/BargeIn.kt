@@ -18,13 +18,21 @@ import kotlin.math.sqrt
 //     (duck/restore the player, flush, send response.cancel, mute stale deltas,
 //     drive the UI state). "Duck-and-confirm": the first hint of the user
 //     talking over the model only ducks the playback (-12 dB); the reply is
-//     cancelled only once the barge-in is CONFIRMED (gate held open for
-//     confirmMs, the server agreeing with speech_started, or a transcription
-//     arriving). A cough/"uh" ducks then restores without cancelling.
+//     cancelled only once the barge-in is CONFIRMED — and a confirm needs BOTH
+//     sides: the server VAD inside a speech segment AND the mic still above the
+//     gate at the tick (or a transcription while the gate is open, or the
+//     server agreeing with a gate duck). The timer alone confirms nothing
+//     (2026-09-17): speech_stopped can only arrive after 600 ms of silence, so
+//     a timer-only confirm cut every reply on any loudspeaker noise. A blip
+//     ducks then restores without cancelling (and the reply the server makes
+//     from a committed blip is cancelled on creation).
 //   * RmsGate: the client-side energy gate that runs in the capture path (20 ms
 //     sub-frames). Calibrates a noise floor, opens with hysteresis, flushes a
 //     300 ms pre-roll so the onset isn't clipped, and emits DIGITAL SILENCE while
 //     closed (the server's silence_duration_ms timer has to observe silence).
+//     On the loudspeaker it is HELD CLOSED for the whole reply (half-duplex —
+//     BargeInProfile.gateForcedClosed): the reply's own echo re-entering the
+//     mic was transcribed, cancelled the reply, then got answered.
 //
 // No Android, no network — every function here is deterministic.
 
@@ -32,10 +40,20 @@ import kotlin.math.sqrt
 enum class VoiceRoute { LOW_ECHO, SPEAKER }
 
 /**
- * Per-route tuning (spec §1). [assistedDuplex] = on the loudspeaker, upload mic
- * frames THROUGH the gate at [gateMarginPlayingDb] while the model plays (so the
- * server VAD can barge in) instead of dropping them (the hard half-duplex
- * fallback for devices whose AEC leaves too much residual echo).
+ * Per-route tuning (spec §1). [assistedDuplex] = upload mic frames THROUGH the
+ * gate at [gateMarginPlayingDb] while the model plays, so the server VAD can
+ * barge in (full duplex — earphones / Bluetooth, which run their own AEC).
+ * `false` = HALF-DUPLEX while the model is audible: the gate is held closed
+ * (digital silence up, pre-roll dropped) from response.created until the
+ * playback has drained, and the Interrupt button is the way to cut a reply.
+ * Hold-to-talk overrides it (the press opens the gate).
+ *
+ * Half-duplex is the loudspeaker DEFAULT (2026-09-17, iOS
+ * `BargeInProfile.halfDuplexWhilePlaying`): with the gate open, the reply's
+ * own echo re-entered the mic, the server VAD + transcription called it
+ * speech, cancelled the reply and then ANSWERED the echo. The assisted-duplex
+ * speaker profile stays available as an opt-in for devices whose AEC proves
+ * good enough.
  */
 data class BargeInProfile(
     val route: VoiceRoute,
@@ -47,18 +65,32 @@ data class BargeInProfile(
 ) {
     fun gateMargin(playbackQueued: Boolean): Double = if (playbackQueued) gateMarginPlayingDb else gateMarginDb
 
-    companion object {
-        /** Wired / BT headset, phone receiver: T 0.5, confirm 200 ms, +6 dB. */
-        val LOW_ECHO = BargeInProfile(VoiceRoute.LOW_ECHO, 0.5, 200L, 6.0, 6.0, assistedDuplex = true)
-        /** Built-in loudspeaker: T 0.6, confirm 300 ms, +9 dB while playing, +6 otherwise. */
-        val SPEAKER = BargeInProfile(VoiceRoute.SPEAKER, 0.6, 300L, 6.0, 9.0, assistedDuplex = true)
-        /** Fallback for a device with >2 self-triggers in the checklist: mic dropped while playing. */
-        val SPEAKER_HALF_DUPLEX = SPEAKER.copy(assistedDuplex = false)
+    /** The mic upload is muted while the model is audible (iOS `halfDuplexWhilePlaying`). */
+    val halfDuplexWhilePlaying: Boolean get() = !assistedDuplex
 
-        fun forRoute(route: VoiceRoute, speakerHalfDuplex: Boolean = false): BargeInProfile = when (route) {
+    companion object {
+        /** Wired / BT headset, phone receiver: T 0.5, confirm 200 ms, +6 dB, full duplex. */
+        val LOW_ECHO = BargeInProfile(VoiceRoute.LOW_ECHO, 0.5, 200L, 6.0, 6.0, assistedDuplex = true)
+        /** Built-in loudspeaker: T 0.6, confirm 300 ms, +9 dB while playing, +6
+         *  otherwise — and HALF-DUPLEX while the model is audible (the default). */
+        val SPEAKER = BargeInProfile(VoiceRoute.SPEAKER, 0.6, 300L, 6.0, 9.0, assistedDuplex = false)
+        /** The same speaker tuning, spelled out. */
+        val SPEAKER_HALF_DUPLEX = SPEAKER
+        /** Opt-in: talk-over on the loudspeaker for a device whose AEC leaves no residual echo. */
+        val SPEAKER_ASSISTED_DUPLEX = SPEAKER.copy(assistedDuplex = true)
+
+        fun forRoute(route: VoiceRoute, speakerHalfDuplex: Boolean = true): BargeInProfile = when (route) {
             VoiceRoute.LOW_ECHO -> LOW_ECHO
-            VoiceRoute.SPEAKER -> if (speakerHalfDuplex) SPEAKER_HALF_DUPLEX else SPEAKER
+            VoiceRoute.SPEAKER -> if (speakerHalfDuplex) SPEAKER_HALF_DUPLEX else SPEAKER_ASSISTED_DUPLEX
         }
+
+        /** Whether the capture gate must be held closed right now (iOS
+         *  `GateContext.forcedClosed`): the half-duplex profile, the model busy
+         *  (a reply in flight OR audio still queued — the queue runs dry for a
+         *  moment at the start of a reply and between bursts, and each gap let
+         *  the gate open on room noise), and no hold-to-talk press overriding. */
+        fun gateForcedClosed(profile: BargeInProfile, modelBusy: Boolean, pttPressed: Boolean): Boolean =
+            profile.halfDuplexWhilePlaying && modelBusy && !pttPressed
     }
 }
 
@@ -186,6 +218,8 @@ class BargeInController(
     var muted = false; private set
     var gateOpen = false; private set
     var gateOpenSince = 0L; private set
+    /** The server VAD is inside a speech segment (speech_started … speech_stopped). */
+    var serverSpeaking = false; private set
     var suppressNextResponse = false; private set
     var pttPressed = false; private set
     var ui: BargeInUi = BargeInUi.LISTENING; private set
@@ -197,6 +231,13 @@ class BargeInController(
     private var suggested = false
 
     val speaking: Boolean get() = responseActive || playbackQueued
+
+    /** Half-duplex: the capture gate must be held closed right now — the
+     *  loudspeaker profile while the model is busy (reply in flight or audio
+     *  queued), unless hold-to-talk's press is opening the mic. The audio
+     *  engine derives the same answer per frame from its own volatiles (it
+     *  knows the playback tail); this is the controller's view for tests/UI. */
+    val gateForcedClosed: Boolean get() = BargeInProfile.gateForcedClosed(profile, speaking, pttPressed)
     val phase: BargeInPhase
         get() = when {
             holdToTalk -> BargeInPhase.HOLD
@@ -244,8 +285,13 @@ class BargeInController(
             BargeInEvent.SpeechStarted -> onSpeechStarted(out)
             BargeInEvent.SpeechStopped -> onSpeechStopped(out)
             BargeInEvent.TranscriptionDelta, BargeInEvent.TranscriptionCompleted -> {
-                // The server heard the user: a barge-in in progress is confirmed.
-                if (duckedSince != null) cancel(out)
+                // The accelerator is subject to the same two-sided rule as the
+                // tick: transcription deltas also stream for the PREVIOUS turn
+                // and for the model's own echo (iOS device log 2026-09-17: a
+                // speech_started and a delta 0.4 ms apart cancelled a reply the
+                // user never interrupted). A transcript with the mic already
+                // closed is not the user talking over.
+                if (duckedSince != null && gateOpen) cancel(out)
             }
             BargeInEvent.GateOpen -> onGateOpen(out)
             BargeInEvent.GateClose -> onGateClose(out)
@@ -322,6 +368,7 @@ class BargeInController(
     }
 
     private fun onSpeechStarted(out: MutableList<BargeInCommand>) {
+        serverSpeaking = true
         if (holdToTalk) return
         if (duckedSince != null) {
             sawSpeechStartedWhileDucked = true
@@ -333,16 +380,15 @@ class BargeInController(
     }
 
     private fun onSpeechStopped(out: MutableList<BargeInCommand>) {
+        serverSpeaking = false
         if (holdToTalk) return
-        val since = duckedSince ?: return
-        if (now() - since < profile.confirmMs) {
-            // A blip the server DID commit — it will create a response for it.
-            // Restore now and cancel that reply the moment it is created.
-            suppressNextResponse = true
-            restore(out)
-            noteFalseBargeIn(out)
-        }
-        // ≥ confirmMs: the tick already cancelled (or will on the next tick).
+        if (duckedSince == null || duckTrigger != DuckTrigger.SERVER) return
+        // The server saw a blip and WILL commit + reply to it: restore now and
+        // cancel that reply the moment it is created. (A GATE duck that the
+        // server never agreed with is restored by gate_close / the tick.)
+        suppressNextResponse = true
+        restore(out)
+        noteFalseBargeIn(out)
     }
 
     private fun onGateOpen(out: MutableList<BargeInCommand>) {
@@ -355,18 +401,34 @@ class BargeInController(
     private fun onGateClose(out: MutableList<BargeInCommand>) {
         gateOpen = false
         if (holdToTalk) return
-        val since = duckedSince ?: return
-        if (duckTrigger == DuckTrigger.GATE && !sawSpeechStartedWhileDucked && now() - since < profile.confirmMs) {
-            // Below the server's threshold the whole time: nothing was committed,
-            // no suppression needed.
-            restore(out)
-            noteFalseBargeIn(out)
-        }
+        if (duckedSince == null || duckTrigger != DuckTrigger.GATE) return
+        // Below the server's threshold the whole time: nothing was committed,
+        // no suppression needed. (A gate duck the server agreed with was
+        // cancelled on the spot in onSpeechStarted.)
+        restore(out)
+        noteFalseBargeIn(out)
     }
 
     private fun onTick(out: MutableList<BargeInCommand>) {
         val since = duckedSince ?: return
-        if (now() - since >= profile.confirmMs) cancel(out)
+        if (now() - since < profile.confirmMs) return
+        // CONFIRM needs evidence from both sides: the server VAD is inside a
+        // speech segment AND the mic is still above the gate — sound that
+        // lasted the whole confirm window. The timer alone confirmed nothing:
+        // the server's speech_stopped can only arrive after silence_duration_ms
+        // (600) of silence, i.e. never inside a 300 ms window, so every VAD
+        // blip on a loudspeaker — a tap, a chair, a cough — cancelled the reply
+        // (Ahmad's iPhone, 2026-09-17: "interrupted by any noise").
+        if (gateOpen && serverSpeaking) {
+            cancel(out)
+            return
+        }
+        // A blip. If the server is still in its segment it WILL commit + reply
+        // to it — suppress that reply, as the speech_stopped path does. A
+        // gate-only duck the server never called speech committed nothing.
+        if (serverSpeaking) suppressNextResponse = true
+        restore(out)
+        noteFalseBargeIn(out)
     }
 
     private fun duck(trigger: DuckTrigger, out: MutableList<BargeInCommand>) {
@@ -561,8 +623,16 @@ class RmsGate(
      * @param marginDb  profile margin (6 dB; 9 dB on the speaker profile while playing)
      * @param playbackQueued  model audio still playing/queued (blocks adaptation)
      * @param responseActive  a reply is in flight (blocks adaptation)
+     * @param forcedClosed  half-duplex (the loudspeaker while the model is
+     *   audible — [BargeInProfile.gateForcedClosed]): the gate is held shut —
+     *   digital silence out, the pre-roll discarded — so nothing from the mic
+     *   reaches the server; its own echo is what tripped the VAD. Hold-to-talk's
+     *   [forceOpen] wins over it.
      */
-    fun process(samples: ShortArray, marginDb: Double, playbackQueued: Boolean, responseActive: Boolean): GateOutput {
+    fun process(
+        samples: ShortArray, marginDb: Double, playbackQueued: Boolean, responseActive: Boolean,
+        forcedClosed: Boolean = false,
+    ): GateOutput {
         val n = min(samples.size, subFrameSamples)
         val frame = if (samples.size == subFrameSamples) samples else samples.copyOf(subFrameSamples)
         val db = rmsDb(frame, n)
@@ -577,6 +647,18 @@ class RmsGate(
                 floorDb = median.coerceIn(FLOOR_MIN_DB, FLOOR_MAX_DB)
             }
             return GateOutput(emptyList(), opened = false, closed = false, rmsDb = db, calibrating = true)
+        }
+
+        if (forcedClosed && !forcedOpen) {
+            // Half-duplex: slam an open gate shut (one close event), keep it
+            // shut, and drop the pre-roll — or the reply's tail would be
+            // prefixed to the user's next turn. Silence of the same size keeps
+            // the server's silence timer running.
+            val wasOpen = open
+            open = false
+            aboveCount = 0; belowCount = 0
+            preRoll.clear()
+            return GateOutput(listOf(silence), opened = false, closed = wasOpen, rmsDb = db, calibrating = false)
         }
 
         if (forcedOpen) {

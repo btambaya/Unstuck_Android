@@ -67,11 +67,15 @@ import kotlin.concurrent.thread
 // returns are executed here. "Duck-and-confirm": the first hint of the user
 // talking over the model (RMS gate opening on the capture thread, or the server's
 // speech_started) only ducks playback to -12 dB and arms a confirm timer; the
-// reply is cancelled once confirmed (gate held ≥ confirmMs, server + gate agree,
-// a transcription arrives, or the timer fires with no speech_stopped). A cough
-// ducks then restores without cancelling. Deltas of a cancelled response are
-// dropped even after the next response.created (they interleave on the wire).
-// Interrupt (button/orb) is a hard cancel that never ducks.
+// reply is cancelled once confirmed — server + gate agreeing at once, a
+// transcription while the gate is open, or the timer firing with the server
+// still in its segment AND the gate still open. A blip (timer with either side
+// missing, speech_stopped, gate_close) restores without cancelling, and the
+// reply the server makes from a committed blip is cancelled on creation.
+// Deltas of a cancelled response are dropped even after the next
+// response.created (they interleave on the wire). Interrupt (button/orb) is a
+// hard cancel that never ducks — and on the loudspeaker, where the gate is
+// held closed for the whole reply (half-duplex), it is the way to cut one.
 //
 // CALL MODE (C1-android — "Unstuck calls you", CallVoiceService): the SAME client
 // with a [CallMode] attached. Three things differ, all mirroring iOS
@@ -191,8 +195,11 @@ class VoiceRealtimeClient(
     private val onError: (String) -> Unit = {},
     /** 3 false barge-ins inside 2 min: the screen may offer "Noisy room? Switch to hold to talk". */
     private val onSuggestHoldToTalk: () -> Unit = {},
-    /** Devices whose AEC leaves enough echo to self-trigger fall back to hard half-duplex on the speaker. */
-    private val speakerHalfDuplex: Boolean = false,
+    /** The loudspeaker is HALF-DUPLEX while the model is audible (the default —
+     *  its own echo tripped the server VAD, 2026-09-17); `false` opts a device
+     *  whose AEC proves good enough into talk-over on the speaker. Earphones /
+     *  Bluetooth are full duplex either way. */
+    private val speakerHalfDuplex: Boolean = true,
     /** Test seam: where sockets come from (production = the shared OkHttpClient). */
     private val socketFactory: WebSocket.Factory = http,
     /** Non-null ⇒ this session is a call from Unstuck (see the file header). */

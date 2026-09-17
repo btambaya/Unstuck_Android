@@ -49,11 +49,16 @@ import kotlin.concurrent.thread
 // 2. RMS noise gate in the capture thread (RmsGate, 20 ms sub-frames): calibrated
 //    floor, hysteresis, 300 ms pre-roll, DIGITAL SILENCE while closed. Gate
 //    open/close are barge-in events for the controller (duck → confirm → cancel).
-// 3. Route profiles: headset/BT = LOW_ECHO; built-in speaker = SPEAKER "assisted
-//    duplex" — frames still flow through the gate while the model plays, at a
-//    +9 dB margin, so the server VAD can barge in. The old hard half-duplex
-//    (drop mic frames while playing) stays available as the SPEAKER_HALF_DUPLEX
-//    fallback profile for devices whose AEC leaves enough echo to self-trigger.
+// 3. Route profiles: headset/BT = LOW_ECHO, full duplex — frames flow through
+//    the gate while the model plays so the server VAD can barge in (talk-over).
+//    Built-in speaker = SPEAKER, HALF-DUPLEX for the whole reply (2026-09-17,
+//    iOS parity): from response.created until the playback has drained the
+//    gate is held closed — DIGITAL SILENCE is uploaded (the server's silence
+//    timer must keep running), the pre-roll is dropped, gate events stop — so
+//    the reply's own echo can never be transcribed, cancel the reply and get
+//    answered. Interrupt (tap / button) cuts a reply; hold-to-talk's press
+//    overrides the mute. SPEAKER_ASSISTED_DUPLEX (talk-over on the speaker) is
+//    the opt-in for devices whose AEC proves good enough.
 // 4. Playback drain is measured from the track's playbackHeadPosition (frames
 //    written − head ≤ 0, then a 300 ms tail) — NOT from write() returning, which
 //    only means "buffered". That is the playback_drained event.
@@ -116,9 +121,10 @@ open class VoiceAudioEngine(private val context: Context) {
     @Volatile var onPlaybackDrained: (() -> Unit)? = null
 
     // Barge-in inputs owned by the client (set from the controller after each event).
-    /** Current route profile — gate margin + assisted-duplex flag for the capture path. */
+    /** Current route profile — gate margin + the duplex rule for the capture path. */
     @Volatile var profile: BargeInProfile = BargeInProfile.SPEAKER
-    /** A reply is in flight (blocks gate floor adaptation). */
+    /** A reply is in flight (blocks gate floor adaptation; with the playback
+     *  queue it is the "model busy" that holds the loudspeaker's gate closed). */
     @Volatile var responseActive = false
 
     // ── communication mode + routing ──
@@ -410,16 +416,20 @@ open class VoiceAudioEngine(private val context: Context) {
 
                     val prof = profile
                     val playing = playbackQueued()
-                    // Hard half-duplex fallback profile: drop mic frames while the model
-                    // plays (+tail) and swallow gate events — residual echo must reach
-                    // neither the server nor the barge-in controller on this route.
-                    val dropForEcho = !prof.assistedDuplex && echoProne && playing
+                    val respActive = responseActive
+                    // Half-duplex (the loudspeaker profile while the model is busy —
+                    // a reply in flight OR audio still queued/in the tail): the gate
+                    // is held closed. Digital silence still goes up (the server VAD's
+                    // silence timer must observe silence), the pre-roll is dropped,
+                    // and nothing from the mic — least of all the reply's own echo —
+                    // can reach the server or the barge-in controller. A hold-to-talk
+                    // press overrides it (the user is deliberately talking over).
+                    val forcedClosed = echoProne && BargeInProfile.gateForcedClosed(prof, playing || respActive, pttPressed)
                     // Hold-to-talk while released: append nothing (null VAD needs no
                     // silence) and never let energy open the gate — the press does that,
                     // flushing the pre-roll the gate keeps filling meanwhile.
                     val dropReleased = holdToTalk && !pttPressed
                     val margin = if (dropReleased) NEVER_OPEN_MARGIN_DB else prof.gateMargin(playing)
-                    val respActive = responseActive
 
                     out.clear()
                     var opened = false
@@ -427,7 +437,7 @@ open class VoiceAudioEngine(private val context: Context) {
                     var off = 0
                     while (off + SUB_FRAME_BYTES <= n) {
                         ByteBuffer.wrap(buf, off, SUB_FRAME_BYTES).order(ByteOrder.LITTLE_ENDIAN).asShortBuffer().get(sub)
-                        val g = gate.process(sub, margin, playing, respActive)
+                        val g = gate.process(sub, margin, playing, respActive, forcedClosed)
                         // Serialize NOW: an open gate hands back `sub` itself, which the
                         // next iteration overwrites (pre-roll entries are private copies).
                         for (f in g.emit) for (s in f) out.putShort(s)
@@ -435,7 +445,7 @@ open class VoiceAudioEngine(private val context: Context) {
                         closed = closed || g.closed
                         off += SUB_FRAME_BYTES
                     }
-                    if (dropForEcho || dropReleased) continue
+                    if (dropReleased) continue
                     if (!holdToTalk) {
                         if (opened) onGateOpen?.invoke()
                         if (closed) onGateClose?.invoke()
@@ -496,8 +506,8 @@ open class VoiceAudioEngine(private val context: Context) {
     /** Model audio still queued, buffered in the track, or inside the post-drain tail. */
     open fun playbackQueued(): Boolean = playing && (queue.isNotEmpty() || drainPending)
 
-    /** True while the model's audio is (or just was) playing — gates the mic on the
-     *  hard half-duplex fallback profile. */
+    /** True while the model's audio is (or just was) playing — with [responseActive]
+     *  it is the "model busy" half of the loudspeaker's half-duplex mute. */
     open fun outputBusy(): Boolean = playbackQueued()
 
     open fun startPlayback() {

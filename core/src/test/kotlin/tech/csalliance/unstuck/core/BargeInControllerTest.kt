@@ -50,11 +50,19 @@ class BargeInControllerTest {
         assertFalse(c.muted)
     }
 
+    // ── 2: confirm needs BOTH the server's segment and a mic still above the
+    // gate; the timer alone is a blip → restore (+ suppress what the server
+    // will reply to). Ahmad's iPhone, 2026-09-17 — iOS BargeInTests 2/2b/2c.
+
     @Test
-    fun `2 no speech_stopped within confirmMs - exactly one cancel, flush, mute, restore, listening`() {
+    fun `2 confirm with sustained mic energy cancels - exactly one cancel, flush, mute, restore, listening`() {
         val c = controller()
         speaking(c)
         c.handle(BargeInEvent.SpeechStarted)
+        clock = 50
+        assertTrue("gate opening while ducked is bookkeeping only", c.handle(BargeInEvent.GateOpen).isEmpty())
+        assertEquals(BargeInPhase.DUCKED, c.phase)
+        assertTrue(c.gateOpen); assertTrue(c.serverSpeaking)
         clock = 150; assertTrue(c.handle(BargeInEvent.Tick).isEmpty()) // not yet
         clock = 300
         val out = c.handle(BargeInEvent.Tick)
@@ -70,6 +78,54 @@ class BargeInControllerTest {
         clock = 900; assertTrue(c.handle(BargeInEvent.Tick).isEmpty())
         // Stale deltas of r1 are dropped even before the next response.
         assertTrue(c.handle(BargeInEvent.AudioDelta("r1")).isEmpty())
+        assertFalse(c.handle(BargeInEvent.TranscriptDelta("r1")).has<BargeInCommand.ShowCaption>())
+    }
+
+    @Test
+    fun `2b a server blip with no mic energy at confirm restores and suppresses the reply it will make`() {
+        // The loudspeaker case that cut every reply: the server VAD fired on a
+        // tap, the gate had already closed again (or never opened), and
+        // speech_stopped cannot arrive inside the window (600 ms of silence
+        // first). The timer must NOT cancel.
+        val c = controller()
+        speaking(c)
+        c.handle(BargeInEvent.SpeechStarted)
+        clock = 20; c.handle(BargeInEvent.GateOpen)
+        clock = 250; c.handle(BargeInEvent.GateClose)          // the tap ended; server still in its segment
+        assertEquals("a server duck waits for the tick", BargeInPhase.DUCKED, c.phase)
+        clock = 300
+        val out = c.handle(BargeInEvent.Tick)
+        assertEquals(listOf<BargeInCommand>(BargeInCommand.Restore), out)
+        assertFalse(out.has<BargeInCommand.SendCancel>())
+        assertEquals(BargeInPhase.SPEAKING, c.phase)
+        assertFalse(c.muted)
+        assertTrue("the reply keeps playing", c.handle(BargeInEvent.AudioDelta("r1")).has<BargeInCommand.EnqueueAudio>())
+        assertTrue("the server will still reply to the blip — that reply is cancelled on creation", c.suppressNextResponse)
+        clock = 900; c.handle(BargeInEvent.SpeechStopped)
+        val created = c.handle(BargeInEvent.ResponseCreated("r2"))
+        assertEquals(1, created.count<BargeInCommand.SendCancel>())
+        assertFalse(c.handle(BargeInEvent.AudioDelta("r2")).has<BargeInCommand.EnqueueAudio>())
+    }
+
+    @Test
+    fun `2c a gate-only duck with no server agreement restores without suppression`() {
+        // Sustained mic energy the server never called speech (a fan, a loud
+        // room): nothing was committed server-side, so restore and suppress nothing.
+        val c = controller()
+        speaking(c)
+        c.handle(BargeInEvent.GateOpen)
+        assertEquals(BargeInPhase.DUCKED, c.phase)
+        clock = 300
+        val out = c.handle(BargeInEvent.Tick)
+        assertEquals(listOf<BargeInCommand>(BargeInCommand.Restore), out)
+        assertFalse(c.suppressNextResponse)
+        assertEquals(BargeInPhase.SPEAKING, c.phase)
+        assertTrue("the gate is still open; a later speech_started re-ducks and can then confirm", c.gateOpen)
+        clock = 1000
+        c.handle(BargeInEvent.SpeechStarted)
+        assertEquals(BargeInPhase.DUCKED, c.phase)
+        clock = 1300
+        assertEquals("gate + server agree at confirm → real talk-over", 1, c.handle(BargeInEvent.Tick).count<BargeInCommand.SendCancel>())
     }
 
     @Test
@@ -117,16 +173,40 @@ class BargeInControllerTest {
     }
 
     @Test
-    fun `5 transcription completed while ducked cancels immediately`() {
+    fun `5 transcription while ducked with the mic open cancels immediately`() {
         val c = controller()
         speaking(c)
         c.handle(BargeInEvent.SpeechStarted)
+        clock = 20; c.handle(BargeInEvent.GateOpen)           // the mic agrees
         clock = 100
         val out = c.handle(BargeInEvent.TranscriptionCompleted)
         assertEquals(1, out.count<BargeInCommand.SendCancel>())
         assertTrue(out.has<BargeInCommand.FlushPlayback>())
         assertEquals(BargeInPhase.IDLE, c.phase)
         assertTrue(c.muted)
+        // The delta form confirms the same way.
+        val d = controller()
+        speaking(d)
+        d.handle(BargeInEvent.GateOpen); d.handle(BargeInEvent.SpeechStarted)
+        assertEquals(BargeInPhase.IDLE, d.phase)              // gate + server agreement already cancelled
+    }
+
+    @Test
+    fun `5b a transcription with the mic closed is not a confirm`() {
+        // Deltas stream for the previous turn and for the model's own echo
+        // (iOS device log 2026-09-17); with the gate closed they confirm nothing.
+        val c = controller()
+        speaking(c)
+        c.handle(BargeInEvent.SpeechStarted)
+        assertFalse(c.gateOpen)
+        clock = 100
+        assertTrue(c.handle(BargeInEvent.TranscriptionDelta).isEmpty())
+        assertTrue(c.handle(BargeInEvent.TranscriptionCompleted).isEmpty())
+        assertEquals("still waiting for the tick", BargeInPhase.DUCKED, c.phase)
+        assertTrue(c.handle(BargeInEvent.AudioDelta("r1")).has<BargeInCommand.EnqueueAudio>())
+        clock = 300
+        assertEquals("and the tick restores (no mic energy)", listOf<BargeInCommand>(BargeInCommand.Restore), c.handle(BargeInEvent.Tick))
+        assertTrue(c.suppressNextResponse)
     }
 
     @Test
@@ -289,14 +369,23 @@ class BargeInControllerTest {
         assertEquals(300, json["prefix_padding_ms"]!!.jsonPrimitive.int)
         assertEquals(600, json["silence_duration_ms"]!!.jsonPrimitive.int)
         assertEquals("server_vad", json["type"]!!.jsonPrimitive.content)
-        // Confirm window now 200 ms.
+        // Confirm window now 200 ms (gate + server both agreeing at the tick).
         speaking(c)
         c.handle(BargeInEvent.SpeechStarted)
+        c.handle(BargeInEvent.GateOpen)
         clock = 199; assertTrue(c.handle(BargeInEvent.Tick).isEmpty())
         clock = 200; assertEquals(1, c.handle(BargeInEvent.Tick).count<BargeInCommand.SendCancel>())
-        // Half-duplex fallback profile keeps the speaker tuning but drops assisted duplex.
+        // The loudspeaker is HALF-DUPLEX by default (2026-09-17); the assisted
+        // duplex speaker profile is the opt-in, with the same tuning. Earphones /
+        // Bluetooth stay full duplex.
+        assertFalse(BargeInProfile.forRoute(VoiceRoute.SPEAKER).assistedDuplex)
+        assertTrue(BargeInProfile.forRoute(VoiceRoute.SPEAKER).halfDuplexWhilePlaying)
         assertFalse(BargeInProfile.forRoute(VoiceRoute.SPEAKER, speakerHalfDuplex = true).assistedDuplex)
-        assertEquals(0.6, BargeInProfile.forRoute(VoiceRoute.SPEAKER, speakerHalfDuplex = true).threshold, 0.0)
+        assertTrue(BargeInProfile.forRoute(VoiceRoute.SPEAKER, speakerHalfDuplex = false).assistedDuplex)
+        assertEquals(0.6, BargeInProfile.forRoute(VoiceRoute.SPEAKER, speakerHalfDuplex = false).threshold, 0.0)
+        assertEquals(300L, BargeInProfile.SPEAKER_ASSISTED_DUPLEX.confirmMs)
+        assertTrue(BargeInProfile.forRoute(VoiceRoute.LOW_ECHO).assistedDuplex)
+        assertFalse(BargeInProfile.LOW_ECHO.halfDuplexWhilePlaying)
     }
 
     @Test
@@ -369,6 +458,76 @@ class BargeInControllerTest {
             if (c.handle(BargeInEvent.GateClose).has<BargeInCommand.SuggestHoldToTalk>()) suggested = true
         }
         assertTrue(suggested)
+    }
+
+    // ── 16: loudspeaker half-duplex while the model is audible ──
+
+    @Test
+    fun `16 the speaker gate is forced closed for the whole reply, hold-to-talk overrides, earphones never`() {
+        // Controller: forced closed from response.created (the queue runs dry
+        // between bursts and at the start) until the playback has drained.
+        val c = controller(BargeInProfile.SPEAKER)
+        assertFalse(c.gateForcedClosed)
+        c.handle(BargeInEvent.ResponseCreated("r1"))
+        assertTrue("muted from response.created", c.gateForcedClosed)
+        c.handle(BargeInEvent.AudioDelta("r1"))
+        assertTrue(c.gateForcedClosed)
+        c.handle(BargeInEvent.ResponseDone("r1", "completed"))
+        assertTrue("the buffered tail is still audible", c.gateForcedClosed)
+        c.handle(BargeInEvent.PlaybackDrained)
+        assertFalse(c.gateForcedClosed)
+        // Hold-to-talk wins: the button down opens the mic even mid-reply.
+        val h = controller(BargeInProfile.SPEAKER, holdToTalk = true)
+        speaking(h)
+        assertTrue(h.gateForcedClosed)
+        h.handle(BargeInEvent.PttDown)
+        assertFalse(h.gateForcedClosed)
+        assertTrue(h.pttPressed)
+        // Low-echo never forces the gate closed.
+        val e = controller(BargeInProfile.LOW_ECHO)
+        speaking(e)
+        assertFalse(e.gateForcedClosed)
+        // The pure helper the audio engine calls per frame.
+        assertTrue(BargeInProfile.gateForcedClosed(BargeInProfile.SPEAKER, modelBusy = true, pttPressed = false))
+        assertFalse(BargeInProfile.gateForcedClosed(BargeInProfile.SPEAKER, modelBusy = true, pttPressed = true))
+        assertFalse(BargeInProfile.gateForcedClosed(BargeInProfile.SPEAKER, modelBusy = false, pttPressed = false))
+        assertFalse(BargeInProfile.gateForcedClosed(BargeInProfile.SPEAKER_ASSISTED_DUPLEX, modelBusy = true, pttPressed = false))
+        assertFalse(BargeInProfile.gateForcedClosed(BargeInProfile.LOW_ECHO, modelBusy = true, pttPressed = false))
+
+        // Gate: an open gate slams shut, uploads digital silence for as long as
+        // it is forced, drops the pre-roll, and reopens on speech after.
+        val g = RmsGate()
+        val floor = -60.0
+        repeat(RmsGate.CALIBRATION_SUB_FRAMES) { g.process(tone(floor), 6.0, false, false) }
+        val loud = tone(floor + 12.0)
+        g.process(loud, 6.0, false, false)
+        val opened = g.process(loud, 6.0, false, false)
+        assertTrue(opened.opened && g.open)
+        val slammed = g.process(loud, 9.0, true, true, forcedClosed = true)
+        assertTrue(slammed.closed)
+        assertFalse(g.open)
+        assertEquals(1, slammed.emit.size)
+        assertTrue("silence, not the loud frame", slammed.emit[0].all { it == 0.toShort() })
+        repeat(10) {
+            val o = g.process(loud, 9.0, true, true, forcedClosed = true)
+            assertFalse(o.opened); assertFalse(o.closed)
+            assertEquals(1, o.emit.size)
+            assertTrue(o.emit[0].all { it == 0.toShort() })
+        }
+        // Released: post-reply room tone becomes the new pre-roll; nothing from before the mute.
+        repeat(3) { g.process(tone(floor - 2), 6.0, false, false) }
+        g.process(loud, 6.0, false, false)
+        val reopened = g.process(loud, 6.0, false, false)
+        assertTrue(reopened.opened)
+        assertEquals("pre-roll = 3 quiet + the two onset frames — nothing from before the mute", 5, reopened.emit.size)
+        assertTrue(reopened.emit.first().contentEquals(tone(floor - 2)))
+        assertTrue(reopened.emit.last().contentEquals(loud))
+        // Hold-to-talk's press beats the mute.
+        g.forceOpen(true)
+        val pressed = g.process(loud, 9.0, true, true, forcedClosed = true)
+        assertEquals(1, pressed.emit.size)
+        assertTrue(pressed.emit[0].contentEquals(loud))
+        g.forceOpen(false)
     }
 
     @Test

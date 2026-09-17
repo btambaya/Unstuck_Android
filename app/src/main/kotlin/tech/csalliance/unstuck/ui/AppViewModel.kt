@@ -2069,8 +2069,16 @@ class AppViewModel(
     }
 
     // --- collection sharing (edge function-backed) ---
-    suspend fun shareCollection(collectionId: String, email: String, role: String): tech.csalliance.unstuck.sync.ShareOutcome {
-        val result = share?.shareDetailed(collectionId, email, role)
+    suspend fun shareCollection(collectionId: String, email: String, role: String): tech.csalliance.unstuck.sync.ShareOutcome =
+        shareCollectionDetailed(collectionId, email = email, userId = null, role = role).outcome
+
+    /** Share a list by email (Someone new) OR by user id (a connection tapped in
+     *  People — unified sharing v1). Answers what the SERVER did (by userId the
+     *  answer is honest: `shared`; by email it is deliberately neutral). */
+    suspend fun shareCollectionDetailed(
+        collectionId: String, email: String?, userId: String?, role: String,
+    ): tech.csalliance.unstuck.sync.CollectionShareClient.ShareResult {
+        val result = share?.shareDetailed(collectionId, email = email, userId = userId, role = role)
             ?: tech.csalliance.unstuck.sync.CollectionShareClient.ShareResult(tech.csalliance.unstuck.sync.ShareOutcome.ERROR, null)
         // The owner's own client must learn it is shared NOW: the server returns the
         // membership rows, so set members[] immediately (isShared flips → item edits
@@ -2078,8 +2086,53 @@ class AppViewModel(
         // edits), then refresh unconditionally — a pending INVITE changes the sheet too.
         result.memberIds?.let { ids -> setCollectionMembersLocally(collectionId, ids) }
         if (result.outcome != tech.csalliance.unstuck.sync.ShareOutcome.SELF) graph.coordinator?.refreshCollections()
-        return result.outcome
+        return result
     }
+
+    /** A one-shot join link carrying this list (`share-collection link`). */
+    suspend fun collectionShareLink(collectionId: String, role: String): tech.csalliance.unstuck.sync.ShareLinkOutcome =
+        share?.link(collectionId, role) ?: tech.csalliance.unstuck.sync.ShareLinkOutcome.Failed("not_configured")
+
+    // --- unified sharing v1: the `share-task` edge fn (email share / roster / link) ---
+    private val taskShareClient get() = graph.coordinator?.taskShare
+
+    /** Share a task I own with an EMAIL: an existing account is shared with at
+     *  once (the server pushes them), anyone else gets an invite email that is
+     *  claimed when they sign up. Answers honestly (shared / invited / a reason). */
+    suspend fun shareTaskByEmail(taskId: String, email: String, level: ShareLevel): tech.csalliance.unstuck.sync.TaskShareOutcome {
+        val r = taskShareClient?.add(taskId, email, level) ?: tech.csalliance.unstuck.sync.TaskShareOutcome.Failed("not_configured")
+        if (r is tech.csalliance.unstuck.sync.TaskShareOutcome.Shared) refreshShares()
+        return r
+    }
+
+    /** Pending email invites on a task I own (`share-task list`). Tolerant → []. */
+    suspend fun taskPendingInvites(taskId: String): List<tech.csalliance.unstuck.sync.TaskSharePendingInvite> =
+        taskShareClient?.list(taskId)?.pending ?: emptyList()
+
+    /** Cancel a pending email invite on a task. TRUE only when the server confirmed. */
+    suspend fun cancelTaskInvite(taskId: String, inviteId: String): Boolean =
+        taskShareClient?.cancelInvite(taskId, inviteId) ?: false
+
+    /** A one-shot join link carrying this task at [level] (`share-task link`). */
+    suspend fun taskShareLink(taskId: String, level: ShareLevel): tech.csalliance.unstuck.sync.ShareLinkOutcome =
+        taskShareClient?.link(taskId, level) ?: tech.csalliance.unstuck.sync.ShareLinkOutcome.Failed("not_configured")
+
+    /** Every invite I sent that is still waiting (Settings → People "Waiting to
+     *  join"): task / list / circle email invites from ONE RPC. Tolerant → []. */
+    suspend fun myPendingInvites(): List<tech.csalliance.unstuck.core.model.PendingInvite> =
+        circleClient?.myPendingInvites() ?: emptyList()
+
+    /** Cancel one of them. TRUE only when a row was deleted; refetches the roster. */
+    suspend fun cancelPendingInvite(kind: tech.csalliance.unstuck.core.model.PendingInviteKind, id: String): Boolean {
+        val ok = circleClient?.cancelPendingInvite(kind, id) ?: false
+        if (ok) refreshCircle()
+        return ok
+    }
+
+    /** "Report…" on a person who holds a shared item (App Store / Play safety) —
+     *  lands in the feedback table under `report` for triage. */
+    suspend fun reportShareConcern(kind: String, itemId: String, about: String, reason: String): Boolean =
+        sendFeedback(body = "⚠️ REPORT — shared $kind $itemId, recipient $about: $reason", category = "report", screen = "share-$kind")
     private suspend fun setCollectionMembersLocally(collectionId: String, memberIds: List<String>) {
         collectionMutex.withLock {
             val cur = store.collections().first().firstOrNull { it.id == collectionId } ?: return@withLock
@@ -2190,17 +2243,20 @@ class AppViewModel(
         circleClient?.taskSharesForTask(taskId) ?: emptyList()
 
     /** Share a task I own with a circle member at [level]. THROWS on error (the sheet
-     *  needs to know), then pings the recipient (best-effort) + refetches. */
-    suspend fun shareTask(taskId: String, userId: String, level: ShareLevel) {
+     *  needs to know), then pings the recipient (best-effort; [notify] false for a
+     *  quiet level change — a grade change is not a new share) + refetches. */
+    suspend fun shareTask(taskId: String, userId: String, level: ShareLevel, notify: Boolean = true) {
         circleClient?.taskShare(taskId, userId, level)
-        circleClient?.notifyTaskShare(taskId, userId)
+        if (notify) circleClient?.notifyTaskShare(taskId, userId)
         refreshShares()
     }
 
-    /** Remove a share by its id (owner-only, RPC-enforced). Best-effort; refetches. */
-    suspend fun unshareTask(shareId: String) {
-        circleClient?.taskUnshare(shareId)
+    /** Remove a share by its id (owner-only, RPC-enforced). TRUE only when the
+     *  server confirmed; refetches either way. */
+    suspend fun unshareTask(shareId: String): Boolean {
+        val ok = circleClient?.taskUnshareConfirmed(shareId) ?: false
         refreshShares()
+        return ok
     }
 
     /** Read-only detail for a task shared WITH me (any level) — drives the shared-task

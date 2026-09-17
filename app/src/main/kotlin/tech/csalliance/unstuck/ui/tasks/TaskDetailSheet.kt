@@ -63,7 +63,14 @@ import tech.csalliance.unstuck.design.component.UButton
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
-import tech.csalliance.unstuck.ui.sharing.ShareTaskSheet
+import tech.csalliance.unstuck.ui.sharing.ShareMode
+import tech.csalliance.unstuck.ui.sharing.ShareScreen
+import tech.csalliance.unstuck.ui.sharing.ShareTarget
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.outlined.SwapHoriz
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import tech.csalliance.unstuck.ui.components.RecurrenceEditor
 import tech.csalliance.unstuck.ui.components.TagPicker
 import tech.csalliance.unstuck.ui.components.areaColorFor
@@ -135,6 +142,8 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     var confirmDelete by remember { mutableStateOf(false) }
     var showEstimate by remember { mutableStateOf(false) }
     var showShare by remember { mutableStateOf(false) }
+    var showHandOver by remember { mutableStateOf(false) }
+    var moreMenu by remember { mutableStateOf(false) }
     // Current per-task reminder lead override (null = the global default from
     // Settings, 0 = off). Keyed on the TEMPLATE for occurrences — that's the id
     // ReminderScheduler looks up per block.
@@ -155,12 +164,32 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                 AreaDotColor(areaColorFor(task.lifeArea, areas, c), size = 6)
                 SectionLabel("${(task.lifeArea ?: "Task").uppercase()} · TASK")
                 Box(Modifier.weight(1f))
-                // Share a real task with your circle at a graded level (not a
-                // recurring occurrence — one day of a series isn't its own task).
-                if (!isOcc) Icon(
-                    Icons.Filled.Share, contentDescription = "Share task", tint = c.ink2,
-                    modifier = Modifier.size(20.dp).clip(CircleShape).clickable { showShare = true },
-                )
+                // A LABELLED "Share" (unified sharing v1 — testers couldn't find the
+                // old bare icon) opening the ONE Share screen, + the task-action menu
+                // ("Hand over to…"). An occurrence shares its TEMPLATE (one day of a
+                // series isn't its own task) and can't be handed over.
+                Row(
+                    Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, c.line2, RoundedCornerShape(999.dp))
+                        .clickable { showShare = true }.padding(horizontal = 12.dp, vertical = 6.dp)
+                        .semantics { contentDescription = "Share task" },
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp),
+                ) {
+                    Icon(Icons.Filled.PersonAdd, contentDescription = null, tint = c.ink, modifier = Modifier.size(15.dp))
+                    Text("Share", style = UFont.sans(13, FontWeight.Medium), color = c.ink)
+                }
+                if (!isOcc) Box {
+                    Icon(
+                        Icons.Filled.MoreVert, contentDescription = "More actions", tint = c.ink2,
+                        modifier = Modifier.size(28.dp).clip(CircleShape).clickable { moreMenu = true }.padding(4.dp),
+                    )
+                    DropdownMenu(expanded = moreMenu, onDismissRequest = { moreMenu = false }) {
+                        DropdownMenuItem(
+                            text = { Text("Hand over to…", style = UFont.sans(14), color = c.ink) },
+                            leadingIcon = { Icon(Icons.Outlined.SwapHoriz, contentDescription = null, tint = c.ink2, modifier = Modifier.size(18.dp)) },
+                            onClick = { moreMenu = false; showHandOver = true },
+                        )
+                    }
+                }
             }
 
             EditableText(
@@ -325,7 +354,10 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
         containerColor = c.surface,
     )
 
-    if (showShare) ShareTaskSheet(vm, task.id, task.name, onDismiss = { showShare = false })
+    // The ONE Share screen (unified sharing v1) + the "Hand over to…" picker —
+    // both on the editable target (the template for an occurrence).
+    if (showShare) ShareScreen(vm, ShareTarget.Task(editTarget.id, editTarget.name), onDismiss = { showShare = false })
+    if (showHandOver) ShareScreen(vm, ShareTarget.Task(editTarget.id, editTarget.name), mode = ShareMode.HAND_OVER, onDismiss = { showHandOver = false })
 }
 
 @Composable

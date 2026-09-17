@@ -71,10 +71,76 @@ data class CircleMember(
     val memberUserId: String?,    // the member's auth user id (active members)
     val memberName: String?,      // resolved display name for active members
     val createdAt: String,
+    /** The address a pending invite was sent to (unified sharing v1 —
+     *  `circle_list.invitee_email`, migration 065). Null for link-only invites,
+     *  for active rows, and against a server that doesn't project the column. */
+    val inviteeEmail: String? = null,
 ) {
     /** Counts toward the roster like the web's activeCount (active + still-pending invites). */
     val isActiveOrInvited: Boolean get() = status == CircleStatus.ACTIVE || status == CircleStatus.INVITED
 }
+
+/** What a pending invite is for — `my_pending_invites().kind` (unified sharing
+ *  v1, spec §2 "One place for people"). The decoder drops rows whose kind it
+ *  does not know, so a future kind never breaks the People screen. Mirrors the
+ *  iOS PendingInviteKind 1:1. */
+enum class PendingInviteKind(val wire: String) {
+    /** A `task_invites` row (an email share of a task from the Share screen). */
+    TASK("task"),
+    /** A `collection_invites` row (an email share of a list). */
+    COLLECTION("collection"),
+    /** A `trusted_circle` row I own, `status = 'invited'` WITH an address (the
+     *  "Add someone" email invite) — link-only invites are not here. */
+    CIRCLE("circle");
+
+    companion object {
+        /** Decode a wire string (trimmed + case-folded); null for anything unknown. */
+        fun fromWire(value: String?): PendingInviteKind? {
+            val v = value?.trim()?.lowercase() ?: return null
+            return entries.firstOrNull { it.wire == v }
+        }
+    }
+}
+
+/** One invite I sent that nobody has claimed yet — the Settings → People
+ *  "Waiting to join" row. One shape for all three sources so the screen lists
+ *  every outstanding email invite in ONE place, whichever screen sent it.
+ *  Mirrors the iOS PendingInvite 1:1. */
+data class PendingInvite(
+    val kind: PendingInviteKind,
+    /** The row key `cancel_pending_invite(p_kind, p_id)` takes: `task_invites.id`,
+     *  the `collection_invites` key, or `trusted_circle.id`. */
+    val inviteId: String,
+    /** The task / collection id (null for a circle invite). */
+    val itemId: String? = null,
+    /** The task title / list name (null for a circle invite; may be missing). */
+    val itemName: String? = null,
+    /** The address the invite went to ("" when the projection omitted it). */
+    val email: String,
+    /** Task: "view" | "partner" | "assign"; list: "editor" | "viewer"; circle: null.
+     *  Kept as a String — an unknown grade degrades in the label, never fails. */
+    val access: String? = null,
+    val createdAt: String? = null,
+    /** The join code of a circle invite, carried over from the roster row
+     *  (`circle_list().invite_code`) so "Copy link" survives the move into
+     *  Waiting to join. Null straight off the RPC. */
+    val inviteCode: String? = null,
+) {
+    /** `kind:inviteId` — a task invite and a circle invite can never collide in
+     *  one list even if their underlying ids happened to match. */
+    val id: String get() = "${kind.wire}:$inviteId"
+}
+
+/** The read-only detail as a "Shared with you" ROW — what the shared-task sheet
+ *  takes. Used when a task arrives by id alone (the `task_share` push's
+ *  `unstuck://task/<id>` for a task that is NOT in my store) and the list
+ *  projection hasn't been fetched yet: the sheet re-fetches the detail itself. */
+fun SharedTaskDetail.asSharedWithMe(shareId: String = ""): SharedWithMe = SharedWithMe(
+    shareId = shareId, taskId = taskId, ownerName = ownerName, level = level, title = title, done = done,
+    completedAt = null, estimateMin = estimateMin, lifeArea = lifeArea,
+    nextBlockId = nextBlockId, nextDate = nextDate, nextStartTime = nextStartTime,
+    nextDurationMinutes = nextDurationMinutes, nextDone = nextDone, nextStartAt = nextStartAt, later = later,
+)
 
 /** A single share on a task I own — drives the share sheet. Port of ShareForTask. */
 data class ShareForTask(

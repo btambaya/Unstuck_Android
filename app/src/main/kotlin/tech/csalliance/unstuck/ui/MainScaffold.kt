@@ -53,6 +53,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.model.SharedTaskDetail
 import tech.csalliance.unstuck.core.model.SharedWithMe
+import tech.csalliance.unstuck.core.model.asSharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.design.component.BottomNavBar
 import tech.csalliance.unstuck.design.component.NavSpec
@@ -333,11 +334,26 @@ fun MainScaffold(vm: AppViewModel) {
                 }
             }
             dl.startsWith("unstuck://task/") -> {
-                val id = dl.removePrefix("unstuck://task/")
+                val id = dl.removePrefix("unstuck://task/").substringBefore('?').substringBefore('#').trim()
                 when {
+                    id.isEmpty() -> { tab = "today"; stack.clear() }
                     tasks.any { it.id == id } -> { tab = "today"; stack.clear(); push(Route.Detail(id)) }
-                    tasks.isEmpty() -> { kotlinx.coroutines.delay(2500); tab = "today"; stack.clear() }
-                    else -> { tab = "today"; stack.clear() }
+                    else -> {
+                        // Not in my store ⇒ a task someone shared WITH me (the
+                        // `task_share` / `invite_claimed` push, unified sharing v1):
+                        // RLS keeps the row off this device, so resolve it through
+                        // the shared projection and open the recipient's READ-ONLY
+                        // sheet, never the owner editor. An own task Room hasn't
+                        // emitted yet (cold start) answers null here and resolves on
+                        // the re-run once `tasks` populates (the effect is keyed on it).
+                        val shared = vm.sharedWithMe.value.firstOrNull { it.taskId == id }
+                            ?: vm.sharedTaskDetail(id)?.asSharedWithMe()
+                        when {
+                            shared != null -> { tab = "today"; stack.clear(); sharedDetail = shared }
+                            tasks.isEmpty() -> { kotlinx.coroutines.delay(2500); tab = "today"; stack.clear() }
+                            else -> { tab = "today"; stack.clear() }
+                        }
+                    }
                 }
             }
             // The LIVE call's own notification (CallVoiceService.build) and the

@@ -24,6 +24,8 @@ import tech.csalliance.unstuck.core.logic.resolveSharedSlot
 import tech.csalliance.unstuck.core.model.CircleMember
 import tech.csalliance.unstuck.core.model.CircleStatus
 import tech.csalliance.unstuck.core.model.Objective
+import tech.csalliance.unstuck.core.model.PendingInvite
+import tech.csalliance.unstuck.core.model.PendingInviteKind
 import tech.csalliance.unstuck.core.model.ShareBadge
 import tech.csalliance.unstuck.core.model.ShareForTask
 import tech.csalliance.unstuck.core.model.ShareLevel
@@ -95,6 +97,16 @@ enum class SharedFocusLogResult { LOGGED, SKIPPED, NOT_ALLOWED, FAILED }
     @SerialName("member_user_id") val memberUserId: String? = null,
     @SerialName("member_name") val memberName: String? = null,
     @SerialName("created_at") val createdAt: String = "",
+    // Unified sharing v1 (migration 065): the pending invite's address, so People
+    // can show WHO was invited. Nullable WITH a default — absent entirely on a
+    // pre-065 projection, explicit null for link-only / active rows.
+    @SerialName("invitee_email") val inviteeEmail: String? = null,
+)
+
+// migration 067 cancel_pending_invite(p_kind text, p_id text) → boolean.
+@Serializable internal data class CancelPendingInviteParams(
+    @SerialName("p_kind") val kind: String,
+    @SerialName("p_id") val id: String,
 )
 
 @Serializable internal data class ShareForTaskRow(
@@ -295,9 +307,80 @@ class CircleClient(private val client: SupabaseClient) {
                 memberUserId = r.memberUserId,
                 memberName = r.memberName,
                 createdAt = r.createdAt,
+                inviteeEmail = r.inviteeEmail?.takeIf { it.isNotBlank() },
             )
         }
     }.getOrDefault(emptyList())
+
+    // ── Pending invites — Settings → People "Waiting to join" ───────────────
+    // (unified sharing v1, spec §2 "One place for people"; migration 067)
+
+    /** Every invite I sent that is still waiting: task_invites (`kind: task`),
+     *  collection_invites (`collection`) and my own email circle invites
+     *  (`circle`), newest first. RPC: my_pending_invites() → setof jsonb, each
+     *  `{kind, id, itemId, itemName, email, access, createdAt}`. Tolerant → []
+     *  on any failure — including a server where the RPC is not deployed yet
+     *  (PostgREST 404) — so the People screen simply shows its roster then. */
+    suspend fun myPendingInvites(): List<PendingInvite> = runCatching {
+        decodePendingInvites(client.postgrest.rpc("my_pending_invites").data)
+    }.getOrDefault(emptyList())
+
+    /** Cancel one pending invite I sent. RPC: cancel_pending_invite(p_kind, p_id)
+     *  → boolean. TRUE only when the server says a row was deleted — a missing
+     *  RPC, a foreign row or a refusal all read as false so the UI never pretends. */
+    suspend fun cancelPendingInvite(kind: PendingInviteKind, id: String): Boolean = runCatching {
+        decodeCancelPendingInvite(client.postgrest.rpc("cancel_pending_invite", CancelPendingInviteParams(kind.wire, id)).data)
+    }.getOrDefault(false)
+
+    companion object {
+        private val lenient = Json { ignoreUnknownKeys = true; isLenient = true }
+
+        /** `my_pending_invites` body → models. Defensive by design: the body must
+         *  be a JSON array; an element that is not an object, has an unknown
+         *  `kind`, or has no `id` is dropped WITHOUT taking the rest down; every
+         *  other field is optional. Accepts the contract's camelCase keys and
+         *  their snake_case twins. Order is preserved. */
+        internal fun decodePendingInvites(body: String): List<PendingInvite> {
+            val arr = runCatching { lenient.parseToJsonElement(body) }.getOrNull() as? kotlinx.serialization.json.JsonArray
+                ?: return emptyList()
+            return arr.mapNotNull { el ->
+                val o = el as? JsonObject ?: return@mapNotNull null
+                fun str(vararg keys: String): String? {
+                    for (k in keys) {
+                        val p = o[k] as? kotlinx.serialization.json.JsonPrimitive ?: continue
+                        if (p is kotlinx.serialization.json.JsonNull) continue
+                        return p.content
+                    }
+                    return null
+                }
+                val kind = PendingInviteKind.fromWire(str("kind")) ?: return@mapNotNull null
+                val id = str("id")?.trim()?.takeIf { it.isNotEmpty() } ?: return@mapNotNull null
+                PendingInvite(
+                    kind = kind, inviteId = id,
+                    itemId = str("itemId", "item_id")?.takeIf { it.isNotEmpty() },
+                    itemName = str("itemName", "item_name")?.takeIf { it.isNotEmpty() },
+                    email = (str("email", "invitee_email") ?: "").trim(),
+                    access = str("access", "level", "role")?.takeIf { it.isNotEmpty() },
+                    createdAt = str("createdAt", "created_at")?.takeIf { it.isNotEmpty() },
+                )
+            }
+        }
+
+        /** `cancel_pending_invite` body → did a row go? PostgREST renders a scalar
+         *  `boolean` as `true` / `false`; `[true]` and `{"ok":true}` are read too in
+         *  case the function is ever reshaped. Anything else is false. */
+        internal fun decodeCancelPendingInvite(body: String): Boolean {
+            val text = body.trim()
+            if (text == "true") return true
+            val el = runCatching { lenient.parseToJsonElement(text) }.getOrNull() ?: return false
+            return when (el) {
+                is kotlinx.serialization.json.JsonPrimitive -> el.content == "true"
+                is kotlinx.serialization.json.JsonArray -> (el.firstOrNull() as? kotlinx.serialization.json.JsonPrimitive)?.content == "true"
+                is JsonObject -> listOf("ok", "cancel_pending_invite").any { (el[it] as? kotlinx.serialization.json.JsonPrimitive)?.content == "true" }
+                else -> false
+            }
+        }
+    }
 
     /** Redeem an invite code → join that owner's circle. Never throws (returns the
      *  server's {ok, error?, owner_name?}). */
@@ -343,8 +426,15 @@ class CircleClient(private val client: SupabaseClient) {
 
     /** Remove a share by its id (owner-only, RPC-enforced). Best-effort. */
     suspend fun taskUnshare(shareId: String) {
-        runCatching { client.postgrest.rpc("task_unshare", IdParam(shareId)) }
+        taskUnshareConfirmed(shareId)
     }
+
+    /** Remove a share by its id and ANSWER whether the server did it — a refusal
+     *  (not the owner, 5xx, offline) must never be reported as "removed" while
+     *  the recipient still has the task (unified sharing v1 Share screen). */
+    suspend fun taskUnshareConfirmed(shareId: String): Boolean =
+        runCatching { client.postgrest.rpc("task_unshare", IdParam(shareId)); true }
+            .getOrElse { println("[share] task_unshare failed: ${it.message}"); false }
 
     /** Who a task I own is shared with — drives the share sheet's current state. */
     suspend fun taskSharesForTask(taskId: String): List<ShareForTask> = runCatching {

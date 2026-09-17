@@ -56,6 +56,16 @@ import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.components.areaColorFor
 import tech.csalliance.unstuck.ui.sharing.SharedWithYouSection
+import tech.csalliance.unstuck.ui.sharing.ShareScreen
+import tech.csalliance.unstuck.ui.sharing.ShareTarget
+import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
 
 // Tab order mirrors the web TaskListPane: Backlog first (the triage stack),
 // then All / Today / Upcoming / Later / Completed. Default is Today.
@@ -64,6 +74,7 @@ private val TAB_ORDER = listOf(
     TaskListView.UPCOMING, TaskListView.LATER, TaskListView.RECURRING, TaskListView.COMPLETED,
 )
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun TasksScreen(
     vm: AppViewModel,
@@ -82,6 +93,10 @@ fun TasksScreen(
     val c = UTheme.colors
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
+    // The row whose long-press menu is open, and the row whose "Share…" opened
+    // the ONE Share screen (unified sharing v1).
+    var rowMenuFor by remember { mutableStateOf<String?>(null) }
+    var shareTarget by remember { mutableStateOf<ShareTarget?>(null) }
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     // "Shared with you" — tasks OTHERS shared with me. They sit on my own list views
     // (web parity: task-list-pane mounts the group on All / Today / Completed only).
@@ -195,8 +210,15 @@ fun TasksScreen(
                 item { Text("No ${view.label.lowercase()} tasks.", style = UFont.sans(14), color = c.ink3, modifier = Modifier.padding(vertical = 32.dp)) }
             } else {
                 items(list, key = { it.id }) { t ->
+                    // Long-press → "Share…" straight from the row (unified sharing
+                    // v1). An occurrence row (id = a cal_block id) shares from its
+                    // editor, where the template is resolved.
+                    val isOccurrence = occurrenceBlockFor(t.id, tasks, blocks) != null
+                    Box(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
                     Row(
-                        Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).clickable { onOpen(t) }.padding(horizontal = 12.dp, vertical = 11.dp),
+                        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp))
+                            .combinedClickable(onClick = { onOpen(t) }, onLongClick = { if (!isOccurrence) rowMenuFor = t.id })
+                            .padding(horizontal = 12.dp, vertical = 11.dp),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
                     ) {
                         Column(Modifier.weight(1f)) {
@@ -232,9 +254,20 @@ fun TasksScreen(
                         }
                         Text("${t.estimateMin}m", style = UFont.mono(11), color = c.ink3)
                     }
+                    DropdownMenu(expanded = rowMenuFor == t.id, onDismissRequest = { rowMenuFor = null }) {
+                        DropdownMenuItem(
+                            text = { Text("Share…", style = UFont.sans(14), color = c.ink) },
+                            leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null, tint = c.ink2, modifier = Modifier.size(18.dp)) },
+                            onClick = { rowMenuFor = null; shareTarget = ShareTarget.Task(t.id, t.name) },
+                        )
+                    }
+                    }
                 }
                 item { Text("", Modifier.padding(28.dp)) }
             }
         }
     }
+
+    // The ONE Share screen, opened from a row's "Share…".
+    shareTarget?.let { ShareScreen(vm, it, onDismiss = { shareTarget = null }) }
 }

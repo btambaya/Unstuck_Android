@@ -31,7 +31,42 @@ import kotlinx.serialization.json.JsonPrimitive
 //    server-side statement, RLS-gated) so two people editing the same list don't
 //    clobber each other. Own/unshared lists keep the whole-row outbox path.
 
-enum class ShareOutcome { OK, INVITED, NOT_FOUND, SELF, ERROR }
+/** Result of a `share` attempt (mirrors iOS ShareOutcome), plus the unified-sharing
+ *  refusals the server now names (`blocked`, `rate_limited`, `bad_request`). */
+enum class ShareOutcome {
+    /** Shared with an existing account (`status: 'shared'`). */
+    OK,
+    /** No account yet → pending invite + email sent (`status: 'invited'`). */
+    INVITED,
+    /** The server took it but does not say which of the two happened —
+     *  `share-collection add` by EMAIL deliberately answers `{ok, invited:true}`
+     *  for BOTH branches (no account-enumeration oracle). Success; neutral copy. */
+    ACCEPTED,
+    NOT_FOUND,
+    SELF,
+    /** The server's blocked-users mechanism refused. */
+    BLOCKED,
+    /** The per-user limiter refused (429). */
+    RATE_LIMITED,
+    /** 400 bad_request (no / malformed email, or a userId an older deployment can't resolve). */
+    INVALID,
+    ERROR;
+
+    /** The server reason code this outcome corresponds to (for the shared
+     *  `ShareFailure` copy); null for the successes. */
+    val failureReason: String? get() = when (this) {
+        OK, INVITED, ACCEPTED -> null
+        NOT_FOUND -> "not_found"
+        SELF -> "self"
+        BLOCKED -> "blocked"
+        RATE_LIMITED -> "rate_limited"
+        INVALID -> "bad_request"
+        ERROR -> "network"
+    }
+
+    /** The share landed (whatever the server chose to reveal). */
+    val isSuccess: Boolean get() = failureReason == null
+}
 
 /** A member (joined) or pending invite of a shared collection, for the share sheet. */
 data class CollectionMemberInfo(
@@ -68,17 +103,32 @@ class CollectionShareClient(private val client: SupabaseClient) {
         val role: String? = null,
         val email: String? = null,
         val error: String? = null,
+        // Unified sharing v1 (share-collection v22): add by USER ID answers
+        // honestly — `{ok, status:'shared', userId, displayName}` — and a refusal
+        // is `{ok:false, reason:'self'}`. Absent on the email path / older servers.
+        val status: String? = null,
+        val displayName: String? = null,
+        val reason: String? = null,
         // Contract 2026-09: `add` returns the collection's membership rows so the
         // owner's client can flip the list to "shared" IMMEDIATELY (its own
         // collection_members channel never fired for another user's row, so the
         // owner kept whole-row upserting the items JSONB and clobbering members'
         // atomic edits until the next full hydrate). Absent on an older server.
-        val members: List<MemberRow>? = null,
-    )
+        // LENIENT: the by-userId branch answers a COUNT (`members: 2`); a number
+        // must not fail the whole decode — the verdict never depends on it.
+        val members: JsonElement? = null,
+    ) {
+        /** The membership rows when the server sent an ARRAY of them; null for a
+         *  count / absent (the caller then keeps its local members). */
+        val memberRows: List<MemberRow>? get() = (members as? kotlinx.serialization.json.JsonArray)?.let { arr ->
+            runCatching { Json { ignoreUnknownKeys = true }.decodeFromJsonElement(kotlinx.serialization.builtins.ListSerializer(MemberRow.serializer()), arr) }.getOrNull()
+        }
+    }
 
     /** Result of a share: the outcome + the membership the server returned (user ids,
-     *  owner excluded), or null when the server didn't return it. */
-    data class ShareResult(val outcome: ShareOutcome, val memberIds: List<String>?)
+     *  owner excluded), or null when the server didn't return it. [displayName] is
+     *  the server-resolved name on the by-userId path (never an email). */
+    data class ShareResult(val outcome: ShareOutcome, val memberIds: List<String>?, val displayName: String? = null)
 
     @Serializable
     private data class PendingRow(val email: String = "", val role: String? = null)
@@ -106,8 +156,17 @@ class CollectionShareClient(private val client: SupabaseClient) {
      *  on a non-HTTP failure (no response, e.g. offline) → caller maps to ERROR. */
     private suspend fun callOrError(body: ShareBody): ShareResponse? =
         runCatching { call(body) }.getOrElse { e ->
-            val resp = (e as? ResponseException)?.response ?: return null
-            runCatching { lenientJson.decodeFromString<ShareResponse>(resp.bodyAsText()) }.getOrNull()
+            // supabase-kt's Functions plugin wraps a non-2xx in a RestException
+            // whose `error` IS the body text (Functions.parseErrorResponse); a bare
+            // ktor ResponseException is read the same way.
+            val text = when (e) {
+                is io.github.jan.supabase.exceptions.RestException -> e.error.ifBlank { e.message ?: "" }
+                is ResponseException -> runCatching { e.response.bodyAsText() }.getOrDefault("")
+                else -> return null
+            }
+            runCatching { lenientJson.decodeFromString<ShareResponse>(text) }.getOrNull()
+                // A non-2xx we could not parse is still a refusal, never "no response".
+                ?: ShareResponse(ok = false, error = "server_error")
         }
 
     /** Share with an email. Existing account → member; otherwise pending invite + email.
@@ -116,18 +175,40 @@ class CollectionShareClient(private val client: SupabaseClient) {
     suspend fun share(collectionId: String, email: String, role: String): ShareOutcome =
         shareDetailed(collectionId, email, role).outcome
 
-    suspend fun shareDetailed(collectionId: String, email: String, role: String): ShareResult {
-        val r = callOrError(ShareBody("add", collectionId, email = email, role = role))
-            ?: return ShareResult(ShareOutcome.ERROR, null)
-        val outcome = when {
-            r.error == "not_found" -> ShareOutcome.NOT_FOUND
-            r.error == "self" -> ShareOutcome.SELF
-            r.error != null -> ShareOutcome.ERROR
-            r.invited == true -> ShareOutcome.INVITED
-            r.ok == true -> ShareOutcome.OK
-            else -> ShareOutcome.ERROR
-        }
-        return ShareResult(outcome, r.members?.map { it.userId }?.filter { it.isNotBlank() })
+    suspend fun shareDetailed(collectionId: String, email: String, role: String): ShareResult =
+        shareDetailed(collectionId, email = email, userId = null, role = role)
+
+    /** Share by email OR by user id (a connection tapped in the People section —
+     *  the roster knows no emails). `userId` is sent as `userId` on the `add`
+     *  body; `share-collection` v22 resolves it and answers `{ok, status:'shared',
+     *  userId, displayName}`. An older deployment that resolves emails only
+     *  answers `bad_request`, which surfaces as INVALID → "enter their email". */
+    suspend fun shareDetailed(collectionId: String, email: String?, userId: String?, role: String): ShareResult {
+        val body = ShareBody(
+            "add", collectionId,
+            email = email?.trim()?.lowercase()?.takeIf { it.isNotEmpty() },
+            userId = userId?.takeIf { it.isNotEmpty() },
+            role = role,
+        )
+        val r = callOrError(body) ?: return ShareResult(ShareOutcome.ERROR, null)
+        return decodeShareAdd(r)
+    }
+
+    /** A one-shot join link that grants THIS list at [role] on redeem
+     *  (`share-collection link`, unified sharing v1). */
+    suspend fun link(collectionId: String, role: String): ShareLinkOutcome = try {
+        val text = client.functions.invoke("share-collection") {
+            method = HttpMethod.Post
+            contentType(ContentType.Application.Json)
+            setBody(ShareBody("link", collectionId, role = role))
+        }.bodyAsText()
+        TaskShareClient.decodeLink(text)
+    } catch (e: io.github.jan.supabase.exceptions.RestException) {
+        ShareLinkOutcome.Failed(TaskShareClient.failureReason(e.error.ifBlank { e.message }))
+    } catch (e: ResponseException) {
+        ShareLinkOutcome.Failed(TaskShareClient.failureReason(runCatching { e.response.bodyAsText() }.getOrNull()))
+    } catch (e: Exception) {
+        ShareLinkOutcome.Failed("network")
     }
 
     // ── revocation: unshare / cancel invite / leave ────────────────────────
@@ -163,6 +244,44 @@ class CollectionShareClient(private val client: SupabaseClient) {
          * owner as "access removed".
          */
         internal fun revoked(r: ShareResponse?): Boolean = r != null && r.ok == true && r.error == null
+
+        /**
+         * Pure `add` verdict (mirrors iOS CollectionShareClient.decodeShareAdd).
+         * Order matters and is the fix for the "always Invited" bug: an explicit
+         * refusal first, then the honest `status`, then `ok` + a resolved user,
+         * and only THEN the legacy `invited` flag — which the email path sets on
+         * BOTH branches (no account-enumeration oracle) → ACCEPTED, never a
+         * fabricated INVITED.
+         */
+        internal fun decodeShareAdd(r: ShareResponse): ShareResult {
+            val members = r.memberRows?.map { it.userId }?.filter { it.isNotBlank() }
+            val code = (r.error ?: r.reason ?: "").trim().lowercase()
+            if (code.isNotEmpty() || r.ok == false) {
+                val outcome = when (code) {
+                    "not_found" -> ShareOutcome.NOT_FOUND
+                    "self" -> ShareOutcome.SELF
+                    "blocked" -> ShareOutcome.BLOCKED
+                    "rate_limited", "rate_limit", "too_many_requests" -> ShareOutcome.RATE_LIMITED
+                    "bad_request", "invalid_email" -> ShareOutcome.INVALID
+                    else -> ShareOutcome.ERROR
+                }
+                return ShareResult(outcome, members)
+            }
+            when ((r.status ?: "").lowercase()) {
+                "shared" -> {
+                    val added = r.userId ?: ""
+                    val ids = if (members.isNullOrEmpty() && added.isNotEmpty()) listOf(added) else members
+                    return ShareResult(ShareOutcome.OK, ids, r.displayName?.takeIf { it.isNotBlank() })
+                }
+                "invited" -> return ShareResult(ShareOutcome.INVITED, members)
+            }
+            val uid = r.userId
+            if (r.ok == true && !uid.isNullOrEmpty()) {
+                return ShareResult(ShareOutcome.OK, if (members.isNullOrEmpty()) listOf(uid) else members, r.displayName?.takeIf { it.isNotBlank() })
+            }
+            if (r.invited == true) return ShareResult(ShareOutcome.ACCEPTED, members)
+            return ShareResult(ShareOutcome.ERROR, members)
+        }
     }
 
     /** Joined members + pending invites for the share sheet. */

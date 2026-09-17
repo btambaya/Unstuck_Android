@@ -69,6 +69,8 @@ class SyncCoordinator(
     val captures = CapturesClient(client)
     val collectionShare = CollectionShareClient(client)
     val circle = CircleClient(client)
+    // Unified sharing v1: the `share-task` edge fn (email share / roster / link).
+    val taskShare = TaskShareClient(client)
     val feedback = FeedbackClient(client)
     val assistant = AssistantClient(client)
     private val loginTracker = LoginTrackerClient(client)

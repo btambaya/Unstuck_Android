@@ -41,7 +41,15 @@ import tech.csalliance.unstuck.design.component.Leading
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.ui.sharing.ShareScreen
+import tech.csalliance.unstuck.ui.sharing.ShareTarget
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.combinedClickable
+import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, onNotifications: () -> Unit, notifUnread: Int, avatarInitials: String) {
     val c = UTheme.colors
@@ -49,6 +57,9 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
     var query by remember { mutableStateOf("") }
     var showNew by remember { mutableStateOf(false) }
     var showArchived by remember { mutableStateOf(false) }
+    // The card whose long-press menu is open / whose "Share…" opened the Share screen.
+    var cardMenuFor by remember { mutableStateOf<String?>(null) }
+    var shareTarget by remember { mutableStateOf<ShareTarget?>(null) }
     val archivedCount = collections.count { it.archived == true }
     val shown = collections.sortedBy { it.sortOrder }.filter {
         (it.archived == true) == showArchived &&
@@ -102,8 +113,21 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
             }
             items(shown, key = { it.id }) { col ->
                 val color = c.areaColor(col.color)
+                // Owner-only "Share…" straight from the card (unified sharing v1):
+                // long-press opens the menu; a tap still opens the list.
+                val owner = vm.isOwner(col)
+                Box(Modifier.fillMaxWidth()) {
+                DropdownMenu(expanded = cardMenuFor == col.id, onDismissRequest = { cardMenuFor = null }) {
+                    DropdownMenuItem(
+                        text = { Text("Share…", style = UFont.sans(14), color = c.ink) },
+                        leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null, tint = c.ink2, modifier = Modifier.size(18.dp)) },
+                        onClick = { cardMenuFor = null; shareTarget = ShareTarget.Collection(col.id, col.name) },
+                    )
+                }
                 Column(
-                    Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp)).clickable { onOpen(col.id) }.padding(14.dp),
+                    Modifier.fillMaxWidth().height(150.dp).clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp))
+                        .combinedClickable(onClick = { onOpen(col.id) }, onLongClick = { if (owner) cardMenuFor = col.id })
+                        .padding(14.dp),
                     verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     val shared = col.members.isNotEmpty() || (col.myRole != null && col.myRole != "owner")
@@ -121,6 +145,7 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
                         }
                     }
                 }
+                }
             }
             if (shown.isEmpty()) {
                 item(span = { androidx.compose.foundation.lazy.grid.GridItemSpan(2) }) {
@@ -134,4 +159,6 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
     }
 
     if (showNew) NewCollectionSheet(vm, onCreated = { id -> showNew = false; onOpen(id) }, onDismiss = { showNew = false })
+    // The ONE Share screen, opened from a card's "Share…".
+    shareTarget?.let { ShareScreen(vm, it, onDismiss = { shareTarget = null }) }
 }

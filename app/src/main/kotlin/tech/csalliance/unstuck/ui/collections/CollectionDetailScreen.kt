@@ -26,8 +26,10 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Share
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.outlined.AddTask
+import tech.csalliance.unstuck.ui.sharing.ShareScreen
+import tech.csalliance.unstuck.ui.sharing.ShareTarget
 import androidx.compose.material.icons.outlined.Archive
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Unarchive
@@ -167,7 +169,7 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                                 tint = c.ink3, modifier = Modifier.size(21.dp).clip(CircleShape).clickable { vm.archiveCollection(col.id, !archived); onBack() }.padding(1.dp),
                             )
                             Icon(Icons.Outlined.Delete, contentDescription = "Delete collection", tint = c.ink3, modifier = Modifier.size(21.dp).clip(CircleShape).clickable { confirmDelete = true }.padding(1.dp))
-                            Icon(Icons.Filled.Share, contentDescription = "Share", tint = c.ink2, modifier = Modifier.size(22.dp).clip(CircleShape).clickable { showShare = true })
+                            Icon(Icons.Filled.PersonAdd, contentDescription = "Share", tint = c.ink2, modifier = Modifier.size(22.dp).clip(CircleShape).clickable { showShare = true })
                         }
                     } else {
                         // Leave only closes the screen once the SERVER confirms it.
@@ -260,7 +262,8 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
         }
     }
 
-    if (showShare) ShareCollectionSheet(vm, col.id, col.name, onDismiss = { showShare = false })
+    // The ONE Share screen (unified sharing v1) — replaces the old per-list sheet.
+    if (showShare) ShareScreen(vm, ShareTarget.Collection(col.id, col.name), onDismiss = { showShare = false })
 
     // Move-to-task chooser (shared lists only): just me vs keep everyone in the loop.
     promoteTarget?.let { target ->

@@ -86,7 +86,7 @@ fun CaptureSheet(vm: AppViewModel, task: TaskItem, sessionId: String?, onDismiss
                         CaptureTag.IDEA -> c.amberSoft to c.amberInk
                         CaptureTag.EDIT -> c.blueSoft to c.blueInk
                         CaptureTag.QUESTION -> c.greenSoft to c.greenInk
-                        CaptureTag.DISTRACTION -> c.coralSoft to c.coralDeep
+                        CaptureTag.DISTRACTION -> c.coralSoft to c.ink
                         else -> c.primarySoft to c.primaryDeep
                     }
                     Box(Modifier.clip(RoundedCornerShape(999.dp)).background(if (sel) selBg else c.surface).then(if (sel) Modifier else Modifier.border(1.dp, c.line2, RoundedCornerShape(999.dp))).clickable { tag = t }.padding(horizontal = 11.dp, vertical = 5.dp)) {

@@ -371,7 +371,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                                     keyboardActions = KeyboardActions(onDone = { generateInvite() }),
                                 )
                                 Text("We'll email them the invite. Or leave it blank for a link you send yourself.", style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink3)
-                                inviteErr?.let { Text(it, style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.coralDeep) }
+                                inviteErr?.let { Text(it, style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.red) }
                                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                                     UButton(if (inviteBusy) "…" else if (inviteEmail.isBlank()) "Generate link" else "Send invite", kind = ButtonKind.DARK, fill = false, enabled = !inviteBusy) { generateInvite() }
                                     UButton("Cancel", kind = ButtonKind.GHOST, fill = false) { inviting = false; inviteErr = null }
@@ -478,8 +478,8 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
 
 /** One circle member + a full-width Off/View/Partner/Assign segmented control —
  *  ShareTaskSheet.MemberLevelRow's pattern, but over PENDING create-form state
- *  (nothing is shared until "Add task"), so the selected segment is coralDeep
- *  (a choice being made) rather than the ink of a live share. */
+ *  (nothing is shared until "Add task"), so the selected segment is the black-and-white pair (ink fill, bg text)
+ *  — the same idiom as every other chip and segment in the app. */
 @Composable
 private fun SharePickRow(name: String, relationship: String?, cur: ShareLevel?, onPick: (ShareLevel?) -> Unit) {
     val c = UTheme.colors
@@ -500,10 +500,10 @@ private fun SharePickRow(name: String, relationship: String?, cur: ShareLevel?, 
             opts.forEach { (value, label) ->
                 val selected = cur == value
                 Box(
-                    Modifier.weight(1f).clip(RoundedCornerShape(999.dp)).background(if (selected) c.coralDeep else Color.Transparent)
+                    Modifier.weight(1f).clip(RoundedCornerShape(999.dp)).background(if (selected) c.ink else Color.Transparent)
                         .clickable { onPick(value) }.padding(vertical = 6.dp),
                     contentAlignment = Alignment.Center,
-                ) { Text(label, style = tech.csalliance.unstuck.design.theme.UFont.sans(11, FontWeight.SemiBold), color = if (selected) Color.White else c.ink2) }
+                ) { Text(label, style = tech.csalliance.unstuck.design.theme.UFont.sans(11, FontWeight.SemiBold), color = if (selected) c.bg else c.ink2) }
             }
         }
     }

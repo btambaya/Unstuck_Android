@@ -160,7 +160,7 @@ fun TasksScreen(
                     // Per-tab accent (web parity: Backlog=amber, Completed=green, …).
                     val pair: Pair<Color, Color>? = when (v) {
                         TaskListView.BACKLOG -> c.amberSoft to c.amberInk
-                        TaskListView.TODAY -> c.coralSoft to c.coralDeep
+                        TaskListView.TODAY -> c.coralSoft to c.ink
                         TaskListView.UPCOMING -> c.blueSoft to c.blueInk
                         TaskListView.LATER -> c.primarySoft to c.primaryDeep
                         TaskListView.RECURRING -> c.blueSoft to c.blueInk

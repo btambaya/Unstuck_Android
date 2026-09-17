@@ -293,7 +293,7 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                     ) { menuOpen = true }
                     DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
                         DropdownMenuItem(
-                            text = { Text("Clear conversation", style = UFont.sans(13), color = c.coralDeep) },
+                            text = { Text("Clear conversation", style = UFont.sans(13), color = c.red) },
                             onClick = { menuOpen = false; showChips = true; vm.clearAssistant() },
                         )
                     }
@@ -381,7 +381,7 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
             ) {
                 Text(
-                    it, style = UFont.sans(12), color = c.coralDeep,
+                    it, style = UFont.sans(12), color = c.red,
                     modifier = Modifier.weight(1f, fill = false).semantics { liveRegion = LiveRegionMode.Polite },
                 )
                 // Two upstream rejections in a row: the thread itself is the
@@ -517,7 +517,7 @@ private fun ReceiptCard(row: ThreadRow.ReceiptItem, inFlight: Boolean = false, o
             r.undo != null -> Text(
                 receiptUndoLabel(r.undo!!.kind, inFlight),
                 style = UFont.sans(12, FontWeight.SemiBold),
-                color = if (inFlight) c.ink3 else c.coralDeep,
+                color = if (inFlight) c.ink3 else c.coral,
                 modifier = Modifier.clip(RoundedCornerShape(999.dp))
                     // In flight the tap is a no-op (the VM ignores a repeat for the
                     // same key anyway) — no second cancel round trip, no lie.

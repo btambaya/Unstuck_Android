@@ -132,13 +132,13 @@ fun AuthScreen(vm: AppViewModel) {
                 Text(
                     if (messageOk) "✓" else "!",
                     style = UFont.sans(16, FontWeight.Bold),
-                    color = if (messageOk) c.greenInk else c.coralDeep,
+                    color = if (messageOk) c.greenInk else c.red,
                 )
                 Spacer(Modifier.width(11.dp))
                 Text(
                     msg,
                     style = UFont.sans(14, FontWeight.Medium),
-                    color = if (messageOk) c.greenInk else c.coralDeep,
+                    color = if (messageOk) c.greenInk else c.red,
                 )
             }
         }
@@ -227,7 +227,7 @@ fun SetNewPasswordScreen(vm: AppViewModel) {
             confirm.isNotEmpty() && confirm != pw -> "Passwords don't match."
             else -> message
         }
-        hint?.let { Spacer(Modifier.height(12.dp)); Text(it, style = UFont.sans(13), color = c.coralDeep, textAlign = TextAlign.Center) }
+        hint?.let { Spacer(Modifier.height(12.dp)); Text(it, style = UFont.sans(13), color = c.red, textAlign = TextAlign.Center) }
         Spacer(Modifier.height(20.dp))
         UButton(if (busy) "…" else "Save password", kind = ButtonKind.DARK, enabled = valid && !busy) { save() }
     }

@@ -389,7 +389,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
                 Modifier
                     .offset { IntOffset((dragPos.x - rootOrigin.x).roundToInt() - ghostDx, (dragPos.y - rootOrigin.y).roundToInt() - ghostDy) }
                     .clip(RoundedCornerShape(10.dp))
-                    .background(c.coralDeep)
+                    .background(c.coral)
                     .padding(horizontal = 12.dp, vertical = 8.dp),
             ) {
                 Text(label, style = UFont.sans(12, FontWeight.Medium), color = androidx.compose.ui.graphics.Color.White, maxLines = 1)

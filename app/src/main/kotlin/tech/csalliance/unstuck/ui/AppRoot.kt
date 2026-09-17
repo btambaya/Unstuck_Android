@@ -60,7 +60,7 @@ private fun LoadingScreen() {
         Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
-    ) { CircularProgressIndicator(color = UTheme.colors.coralDeep) }
+    ) { CircularProgressIndicator(color = UTheme.colors.coral) }
 }
 
 @Composable

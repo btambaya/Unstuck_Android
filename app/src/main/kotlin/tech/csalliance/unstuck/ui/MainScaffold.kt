@@ -665,10 +665,10 @@ private fun InCallBar(onEnd: () -> Unit) {
         Modifier.fillMaxWidth().background(c.coralSoft).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Icon(Icons.Filled.Mic, contentDescription = null, tint = c.coralDeep, modifier = Modifier.size(16.dp))
+        Icon(Icons.Filled.Mic, contentDescription = null, tint = c.coral, modifier = Modifier.size(16.dp))
         Text(
             IN_CALL_LABEL,
-            style = UFont.sans(13, FontWeight.Medium), color = c.coralDeep,
+            style = UFont.sans(13, FontWeight.Medium), color = c.ink,
             modifier = Modifier.weight(1f).padding(start = 8.dp),
         )
         Text(

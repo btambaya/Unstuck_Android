@@ -126,8 +126,8 @@ fun FilterPill(label: String, selected: Boolean, modifier: Modifier = Modifier, 
 @Composable
 fun Chip(title: String, selected: Boolean = false, modifier: Modifier = Modifier) {
     val c = UTheme.colors
-    Box(modifier.clip(pill).background(if (selected) c.primary else c.bg2).padding(horizontal = 11.dp, vertical = 5.dp)) {
-        Text(title, style = UFont.sans(13, FontWeight.Medium), color = if (selected) Color.White else c.ink2)
+    Box(modifier.clip(pill).background(if (selected) c.ink else c.bg2).padding(horizontal = 11.dp, vertical = 5.dp)) {
+        Text(title, style = UFont.sans(13, FontWeight.Medium), color = if (selected) c.bg else c.ink2)
     }
 }
 

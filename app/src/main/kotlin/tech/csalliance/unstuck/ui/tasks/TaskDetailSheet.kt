@@ -464,7 +464,7 @@ private fun captureTagColors(tag: CaptureTag): Pair<androidx.compose.ui.graphics
         1 -> c.amberSoft to c.amberInk
         2 -> c.blueSoft to c.blueInk
         3 -> c.greenSoft to c.greenInk
-        4 -> c.coralSoft to c.coralDeep
+        4 -> c.coralSoft to c.ink
         else -> c.primarySoft to c.primaryDeep
     }
 }

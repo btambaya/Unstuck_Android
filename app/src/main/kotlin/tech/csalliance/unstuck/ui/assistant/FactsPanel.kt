@@ -192,7 +192,7 @@ fun FactsPanelContent(host: FactsHost, modifier: Modifier = Modifier) {
 
         editError?.let { err ->
             Text(
-                err, style = UFont.sans(12), color = c.coralDeep,
+                err, style = UFont.sans(12), color = c.red,
                 modifier = Modifier.padding(top = 6.dp).semantics { liveRegion = LiveRegionMode.Polite },
             )
         }
@@ -277,7 +277,7 @@ private fun FactRow(f: ProfileFact, onEdit: () -> Unit, onForget: () -> Unit) {
     val c = UTheme.colors
     Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.Top) {
         Text(
-            f.category.raw.uppercase(), style = UFont.mono(9, FontWeight.SemiBold).copy(letterSpacing = 0.6.sp), color = c.coralDeep,
+            f.category.raw.uppercase(), style = UFont.mono(9, FontWeight.SemiBold).copy(letterSpacing = 0.6.sp), color = c.coral,
             modifier = Modifier.padding(top = 2.dp).clip(RoundedCornerShape(6.dp)).background(c.bg2).padding(horizontal = 6.dp, vertical = 2.dp),
         )
         Column(

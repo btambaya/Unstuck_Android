@@ -312,7 +312,7 @@ fun TodayScreen(
                             .background(c.coralSoft).padding(16.dp),
                     ) {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
-                            SectionLabel("Just now", color = c.coralDeep)
+                            SectionLabel("Just now", color = c.coral)
                             Text("✕", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable { vm.dismissRecap() })
                         }
                         // A remote-ended shared session attributes calmly; own finishes celebrate.

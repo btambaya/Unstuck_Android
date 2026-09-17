@@ -74,7 +74,7 @@ fun ShareConfirmCard(
                 style = UFont.sans(11), color = c.ink3,
             )
             if (failed) {
-                Text("Could not share — try again.", style = UFont.sans(12), color = c.coralDeep)
+                Text("Could not share — try again.", style = UFont.sans(12), color = c.red)
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Box(

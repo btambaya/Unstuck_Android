@@ -122,7 +122,7 @@ fun FeedbackForm(vm: AppViewModel, currentScreen: String?, onDone: () -> Unit) {
         }
 
         Text(ctx, style = UFont.mono(10), color = c.ink4)
-        error?.let { Text(it, style = UFont.sans(12), color = c.coralDeep) }
+        error?.let { Text(it, style = UFont.sans(12), color = c.red) }
 
         Box(Modifier.padding(top = 2.dp)) {
             UButton(if (sending) "Sending…" else "Send", kind = ButtonKind.CORAL, fill = false, enabled = body.isNotBlank() && !sending) {

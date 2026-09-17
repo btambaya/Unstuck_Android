@@ -109,17 +109,32 @@ object UTheme {
 /** Accent palettes — mirror the web theme-context ACCENT_PALETTES. */
 enum class AccentPalette { INDIGO_CORAL, PERIWINKLE_ROSE, FOREST_AMBER }
 
-/** Override the primary/coral ramp on a base palette for the chosen accent.
- *  INDIGO_CORAL is the brand default (no change). */
+/** Override the primary/coral ramp on a base palette for the chosen accent,
+ *  per SCHEME. INDIGO_CORAL is the brand default (no change). Values mirror
+ *  `unstuck/app/globals.css` verbatim — the web defines BOTH halves per accent,
+ *  and its dark block overrides `primary`, `primaryDeep`, `primarySoft` and
+ *  `coralSoft` ONLY (`coral` and `coralDeep` keep the light accent values in
+ *  dark). The previous one-set-fits-both form applied the LIGHT ramp on top of
+ *  the dark palette: rose / forest in dark mode got a primaryDeep of L 0.42 on
+ *  a 0.205 background (≈1.9:1) and a near-white primarySoft capsule (same bug
+ *  iOS Tokens.swift `withAccent(_:dark:)` fixed, 2026-09-17). */
 fun UnstuckColors.withAccent(accent: AccentPalette): UnstuckColors = when (accent) {
     AccentPalette.INDIGO_CORAL -> this
     AccentPalette.PERIWINKLE_ROSE -> copy(
-        primary = oklch(0.62, 0.14, 265.0), primaryDeep = oklch(0.42, 0.16, 265.0), primarySoft = oklch(0.94, 0.04, 265.0),
-        coral = oklch(0.74, 0.14, 15.0), coralSoft = oklch(0.95, 0.05, 15.0), coralDeep = oklch(0.50, 0.16, 15.0),
+        primary = if (isDark) oklch(0.74, 0.13, 265.0) else oklch(0.62, 0.14, 265.0),
+        primaryDeep = if (isDark) oklch(0.82, 0.12, 265.0) else oklch(0.42, 0.16, 265.0),
+        primarySoft = if (isDark) oklch(0.32, 0.07, 265.0) else oklch(0.94, 0.04, 265.0),
+        coral = oklch(0.74, 0.14, 15.0),                                   // light + dark
+        coralSoft = if (isDark) oklch(0.36, 0.08, 15.0) else oklch(0.95, 0.05, 15.0),
+        coralDeep = oklch(0.50, 0.16, 15.0),                               // light + dark
     )
     AccentPalette.FOREST_AMBER -> copy(
-        primary = oklch(0.55, 0.10, 170.0), primaryDeep = oklch(0.38, 0.10, 170.0), primarySoft = oklch(0.94, 0.04, 170.0),
-        coral = oklch(0.74, 0.14, 65.0), coralSoft = oklch(0.95, 0.05, 65.0), coralDeep = oklch(0.48, 0.13, 65.0),
+        primary = if (isDark) oklch(0.70, 0.11, 170.0) else oklch(0.55, 0.10, 170.0),
+        primaryDeep = if (isDark) oklch(0.80, 0.10, 170.0) else oklch(0.38, 0.10, 170.0),
+        primarySoft = if (isDark) oklch(0.32, 0.06, 170.0) else oklch(0.94, 0.04, 170.0),
+        coral = oklch(0.74, 0.14, 65.0),
+        coralSoft = if (isDark) oklch(0.36, 0.08, 65.0) else oklch(0.95, 0.05, 65.0),
+        coralDeep = oklch(0.48, 0.13, 65.0),
     )
 }
 

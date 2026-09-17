@@ -6,7 +6,6 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import tech.csalliance.unstuck.core.logic.InterviewAutoOpenGate
 import tech.csalliance.unstuck.core.logic.InterviewFlag
 import tech.csalliance.unstuck.core.logic.RitualPrefs
 import tech.csalliance.unstuck.core.model.CalBlock
@@ -204,20 +203,6 @@ class GatewayCardLogicTest {
         assertEquals(InterviewFlag.State(done = true, open = false), InterviewFlag.apply(serverDone = true, done = false, open = true))
         assertEquals(InterviewFlag.State(done = false, open = true), InterviewFlag.apply(serverDone = false, done = false, open = true))
         assertEquals(InterviewFlag.State(done = true, open = false), InterviewFlag.apply(serverDone = false, done = true, open = false))
-    }
-
-    @Test fun autoOpenGate_waitsForBothTheLocalReadAndTheHydrate_thenDecidesOnce() {
-        val gate = InterviewAutoOpenGate()
-        assertFalse(gate.evaluate(hydrated = false, factsLoaded = true, factCount = 0, done = false))
-        assertFalse(gate.evaluate(hydrated = true, factsLoaded = false, factCount = 0, done = false))
-        assertFalse(gate.decided)
-        assertTrue(gate.evaluate(hydrated = true, factsLoaded = true, factCount = 0, done = false))
-        assertTrue(gate.decided)
-        assertFalse("one shot", gate.evaluate(hydrated = true, factsLoaded = true, factCount = 0, done = false))
-        // Done elsewhere, facts present, or a parked step: never opens by itself.
-        assertFalse(InterviewAutoOpenGate().evaluate(hydrated = true, factsLoaded = true, factCount = 0, done = true))
-        assertFalse(InterviewAutoOpenGate().evaluate(hydrated = true, factsLoaded = true, factCount = 2, done = false))
-        assertFalse(InterviewAutoOpenGate().evaluate(hydrated = true, factsLoaded = true, factCount = 0, done = false, hasResumeStep = true))
     }
 
     @Test fun chips_andCopy_areTheReferenceStrings() {

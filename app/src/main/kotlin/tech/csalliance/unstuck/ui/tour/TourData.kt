@@ -39,7 +39,6 @@ enum class TourView { TODAY, TASKS, CALENDAR, CAPTURES, COLLECTIONS, INSIGHTS, S
  * ============================================================ */
 object TourAnchorIds {
     const val START_NEXT = "start-next"
-    const val BACKLOG_POINTER = "backlog-pointer"
     const val TODAY_LIST = "today-list"
     const val FIRST_ACTION = "first-action"
     const val NEW_TASK = "new-task"
@@ -113,10 +112,10 @@ val ESSENTIAL_STEPS: List<TourStep> = listOf(
     ),
     TourStep(
         id = "today", stage = "Today", view = TourView.TODAY,
-        // Empty-account fallback: a brand-new account with no tasks renders NO
-        // hero card at all — fall through the backlog pointer to the Today list.
+        // Fallback: an account with nothing scheduled renders NO hero card at
+        // all (the backlog pointer is gone, 2026-09-17) — ring the Today list.
         target = TourAnchorIds.START_NEXT,
-        fallbacks = listOf(TourAnchorIds.BACKLOG_POINTER, TourAnchorIds.TODAY_LIST),
+        fallbacks = listOf(TourAnchorIds.TODAY_LIST),
         title = "Today narrows it down",
         body = "Start Next offers one realistic suggestion — with a short reason, like the time it fits. It’s a recommendation, never a command. Today shows only planned work; everything else waits in Backlog.",
         narration = "This is Today. Instead of a long list, Start Next offers one realistic suggestion, with a short reason — like the gap it fits before your next meeting. It’s a suggestion, never a command. Today shows only planned work; everything else waits quietly in your Backlog.",
@@ -179,7 +178,7 @@ val ESSENTIAL_STEPS: List<TourStep> = listOf(
     TourStep(
         id = "finish", stage = "Begin", view = TourView.TODAY,
         target = TourAnchorIds.START_NEXT,
-        fallbacks = listOf(TourAnchorIds.BACKLOG_POINTER, TourAnchorIds.TODAY_LIST),
+        fallbacks = listOf(TourAnchorIds.TODAY_LIST),
         title = "You’re ready to begin",
         body = "That’s the loop: Today narrows things down, the first physical action gets you moving, Focus sustains it, and the Assistant helps when you’re stuck. Pick one real next step.",
         narration = "That’s the core loop. Today narrows things down. The first physical action gets you moving. Focus sustains it. And the Assistant is there when you get stuck. You don’t need to learn everything today — just choose one real next step, and begin.",

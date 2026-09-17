@@ -224,3 +224,35 @@ object InterviewScript {
         return fact.takeWhile { !it.isWhitespace() && it !in seps }
     }
 }
+
+/** The in-thread host's lines (iOS InterviewThreadDriver, 2026-09-17): the
+ *  interview is asked INSIDE the assistant thread — the greeting once, one
+ *  question per local assistant turn, the rituals picker last, one closing
+ *  line. Verbatim from iOS so the two platforms read alike. */
+object InterviewThreadCopy {
+    /** The first local turn: the web interview's greeting, then the disclosure. */
+    fun greeting(firstName: String?): String = InterviewCopy.greeting(firstName) + "\n\n" + InterviewCopy.DISCLOSURE
+
+    const val PICKER_QUESTION = "Last one — which moments should I run for you? All optional, all changeable in Settings."
+    const val CLOSING = "That’s everything — I’ll plan around it. Change any of it in Settings → What Unstuck knows."
+}
+
+/** The same seven questions as one spoken list for the voice opening primer
+ *  (buildVoiceOpening) — keyed by the script's keys so the two hosts can never
+ *  drift apart (a unit test checks every key has a line). iOS InterviewVoice. */
+object InterviewVoice {
+    val spoken: Map<String, String> = mapOf(
+        "rhythm" to "when their head's clearest — mornings, afternoons or evenings",
+        "work" to "what their work days look like — the hours and days",
+        "people" to "anyone whose schedule shapes theirs — kids, a partner, someone they care for (names help)",
+        "fixed" to "fixed points in the week to plan around — school runs, prayers, classes",
+        "commitments" to "regular commitments — gym, rehearsals, clubs, volunteering",
+        "nogo" to "times to never schedule anything",
+        "nudge" to "how they'd like to be nudged — gently, kept honest, or barely at all",
+    )
+
+    /** "; "-joined spoken lines for the questions from [from] on (the first is
+     *  spoken verbatim in the primer's greeting, so the list starts at 1). */
+    fun questionList(from: Int = 1, questions: List<InterviewQuestion> = INTERVIEW_QUESTIONS): String =
+        questions.drop(from).mapNotNull { spoken[it.key] }.joinToString("; ")
+}

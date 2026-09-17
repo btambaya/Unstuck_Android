@@ -2091,34 +2091,58 @@ class AppViewModelTest {
         assertEquals("Plan my day — what should I start with and what order makes sense?", vm.assistantHistory.first { it.role == "user" }.content)
     }
 
-    @Test fun gateway_interviewAutoOpen_neverFiresBeforeTheServerFlagIsApplied() = runTest(dispatcher) {
+    @Test fun voice_finishInterview_isAnsweredBeforeTheExecutorAndMarksTheAccountDone() = runTest(dispatcher) {
+        // The talk-level tool (voice-only): the opening primer's intro is over.
         val vm = vm()
-        // Facts read, zero facts, not done locally — the classic "fresh install"
-        // shape. Before the hydrate lands the gate must NOT open (and must not
-        // spend its one-shot decision either).
-        assertFalse(vm.profileFactsHydrated.value)
-        assertFalse(vm.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
-        assertFalse(vm.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
-        // The account finished the interview on the web: the hydrate pins done
-        // BEFORE the hydrated flag flips, so the gate sees done and stays shut.
-        vm.completeAssistantHydrate("me", PreferencesClient.ServerUserPrefs(assistant_interview_done_at = "2026-09-05T10:00:00+00:00"))
-        assertTrue(vm.profileFactsHydrated.value)
-        assertTrue(vm.interviewDone.value)
-        assertFalse(vm.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
+        vm.setInterviewStep(3)
+        assertFalse(vm.interviewDone.value)
+        val out = vm.runVoiceTool(tech.csalliance.unstuck.ui.assistant.FinishInterviewTool.NAME, kotlinx.serialization.json.JsonObject(emptyMap()))
+        assertEquals(tech.csalliance.unstuck.ui.assistant.FinishInterviewTool.OK, out)
+        assertTrue("local flag", vm.interviewDone.value)
+        assertNull("resume step dropped", vm.interviewParkedStep(7))
+        assertFalse("the assistant API seam sees it", tech.csalliance.unstuck.ui.assistant.AppViewModelAssistantApi(vm).interviewPending())
+        // The Talk schema advertises it; the executor never sees an unknown tool.
+        assertTrue(vm.voiceTools().any { kotlinx.serialization.json.JsonObject::class.java.cast(it)["name"].toString().contains("finish_interview") })
     }
 
-    @Test fun gateway_interviewAutoOpen_firesExactlyOnceAfterHydrateForAnAccountNobodyHasMet() = runTest(dispatcher) {
+    @Test fun assistant_openAssistant_asksForTheComposerWithoutSendingAnything() = runTest(dispatcher) {
         val vm = vm()
-        assertFalse(vm.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
-        vm.completeAssistantHydrate("me", null)   // no row anywhere: never onboarded
-        assertFalse("still waits for the local facts read", vm.evaluateInterviewAutoOpen(factsLoaded = false, factCount = 0))
-        assertTrue(vm.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
-        assertFalse("one shot", vm.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
-        // A parked step ("Skip for now") on another fresh VM: the pill is the way in.
-        val parked = vm()
-        parked.setInterviewStep(3)
-        parked.completeAssistantHydrate("me", null)
-        assertFalse(parked.evaluateInterviewAutoOpen(factsLoaded = true, factCount = 0))
+        val requests = mutableListOf<AppViewModel.AssistantOpenRequest>()
+        // The request flow has no replay: subscribe synchronously (UNDISPATCHED
+        // runs the collector up to its first suspension) before emitting.
+        backgroundScope.launch(start = kotlinx.coroutines.CoroutineStart.UNDISPATCHED) { vm.assistantOpenRequests.collect { requests += it } }
+        vm.openAssistant(focusComposer = true)
+        settleUntil { requests.isNotEmpty() }
+        assertEquals(listOf(AppViewModel.AssistantOpenRequest(handoff = false, focusComposer = true)), requests)
+        assertTrue("nothing is typed on Today", vm.assistantHistory.isEmpty())
+        vm.openAssistantWith("Plan my day")
+        settleAssistantTurn(vm)
+        assertEquals(AppViewModel.AssistantOpenRequest(handoff = true, focusComposer = false), requests.last())
+        assertEquals(2, requests.size)
+    }
+
+    /** Advance (with real-thread hops) until [ready] — the same loop [settleAssistantTurn] runs. */
+    private fun TestScope.settleUntil(ready: () -> Boolean) {
+        repeat(300) {
+            advanceUntilIdle()
+            if (ready()) return
+            Thread.sleep(10)
+        }
+        error("condition never settled")
+    }
+
+    @Test fun assistant_localTurns_carryIdsAndAUserEcho_neverEnterTheModelWindow() = runTest(dispatcher) {
+        val vm = vm()
+        val id = vm.appendLocalAssistant("When’s your head clearest?")
+        assertNotNull(id)
+        assertNull(vm.appendLocalAssistant("   "))
+        vm.appendLocalUser("Morning")
+        assertEquals(2, vm.assistantHistory.size)
+        assertEquals(id, vm.assistantHistory[0].id)
+        assertTrue(vm.assistantHistory.all { it.local })
+        assertEquals("user", vm.assistantHistory[1].role)
+        assertEquals("Morning", vm.assistantHistory[1].content)
+        assertTrue(tech.csalliance.unstuck.core.logic.assistantModelWindow(vm.assistantHistory).isEmpty())
     }
 
     @Test fun gateway_strugglesFromTheServerAreCanonicalisedCachedAndReadByTheAssistantApi() = runTest(dispatcher) {

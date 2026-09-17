@@ -48,8 +48,11 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tech.csalliance.unstuck.BuildConfig
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.daysSinceCreated
 import tech.csalliance.unstuck.core.logic.formatMMSS
@@ -84,8 +87,7 @@ import tech.csalliance.unstuck.ui.tour.TourAnchorIds
 import tech.csalliance.unstuck.ui.tour.tourAnchor
 import tech.csalliance.unstuck.ui.components.areaColorFor
 import tech.csalliance.unstuck.ui.components.dateEyebrow
-import tech.csalliance.unstuck.ui.components.greeting
-import tech.csalliance.unstuck.ui.components.greetingName
+import tech.csalliance.unstuck.ui.components.greetingLine
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -101,10 +103,6 @@ fun TodayScreen(
     onInbox: () -> Unit,
     inboxCount: Int,
     onOpenShared: (SharedWithMe) -> Unit,
-    // The AI gateway's interview hooks: the pill shows while the interview is
-    // pending (not done, not open); tapping it asks the host to present the sheet.
-    interviewPending: Boolean = false,
-    onPersonalise: () -> Unit = {},
 ) {
     val c = UTheme.colors
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -121,10 +119,15 @@ fun TodayScreen(
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val live by vm.liveSession.collectAsStateWithLifecycle()
     val recap by vm.lastRecap.collectAsStateWithLifecycle()
-    // Talk mode from the gateway's mic — presented here exactly as the Assistant
-    // sheet presents it (saveable so a rotation keeps the live session's screen).
+    // Talk mode from the assistant input pill's mic — presented here exactly as
+    // the Assistant sheet presents it (saveable so a rotation keeps the live
+    // session's screen).
     var voiceOpen by rememberSaveable { mutableStateOf(false) }
     if (voiceOpen) VoiceModeScreen(vm) { voiceOpen = false }
+    // Privacy §21 kill-switch (Settings → Interface → AI Assistant): with AI off
+    // the input pill draws nothing at all (web / iOS parity).
+    val settings by vm.settings.collectAsStateWithLifecycle()
+    val assistantOn = BuildConfig.ASSISTANT_ENABLED && settings.assistantEnabled
     // Sharing (M2/M3): tasks OTHERS shared with me, badges on MY outgoing shares, and
     // the taskId→assignee map for tasks I assigned away (they leave the active list).
     val sharedWithMe by vm.sharedWithMe.collectAsStateWithLifecycle()
@@ -250,9 +253,10 @@ fun TodayScreen(
         }
         Column(Modifier.padding(horizontal = 18.dp)) {
             SectionLabel(dateEyebrow(now), color = c.primaryDeep)
-            // Greet by first name — display name from the same source Settings → Account
-            // reads (reactive, so it fills in once auth hydrates); "Unstuck." when unset.
-            Text("${greeting(now)}\n${greetingName(displayName)}.", style = UFont.serifItalic(28), color = c.ink, modifier = Modifier.padding(top = 6.dp, bottom = 6.dp))
+            // Greet by first name on ONE line ("Good evening Maya.") — display name
+            // from the same source Settings → Account reads (reactive, so it fills
+            // in once auth hydrates); "Unstuck." when unset (iOS GreetingName.line).
+            GreetingLine(greetingLine(now, displayName), modifier = Modifier.padding(top = 6.dp, bottom = 6.dp))
             Row(
                 Modifier.padding(top = 2.dp, bottom = 4.dp).clip(RoundedCornerShape(999.dp)).background(c.bg2).clickable(onClick = onInsights).padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -262,11 +266,15 @@ fun TodayScreen(
                 Text(if (weekMin >= 60) "${weekMin / 60}h${if (weekMin % 60 != 0) " ${weekMin % 60}m" else ""} focused" else "${weekMin}m focused", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
                 Text("→", style = UFont.sans(12), color = c.ink3)
             }
+            // The way into the assistant + Talk: ONE input pill directly under the
+            // week pill (it replaced the gateway card — brief / moment / chips /
+            // "Personalise your assistant" left the home, 2026-09-17).
+            if (assistantOn) AssistantInputPill(vm, onTalk = { voiceOpen = true }, modifier = Modifier.padding(top = 8.dp, bottom = 6.dp))
         }
         // ── Scrolling content: the Start-Next banner first, then the filter pills
         //    (which stick to the top as you scroll), then the list. ──────────────────
-        // tourAnchor: the guided tour's last-resort Today target (empty account
-        // → no hero, no backlog pointer — ring the list area instead).
+        // tourAnchor: the guided tour's Today fallback target (no hero — ring the
+        // list area instead).
         LazyColumn(Modifier.fillMaxWidth().weight(1f).tourAnchor(TourAnchorIds.TODAY_LIST)) {
             if (!notifsEnabled) {
                 item {
@@ -290,19 +298,6 @@ fun TodayScreen(
                         Text("→", style = UFont.sans(14), color = c.amberInk)
                     }
                 }
-            }
-            // The AI gateway — brief + one moment + composer — sits between the
-            // greeting and the recap/hero (additive; the classic Today continues
-            // underneath). It REPLACES the old quiet-nudge card outright: moments
-            // subsume slip radar / habit gaps, so `vm.nudges` / `computeNudges`
-            // now have no reader (kept for the moment; delete with A3's sweep).
-            // With the AI kill-switch off the card draws nothing at all.
-            item(key = "gateway") {
-                GatewayCard(
-                    vm, onTalk = { voiceOpen = true },
-                    interviewPending = interviewPending, onPersonalise = onPersonalise,
-                    modifier = Modifier.padding(horizontal = 18.dp).padding(top = 10.dp, bottom = 4.dp),
-                )
             }
             // Expire the "just now" recap after 6h (web parity) using the existing now ticker.
             recap?.takeIf { now - it.at < 6L * 3600_000 }?.let { r ->
@@ -331,12 +326,12 @@ fun TodayScreen(
             if (empty) {
                 item { EmptyHero(onAdd = onSearch) }
             } else {
+                // Nothing scheduled today but a Backlog exists: no card here — the
+                // list below (and its Backlog pill) already say so. The "Nothing
+                // scheduled today / Pick something to start" pointer is gone
+                // (2026-09-17); the tour's today/finish steps fall back to the list.
                 if (startNext != null) {
                     item { StartNextHero(startNext, onStart = { onStartFocus(startNext) }, onPickAnother = onSearch) }
-                } else if (backlogAll.isNotEmpty()) {
-                    // Nothing scheduled today — point to the Backlog (don't pull a backlog
-                    // task into the hero). Tapping flips the list below to the Backlog.
-                    item { BacklogPointerHero(count = backlogAll.size, onOpenBacklog = { backlogActive = true; areaFilter = null }) }
                 }
                 // Filter pills BELOW the banner; they stick to the top of the list on scroll.
                 stickyHeader {
@@ -396,6 +391,21 @@ fun TodayScreen(
     }
 }
 
+/** The ONE-line greeting ("Good evening Maya."): clamped to a line; a long name
+ *  scales the type down (to 70%) before it ellipsises — iOS lineLimit(1) +
+ *  minimumScaleFactor(0.7). */
+@Composable
+private fun GreetingLine(text: String, modifier: Modifier = Modifier) {
+    val c = UTheme.colors
+    val base = UFont.serifItalic(28)
+    var fontSize by remember(text) { mutableStateOf(base.fontSize) }
+    Text(
+        text, style = base.copy(fontSize = fontSize), color = c.ink, maxLines = 1, softWrap = false,
+        overflow = TextOverflow.Ellipsis, modifier = modifier,
+        onTextLayout = { r -> if (r.hasVisualOverflow && fontSize.value > 28f * 0.7f) fontSize = (fontSize.value * 0.92f).sp },
+    )
+}
+
 /** The Start-Next / empty hero gradient — light lavender→pink in light mode,
  *  a deep indigo→plum in dark mode so the (light) hero text stays legible. */
 private fun heroBrush(c: UnstuckColors): Brush =
@@ -429,26 +439,6 @@ private fun StartNextHero(task: TaskItem, onStart: () -> Unit, onPickAnother: ()
                     UButton("Focus", kind = ButtonKind.CORAL, fill = false, leadingIcon = Icons.Filled.PlayArrow, modifier = Modifier.tourAnchor(TourAnchorIds.FOCUS_BEGIN), onClick = onStart)
                     Text("Pick another", style = UFont.sans(13, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(onClick = onPickAnother).padding(horizontal = 10.dp, vertical = 8.dp))
                 }
-            }
-        }
-    }
-}
-
-/** Nothing is scheduled today, but the backlog isn't empty — point the user there
- *  instead of pulling a backlog task into the hero. Tapping opens the Backlog list. */
-@Composable
-private fun BacklogPointerHero(count: Int, onOpenBacklog: () -> Unit) {
-    val c = UTheme.colors
-    Column(Modifier.padding(horizontal = 18.dp).padding(top = 20.dp)) {
-        Column(
-            Modifier.fillMaxWidth().tourAnchor(TourAnchorIds.BACKLOG_POINTER).clip(RoundedCornerShape(24.dp)).background(heroBrush(c))
-                .clickable(onClick = onOpenBacklog).padding(18.dp),
-        ) {
-            SectionLabel("Nothing scheduled today", color = c.primaryDeep)
-            Text("Pick something to start.", style = UFont.sans(21, FontWeight.Bold), color = c.ink, modifier = Modifier.padding(top = 6.dp))
-            Row(Modifier.padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                Text("$count in your backlog", style = UFont.sans(13, FontWeight.SemiBold), color = c.primaryDeep)
-                Text("→", style = UFont.sans(13, FontWeight.SemiBold), color = c.primaryDeep)
             }
         }
     }

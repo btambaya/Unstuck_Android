@@ -1,13 +1,30 @@
 package tech.csalliance.unstuck.ui
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Test
+import tech.csalliance.unstuck.ui.components.greetingLine
 import tech.csalliance.unstuck.ui.components.greetingName
+import java.time.ZoneId
+import java.time.ZonedDateTime
 
 // The Today-header greeting name: first whitespace-separated word of the display
-// name, EXACTLY "Unstuck" when unset — so the header reads "Good evening,\nMaya."
-// or "Good evening,\nUnstuck." (web parity).
+// name, EXACTLY "Unstuck" when unset — so the ONE-line header reads
+// "Good evening Maya." or "Good evening Unstuck." (iOS GreetingName.line).
 class GreetingNameTest {
+
+    private fun at(hour: Int): Long =
+        ZonedDateTime.of(2026, 9, 17, hour, 5, 0, 0, ZoneId.systemDefault()).toInstant().toEpochMilli()
+
+    @Test fun oneLineGreetingDropsTheCommaAndKeepsTheNameOnTheSameLine() {
+        assertEquals("Good evening Maya.", greetingLine(at(20), "Maya Chen"))
+        assertEquals("Good afternoon Zubair.", greetingLine(at(14), "Zubair Kazaure"))
+        assertEquals("Good morning Maya.", greetingLine(at(8), "  Maya "))
+        assertEquals("Good evening Unstuck.", greetingLine(at(22), null))
+        assertEquals("Good evening Unstuck.", greetingLine(at(22), "   "))
+        assertFalse(greetingLine(at(20), "Maya Chen").contains("\n"))
+        assertFalse(greetingLine(at(20), "Maya Chen").contains(","))
+    }
 
     @Test fun firstNameOfFullName() {
         assertEquals("Maya", greetingName("Maya Chen"))

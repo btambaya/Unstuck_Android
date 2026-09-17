@@ -4,14 +4,15 @@ import tech.csalliance.unstuck.core.time.Time
 
 // The cross-device "already onboarded" flag for the get-to-know-you interview
 // and the pure gates around it. Port of lib/assistant/interview-flag.ts (web)
-// + the static rules of iOS InterviewMachine / GatewayInterviewFlag /
-// InterviewAutoOpenGate. "Done" used to live only in one device's local
+// + the static rules of iOS InterviewMachine / GatewayInterviewFlag. (The
+// one-shot auto-open gate went with the Today card, 2026-09-17: the interview
+// is asked inside the assistant thread / by the voice primer instead.) "Done" used to live only in one device's local
 // storage, so a tester who finished on the web was asked again on the phone —
 // and any device that hydrated too few synced facts re-asked (prod tester,
 // 2026-09-05). The server column `user_preferences.assistant_interview_done_at`
 // (migration 052) is the account-wide truth: written when the interview
 // finishes on ANY platform, read on every hydrate to pin the local flag BEFORE
-// the card may auto-open.
+// the assistant may ask.
 
 object InterviewFlag {
     /** The server column (migration 052). */
@@ -62,22 +63,4 @@ object InterviewFlag {
         if (serverDone) State(done = true, open = false) else State(done, open)
 
     data class State(val done: Boolean, val open: Boolean)
-}
-
-/** When the card may open the interview BY ITSELF: exactly once, and only
- *  after BOTH the local facts have been read AND the server hydrate has
- *  completed (success or failure/offline). Deciding on the first local
- *  emission flashed the interview open on a fresh install whose facts live on
- *  the web, then slammed it shut when the hydrate landed. Pure and tested. */
-class InterviewAutoOpenGate {
-    var decided: Boolean = false
-        private set
-
-    /** Feed every change (facts emission, hydrate flag flip). Returns true
-     *  exactly once — the moment the panel should open. */
-    fun evaluate(hydrated: Boolean, factsLoaded: Boolean, factCount: Int, done: Boolean, hasResumeStep: Boolean = false): Boolean {
-        if (decided || !hydrated || !factsLoaded) return false
-        decided = true
-        return InterviewFlag.shouldAutoOpen(factCount, done, hasResumeStep)
-    }
 }

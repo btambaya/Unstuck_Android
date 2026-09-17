@@ -178,6 +178,32 @@ val SNOOZE_CALL_SPEC: ToolSpec = ToolSpec(
     listOf(ToolProp("minutes", "integer", "Minutes until the call-back (1–180).", default = kotlinx.serialization.json.JsonPrimitive(SnoozeCallTool.DEFAULT_MINUTES))),
 )
 
+// ── finish_interview — the TALK-LEVEL tool (voice-only, 2026-09-17) ──
+// The opening primer runs the get-to-know-you intro aloud while the account's
+// interview is pending; this closes it (iOS AssistantContext VOICE_TOOLS
+// `finish_interview`, executor → markInterviewDone). Like snooze_call it is
+// NOT one of the 57 contract tools (ContractDiffTest pins the registry to
+// exactly those) and never reaches the text harness — the in-thread interview
+// closes itself through its chips. AppViewModel.runVoiceTool answers it before
+// the executor.
+object FinishInterviewTool {
+    const val NAME = "finish_interview"
+    const val DESCRIPTION = "Call once you have been through EVERY get-to-know-you question from the opening (answered or skipped) — marks the intro done so it is never asked again. Only during that intro."
+    /** The tool result the model reads. */
+    const val OK = "ok: intro finished — it won't be asked again"
+}
+
+/** `finish_interview` — no arguments. */
+val FINISH_INTERVIEW_SPEC: ToolSpec = ToolSpec(FinishInterviewTool.NAME, FinishInterviewTool.DESCRIPTION, emptyList(), emptyList())
+
+/** The registry for a plain TALK session: the 57 contract tools plus the
+ *  talk-level finish_interview (58 — iOS VOICE_TOOLS). Calls get their own
+ *  filtered list ([callVoiceToolSpecs]); the text path takes the server's. */
+val TALK_VOICE_TOOL_SPECS: List<ToolSpec> = ASSISTANT_TOOL_SPECS + FINISH_INTERVIEW_SPEC
+
+/** Tool schemas for a TALK session (realtime function shape). */
+fun talkVoiceToolsJson(): JsonArray = voiceToolsJson(TALK_VOICE_TOOL_SPECS)
+
 /** The registry filtered to the tools live during a call — `callTools` is
  *  core `CallScript.callTools()` (iOS CallScript.callTools), in that order —
  *  plus the call-level snooze_call when the list names it. Unknown names are

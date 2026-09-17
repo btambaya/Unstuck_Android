@@ -4,7 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
-import tech.csalliance.unstuck.core.logic.InterviewAutoOpenGate
 import tech.csalliance.unstuck.core.logic.InterviewFlag
 
 // The cross-device interview flag + the auto-open / auto-done gates. Ported
@@ -69,32 +68,16 @@ class InterviewFlagTest {
         assertEquals(InterviewFlag.State(done = true, open = false), InterviewFlag.apply(serverDone = false, done = true, open = false))
     }
 
-    // ── the auto-open gate (waits for the server hydrate) ──────────────────
+    // ── the server flag vs the ≥1-fact stand-down ──────────────────────────
 
-    @Test fun `the gate decides once, and only after both the facts and the hydrate have landed`() {
-        val gate = InterviewAutoOpenGate()
-        assertFalse("facts not loaded yet", gate.evaluate(hydrated = true, factsLoaded = false, factCount = 0, done = false))
-        assertFalse("hydrate not landed yet", gate.evaluate(hydrated = false, factsLoaded = true, factCount = 0, done = false))
-        assertFalse(gate.decided)
-        assertTrue(gate.evaluate(hydrated = true, factsLoaded = true, factCount = 0, done = false))
-        assertTrue(gate.decided)
-        assertFalse("exactly once", gate.evaluate(hydrated = true, factsLoaded = true, factCount = 0, done = false))
-    }
-
-    @Test fun `server says done - the gate never opens`() {
-        // What the hydrate hook does when the account row carries
-        // assistant_interview_done_at — BEFORE profileFactsHydrated flips.
+    @Test fun `server says done - nothing to auto-complete`() {
         val done = InterviewFlag.interviewDoneFromServer("2026-09-05T10:00:00+00:00")
-        val gate = InterviewAutoOpenGate()
-        assertFalse(gate.evaluate(hydrated = true, factsLoaded = true, factCount = 0, done = done))
-        assertTrue(gate.decided)
         assertFalse(InterviewFlag.shouldAutoOpen(factCount = 0, done = done))
         assertFalse("already done — nothing to auto-complete", InterviewFlag.shouldAutoComplete(5, isOpen = false, done = done))
     }
 
-    @Test fun `a parked step keeps the gate shut and a parked greeting still stands down on a chat fact`() {
-        val gate = InterviewAutoOpenGate()
-        assertFalse(gate.evaluate(hydrated = true, factsLoaded = true, factCount = 0, done = false, hasResumeStep = true))
+    @Test fun `a parked greeting still stands down on a chat fact`() {
         assertTrue(InterviewFlag.shouldAutoComplete(factCount = 1, isOpen = false, done = false, parkedStep = 0))
+        assertFalse("mid-way parked: that fact may be its own answer", InterviewFlag.shouldAutoComplete(factCount = 1, isOpen = false, done = false, parkedStep = 2))
     }
 }

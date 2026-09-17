@@ -108,7 +108,7 @@ class TourLogicTest {
         for (id in listOf("today", "finish")) {
             val s = ESSENTIAL_STEPS.first { it.id == id }
             assertEquals(TourAnchorIds.START_NEXT, s.target)
-            assertEquals(listOf(TourAnchorIds.BACKLOG_POINTER, TourAnchorIds.TODAY_LIST), s.fallbacks)
+            assertEquals("no backlog pointer any more — the list is the fallback", listOf(TourAnchorIds.TODAY_LIST), s.fallbacks)
         }
     }
 

@@ -141,6 +141,8 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
     override suspend fun saveProfileFact(category: String?, fact: String, whenIso: String?): ProfileFact =
         vm.profileFactsService.store(ProfileFactsLogic.category(category), fact, ProfileFactSource.CHAT, whenIso)
     override suspend fun removeProfileFact(id: String): Boolean = vm.profileFactsService.remove(id)
+    /** The account-wide flag (pinned from the server on every pull). */
+    override fun interviewPending(): Boolean = !vm.interviewDone.value
 
     // ── captures ──
     override suspend fun getCaptures(): List<Capture> = store.snapshot(Tables.CAPTURES, Capture.serializer())

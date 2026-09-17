@@ -126,6 +126,10 @@ interface AssistantApi {
 
     // ── profile memory ──
     suspend fun getProfileFacts(): List<ProfileFact>
+    /** The get-to-know-you interview is still PENDING on this account (not
+     *  finished or skipped — the same flag the in-thread interview keeps).
+     *  Gates the voice opening primer's intro; `finish_interview` clears it. */
+    fun interviewPending(): Boolean = false
     /** Throws `ProfileFactSaveError` — the executor tells a text rejection
      *  (Empty / InstructionLike) from a store failure (StoreFailed). */
     suspend fun saveProfileFact(category: String?, fact: String, whenIso: String?): ProfileFact

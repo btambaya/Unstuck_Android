@@ -76,7 +76,6 @@ import tech.csalliance.unstuck.ui.assistant.GatewayMemo
 import tech.csalliance.unstuck.ui.assistant.GatewayWrites
 import tech.csalliance.unstuck.ui.assistant.canonicalStruggles
 import tech.csalliance.unstuck.ui.assistant.deriveGateway
-import tech.csalliance.unstuck.core.logic.InterviewAutoOpenGate
 import tech.csalliance.unstuck.core.logic.Moment
 import tech.csalliance.unstuck.core.logic.MomentAction
 import tech.csalliance.unstuck.core.logic.MomentRun
@@ -95,7 +94,8 @@ import tech.csalliance.unstuck.ui.assistant.buildAssistantContext
 import tech.csalliance.unstuck.ui.assistant.buildVoiceInstructions
 import tech.csalliance.unstuck.ui.assistant.buildVoiceOpening
 import tech.csalliance.unstuck.ui.assistant.runAssistantTool
-import tech.csalliance.unstuck.ui.assistant.voiceToolsJson
+import tech.csalliance.unstuck.ui.assistant.talkVoiceToolsJson
+import tech.csalliance.unstuck.ui.assistant.FinishInterviewTool
 import tech.csalliance.unstuck.ui.assistant.callVoiceToolsJson
 import tech.csalliance.unstuck.ui.assistant.CallToolLogic
 import tech.csalliance.unstuck.calls.CallSettingsStore
@@ -261,11 +261,6 @@ class AppViewModel(
     /** The account's onboarding struggles, canonical ("Starting", …) — the
      *  moments engine + the assistant context read these. */
     val struggles: StateFlow<List<String>> = _struggles.asStateFlow()
-    /** The gateway interview's one-shot auto-open decision (per account; reset
-     *  on (re)sign-in and the sign-out scrub). Declared up here — BEFORE the
-     *  init block that reloads the per-account state — so property
-     *  initialisation order can't hand reloadAssistantUserState a null. */
-    private var interviewAutoOpenGate = InterviewAutoOpenGate()
     private val _momentDone = MutableStateFlow<String?>(null)
     /** The ✓ confirmation after a moment action — a moment, not a mute button:
      *  the card clears it after ~8 s so the NEXT undismissed moment can surface. */
@@ -2647,9 +2642,6 @@ class AppViewModel(
      *  after a scrub). No account → defaults. */
     internal fun reloadAssistantUserState() {
         val uid = currentUid()
-        // A (re)sign-in is a fresh gateway: the one-shot auto-open decision is
-        // taken again for THIS account once its hydrate lands.
-        interviewAutoOpenGate = InterviewAutoOpenGate()
         if (uid == null) {
             _rituals.value = RitualPrefs.DEFAULTS
             _dismissedMoments.value = emptyList()
@@ -2882,32 +2874,35 @@ class AppViewModel(
         for (t in w.tasks) api.upsertTask(t)
     }
 
-    /** "Open the Assistant sheet" requests from the gateway (the composer, a
-     *  chip, a chat moment) — MainScaffold presents the sheet; the message
-     *  itself is already on its way through [sendAssistant]'s queue. */
-    private val _assistantOpenRequests = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
-    val assistantOpenRequests: SharedFlow<Unit> = _assistantOpenRequests.asSharedFlow()
+    /** "Open the Assistant sheet" requests (Today's input pill, a chat moment)
+     *  — MainScaffold presents the sheet. [handoff] = a message is already on
+     *  its way through [sendAssistant]'s queue (open onto the thread);
+     *  [focusComposer] = put the keyboard in the sheet's composer. */
+    data class AssistantOpenRequest(val handoff: Boolean, val focusComposer: Boolean)
+    private val _assistantOpenRequests = MutableSharedFlow<AssistantOpenRequest>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+    val assistantOpenRequests: SharedFlow<AssistantOpenRequest> = _assistantOpenRequests.asSharedFlow()
 
-    /** The gateway hand-off: the sheet owns the thread, so open it and send the
-     *  text through the same queue a typed message takes (never dropped). */
+    /** The hand-off: the sheet owns the thread, so open it and send the text
+     *  through the same queue a typed message takes (never dropped). */
     fun openAssistantWith(text: String) {
         val t = text.trim()
         if (t.isEmpty()) return
-        _assistantOpenRequests.tryEmit(Unit)
+        _assistantOpenRequests.tryEmit(AssistantOpenRequest(handoff = true, focusComposer = false))
         sendAssistant(t)
     }
 
-    // interview auto-open — exactly once per account, and only after BOTH the
-    // local facts have been read AND the server hydrate has applied the
-    // account's interview flag (plan F9: a tester onboarded on the web must
-    // never be greeted as a stranger here).
-    /** Feed on every change (facts emission, hydrate flip). True exactly once —
-     *  the moment the interview should open by itself. */
-    fun evaluateInterviewAutoOpen(factsLoaded: Boolean, factCount: Int): Boolean =
-        interviewAutoOpenGate.evaluate(
-            hydrated = _profileFactsHydrated.value, factsLoaded = factsLoaded, factCount = factCount,
-            done = _interviewDone.value, hasResumeStep = hasInterviewResumeStep(),
-        )
+    /** Today's input pill: open the sheet with focus in ITS composer (nothing
+     *  is typed on Today — iOS AppModel.openAssistant(focusComposer:)). */
+    fun openAssistant(focusComposer: Boolean = true) {
+        _assistantOpenRequests.tryEmit(AssistantOpenRequest(handoff = false, focusComposer = focusComposer))
+    }
+
+    /** The in-thread interview has a question up (its chip row is on screen).
+     *  The ≥1-fact stand-down must never fire while it is — its own answers
+     *  grow the count (the old sheet's `isOpen`). Set by the assistant sheet. */
+    private val _interviewThreadAsking = MutableStateFlow(false)
+    val interviewThreadAsking: StateFlow<Boolean> = _interviewThreadAsking.asStateFlow()
+    fun setInterviewThreadAsking(asking: Boolean) { _interviewThreadAsking.value = asking }
 
     /** The pure-ish half of [reconcileAssistantPrefs] (tested directly): [server] =
      *  the row as read (null = no row: never onboarded anywhere). */
@@ -2985,7 +2980,7 @@ class AppViewModel(
         _struggles.value = emptyList()
         _profileFactsHydrated.value = false
         _momentDone.value = null
-        interviewAutoOpenGate = InterviewAutoOpenGate()
+        _interviewThreadAsking.value = false
         // The voice session's un-landed receipts point at the PREVIOUS account's
         // rows, and their Undo would write them. `signedOut` abandons a live call
         // WITHOUT calling [endVoiceSession] (nothing may be reported under a dead
@@ -3060,11 +3055,23 @@ class AppViewModel(
     )
 
     /** Inject a LOCAL display-only assistant turn (the daily check-in, a voice
-     *  session's receipts). Never enters the model window; persists like any
-     *  other display turn — receipts included, so their Undo keeps working. */
-    fun appendLocalAssistant(content: String, receipts: List<Receipt>? = null) {
+     *  session's receipts, an interview question). Never enters the model
+     *  window; persists like any other display turn — receipts included, so
+     *  their Undo keeps working. @return the turn's id (the interview draws
+     *  its chip row under the question it is asking), null for a blank. */
+    fun appendLocalAssistant(content: String, receipts: List<Receipt>? = null): String? {
+        if (content.isBlank()) return null
+        val t = turn("assistant", content = content, local = true).copy(receipts = receipts?.takeIf { it.isNotEmpty() })
+        assistantHistory.add(t)
+        persistAssistant()
+        return t.id
+    }
+
+    /** Inject a LOCAL user bubble — the interview echoing a tapped chip so the
+     *  thread reads as a conversation. Never enters the model window. */
+    fun appendLocalUser(content: String) {
         if (content.isBlank()) return
-        assistantHistory.add(turn("assistant", content = content, local = true).copy(receipts = receipts?.takeIf { it.isNotEmpty() }))
+        assistantHistory.add(turn("user", content = content, local = true))
         persistAssistant()
     }
 
@@ -3431,6 +3438,13 @@ class AppViewModel(
     }
 
     suspend fun runVoiceTool(name: String, args: JsonObject): String {
+        // The talk-level finish_interview (voice-only, 2026-09-17): the opening
+        // primer's intro is over — mark the account done (local flag + resume
+        // step dropped + the server), exactly as the in-thread picker does.
+        if (name == FinishInterviewTool.NAME) {
+            markInterviewDone()
+            return FinishInterviewTool.OK
+        }
         val parsed = ToolArgs(args)
         val result = runAssistantTool(name, parsed, assistantApi, voiceScratch)
         // Derived exactly like the text harness: tool name + args + the executor's
@@ -3466,10 +3480,10 @@ class AppViewModel(
     fun voiceInstructions(): String = kotlinx.coroutines.runBlocking { buildVoiceInstructions(assistantApi) }
     suspend fun voiceInstructionsAsync(): String = buildVoiceInstructions(assistantApi)
 
-    /** Tool schemas for the realtime session — generated from the ONE registry
-     *  the executor runs (VoiceToolSchema.kt), so voice can never advertise a
-     *  tool the executor lacks. */
-    fun voiceTools(): JsonArray = voiceToolsJson()
+    /** Tool schemas for the realtime TALK session — generated from the ONE
+     *  registry the executor runs (VoiceToolSchema.kt) plus the talk-level
+     *  finish_interview, so voice can never advertise a tool the executor lacks. */
+    fun voiceTools(): JsonArray = talkVoiceToolsJson()
 
     /** Tool schemas for a CALL session (CallVoiceService): the same registry
      *  filtered to core `CallScript.callTools()` plus the call-level snooze_call. */

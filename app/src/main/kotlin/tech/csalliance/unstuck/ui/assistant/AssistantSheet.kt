@@ -43,6 +43,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
@@ -54,6 +55,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -95,20 +98,22 @@ import tech.csalliance.unstuck.ui.AppViewModel
  * There is no "new chat" — the conversation continues forever (⋯ still offers a
  * deliberate "Clear conversation"). Feedback moved to Settings → Send feedback.
  */
-/** @param handoff opened by the Today gateway (composer / chip / a chat moment)
- *  with the message ALREADY on its way through [AppViewModel.sendAssistant]'s
- *  queue: the sheet opens onto the thread (the sent bubble + "Thinking…"), not
- *  the suggestion card parked over it. */
+/** @param handoff opened by a hand-off (a chat moment) with the message
+ *  ALREADY on its way through [AppViewModel.sendAssistant]'s queue: the sheet
+ *  opens onto the thread (the sent bubble + "Thinking…"), not the suggestion
+ *  card parked over it.
+ *  @param focusComposer opened from Today's input pill: put the keyboard in
+ *  THIS composer once the sheet has settled (nothing is typed on Today). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AssistantSheet(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit, onDismiss: () -> Unit, handoff: Boolean = false) {
+fun AssistantSheet(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit, onDismiss: () -> Unit, handoff: Boolean = false, focusComposer: Boolean = false) {
     val c = UTheme.colors
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = SheetScrim,
         dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } },
     ) {
-        AssistantChat(vm, onNavigate = { onNavigate(it); onDismiss() }, handoff = handoff)
+        AssistantChat(vm, onNavigate = { onNavigate(it); onDismiss() }, handoff = handoff, focusComposer = focusComposer)
     }
 }
 
@@ -117,10 +122,12 @@ private sealed interface ThreadRow {
     data class Divider(val label: String) : ThreadRow
     data class Bubble(val msg: ChatMessage) : ThreadRow
     data class ReceiptItem(val messageId: String, val index: Int, val receipt: Receipt) : ThreadRow
+    /** The interview's chip row, under the question it is asking. */
+    data object InterviewPrompt : ThreadRow
 }
 
 @Composable
-private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit, handoff: Boolean = false) {
+private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit, handoff: Boolean = false, focusComposer: Boolean = false) {
     val c = UTheme.colors
     val context = LocalContext.current
     val voice = rememberVoiceController()
@@ -147,6 +154,33 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     LaunchedEffect(Unit) { while (true) { kotlinx.coroutines.delay(60_000); nowMs = vm.nowMs() } }
     val ctx = rememberAssistantContext(vm, nowMs)
 
+    // The get-to-know-you interview rides in THIS thread until the account is
+    // done with it (InterviewThreadDriver): it arms on the first send of a
+    // visit (the reply comes first), then asks one question per local turn
+    // with its chips under it. Same machine / facts store / done flag as
+    // before — only the host changed (the Today card is gone, 2026-09-17).
+    val interviewDone by vm.interviewDone.collectAsStateWithLifecycle()
+    val rituals by vm.rituals.collectAsStateWithLifecycle()
+    val interview = remember {
+        InterviewThreadDriver(
+            controller = InterviewFlowController(vm),
+            host = vm,
+            firstName = vm.currentName?.trim()?.split(' ', '\t', '\n')?.firstOrNull { it.isNotBlank() },
+            ready = { vm.profileFactsHydrated.value },
+            factCount = { vm.profileFacts.value.size },
+            post = { text -> vm.appendLocalAssistant(text) ?: "" },
+            echo = { text -> vm.appendLocalUser(text) },
+        )
+    }
+    val interviewState by interview.state.collectAsStateWithLifecycle()
+    // The ≥1-fact stand-down (MainScaffold) must not fire while a question is up.
+    LaunchedEffect(interviewState.phase) { vm.setInterviewThreadAsking(interviewState.phase == InterviewThreadPhase.ASKING) }
+    DisposableEffect(Unit) { onDispose { vm.setInterviewThreadAsking(false) } }
+    // Done from ELSEWHERE (another device, a server pin) while asking: stand down.
+    LaunchedEffect(interviewDone) { if (interviewDone) interview.hostDone() }
+    // The interview asks its question only once the reply (or error) has landed.
+    LaunchedEffect(sending) { if (!sending) interview.turnFinished() }
+
     var input by rememberSaveable { mutableStateOf("") }
     var listening by remember { mutableStateOf(false) }
     var speakReplies by rememberSaveable { mutableStateOf(false) }
@@ -167,13 +201,17 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
 
     // Flatten to rows so day dividers and receipts are first-class list items
     // (a divider must not scroll as part of the bubble above it).
-    val rows = remember(display, nowMs) {
+    val promptTurnId = interviewState.promptTurnId
+    val rows = remember(display, nowMs, promptTurnId) {
         buildList {
             var lastLabel: String? = null
             display.forEach { m ->
                 val label = assistantDayLabel(m.at, nowMs)
                 if (label != null && label != lastLabel) { add(ThreadRow.Divider(label)); lastLabel = label }
                 add(ThreadRow.Bubble(m))
+                // The interview's chips, under the question it is asking (older
+                // prompts — a relaunch, a re-ask — render as plain text).
+                if (promptTurnId != null && m.id == promptTurnId) add(ThreadRow.InterviewPrompt)
                 m.receipts?.forEachIndexed { i, r -> add(ThreadRow.ReceiptItem(m.id.orEmpty(), i, r)) }
             }
         }
@@ -217,6 +255,15 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     LaunchedEffect(Unit) { vm.assistantReplies.collect { if (speakReplies) voice.speak(it) } }
 
     val keyboard = LocalSoftwareKeyboardController.current
+    // Today's input pill asked for the keyboard: honour it once the sheet has
+    // settled (the field only exists after the first frame).
+    val composerFocus = remember { FocusRequester() }
+    LaunchedEffect(focusComposer) {
+        if (!focusComposer) return@LaunchedEffect
+        kotlinx.coroutines.delay(450)
+        runCatching { composerFocus.requestFocus() }
+        keyboard?.show()
+    }
 
     fun ask(text: String) {
         val t = text.trim()
@@ -230,6 +277,7 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
         // Tap the field again to keep typing.
         keyboard?.hide()
         vm.sendAssistant(t)
+        interview.userSent()
     }
 
     fun startMic() {
@@ -333,6 +381,7 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                                 is ThreadRow.Divider -> "div:$i:${r.label}"
                                 is ThreadRow.Bubble -> "msg:${r.msg.id ?: i}"
                                 is ThreadRow.ReceiptItem -> "rcpt:${r.messageId}:${r.index}"
+                                ThreadRow.InterviewPrompt -> "interview:$promptTurnId"
                             }
                         },
                     ) { i ->
@@ -343,6 +392,11 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                                 r,
                                 inFlight = receiptUndoKey(r.messageId, r.index) in undosInFlight,
                             ) { vm.undoAssistantReceipt(r.messageId, r.index) }
+                            ThreadRow.InterviewPrompt -> InterviewPromptRow(
+                                interview,
+                                ritualIsOn = { rituals[it] },
+                                setRitual = { key, on -> vm.setRitual(key, on) },
+                            )
                         }
                     }
                     if (sending) item(key = "thinking") { ThinkingRow() }
@@ -418,7 +472,7 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                     textStyle = UFont.sans(15).copy(color = c.ink), cursorBrush = SolidColor(c.ink),
                     keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
                     keyboardActions = KeyboardActions(onSend = { ask(input) }),
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().focusRequester(composerFocus),
                     decorationBox = { inner ->
                         if (input.isEmpty()) {
                             Text(
@@ -486,10 +540,12 @@ private fun MessageBubble(m: ChatMessage) {
                 .then(if (fromUser) Modifier else Modifier.border(1.dp, c.line, RoundedCornerShape(16.dp)))
                 .padding(horizontal = 14.dp, vertical = 10.dp),
         ) {
-            // A locally-injected turn (the daily check-in) is marked ✦ so it
-            // never reads as something the model said.
+            // A locally-injected assistant turn (the daily check-in, an interview
+            // question) is marked ✦ so it never reads as something the model
+            // said; a local USER bubble (the interview echoing a tapped chip)
+            // reads as the user's own words.
             Text(
-                (if (m.local) "✦ " else "") + m.content.orEmpty(),
+                (if (m.local && !fromUser) "✦ " else "") + m.content.orEmpty(),
                 style = UFont.sans(15), color = if (fromUser) Color.White else c.ink,
             )
         }

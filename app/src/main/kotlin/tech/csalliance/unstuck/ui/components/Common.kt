@@ -153,9 +153,15 @@ fun dateEyebrow(nowMs: Long): String {
 
 /** First name for the Today greeting: the first whitespace-separated word of the
  *  user's display name ("Maya Chen" → "Maya"); EXACTLY "Unstuck" when unset, so the
- *  header reads "Good evening,\nUnstuck." — mirroring the web greeting fallback. */
+ *  header reads "Good evening Unstuck." — mirroring the web greeting fallback. */
 fun greetingName(displayName: String?): String =
     displayName?.trim()?.split(' ', '\t', '\n')?.firstOrNull { it.isNotBlank() } ?: "Unstuck"
+
+/** The ONE-line Today greeting (iOS GreetingName.line): "Good evening Maya." —
+ *  the greeting's comma dropped, the first name (or "Unstuck") on the same line.
+ *  It used to stack the name on a second line (2026-09-17). */
+fun greetingLine(nowMs: Long, displayName: String?): String =
+    "${greeting(nowMs).trimEnd(',')} ${greetingName(displayName)}."
 
 /** "Good morning," / "Good afternoon," / "Good evening," by local hour. */
 fun greeting(nowMs: Long): String {

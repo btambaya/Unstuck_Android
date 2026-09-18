@@ -82,8 +82,15 @@ class AssistantMemoryHooksTest {
         // "Main looper has queued unexecuted runnables" note, and one test's work
         // left to fire inside whichever test idles the looper next.
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        // ...and FINISH this test's ViewModels before Main is handed back: cancelling
+        // one only asks, and a child still unwinding on a real Room thread resumes on
+        // Dispatchers.Main, which by then belongs to the next test. See ViewModelDrain.
+        drain.drain()
         Dispatchers.resetMain()
     }
+
+    /** Finishes every ViewModel this test built — see [ViewModelDrain]. */
+    private val drain = ViewModelDrain(dispatcher.scheduler)
 
     /**
      * Build the SUT — and make sure it DIES WITH THE TEST. `onCleared()` never runs
@@ -99,6 +106,7 @@ class AssistantMemoryHooksTest {
     private fun kotlinx.coroutines.test.TestScope.vm() =
         AppViewModel(graph = graph, writeOverride = write, currentUidProvider = { uid }, currentNameProvider = { "Ada" })
             .also { created ->
+                drain.track(created)
                 backgroundScope.coroutineContext.job.invokeOnCompletion {
                     runCatching { created.viewModelScope.cancel() }
                 }

@@ -1256,6 +1256,26 @@ class AppViewModel(
      *  Internal (not private) purely as a test seam — production calls arrive only
      *  via the session-lifetime controls collector. */
     internal suspend fun applyRemoteControl(ctl: CoFocusControl) {
+        // Sampled HERE, before the first suspension: the rejoin window as it stood
+        // when the control ARRIVED. It used to be read further down, after the
+        // live-session load below — and the grace timer that closes the window
+        // ([armDivergenceGrace]) runs on this same scope, so it could expire DURING
+        // that read and pull the gate out from under a control that had already
+        // landed inside the window. The reply then lost to plain LWW, both clocks
+        // kept their own time, and the session forked — the exact outcome rejoin
+        // v2 exists to prevent. A partner answering our hello IS the evidence the
+        // grace is waiting for; a timer that fires mid-read must not discard it.
+        //
+        // In production that window is one Room read inside five seconds. In the
+        // unit suite, where `delay` is virtual and skips the moment the scheduler
+        // idles — which is exactly while this read is parked on Room's real
+        // executor — the two raced on thread scheduling and the grace won about one
+        // run in five: rejoinPending_unflagged_incomingAheadAdopts_despiteLosingPlainLww
+        // then waited for an adopt that never came and died on runTest's 60s
+        // timeout, which is what made the suite look order-dependent. Traced
+        // live: "applyRemoteControl entry pending=true" → "grace expiry CLOSED the
+        // pending window" → "afterRead pending=false".
+        val rejoinPending = coFocusRejoinPending
         val cur = store.getLiveSession() ?: return
         val id = cur.id
         val start = cur.sessionStart
@@ -1275,9 +1295,9 @@ class AppViewModel(
         val msg = ctl.state
         val name = ctl.name?.let { coFocusFirstName(it) } ?: "Your partner"
         // The first SAME-session exchange closes the rejoin-pending window (rejoin
-        // v2 rule 2) — captured first so THIS control still reconciles through the
-        // widened gate below. Suppression lifts unless the diverged flag holds it.
-        val rejoinPending = coFocusRejoinPending
+        // v2 rule 2) — the flag was captured at entry (above) so THIS control still
+        // reconciles through the widened gate below. Suppression lifts unless the
+        // diverged flag holds it.
         if (rejoinPending && msg.sessionId == id) {
             coFocusRejoinPending = false
             if (cur.divergedOffline != true) coFocusSession?.setSuppressAnnounce(false)
@@ -1888,6 +1908,30 @@ class AppViewModel(
     // --- collections ---
 
     fun upsertCollection(c: ItemCollection) = launchWrite { write?.upsertCollection(c) }
+
+    /**
+     * Suspend until [id] is READABLE in [collections] — i.e. the local write has
+     * landed in Room AND the read flow has published it.
+     *
+     * Anything that NAVIGATES to a just-created collection needs this.
+     * [upsertCollection] is fire-and-forget (`launchWrite` → Room → a `flowOn`
+     * Room flow → the StateFlow), so the row is NOT resolvable in the frame the
+     * caller gets the id back, and CollectionDetailScreen treats an id it cannot
+     * resolve as deleted — it calls `onBack()`. Pushing straight after creating
+     * therefore bounced the user back to the grid whenever the write lost the
+     * race, which an emulator run reproduced readily — a majority of repeated
+     * create-and-open attempts bounced. With the wait, none did.
+     *
+     * Deliberately UNBOUNDED. A timeout here would only convert a slow device
+     * into a silently different outcome (create, then no navigation, for no
+     * reason the user can see); the caller bounds it instead by running this in
+     * its own composition scope, so the wait dies with the screen that wants the
+     * navigation. If the write never lands there is nothing to navigate to
+     * anyway — the user keeps the surface they are on.
+     */
+    suspend fun awaitCollectionReadable(id: String) {
+        collections.first { list -> list.any { it.id == id } }
+    }
     fun deleteCollection(id: String) = launchWrite { deleteCollectionNow(id) }
     /** [deleteCollection], committed before returning (the assistant executor
      *  reads the lists back in the same round). */

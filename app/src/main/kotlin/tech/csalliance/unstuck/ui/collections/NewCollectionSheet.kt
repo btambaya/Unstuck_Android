@@ -22,7 +22,7 @@ import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -50,8 +50,11 @@ fun NewCollectionSheet(vm: AppViewModel, onCreated: (String) -> Unit, onDismiss:
     val c = UTheme.colors
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val collections by vm.collections.collectAsStateWithLifecycle()
-    var name by remember { mutableStateOf("") }
-    var color by remember { mutableStateOf("indigo") }
+    // rememberSaveable (not remember), matching NewTaskSheet: the sheet's OPEN
+    // flag is now saveable in MainScaffold, so a rotation mid-typing re-composes
+    // the sheet — with plain remember it would come back blank and eat the name.
+    var name by rememberSaveable { mutableStateOf("") }
+    var color by rememberSaveable { mutableStateOf("indigo") }
     val focusManager = LocalFocusManager.current
 
     // Shared by the Create button AND the name field's IME Done.

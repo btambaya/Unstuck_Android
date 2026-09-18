@@ -25,6 +25,12 @@ class AppGraph(
     // so the whole graph reads + writes the same isolated store.
     configured: Boolean = BuildConfig.SUPABASE_ANON_KEY.isNotEmpty(),
     storeOverride: LocalStore? = null,
+    // With `configured = false` there is no SyncCoordinator, so there is no
+    // signed-in uid to attribute the PER-ACCOUNT onboarded flag to — which makes
+    // the flag unsettable and pins an offline test to the onboarding screen. This
+    // supplies the account id instead. Null in production → the auth session's own
+    // uid, exactly as before.
+    private val uidOverride: (() -> String?)? = null,
 ) {
     val configured: Boolean = configured
     val appContext: Context = context.applicationContext
@@ -74,9 +80,10 @@ class AppGraph(
      *  Reconciled from the SERVER after every pull (AppViewModel.reconcileOnboarded)
      *  so a returning account on a fresh install isn't re-onboarded either. See
      *  [OnboardedFlag] for the legacy-key migration rule. */
+    private val onboardedUid: String? get() = uidOverride?.invoke() ?: coordinator?.auth?.currentUserId
     var onboarded: Boolean
-        get() = OnboardedFlag.get(appPrefs, coordinator?.auth?.currentUserId, syncPrefs.getString("unstuck.prevUserId", null))
-        set(value) = OnboardedFlag.set(appPrefs, coordinator?.auth?.currentUserId, value)
+        get() = OnboardedFlag.get(appPrefs, onboardedUid, syncPrefs.getString("unstuck.prevUserId", null))
+        set(value) = OnboardedFlag.set(appPrefs, onboardedUid, value)
 
     /** Device-local settings (theme / focus / sound / a11y). */
     val settings = SettingsStore(context.applicationContext)

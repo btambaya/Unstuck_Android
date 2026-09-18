@@ -178,4 +178,20 @@ dependencies {
     testImplementation(libs.androidx.test.core)
     testImplementation(libs.room.runtime)
     testImplementation(libs.room.ktx)
+    // Compose UI tests on the JVM (Robolectric). These compose the REAL
+    // MainScaffold and drive it through the semantics tree, so the shell's
+    // wiring — which sheet the one bottom-bar + actually opens on each tab — is
+    // covered by behaviour rather than by a pure helper the shell is free to
+    // stop calling.
+    //
+    // NOTE: no `ui-test-manifest` here, deliberately. An APPLICATION module's
+    // unit tests run against the app's own packaged manifest, so that AAR only
+    // declares the host ComponentActivity on the variant it is added to —
+    // `debugImplementation` left `:app:testReleaseUnitTest` failing all 14 of
+    // these, and covering release with it would merge a test activity into the
+    // shipping manifest. MainScaffoldFabTest registers the host activity with
+    // Robolectric itself instead (see its `hostActivity` rule): variant-neutral,
+    // and nothing reaches the APK. (:design is a library — it gets its own
+    // unit-test manifest merge, so it keeps the AAR as `testImplementation`.)
+    testImplementation(libs.compose.ui.test.junit4)
 }

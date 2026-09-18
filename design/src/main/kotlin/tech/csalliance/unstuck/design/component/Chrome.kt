@@ -109,6 +109,9 @@ fun BottomNavBar(
     modifier: Modifier = Modifier,
     /** Extra modifier on the FAB itself (e.g. the guided tour's anchor). */
     fabModifier: Modifier = Modifier,
+    /** What the + creates here, for TalkBack. The button's look never changes,
+     *  so its spoken label is the ONLY place its per-tab meaning surfaces. */
+    fabLabel: String = "New",
 ) {
     val c = UTheme.colors
     Box(modifier.fillMaxWidth()) {
@@ -128,7 +131,7 @@ fun BottomNavBar(
         // 0.5px top divider
         Box(Modifier.fillMaxWidth().height(1.dp).background(c.line).align(Alignment.TopCenter))
         // Floating FAB, centered, lifted above the bar.
-        CoralFab(onFab, Modifier.align(Alignment.TopCenter).offset(y = (-28).dp).then(fabModifier))
+        CoralFab(onFab, Modifier.align(Alignment.TopCenter).offset(y = (-28).dp).then(fabModifier), label = fabLabel)
     }
 }
 
@@ -155,14 +158,14 @@ private fun RowScope.NavCell(item: NavSpec, activeKey: String, onSelect: (String
     }
 }
 
-/** 56×56, 16dp rounded-square coral FAB. */
+/** 56×56, 16dp rounded-square coral FAB. [label] is what it creates (TalkBack). */
 @Composable
-fun CoralFab(onClick: () -> Unit, modifier: Modifier = Modifier) {
+fun CoralFab(onClick: () -> Unit, modifier: Modifier = Modifier, label: String = "New") {
     val c = UTheme.colors
     Box(
         modifier.size(56.dp).clip(RoundedCornerShape(16.dp)).background(c.coral).clickable(onClick = onClick),
         contentAlignment = Alignment.Center,
-    ) { Icon(Icons.Filled.Add, contentDescription = "New", tint = Color.White, modifier = Modifier.size(24.dp)) }
+    ) { Icon(Icons.Filled.Add, contentDescription = label, tint = Color.White, modifier = Modifier.size(24.dp)) }
 }
 
 /** 32×4 drag handle for bottom sheets. */

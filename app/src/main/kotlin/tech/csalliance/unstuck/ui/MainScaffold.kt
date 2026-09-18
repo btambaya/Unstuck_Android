@@ -21,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -47,6 +48,7 @@ import androidx.compose.ui.text.font.FontWeight
 import tech.csalliance.unstuck.calls.CallVoiceService
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.BuildConfig
+import kotlinx.coroutines.launch
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleEventEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -61,6 +63,7 @@ import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.calendar.CalendarScreen
 import tech.csalliance.unstuck.ui.collections.CollectionDetailScreen
 import tech.csalliance.unstuck.ui.collections.CollectionsScreen
+import tech.csalliance.unstuck.ui.collections.NewCollectionSheet
 import tech.csalliance.unstuck.ui.components.AvatarMenu
 import tech.csalliance.unstuck.ui.focus.FocusScreen
 import tech.csalliance.unstuck.ui.sharing.SharedTaskDetailSheet
@@ -81,11 +84,14 @@ import tech.csalliance.unstuck.ui.tour.TourHost
 import tech.csalliance.unstuck.ui.tour.TourNav
 import tech.csalliance.unstuck.ui.tour.tourAnchor
 
-private val NAV = listOf(
+// internal (not private) so FabActionTest can pin the Collections key against
+// the one the + 's routing keys off — a rename here would otherwise silently
+// send the + back to New task on that tab.
+internal val NAV = listOf(
     NavSpec("today", "Today", Icons.Outlined.Schedule),
     NavSpec("tasks", "Tasks", Icons.Outlined.Inbox),
     NavSpec("calendar", "Calendar", Icons.Outlined.CalendarMonth),
-    NavSpec("lists", "Collections", Icons.Outlined.Layers),
+    NavSpec(TAB_COLLECTIONS, "Collections", Icons.Outlined.Layers),
 )
 
 /** Full-screen overlay routes (pushed on top of the tab content). */
@@ -134,6 +140,12 @@ fun MainScaffold(vm: AppViewModel) {
         restore = { l -> Sheet.of(l.firstOrNull()) },
     )) { mutableStateOf<Sheet?>(null) }
     var showNewTask by rememberSaveable { mutableStateOf(false) }
+    // The New-collection sheet lives HERE, not in CollectionsScreen, because it
+    // now has two openers — the grid's own "+ New" pill and the bottom bar's + —
+    // and hoisting it keeps exactly ONE instance of the sheet in the tree.
+    // rememberSaveable so a rotation mid-typing doesn't drop it (same reason as
+    // showNewTask above).
+    var showNewCollection by rememberSaveable { mutableStateOf(false) }
     // Whether the Assistant sheet was opened by a hand-off (a chat moment with
     // its message already queued — it then opens onto the thread) and whether
     // Today's input pill asked for the keyboard in the sheet's composer.
@@ -167,6 +179,7 @@ fun MainScaffold(vm: AppViewModel) {
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
         if (hostActivity?.isChangingConfigurations != true) {
             tab = "today"; stack.clear(); sheet = null; showNewTask = false; newTaskPrefill = null
+            showNewCollection = false
             assistantHandoff = false; assistantFocusComposer = false
         }
     }
@@ -220,6 +233,10 @@ fun MainScaffold(vm: AppViewModel) {
     }
     val notifUnread by vm.notifUnread.collectAsStateWithLifecycle()
     val inboxCaptures by vm.inboxCaptures.collectAsStateWithLifecycle()
+    // Carries the one deferred navigation in this file (see the New-collection
+    // sheet below): it must outlive the sheet that starts it, so it hangs off the
+    // scaffold's composition, not the sheet's.
+    val navScope = rememberCoroutineScope()
     fun push(r: Route) = stack.add(r)
     fun pop() { if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex) }
     val openNotifs: () -> Unit = { vm.markNotificationsSeen(); push(Route.Notifications) }
@@ -265,7 +282,10 @@ fun MainScaffold(vm: AppViewModel) {
                 calendarView = when (screen) { "week" -> "Week"; "month" -> "Month"; else -> "Day" }
                 tab = "calendar"
             }
-            "lists", "collections" -> { tab = "lists"; if (id != null) push(Route.Collection(id)) }
+            // No id branch: a collection route must not be pushed until the row
+            // is resolvable (see the unstuck://collections/<id> deep link, which
+            // does the waiting). Pushing one from here would reintroduce the race.
+            "lists", "collections" -> tab = "lists"
             // Focus is an overlay, not a tab: it resolves through the live session's
             // task. No session → Today (the tool only opens what exists).
             "focus" -> {
@@ -362,7 +382,41 @@ fun MainScaffold(vm: AppViewModel) {
                 tab = "today"; stack.clear()
             }
             dl == "unstuck://collections" -> { tab = "lists"; stack.clear() }   // a shared collection
-            dl.startsWith("unstuck://collections/") -> goAssistantScreen("lists", dl.removePrefix("unstuck://collections/"))
+            dl.startsWith("unstuck://collections/") -> {
+                // Same race as create-then-open, reached from the other side. The
+                // push used to be immediate; `collections` is WhileSubscribed, so
+                // on a COLD arrival (a notification tap, or the assistant's
+                // open_screen, before anything has subscribed) the detail screen
+                // composed with an id it could not resolve, its deleted-while-open
+                // guard fired, and the link dumped the user on the grid —
+                // reproduced on an emulator on a cold arrival.
+                //
+                // The wait must NOT happen inside this effect. This effect is keyed
+                // on `tasks`, which changes by itself, and the link is only consumed
+                // at the bottom of it — so a wait here kept the link PENDING for its
+                // whole duration and any task-list change in that window cancelled
+                // the effect and re-ran it from the top, yanking the user back to
+                // this tab. For an id that never becomes readable, that repeated
+                // forever: reproduced on an emulator with the debug APK — fire
+                // unstuck://collections/does-not-exist, leave for Tasks, let the
+                // list change, and the dead link acted again.
+                //
+                // So: handle the link now (the tab switch is immediate and the
+                // effect falls through to consumeDeepLink in the same frame — the
+                // link fires exactly once, whatever the outcome), and let the
+                // deferred push ride the scaffold's own scope, where recomposition
+                // can't restart it. Bounded there, unlike the create path: this id
+                // comes from outside and may name a collection that no longer
+                // exists, so after 2.5s we simply don't navigate and the user keeps
+                // the Collections grid — somewhere sane rather than nowhere.
+                val id = dl.removePrefix("unstuck://collections/").substringBefore('?').substringBefore('#').trim()
+                goAssistantScreen("lists")
+                if (id.isNotEmpty()) navScope.launch {
+                    if (kotlinx.coroutines.withTimeoutOrNull(2_500) { vm.awaitCollectionReadable(id) } != null &&
+                        tab == TAB_COLLECTIONS && stack.isEmpty()
+                    ) push(Route.Collection(id))
+                }
+            }
             dl == "unstuck://tasks/all" -> goAssistantScreen("tasks")
             // The assistant's open_screen links (AssistantToolsAppModel.assistantScreenLink).
             // Everything but today/task/collections used to fall through to Today
@@ -390,10 +444,13 @@ fun MainScaffold(vm: AppViewModel) {
         vm.consumeDeepLink()
     }
 
-    // System back, top layer wins. NewTask / Avatar ride on ModalBottomSheet which
-    // intercepts back itself, so we only handle the focus overlay, the route stack,
-    // and the non-Today tab fall-back. (Leaving focus keeps the live session running.)
-    val sheetOpen = showNewTask || sheet != null
+    // System back, top layer wins. NewTask / NewCollection / Avatar ride on
+    // ModalBottomSheet which intercepts back itself, so we only handle the focus
+    // overlay, the route stack, and the non-Today tab fall-back. (Leaving focus
+    // keeps the live session running.) NewCollection counts here for the same
+    // reason NewTask does: while it is up, back must not pop a route or switch
+    // tabs underneath it, and the assistant bubble must stay hidden.
+    val sheetOpen = showNewTask || showNewCollection || sheet != null
     BackHandler(enabled = focusTask != null) { focusTask = null; focusAutoCapture = false; focusShared = null }
     BackHandler(enabled = focusTask == null && !sheetOpen && stack.isNotEmpty()) { pop() }
     BackHandler(enabled = focusTask == null && !sheetOpen && stack.isEmpty() && tab != "today") { tab = "today" }
@@ -438,14 +495,42 @@ fun MainScaffold(vm: AppViewModel) {
                     )
                     "tasks" -> TasksScreen(vm, activeArea = activeArea, onClearArea = { activeArea = null }, onAreaPick = { activeArea = it }, onOpen = { push(Route.Detail(it.id)) }, onOpenShared = { sharedDetail = it }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
                     "calendar" -> CalendarScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onOpenShared = { sharedDetail = it }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials, onCreateAt = { d, t -> newTaskPrefill = d to t; showNewTask = true }, requestedView = calendarView, onViewApplied = { calendarView = null })
-                    "lists" -> CollectionsScreen(vm, onOpen = { push(Route.Collection(it)) }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
+                    TAB_COLLECTIONS -> CollectionsScreen(vm, onOpen = { push(Route.Collection(it)) }, onNewCollection = { showNewCollection = true }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
                 }
             }
+            // The + creates the thing you're looking at: New task on
+            // Today/Tasks/Calendar (unchanged), New collection on the Collections
+            // grid. The decision is pure — see FabAction.kt, which also records
+            // why the "inside a collection" case has no branch on Android.
+            val fab = fabAction(tab)
+            // A pushed route renders in the full-screen, opaque Box declared AFTER
+            // this Column (below), so while one is open the whole bar is invisible
+            // and its taps are swallowed by that overlay's pointerInput. It was
+            // still in the ACCESSIBILITY tree, though — driven on an emulator:
+            // with a collection open the + was reachable, announced "New
+            // collection", and a TalkBack double-tap really did open the
+            // New-collection sheet on top of the collection. That is the case
+            // FabAction.kt says cannot arise, and a control nobody can see or tap
+            // has no business being announced at all, so clear it: the bar now
+            // leaves the a11y tree exactly when it leaves the screen.
+            // (clearAndSetSemantics, not a removal — the FAB's tourAnchor measures
+            // through onGloballyPositioned, i.e. layout, which is untouched.)
+            val barCovered = stack.isNotEmpty()
             BottomNavBar(
-                NAV, tab, onSelect = { tab = it; stack.clear() }, onFab = { newTaskPrefill = null; showNewTask = true },
-                modifier = Modifier.navigationBarsPadding(),
-                // Tour anchor: the first-action step's empty-account fallback.
+                NAV, tab, onSelect = { tab = it; stack.clear() },
+                onFab = {
+                    when (fab) {
+                        FabAction.NEW_TASK -> { newTaskPrefill = null; showNewTask = true }
+                        FabAction.NEW_COLLECTION -> showNewCollection = true
+                    }
+                },
+                modifier = Modifier.navigationBarsPadding()
+                    .then(if (barCovered) Modifier.clearAndSetSemantics {} else Modifier),
+                // Tour anchor: the first-action step's empty-account fallback. That
+                // step runs on the Tasks tab, where the + is still New task, so the
+                // anchor id stays put and the tour is unaffected.
                 fabModifier = Modifier.tourAnchor(TourAnchorIds.NEW_TASK),
+                fabLabel = fabLabel(fab),
             )
         }
 
@@ -519,6 +604,34 @@ fun MainScaffold(vm: AppViewModel) {
 
         // Sheets.
         if (showNewTask) NewTaskSheet(vm, prefillDate = newTaskPrefill?.first, prefillTime = newTaskPrefill?.second, onDismiss = { showNewTask = false; newTaskPrefill = null })
+        // Opened by the bottom bar's + on the Collections tab AND by the grid's own
+        // "+ New" pill (one sheet, two openers). On create we land IN the new
+        // collection, which puts the cursor in its inline "Add to this collection…"
+        // field — making a list and filling it is one continuous move.
+        //
+        // The push is DEFERRED until the row is readable. Route.Collection resolves
+        // its id against vm.collections; creating is an async local write
+        // (launchWrite → Room → the read flow), so the old same-frame push raced the
+        // write and usually LOST — the detail screen composed with nothing to show,
+        // its deleted-while-open guard fired, and the user was bounced straight back
+        // to the grid. Repeated create-and-observe runs on an emulator bounced
+        // more often than not with the same-frame push, and never once deferred.
+        // Waiting costs nothing when the write is quick, and if it never lands we
+        // simply don't navigate: the user stays on the grid, which is the honest
+        // outcome and never a blank screen.
+        // The tab/stack guard is for the slow case only — if the user has moved on
+        // in the meantime, we don't yank them somewhere they didn't ask to be.
+        if (showNewCollection) NewCollectionSheet(
+            vm,
+            onCreated = { id ->
+                showNewCollection = false
+                navScope.launch {
+                    vm.awaitCollectionReadable(id)
+                    if (tab == TAB_COLLECTIONS && stack.isEmpty()) push(Route.Collection(id))
+                }
+            },
+            onDismiss = { showNewCollection = false },
+        )
         when (sheet) {
             Sheet.Avatar -> AvatarMenu(
                 vm,
@@ -583,26 +696,27 @@ fun MainScaffold(vm: AppViewModel) {
                     // Leaving the focus overlay keeps a live session running, so
                     // clearing it here is non-destructive.
                     stack.clear(); sheet = null; showNewTask = false; newTaskPrefill = null
+                    showNewCollection = false
                     sharedDetail = null; focusTask = null; focusAutoCapture = false; focusShared = null
                     tab = t
                 },
                 openTaskDetail = { id ->
-                    stack.clear(); sheet = null; showNewTask = false; sharedDetail = null
+                    stack.clear(); sheet = null; showNewTask = false; showNewCollection = false; sharedDetail = null
                     focusTask = null; focusAutoCapture = false; focusShared = null
                     tab = "tasks"; push(Route.Detail(id))
                 },
                 openInbox = {
-                    stack.clear(); sheet = null; showNewTask = false; sharedDetail = null
+                    stack.clear(); sheet = null; showNewTask = false; showNewCollection = false; sharedDetail = null
                     focusTask = null; focusAutoCapture = false; focusShared = null
                     tab = "today"; push(Route.Inbox)
                 },
                 openInsights = {
-                    stack.clear(); sheet = null; showNewTask = false; sharedDetail = null
+                    stack.clear(); sheet = null; showNewTask = false; showNewCollection = false; sharedDetail = null
                     focusTask = null; focusAutoCapture = false; focusShared = null
                     push(Route.Insights(false))
                 },
                 openSettingsSection = { s ->
-                    stack.clear(); sheet = null; showNewTask = false; sharedDetail = null
+                    stack.clear(); sheet = null; showNewTask = false; showNewCollection = false; sharedDetail = null
                     focusTask = null; focusAutoCapture = false; focusShared = null
                     // Hub first, then the section — popping back lands somewhere sane.
                     push(Route.Settings); push(Route.SettingsSub(s))

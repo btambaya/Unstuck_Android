@@ -64,6 +64,10 @@ compose-ui-tooling = { module = "androidx.compose.ui:ui-tooling" }
 compose-ui-tooling-preview = { module = "androidx.compose.ui:ui-tooling-preview" }
 compose-material3 = { module = "androidx.compose.material3:material3" }
 compose-material-icons = { module = "androidx.compose.material:material-icons-extended" }
+# Compose UI tests. Versionless — resolved by the same compose BOM the modules
+# already import, so the test artifacts can never drift from the UI ones.
+compose-ui-test-junit4 = { module = "androidx.compose.ui:ui-test-junit4" }
+compose-ui-test-manifest = { module = "androidx.compose.ui:ui-test-manifest" }
 navigation-compose = { module = "androidx.navigation:navigation-compose", version.ref = "navCompose" }
 
 # di

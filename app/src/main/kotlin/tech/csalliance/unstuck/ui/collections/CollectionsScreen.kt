@@ -51,11 +51,10 @@ import androidx.compose.material3.DropdownMenuItem
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, onNotifications: () -> Unit, notifUnread: Int, avatarInitials: String) {
+fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onNewCollection: () -> Unit, onSearch: () -> Unit, onMenu: () -> Unit, onAvatar: () -> Unit, onNotifications: () -> Unit, notifUnread: Int, avatarInitials: String) {
     val c = UTheme.colors
     val collections by vm.collections.collectAsStateWithLifecycle()
     var query by remember { mutableStateOf("") }
-    var showNew by remember { mutableStateOf(false) }
     var showArchived by remember { mutableStateOf(false) }
     // The card whose long-press menu is open / whose "Share…" opened the Share screen.
     var cardMenuFor by remember { mutableStateOf<String?>(null) }
@@ -91,7 +90,9 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
                                 decorationBox = { inner -> if (query.isEmpty()) Text("Search collections", style = UFont.sans(13), color = c.ink3); inner() },
                             )
                         }
-                        if (!showArchived) Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.coral).clickable { showNew = true }.padding(horizontal = 14.dp, vertical = 9.dp)) {
+                        // Same sheet the bottom bar's + now opens — it is hoisted to
+                        // MainScaffold so there is one instance, not two.
+                        if (!showArchived) Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.coral).clickable(onClick = onNewCollection).padding(horizontal = 14.dp, vertical = 9.dp)) {
                             Text("+ New", style = UFont.sans(13, FontWeight.SemiBold), color = androidx.compose.ui.graphics.Color.White)
                         }
                     }
@@ -158,7 +159,8 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onSearch: () -
         }
     }
 
-    if (showNew) NewCollectionSheet(vm, onCreated = { id -> showNew = false; onOpen(id) }, onDismiss = { showNew = false })
+    // NewCollectionSheet is NOT rendered here: it moved to MainScaffold when the
+    // bottom bar's + became a second opener for it (one sheet, two openers).
     // The ONE Share screen, opened from a card's "Share…".
     shareTarget?.let { ShareScreen(vm, it, onDismiss = { shareTarget = null }) }
 }

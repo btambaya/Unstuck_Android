@@ -139,8 +139,19 @@ class AppViewModelTest {
         // runnables" note on every failure in this class came from, and which leaves
         // one test's posted work to fire inside whichever test idles the looper next.
         org.robolectric.Shadows.shadowOf(android.os.Looper.getMainLooper()).idle()
+        // ...and FINISH this test's ViewModels before Main is handed back.
+        // Cancelling them (below, at the end of the test body) only asks; a child
+        // parked in a Room call on a real thread keeps unwinding afterwards and
+        // resumes on Dispatchers.Main — which by then belongs to the next test.
+        // That was this suite's order-dependent flake, in both of its shapes
+        // (see ViewModelDrain). Measured: 17 tests here reached this line with a
+        // live viewModelScope job.
+        drain.drain()
         Dispatchers.resetMain()
     }
+
+    /** Finishes every ViewModel this test built — see [ViewModelDrain]. */
+    private val drain = ViewModelDrain(dispatcher.scheduler)
 
     /**
      * Build the SUT — and make sure it DIES WITH THE TEST.
@@ -177,6 +188,7 @@ class AppViewModelTest {
         nowProvider = { nowMs },
         coFocusChannelFactory = coFocus,
     ).also { created ->
+        drain.track(created)
         backgroundScope.coroutineContext.job.invokeOnCompletion {
             runCatching { created.viewModelScope.cancel() }
         }
@@ -630,6 +642,32 @@ class AppViewModelTest {
     // -----------------------------------------------------------------------
     // collection mutate routing: solo vs shared
     // -----------------------------------------------------------------------
+
+    /**
+     * Creating a collection is FIRE-AND-FORGET (`launchWrite` → Room → a `flowOn`
+     * read flow), so the row is NOT resolvable in the turn the caller gets the id
+     * back. This pins that premise, because the round-1 report asserted the
+     * opposite ("upsertCollection writes the row locally before onCreated") and
+     * used it to argue the create-then-navigate push was safe. It isn't:
+     * CollectionDetailScreen treats an id it can't resolve as deleted and backs
+     * out, which is how "create a list, land back on the grid" happened.
+     *
+     * If the create is ever made synchronous, this test fails — and that is the
+     * signal that [AppViewModel.awaitCollectionReadable] can be dropped.
+     */
+    @Test fun creatingACollectionIsAsync_soTheRowIsNotReadableInTheSameTurn() = runTest(dispatcher) {
+        uid = "me"
+        val vm = vm()
+        subscribeReads(vm, vm.collections)
+        val c = ItemCollection(id = "new-1", name = "Reading", color = "indigo", items = emptyList(), sortOrder = 0, ownerId = "me")
+
+        vm.upsertCollection(c)
+        assertNull("the create has NOT landed in the same turn", vm.collections.value.firstOrNull { it.id == "new-1" })
+
+        // ...and the wait returns exactly when it becomes readable — never before.
+        vm.awaitCollectionReadable("new-1")
+        assertNotNull("awaitCollectionReadable returned before the row was readable", vm.collections.value.firstOrNull { it.id == "new-1" })
+    }
 
     @Test fun renameCollection_soloList_writesThroughOutbox() = runTest(dispatcher) {
         // Solo list (no members, owned by me) → whole-row upsert via WriteThrough,

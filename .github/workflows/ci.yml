@@ -7,8 +7,8 @@ on:
     branches: [main]
 
 jobs:
-  core-tests:
-    name: :core unit tests
+  unit-tests:
+    name: unit tests (all modules)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -23,13 +23,27 @@ jobs:
             ~/.gradle/caches
             ~/.gradle/wrapper
           key: gradle-${{ hashFiles('**/*.gradle.kts', 'gradle/libs.versions.toml') }}
+      # :app was missing here until 2026-09-18 — with it, 548 unit tests in 36
+      # classes (the AppViewModel orchestration suite, calls, assistant, tour,
+      # surfaces, and the shell's own Compose tests) had never run on CI, and the
+      # application module was never even compiled, so a change that broke the app
+      # and nothing else went green. Every module that has a `src/test` is listed.
+      # (The count was first written here as 1071; measured, it is 548 — `grep -rho
+      # "@Test" app/src/test | wc -l`, and the task's own XML agrees.)
       - name: Unit tests (all modules)
-        run: ./gradlew :core:test :design:testDebugUnitTest :data:testDebugUnitTest :sync:testDebugUnitTest --console=plain --stacktrace
+        run: ./gradlew :core:test :design:testDebugUnitTest :data:testDebugUnitTest :sync:testDebugUnitTest :app:testDebugUnitTest --console=plain --stacktrace
+      # Building the APK on top of the unit tests: assembling catches what
+      # compiling alone can't — manifest merge, resource linking, dexing.
+      - name: Assemble the app (debug)
+        run: ./gradlew :app:assembleDebug --console=plain --stacktrace
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v4
         with:
+          # The second entry used to carry literal quote characters inside this
+          # block scalar, so it matched nothing and only :core's reports were ever
+          # uploaded. Unquoted, the glob resolves for every Android module.
           name: test-reports
           path: |
             core/build/reports/tests
-            "**/build/reports/tests/testDebugUnitTest"
+            **/build/reports/tests/testDebugUnitTest

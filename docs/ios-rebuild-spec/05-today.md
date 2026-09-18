@@ -1,5 +1,7 @@
 # iOS Rebuild SPEC — Today / Dashboard (`TodayScreen`)
 
+> **Superseded in part (2026-09-18).** The **Start-Next hero** and its all-clear twin (`EmptyHero`) described in §1.2 / §2 below were **removed from the home on both platforms** — the home is now: top bar → date eyebrow → one-line greeting → "This week · … focused" pill → assistant input pill → the Today list. `onSearch` went with them (the command palette lives on the Tasks / Calendar / Collections search icons), and `pickTodayHero()` is deleted — `pickStartNext()` survives for the home-screen widget, the assistant's context strip and Up Next. Focus starts from a task row's detail or the task editor. Everything else in this spec still stands; see `docs/handover.md` (2026-09-18) for the change.
+
 Reference client: **Android** (`unstuck_android`). Target: a 1:1 behavioral SwiftUI replica. This spec covers the Today tab — the first screen the user lands on. Source files: `app/.../ui/today/TodayScreen.kt`, `core/.../logic/PickStartNext.kt`, `core/.../logic/VisibleTasks.kt`, `core/.../logic/TaskBucket.kt`, `core/.../logic/CalBlockKind.kt`, `core/.../logic/FocusTimer.kt`, plus `AppViewModel.kt`, `Common.kt`, and the `sync` row codecs.
 
 ---

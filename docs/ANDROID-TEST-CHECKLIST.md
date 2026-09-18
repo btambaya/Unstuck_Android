@@ -52,8 +52,9 @@ The must-pass set. If any item fails, do not ship.
 - [ ] **Task — schedule:** native date+time pickers create a cal_block at the chosen snapped time; task lands on Today/calendar.
 - [ ] **Task — complete:** Mark done stamps completedAt on first flip, strikethrough + green check, moves to Completed; undo clears timestamp.
 - [ ] **Task — delete cascades:** deleting removes the task + all its cal_blocks + captures; no orphaned data; UI updates immediately.
-- [ ] **Today — Start-Next hero:** shows correctly-ranked task (priority DESC → estimate ASC → createdAt ASC); Focus + Pick another respond.
-- [ ] **Today — empty state:** with zero tasks/live/backlog/startNext, EmptyHero renders with working "Add one thing".
+- [ ] **Today — home structure:** top bar → date eyebrow → one-line greeting → "This week · … focused" pill → assistant input pill → the Today list (filters + rows). No Start-Next hero and no all-clear card — both left the home 2026-09-18.
+- [ ] **Today — empty state:** a plain Today with nothing scheduled (no live card, no shares) shows the inline note "Nothing scheduled. Tap + to add."; Backlog with nothing waiting and an area filter with no matches show their own inline notes instead of a blank list.
+- [ ] **Focus from a row:** tapping any Today/Backlog row opens the task; its coral **Focus** button starts the session (the hero's Focus button is gone — this is the in-app entry point).
 - [ ] **Focus — start/run:** start focus creates live session, FocusScreen shows FOCUSING + ticking MM:SS, RUNNING state, ring at 0%.
 - [ ] **Focus — pause/resume:** Pause freezes elapsed (amber ring), Resume shifts sessionStart past the gap so only true focus time counts (white ring).
 - [ ] **Focus — Done:** records Session with elapsed, flips task.done=true, shows ReflectSheet, closes; recap surfaces.
@@ -177,7 +178,7 @@ The must-pass set. If any item fails, do not ship.
 - [ ] Rate limit (over_email_send_rate_limit): "We can only send a few sign-up emails per hour…". `[edge]`
 
 ### Today Dashboard
-- [ ] Pick another navigates to task selection/new-task flow.
+- [ ] Command palette stays reachable from the Tasks / Calendar / Collections search icons (the home lost its `onSearch` entry point with the hero).
 - [ ] Completed-today tasks stay visible at bottom of Today list (after open tasks), not filtered out.
 - [ ] Backlog toggle shows unplanned/past-only tasks, hides today-scheduled; toggling clears area filter.
 - [ ] Area filter pills filter Today's in-memory rows (cal_block view is area-agnostic but rows respect filter); active state shows.
@@ -502,6 +503,7 @@ The must-pass set. If any item fails, do not ship.
 - [ ] Low-memory: process kill recovers gracefully, no OOM crash, focus + Room restored from disk. `[regression]`
 - [ ] SyncWorker (30 min, CONNECTED constraint) skips with no network, runs on reconnect, updates Start Next widget. `[perf]`
 - [ ] Home-screen widget truncates long name (maxLines=2) + null estimate defaults to 25; fits small + large screens. `visual`
+- [ ] Home-screen widget picks the correctly-ranked task (`pickStartNext`: priority DESC → estimate ASC → createdAt ASC), skipping done / Later / recurring templates / the live task / anything assigned away. (The in-app hero that used to show the same pick is gone — the widget, the assistant's context strip and Up Next are the surfaces left.)
 - [ ] Notched/punch-hole: status/nav/systemBars padding protect AppBar + overlays + focus buttons. `visual`
 - [ ] Keyboard navigation: Tab/Shift+Tab through fields/buttons, Enter submits, focus visible. `[a11y]`
 - [ ] Empty states graceful: zero tasks/captures/collections show messages (Inbox zero, etc.), no broken layout. `[edge]`

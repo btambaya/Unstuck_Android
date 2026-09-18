@@ -31,8 +31,8 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         runCatching {
             val store = app.graph.store
             // Exclude tasks I've assigned away — a delegated task is someone else's now
-            // and must never surface in the widget's Start-Next (parity with Today's hero
-            // + the in-app widget updater). Best-effort: an offline/failed badge read just
+            // and must never surface in the widget's Start-Next (same rule as the Today
+            // list + the in-app widget updater). Best-effort: an offline/failed badge read just
             // yields no exclusions rather than blocking the widget refresh.
             val assigned = runCatching {
                 tech.csalliance.unstuck.core.model.assignedOutIds(

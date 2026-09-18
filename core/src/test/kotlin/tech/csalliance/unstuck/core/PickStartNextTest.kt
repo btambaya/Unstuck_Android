@@ -4,7 +4,6 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.pickStartNext
-import tech.csalliance.unstuck.core.logic.pickTodayHero
 import tech.csalliance.unstuck.core.logic.pickUpNext
 import tech.csalliance.unstuck.core.model.Priority
 
@@ -68,41 +67,6 @@ class PickStartNextTest {
         assertEquals(listOf("open"), pickUpNext(listOf(done, later, open), emptyList(), null, null).map { it.id })
     }
 
-    // --- pickTodayHero (today-scoped, never backlog) ---
-
-    @Test fun heroPrefersScheduledOverShorterUnscheduled() {
-        val sched = mkTask(id = "sched", estimateMin = 25)            // scheduled today (longer)
-        val quick = mkTask(id = "quick", estimateMin = 5, createdAt = iso(NOW))  // created today, unscheduled (shorter)
-        val blocks = listOf(mkBlock(id = "bs", taskId = "sched", startTime = "16:00", date = todayPlus(0)))
-        val hero = pickTodayHero(listOf(sched, quick), blocks, NOW)
-        assertEquals("a scheduled-today task wins over a shorter unscheduled one", "sched", hero?.id)
-    }
-
-    @Test fun heroShortestWhenNoneScheduled() {
-        val a = mkTask(id = "a", estimateMin = 25, createdAt = iso(NOW))
-        val b = mkTask(id = "b", estimateMin = 10, createdAt = iso(NOW))
-        val hero = pickTodayHero(listOf(a, b), emptyList(), NOW)
-        assertEquals("lowest-friction (shortest estimate) when nothing is scheduled today", "b", hero?.id)
-    }
-
-    @Test fun heroNeverOffersAnAlreadyCompletedOccurrence() {
-        // Today KEEPS a recurring occurrence that was ticked today (so the win stays
-        // visible and un-doable), and the hero is handed exactly that list — it must
-        // not offer to "start" the finished one.
-        val template = mkTask(id = "tpl", name = "Run").copy(recurrence = tech.csalliance.unstuck.core.model.Recurrence.Daily())
-        val now = System.currentTimeMillis()
-        val plain = mkTask(id = "plain", estimateMin = 45, createdAt = iso(now))
-        val doneOcc = mkBlock(id = "occ", taskId = "tpl", startTime = "07:00", date = todayPlus(0))
-            .copy(done = true, completedAt = iso(now))
-        val hero = pickTodayHero(listOf(template, plain), listOf(doneOcc), now)
-        assertEquals("plain", hero?.id)
-    }
-
-    @Test fun heroNullWhenNoTodayTasks() {
-        val old = mkTask(id = "old", createdAt = "2026-04-01T10:00:00.000Z")   // backlog, not today
-        assertNull("the hero never pulls from the backlog", pickTodayHero(listOf(old), emptyList(), NOW))
-    }
-
     // --- excludeIds — tasks assigned away are never recommended (M3 delegation) ---
 
     @Test fun startNextSkipsExcludedIds() {
@@ -120,14 +84,5 @@ class PickStartNextTest {
         val c = mkTask(id = "c", priority = Priority.LOW)
         val ids = pickUpNext(listOf(a, b, c), emptyList(), null, null, 3, setOf("b")).map { it.id }
         assertEquals(listOf("a", "c"), ids)
-    }
-
-    @Test fun heroSkipsExcludedTask() {
-        val a = mkTask(id = "a", estimateMin = 5, createdAt = iso(NOW))
-        val b = mkTask(id = "b", estimateMin = 30, createdAt = iso(NOW))
-        // 'a' is lower friction, so normally the hero.
-        assertEquals("a", pickTodayHero(listOf(a, b), emptyList(), NOW)?.id)
-        // Assigned away → hero falls to 'b'.
-        assertEquals("b", pickTodayHero(listOf(a, b), emptyList(), NOW, null, null, setOf("a"))?.id)
     }
 }

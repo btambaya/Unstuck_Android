@@ -41,8 +41,8 @@ import tech.csalliance.unstuck.design.theme.UTheme
 // The cut-out itself passes touches through ONLY with [cutoutInteractive]
 // (the assistant/reentry steps, whose cutout is the assistant bubble); on
 // every other step the cutout is DISPLAY-ONLY — a blocker covers it too, so
-// the spotlight can highlight without leaking taps (no minting a focus
-// session from the hero, no stale-hole leak into a takeover). No target →
+// the spotlight can highlight without leaking taps (no opening a task from
+// the spotlighted list, no stale-hole leak into a takeover). No target →
 // one full-screen blocker (everything except the panel). A LIVE-open settings
 // surface passes consumeInput=false — the scrim reverts to drawing only, and
 // just the panel claims input (tourScrimConsumesInput / tourLockdownPolicy).

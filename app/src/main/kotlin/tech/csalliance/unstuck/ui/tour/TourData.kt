@@ -38,15 +38,12 @@ enum class TourView { TODAY, TASKS, CALENDAR, CAPTURES, COLLECTIONS, INSIGHTS, S
  * Modifier.tourAnchor(id) (see TourSpotlight.kt).
  * ============================================================ */
 object TourAnchorIds {
-    const val START_NEXT = "start-next"
+    /** The Today list area — the today/finish steps' target since the
+     *  Start-Next hero left the home (2026-09-18). */
     const val TODAY_LIST = "today-list"
     const val FIRST_ACTION = "first-action"
     const val NEW_TASK = "new-task"
     const val ASSISTANT_LAUNCH = "assistant-launch"
-    /** LEGACY (round 1): the Today begin-focus affordance. Still registered by
-     *  the hero's Focus button but no step targets it any more — the focus +
-     *  capture steps spotlight the DEMO surface anchors below (round 2). */
-    const val FOCUS_BEGIN = "focus-begin"
     const val NOTIF_BODY = "notif-body"
     /** Round-2 demo focus surface (TourDemoFocus.kt) — anchors INSIDE the demo. */
     const val DEMO_FOCUS_RING = "demo-focus-ring"
@@ -85,8 +82,8 @@ data class TourStep(
     /** Fallback anchor CHAIN, tried in order when the primary isn't on screen
      *  (e.g. an empty account has no task detail → spotlight New task).
      *  Mirrors the iOS port's fallbacks array — richer than the web's single
-     *  targetFallback because phone screens change layout more (no hero, no
-     *  backlog pointer, …). */
+     *  targetFallback because phone screens change layout more (an empty
+     *  account, a filtered list, …). */
     val fallbacks: List<String> = emptyList(),
     val title: String,
     val body: String,
@@ -112,14 +109,13 @@ val ESSENTIAL_STEPS: List<TourStep> = listOf(
     ),
     TourStep(
         id = "today", stage = "Today", view = TourView.TODAY,
-        // Fallback: an account with nothing scheduled renders NO hero card at
-        // all (the backlog pointer is gone, 2026-09-17) — ring the Today list.
-        target = TourAnchorIds.START_NEXT,
-        fallbacks = listOf(TourAnchorIds.TODAY_LIST),
+        // The Start-Next hero left the home (2026-09-18): the list IS Today, so
+        // the step rings the list area itself — always on screen, no fallback.
+        target = TourAnchorIds.TODAY_LIST,
         title = "Today narrows it down",
-        body = "Start Next offers one realistic suggestion — with a short reason, like the time it fits. It’s a recommendation, never a command. Today shows only planned work; everything else waits in Backlog.",
-        narration = "This is Today. Instead of a long list, Start Next offers one realistic suggestion, with a short reason — like the gap it fits before your next meeting. It’s a suggestion, never a command. Today shows only planned work; everything else waits quietly in your Backlog.",
-        more = "Usable Time (top of the page and right rail) already accounts for meetings and fragmentation, so the suggestion is grounded in the time you actually have.",
+        body = "Today shows only the work you planned for today — each task with its area and estimate, nothing more. Everything else waits in Backlog, so the list stays short enough to begin. Open any task to focus on it.",
+        narration = "This is Today. Instead of a long list, it shows only the work you planned for today, with the time each piece takes. Everything else waits quietly in your Backlog, so what’s in front of you stays short enough to begin. Open any task to focus on it.",
+        more = "Usable Time already accounts for meetings and fragmentation, so what Today asks of you fits the time you actually have.",
         primary = "Continue",
     ),
     TourStep(
@@ -177,8 +173,7 @@ val ESSENTIAL_STEPS: List<TourStep> = listOf(
     ),
     TourStep(
         id = "finish", stage = "Begin", view = TourView.TODAY,
-        target = TourAnchorIds.START_NEXT,
-        fallbacks = listOf(TourAnchorIds.TODAY_LIST),
+        target = TourAnchorIds.TODAY_LIST,
         title = "You’re ready to begin",
         body = "That’s the loop: Today narrows things down, the first physical action gets you moving, Focus sustains it, and the Assistant helps when you’re stuck. Pick one real next step.",
         narration = "That’s the core loop. Today narrows things down. The first physical action gets you moving. Focus sustains it. And the Assistant is there when you get stuck. You don’t need to learn everything today — just choose one real next step, and begin.",
@@ -549,8 +544,8 @@ fun tourScrimConsumesInput(step: TourStep, openSection: SettingsSection?): Boole
  *  the tour's own demo (whose root swallows input), so nothing real is ever
  *  reachable — the pill only opens the DEMO capture sheet. Every other step's
  *  cutout is DISPLAY-ONLY: the ring highlights the element but a blocker
- *  covers the cut-out region too, so the today/finish hero can never mint a
- *  real focus session and a stale hole can never leak taps into a takeover. */
+ *  covers the cut-out region too, so a spotlighted Today row can never open a
+ *  task mid-tour and a stale hole can never leak taps into a takeover. */
 fun tourCutoutInteractive(step: TourStep): Boolean =
     step.target == TourAnchorIds.ASSISTANT_LAUNCH || tourDemoCapturePillEnabled(step)
 
@@ -580,9 +575,9 @@ fun tourLockdownPolicy(step: TourStep, openSection: SettingsSection?, overlayAbo
  * Accessibility lockdown (pure): whether the app content BENEATH the tour must
  * be hidden from screen readers this frame. The pointer blockers never stopped
  * TalkBack — an accessibility click invokes the node's semantics action
- * directly, so a user could traverse under the scrim and ACTIVATE the
- * display-only spotlighted hero (minting a real focus session mid-tour), the
- * bottom nav, the FAB… Hidden whenever a tour card is up, or the run's scrim is
+ * directly, so a user could traverse under the scrim and ACTIVATE a
+ * display-only spotlighted Today row (opening a task mid-tour), the bottom
+ * nav, the FAB… Hidden whenever a tour card is up, or the run's scrim is
  * consuming input. The ONE frame the content is reachable by touch — the
  * step's own settings section, live and exempt — stays reachable by screen
  * reader too (consumeInput=false). The assistant/reentry cutout (the bubble) is

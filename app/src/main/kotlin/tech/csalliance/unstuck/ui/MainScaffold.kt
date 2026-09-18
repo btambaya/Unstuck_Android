@@ -405,8 +405,8 @@ fun MainScaffold(vm: AppViewModel) {
         // the Focus takeover — is cleared from the semantics tree. The pointer
         // blockers only ever swallowed touches: TalkBack could still traverse
         // under the scrim and ACTIVATE the real UI (an accessibility click
-        // invokes the node's action directly — e.g. the display-only
-        // spotlighted Start-Next hero minting a real focus session). Lifted
+        // invokes the node's action directly — e.g. a display-only
+        // spotlighted Today row opening a task mid-tour). Lifted
         // for the one legitimately-interactive frame (the settings step's own
         // section, live and exempt). Own-window sheets/dialogs are unaffected
         // (they're closed by the step presentation and unreachable anyway).
@@ -429,7 +429,6 @@ fun MainScaffold(vm: AppViewModel) {
                         onStartFocus = openFocus,
                         onOpen = { push(Route.Detail(it.id)) },
                         onAvatar = { sheet = Sheet.Avatar },
-                        onSearch = { push(Route.Palette) },
                         onInsights = { push(Route.Insights(false)) },
                         onNotifications = openNotifs,
                         notifUnread = notifUnread,

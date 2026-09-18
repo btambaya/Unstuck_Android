@@ -21,10 +21,8 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Bolt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Person
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.outlined.MoveToInbox
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material3.Icon
@@ -42,7 +40,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -59,7 +56,6 @@ import tech.csalliance.unstuck.core.logic.formatMMSS
 import tech.csalliance.unstuck.core.logic.isCompletedToday
 import tech.csalliance.unstuck.core.logic.ShareViewMode
 import tech.csalliance.unstuck.core.logic.isTemplate
-import tech.csalliance.unstuck.core.logic.pickTodayHero
 import tech.csalliance.unstuck.core.logic.projectOccurrences
 import tech.csalliance.unstuck.core.logic.visibleShares
 import tech.csalliance.unstuck.core.logic.visibleTasks
@@ -70,15 +66,11 @@ import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.model.TaskListView
-import tech.csalliance.unstuck.design.color.oklch
 import tech.csalliance.unstuck.design.component.AreaDotColor
-import tech.csalliance.unstuck.design.component.ButtonKind
 import tech.csalliance.unstuck.design.component.FilterPill
 import tech.csalliance.unstuck.design.component.Orbit
 import tech.csalliance.unstuck.design.component.SectionLabel
-import tech.csalliance.unstuck.design.component.UButton
 import tech.csalliance.unstuck.design.theme.UFont
-import tech.csalliance.unstuck.design.theme.UnstuckColors
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.assistant.VoiceModeScreen
@@ -96,7 +88,6 @@ fun TodayScreen(
     onStartFocus: (TaskItem) -> Unit,
     onOpen: (TaskItem) -> Unit,
     onAvatar: () -> Unit,
-    onSearch: () -> Unit,
     onInsights: () -> Unit,
     onNotifications: () -> Unit,
     notifUnread: Int,
@@ -159,16 +150,6 @@ fun TodayScreen(
     val todayOpen = remember(tasks, blocks, now) {
         visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false)
     }
-    // Start-Next hero — scoped to TODAY (next-scheduled by time → else
-    // shortest-estimate → else null so the hero points to the Backlog instead of
-    // pulling a backlog task). Excludes the live-focused task + honours the area.
-    // Memoized on the bucketing-relevant inputs (coarse 60s `now`, NOT the 1s
-    // `nowTick`) so these don't recompute every live-session frame. It is handed
-    // `todayOpen` — the very list it would otherwise re-bucket internally.
-    val startNext = remember(todayOpen, tasks, blocks, now, liveId, areaFilter, assignedOut) {
-        // excludeIds = tasks I assigned away — never the hero (they're in Delegated).
-        pickTodayHero(tasks, blocks, now, liveId, areaFilter, assignedOut.keys, todayOpen)
-    }
     // Completed-today = real tasks + today's occurrences (NOT recurring
     // templates), so a ticked-off occurrence stays visible as a win and a done
     // template never leaks in.
@@ -178,24 +159,22 @@ fun TodayScreen(
     }
     val todayAll = remember(todayOpen, todayDone) { todayOpen + todayDone }
     // Tasks I assigned away leave my active list (they collect in Delegated instead).
-    val rows = remember(todayAll, areaFilter, startNext, liveId, assignedOut) {
-        todayAll.filter { (areaFilter == null || it.lifeArea == areaFilter) && it.id != startNext?.id && it.id != liveId && it.id !in assignedOut }
+    val rows = remember(todayAll, areaFilter, liveId, assignedOut) {
+        todayAll.filter { (areaFilter == null || it.lifeArea == areaFilter) && it.id != liveId && it.id !in assignedOut }
     }
     // Backlog view (web parity): the unplanned + overdue stack, area-agnostic.
     val backlogAll = remember(tasks, blocks, now) {
         visibleTasks(TaskListView.BACKLOG, tasks, blocks, now, activeArea = null, slipMode = false)
     }
-    val backlogRows = remember(backlogAll, startNext, liveId, assignedOut) {
-        backlogAll.filter { it.id != startNext?.id && it.id != liveId && it.id !in assignedOut }
+    val backlogRows = remember(backlogAll, liveId, assignedOut) {
+        backlogAll.filter { it.id != liveId && it.id !in assignedOut }
     }
     // "Shared with you" follows the SAME rules as my own tasks, placed by the OWNER's
     // next block (migration 052): Today holds shares whose next block is today or that
     // have no plan yet; the Backlog view holds the overdue ones; a completed share
     // leaves immediately (it lives under Tasks → Completed from then on). The group
     // respects the area filter like Delegated does (an area-less share always shows).
-    // `sharedTodayAll` (unfiltered) feeds the all-clear hero decision below.
     val todayIso = remember(now) { Clock.dateIso(now) }
-    val sharedTodayAll = remember(sharedWithMe, now) { visibleShares(sharedWithMe, ShareViewMode.TODAY, now, todayIso) }
     val shareMode = if (backlogActive) ShareViewMode.BACKLOG else ShareViewMode.TODAY
     val sharedVisible = remember(sharedWithMe, now, shareMode, areaFilter) {
         visibleShares(sharedWithMe, shareMode, now, todayIso, activeArea = if (backlogActive) null else areaFilter)
@@ -217,13 +196,6 @@ fun TodayScreen(
         liveId?.let { id -> tasks.firstOrNull { it.id == id } }
             ?: live?.let { l -> l.sharedTitle?.let { title -> TaskItem(id = l.taskId, name = title, estimateMin = l.sessionEstimateMin, createdAt = "", updatedAt = "") } }
     }
-    // Judge "empty" from the UNFILTERED backlog (+ startNext), not backlogRows:
-    // backlogRows has start-next/live subtracted, so a lone overdue task (which
-    // becomes the start-next) would otherwise read as empty and hide the Backlog
-    // toggle. A genuinely empty account still has no todayAll/backlogAll/startNext.
-    // "Company" (tasks shared WITH me) also counts as content, so a user whose only
-    // rows are shared-with-you still sees them instead of the all-clear empty hero.
-    val empty = todayAll.isEmpty() && live == null && backlogAll.isEmpty() && startNext == null && sharedTodayAll.isEmpty() && delegatedRows.isEmpty()
     // The 7-day focus roll-up re-ran an ISO parse for every session on every
     // minute tick. Parse once per sessions list; the per-tick pass is then
     // arithmetic. Unparseable stays 0L, i.e. still outside the window.
@@ -271,10 +243,9 @@ fun TodayScreen(
             // "Personalise your assistant" left the home, 2026-09-17).
             if (assistantOn) AssistantInputPill(vm, onTalk = { voiceOpen = true }, modifier = Modifier.padding(top = 8.dp, bottom = 6.dp))
         }
-        // ── Scrolling content: the Start-Next banner first, then the filter pills
-        //    (which stick to the top as you scroll), then the list. ──────────────────
-        // tourAnchor: the guided tour's Today fallback target (no hero — ring the
-        // list area instead).
+        // ── Scrolling content: the filter pills (which stick to the top as you
+        //    scroll), then the list. ─────────────────────────────────────────────
+        // tourAnchor: the guided tour's today/finish steps ring the list area.
         LazyColumn(Modifier.fillMaxWidth().weight(1f).tourAnchor(TourAnchorIds.TODAY_LIST)) {
             if (!notifsEnabled) {
                 item {
@@ -323,67 +294,67 @@ fun TodayScreen(
                 }
             }
 
-            if (empty) {
-                item { EmptyHero(onAdd = onSearch) }
-            } else {
-                // Nothing scheduled today but a Backlog exists: no card here — the
-                // list below (and its Backlog pill) already say so. The "Nothing
-                // scheduled today / Pick something to start" pointer is gone
-                // (2026-09-17); the tour's today/finish steps fall back to the list.
-                if (startNext != null) {
-                    item { StartNextHero(startNext, onStart = { onStartFocus(startNext) }, onPickAnother = onSearch) }
-                }
-                // Filter pills BELOW the banner; they stick to the top of the list on scroll.
-                stickyHeader {
-                    Column(Modifier.fillMaxWidth().background(c.bg)) {
-                        Text(if (backlogActive) "Backlog" else "Today", style = UFont.sans(15, FontWeight.SemiBold), color = c.ink, modifier = Modifier.padding(start = 18.dp, top = 14.dp, bottom = 8.dp))
-                        Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 18.dp, end = 18.dp, bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            // Backlog toggle — amber accent (web parity); entering it clears the area filter.
-                            Box(
-                                Modifier.clip(RoundedCornerShape(999.dp)).background(if (backlogActive) c.amberSoft else c.bg2).clickable { backlogActive = !backlogActive; if (backlogActive) areaFilter = null }.padding(horizontal = 12.dp, vertical = 6.dp),
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                                    if (!backlogActive) Box(Modifier.size(6.dp).clip(CircleShape).background(c.amber))
-                                    Text("Backlog", style = UFont.sans(12, FontWeight.Medium), color = if (backlogActive) c.amberInk else c.ink2)
-                                }
+            // The Start-Next hero and its all-clear twin are gone (2026-09-18): the
+            // list IS the home. Filter pills first; they stick to the top on scroll.
+            stickyHeader {
+                Column(Modifier.fillMaxWidth().background(c.bg)) {
+                    Text(if (backlogActive) "Backlog" else "Today", style = UFont.sans(15, FontWeight.SemiBold), color = c.ink, modifier = Modifier.padding(start = 18.dp, top = 14.dp, bottom = 8.dp))
+                    Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(start = 18.dp, end = 18.dp, bottom = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        // Backlog toggle — amber accent (web parity); entering it clears the area filter.
+                        Box(
+                            Modifier.clip(RoundedCornerShape(999.dp)).background(if (backlogActive) c.amberSoft else c.bg2).clickable { backlogActive = !backlogActive; if (backlogActive) areaFilter = null }.padding(horizontal = 12.dp, vertical = 6.dp),
+                        ) {
+                            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                                if (!backlogActive) Box(Modifier.size(6.dp).clip(CircleShape).background(c.amber))
+                                Text("Backlog", style = UFont.sans(12, FontWeight.Medium), color = if (backlogActive) c.amberInk else c.ink2)
                             }
-                            FilterPill("All", !backlogActive && areaFilter == null) { backlogActive = false; areaFilter = null }
-                            areas.forEach { a -> FilterPill(a.name, !backlogActive && areaFilter == a.name, dotColor = c.areaColor(a.color)) { backlogActive = false; areaFilter = if (areaFilter == a.name) null else a.name } }
                         }
+                        FilterPill("All", !backlogActive && areaFilter == null) { backlogActive = false; areaFilter = null }
+                        areas.forEach { a -> FilterPill(a.name, !backlogActive && areaFilter == a.name, dotColor = c.areaColor(a.color)) { backlogActive = false; areaFilter = if (areaFilter == a.name) null else a.name } }
                     }
                 }
-                // Sharing groups sit at the top of the list (web parity). "Shared with
-                // you" follows the view — today's + unplanned shares here, the OVERDUE
-                // ones in the Backlog view (placed by the owner's next block) — then, on
-                // Today only, the tasks I delegated.
-                if (sharedVisible.isNotEmpty()) item(key = "shared-with-you") {
-                    SharedWithYouSection(vm, sharedVisible, shareMode, onToggle = { taskId, done -> vm.completeSharedTask(taskId, done) }, onOpen = onOpenShared, modifier = Modifier.padding(horizontal = 18.dp))
+            }
+            // Sharing groups sit at the top of the list (web parity). "Shared with
+            // you" follows the view — today's + unplanned shares here, the OVERDUE
+            // ones in the Backlog view (placed by the owner's next block) — then, on
+            // Today only, the tasks I delegated.
+            if (sharedVisible.isNotEmpty()) item(key = "shared-with-you") {
+                SharedWithYouSection(vm, sharedVisible, shareMode, onToggle = { taskId, done -> vm.completeSharedTask(taskId, done) }, onOpen = onOpenShared, modifier = Modifier.padding(horizontal = 18.dp))
+            }
+            if (!backlogActive && delegatedRows.isNotEmpty()) item(key = "delegated") {
+                DelegatedSection(delegatedRows, assignedOut, onOpen)
+            }
+            if (liveTask != null && live != null) {
+                item {
+                    LiveSessionCard(
+                        liveTask, live!!, nowTick,
+                        onReturn = { onStartFocus(liveTask) },
+                        onPause = { vm.pauseFocus() },
+                        onResume = { vm.resumeFocus() },
+                    )
                 }
-                if (!backlogActive && delegatedRows.isNotEmpty()) item(key = "delegated") {
-                    DelegatedSection(delegatedRows, assignedOut, onOpen)
+            }
+            items(displayRows, key = { it.id }) { t -> TaskRow(t, areaColorFor(t.lifeArea, areas, c), ageDays = if (backlogActive) tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, now) else null, shareBadges = shareBadges[t.id].orEmpty()) { onOpen(t) } }
+            // Per-view empty note: switching to Backlog or an area filter with no
+            // matches showed a blank list under the header (looked broken). The live
+            // card counts as content, so only show this when nothing else is there.
+            if (displayRows.isEmpty() && liveTask == null && sharedVisible.isEmpty() && (backlogActive || areaFilter != null)) {
+                item {
+                    Text(
+                        if (backlogActive) "Backlog's clear — nothing waiting." else "Nothing in $areaFilter right now.",
+                        style = UFont.sans(13), color = c.ink3,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 28.dp),
+                    )
                 }
-                if (liveTask != null && live != null) {
-                    item {
-                        LiveSessionCard(
-                            liveTask, live!!, nowTick,
-                            onReturn = { onStartFocus(liveTask) },
-                            onPause = { vm.pauseFocus() },
-                            onResume = { vm.resumeFocus() },
-                        )
-                    }
-                }
-                items(displayRows, key = { it.id }) { t -> TaskRow(t, areaColorFor(t.lifeArea, areas, c), ageDays = if (backlogActive) tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, now) else null, shareBadges = shareBadges[t.id].orEmpty()) { onOpen(t) } }
-                // Per-view empty note: switching to Backlog or an area filter with no
-                // matches showed a blank list under the header (looked broken). The live
-                // card counts as content, so only show this when nothing else is there.
-                if (displayRows.isEmpty() && liveTask == null && sharedVisible.isEmpty() && (backlogActive || areaFilter != null)) {
-                    item {
-                        Text(
-                            if (backlogActive) "Backlog's clear — nothing waiting." else "Nothing in $areaFilter right now.",
-                            style = UFont.sans(13), color = c.ink3,
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 28.dp),
-                        )
-                    }
+            } else if (displayRows.isEmpty() && liveTask == null && sharedVisible.isEmpty()) {
+                // Plain Today with nothing scheduled (no live card): a quiet prompt
+                // rather than a blank list — the all-clear hero is gone (iOS parity).
+                item {
+                    Text(
+                        "Nothing scheduled. Tap + to add.",
+                        style = UFont.sans(13), color = c.ink3,
+                        modifier = Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 28.dp),
+                    )
                 }
             }
             item { Spacer(Modifier.height(24.dp)) }
@@ -404,44 +375,6 @@ private fun GreetingLine(text: String, modifier: Modifier = Modifier) {
         overflow = TextOverflow.Ellipsis, modifier = modifier,
         onTextLayout = { r -> if (r.hasVisualOverflow && fontSize.value > 28f * 0.7f) fontSize = (fontSize.value * 0.92f).sp },
     )
-}
-
-/** The Start-Next / empty hero gradient — light lavender→pink in light mode,
- *  a deep indigo→plum in dark mode so the (light) hero text stays legible. */
-private fun heroBrush(c: UnstuckColors): Brush =
-    if (c.isDark)
-        Brush.linearGradient(listOf(oklch(0.34, 0.09, 280.0), oklch(0.30, 0.07, 322.0)))
-    else
-        Brush.linearGradient(listOf(oklch(0.96, 0.04, 280.0), oklch(0.95, 0.05, 320.0)))
-
-@Composable
-private fun StartNextHero(task: TaskItem, onStart: () -> Unit, onPickAnother: () -> Unit) {
-    val c = UTheme.colors
-    Column(Modifier.padding(horizontal = 18.dp).padding(top = 20.dp)) {
-        Box(Modifier.fillMaxWidth().tourAnchor(TourAnchorIds.START_NEXT).clip(RoundedCornerShape(24.dp)).background(heroBrush(c)).padding(18.dp)) {
-            Column {
-                Row(Modifier.clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = if (c.isDark) 0.12f else 0.7f)).padding(horizontal = 9.dp, vertical = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Icon(Icons.Filled.Bolt, contentDescription = null, tint = c.primaryDeep, modifier = Modifier.size(11.dp))
-                    SectionLabel("Start next", color = c.primaryDeep)
-                }
-                Row(Modifier.padding(top = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Box(Modifier.size(6.dp).clip(CircleShape).background(c.coral))
-                    Text("${task.lifeArea ?: "Focus"} · ${task.name}", style = UFont.sans(11, FontWeight.SemiBold), color = c.primaryDeep, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
-                }
-                // Headline = the smallest concrete step (firstPhysicalAction) when set, else
-                // the task name — the calming "do this one small thing" framing (web parity).
-                Text(task.firstPhysicalAction?.takeIf { it.isNotBlank() } ?: task.name, style = UFont.sans(21, FontWeight.Bold), color = c.ink, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis, modifier = Modifier.padding(top = 6.dp))
-                Text("${task.estimateMin} min", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 6.dp))
-                Row(Modifier.padding(top = 14.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    // tourAnchor: the begin-focus affordance — the tour's focus +
-                    // capture steps ring THIS (never the focus screen, which
-                    // would mint a real session on entry).
-                    UButton("Focus", kind = ButtonKind.CORAL, fill = false, leadingIcon = Icons.Filled.PlayArrow, modifier = Modifier.tourAnchor(TourAnchorIds.FOCUS_BEGIN), onClick = onStart)
-                    Text("Pick another", style = UFont.sans(13, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(onClick = onPickAnother).padding(horizontal = 10.dp, vertical = 8.dp))
-                }
-            }
-        }
-    }
 }
 
 /**
@@ -578,23 +511,6 @@ private fun DelegatedSection(rows: List<TaskItem>, assignedOut: Map<String, Stri
                     Text(if (t.done) "done" else "assigned", style = UFont.sans(10, FontWeight.Bold), color = c.primaryDeep)
                 }
             }
-        }
-    }
-}
-
-@Composable
-private fun EmptyHero(onAdd: () -> Unit) {
-    val c = UTheme.colors
-    Column(Modifier.padding(horizontal = 18.dp).padding(top = 22.dp)) {
-        Column(
-            Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(heroBrush(c)).padding(vertical = 32.dp, horizontal = 22.dp),
-            horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(10.dp),
-        ) {
-            Orbit(size = 48)
-            SectionLabel("Nothing to start", color = c.primaryDeep)
-            Text("You're all clear.", style = UFont.serifItalic(28), color = c.ink)
-            Text("Nothing's missing. When something's on your mind, drop it in.", style = UFont.sans(14), color = c.ink2, modifier = Modifier.padding(horizontal = 8.dp))
-            Box(Modifier.padding(top = 6.dp)) { UButton("Add one thing", kind = ButtonKind.CORAL, fill = false, onClick = onAdd) }
         }
     }
 }

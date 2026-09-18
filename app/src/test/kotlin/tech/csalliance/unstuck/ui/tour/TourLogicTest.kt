@@ -69,15 +69,13 @@ class TourLogicTest {
     fun focusStepsSpotlightTheDemoSurfaceAnchors() {
         // Round-2 #6: the focus/capture steps target anchors INSIDE the
         // tour-rendered demo focus surface — the old begin-focus targeting
-        // (FOCUS_BEGIN + Today fallbacks) is gone.
+        // (the hero's Focus button + Today fallbacks) is gone.
         val focus = ESSENTIAL_STEPS.first { it.id == "focus" }
         assertEquals(TourAnchorIds.DEMO_FOCUS_RING, focus.target)
         assertEquals(emptyList<String>(), focus.fallbacks)
         val capture = ESSENTIAL_STEPS.first { it.id == "capture" }
         assertEquals(TourAnchorIds.DEMO_CAPTURE_HINT, capture.target)
         assertEquals(emptyList<String>(), capture.fallbacks)
-        // No step targets the legacy begin-focus anchor any more.
-        assertTrue((FULL_STEPS + ESSENTIAL_STEPS).none { it.target == TourAnchorIds.FOCUS_BEGIN })
     }
 
     @Test
@@ -104,11 +102,24 @@ class TourLogicTest {
     }
 
     @Test
-    fun todayAndFinishFallbackChain() {
+    fun todayAndFinishRingTheTodayList() {
+        // The Start-Next hero left the home (2026-09-18): both steps target the
+        // list area directly — always on screen, so no fallback chain.
         for (id in listOf("today", "finish")) {
             val s = ESSENTIAL_STEPS.first { it.id == id }
-            assertEquals(TourAnchorIds.START_NEXT, s.target)
-            assertEquals("no backlog pointer any more — the list is the fallback", listOf(TourAnchorIds.TODAY_LIST), s.fallbacks)
+            assertEquals(TourAnchorIds.TODAY_LIST, s.target)
+            assertEquals(emptyList<String>(), s.fallbacks)
+        }
+    }
+
+    @Test
+    fun tourCopyNoLongerDescribesTheStartNextHero() {
+        // The hero (and its "Pick another" / "Add one thing" twin) is gone from
+        // the home; no step may still narrate it.
+        for (s in (FULL_STEPS + ESSENTIAL_STEPS).distinctBy { it.id }) {
+            for (text in listOfNotNull(s.title, s.body, s.narration, s.more)) {
+                assertFalse("${s.id} still mentions Start Next: $text", text.contains("Start Next", ignoreCase = true))
+            }
         }
     }
 
@@ -467,13 +478,17 @@ class TourLogicTest {
     fun audioResourceNamesMatchBundledClips() {
         assertEquals("tour_first_action", tourAudioResName("first-action"))
         assertEquals("tour_welcome", tourAudioResName("welcome"))
-        // Every step in both modes maps to a name in the bundled set.
+        // Every step in both modes maps to a name in the bundled set (bar the
+        // steps whose clips are awaiting a re-record — see TourAudio.kt).
         val bundled = setOf(
-            "tour_welcome", "tour_today", "tour_first_action", "tour_assistant", "tour_focus",
+            "tour_welcome", "tour_first_action", "tour_assistant", "tour_focus",
             "tour_capture", "tour_reentry", "tour_notifications", "tour_finish", "tour_calendar",
             "tour_captures", "tour_collections", "tour_sharing", "tour_insights", "tour_personalization",
         )
-        for (s in FULL_STEPS + ESSENTIAL_STEPS) assertTrue("missing clip for ${s.id}", tourAudioResName(s.id) in bundled)
+        for (s in FULL_STEPS + ESSENTIAL_STEPS) {
+            if (s.id in TOUR_STEPS_AWAITING_NARRATION) continue
+            assertTrue("missing clip for ${s.id}", tourAudioResName(s.id) in bundled)
+        }
     }
 
     /* ── ask wire + fallback ────────────────────────────────────────────── */
@@ -555,8 +570,16 @@ class TourLogicTest {
     @Test
     fun everyStepHasABundledAudioResource() {
         for (s in FULL_STEPS + ESSENTIAL_STEPS) {
-            assertTrue("no raw resource wired for ${s.id}", tourAudioRes(s.id) != 0)
+            if (s.id in TOUR_STEPS_AWAITING_NARRATION) {
+                // Copy changed after the clip was recorded: Listen is hidden on
+                // that step rather than narrating a surface that no longer exists.
+                assertEquals("stale clip still wired for ${s.id}", 0, tourAudioRes(s.id))
+            } else {
+                assertTrue("no raw resource wired for ${s.id}", tourAudioRes(s.id) != 0)
+            }
         }
+        // The today clip narrated the Start-Next hero, gone 2026-09-18.
+        assertEquals(setOf("today"), TOUR_STEPS_AWAITING_NARRATION)
         assertEquals(0, tourAudioRes("nope"))
     }
 
@@ -567,7 +590,7 @@ class TourLogicTest {
         // Exactly the steps carrying `more` text have a more clip; the rest
         // resolve to 0 (the section expands silently — never a crash).
         for (s in (FULL_STEPS + ESSENTIAL_STEPS).distinctBy { it.id }) {
-            if (s.more != null) {
+            if (s.more != null && s.id !in TOUR_STEPS_AWAITING_NARRATION) {
                 assertTrue("no more-clip wired for ${s.id}", tourMoreAudioRes(s.id) != 0)
             } else {
                 assertEquals("unexpected more-clip for ${s.id}", 0, tourMoreAudioRes(s.id))
@@ -726,7 +749,7 @@ class TourLogicTest {
         // Not running, no card → nothing hidden.
         assertFalse(tourHidesAppContent(cardUp = false, running = false, policy = null))
         // Running with a consuming scrim (display-only cutout) → hidden: a
-        // screen reader must not be able to activate the spotlighted hero.
+        // screen reader must not be able to activate the spotlighted rows.
         assertTrue(tourHidesAppContent(false, true, tourLockdownPolicy(today, openSection = null, overlayAboveTour = false)))
         // The assistant/reentry cutout is interactive by touch, but the
         // content beneath is still hidden (the panel's CTA opens the sheet).
@@ -769,8 +792,8 @@ class TourLogicTest {
             setOf("assistant", "reentry", "capture"),
             (FULL_STEPS + ESSENTIAL_STEPS).filter { tourCutoutInteractive(it) }.map { it.id }.toSet(),
         )
-        // Display-only everywhere else — the hero-targeting today/finish steps
-        // can no longer mint a real focus session through the spotlight hole.
+        // Display-only everywhere else — the list-targeting today/finish steps
+        // can't open a task through the spotlight hole.
         assertFalse(tourCutoutInteractive(ESSENTIAL_STEPS.first { it.id == "today" }))
         assertFalse(tourCutoutInteractive(ESSENTIAL_STEPS.first { it.id == "finish" }))
         assertFalse(tourCutoutInteractive(ESSENTIAL_STEPS.first { it.id == "focus" }))

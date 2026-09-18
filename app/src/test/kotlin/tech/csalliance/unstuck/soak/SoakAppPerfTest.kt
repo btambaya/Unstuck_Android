@@ -13,7 +13,6 @@ import tech.csalliance.unstuck.core.logic.busyMinutesByDay
 import tech.csalliance.unstuck.core.logic.isCompletedToday
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.isTemplate
-import tech.csalliance.unstuck.core.logic.pickTodayHero
 import tech.csalliance.unstuck.core.logic.projectOccurrences
 import tech.csalliance.unstuck.core.logic.visibleTasks
 import tech.csalliance.unstuck.core.model.CalBlock
@@ -83,7 +82,6 @@ class SoakAppPerfTest {
     // ── Today screen: every remember{} body, in order ────────────────────────
 
     @Test fun soak_today_screen_derivation() {
-        val hero = Bench.run("Today: pickTodayHero") { pickTodayHero(tasks, blocks, now, null, null, emptySet()) }
         val open = Bench.run("Today: visibleTasks(TODAY)") { visibleTasks(TaskListView.TODAY, tasks, blocks, now, null, null, false) }
         val todayOpen = visibleTasks(TaskListView.TODAY, tasks, blocks, now, null, null, false)
         Bench.run("Today: todayDone (filter + projectOccurrences)") {
@@ -95,14 +93,13 @@ class SoakAppPerfTest {
             sessions.filter { (now - (java.time.Instant.parse(it.completedAt).toEpochMilli())) in 0..(7L * 86_400_000) }.sumOf { it.actualSec } / 60
         }
         Bench.run("Today: WHOLE screen derivation (all of the above)") {
-            val h = pickTodayHero(tasks, blocks, now, null, null, emptySet())
             val o = visibleTasks(TaskListView.TODAY, tasks, blocks, now, null, null, false)
             val d = (tasks.filter { !isTemplate(it) } + projectOccurrences(tasks, blocks, today))
                 .filter { isCompletedToday(it, now) && o.none { x -> x.id == it.id } }
             val b = visibleTasks(TaskListView.BACKLOG, tasks, blocks, now, null, null, false)
-            h to (o.size + d.size + b.size)
+            o.size + d.size + b.size
         }
-        println("PERF | (hero=${hero.iters}, todayOpen=${todayOpen.size}, backlog rows=${visibleTasks(TaskListView.BACKLOG, tasks, blocks, now, null, null, false).size}) open-bench=${open.medianMs}")
+        println("PERF | (todayOpen=${todayOpen.size}, backlog rows=${visibleTasks(TaskListView.BACKLOG, tasks, blocks, now, null, null, false).size}) open-bench=${open.medianMs}")
     }
 
     // ── calendar lanes ──────────────────────────────────────────────────────

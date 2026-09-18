@@ -797,7 +797,7 @@ class AppViewModel(
                 .distinctUntilChanged()
                 .debounce(300)
                 // excludeIds: a task assigned away is someone else's now — never
-                // recommend it in the home-screen widget (parity with Today's hero).
+                // recommend it in the home-screen widget (same rule as the Today list).
                 .map { (ts, bs, liveId, assigned) -> tech.csalliance.unstuck.core.logic.pickStartNext(ts, bs, liveId, null, assigned) }
                 .distinctUntilChanged()
                 .collect { rec ->

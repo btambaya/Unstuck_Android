@@ -10,7 +10,6 @@ import tech.csalliance.unstuck.core.logic.isSlipping
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.isTemplate
 import tech.csalliance.unstuck.core.logic.matchesArea
-import tech.csalliance.unstuck.core.logic.pickTodayHero
 import tech.csalliance.unstuck.core.logic.projectOccurrences
 import tech.csalliance.unstuck.core.logic.projectOverdueOccurrences
 import tech.csalliance.unstuck.core.logic.visibleTasks
@@ -53,24 +52,6 @@ class VisibleTasksParityTest {
         for (view in TaskListView.entries) {
             for (area in areas) for (tag in tags) for (slip in listOf(false, true)) {
                 assertSame(view, area, tag, slip)
-            }
-        }
-    }
-
-    // pickTodayHero now accepts the caller's already-computed TODAY rows so
-    // Today doesn't bucket the same list twice. Handing it in must not change
-    // which task it picks — for any area filter, live task or exclude set.
-    @Test fun heroWithPrecomputedRowsPicksTheSameTask() {
-        val todayRows = visibleTasks(TaskListView.TODAY, tasks, blocks, now, activeArea = null, slipMode = false)
-        assertTrue("fixture must have today rows", todayRows.isNotEmpty())
-        val excludes: List<Set<String>?> = listOf(null, emptySet(), todayRows.take(3).map { it.id }.toSet())
-        for (area in listOf(null, "Work", "Health", UNASSIGNED_AREA, "NoSuchArea")) {
-            for (live in listOf(null, todayRows.first().id, "nope")) {
-                for (ex in excludes) {
-                    val without = pickTodayHero(tasks, blocks, now, live, area, ex)
-                    val with = pickTodayHero(tasks, blocks, now, live, area, ex, todayRows)
-                    assertEquals("area=$area live=$live ex=${ex?.size}", without, with)
-                }
             }
         }
     }

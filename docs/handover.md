@@ -4,6 +4,14 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
+## 2026-09-18 — the Start-Next hero is gone from the home
+
+The lavender "Start next" card (area · task, first-step headline, estimate, Focus, "Pick another") and its all-clear twin ("Nothing to start / You're all clear. / Add one thing") no longer render on Today, on iOS and Android alike. The home is now: top bar → date eyebrow → one-line greeting → "This week · focused" pill → the assistant input pill → the Today list (filters + rows). Focus stays reachable from every task row (detail / context menu) and the editor's Focus button; the Start-Next **home-screen widget** (`surface/StartNextWidget.kt`, `pickStartNext`) is untouched.
+
+- `ui/today/TodayScreen.kt`: `StartNextHero`, `EmptyHero`, `heroBrush`, the `startNext`/`empty` derivations and the `onSearch` parameter are deleted; rows no longer subtract the hero; a plain Today with nothing scheduled shows the iOS note "Nothing scheduled. Tap + to add." instead of the all-clear card.
+- `core/logic/PickStartNext.kt`: `pickTodayHero()` (+ its tests/soak benches) deleted — only the hero used it.
+- Tour: anchors `START_NEXT` / `FOCUS_BEGIN` removed; the today + finish steps target `TODAY_LIST` directly (no fallback chain); the today step's copy no longer describes Start Next. **Its Cherry clips (`tour_today.m4a`, `tour_today_more.m4a`) narrated the hero and were removed — Listen is hidden on that step (`TOUR_STEPS_AWAITING_NARRATION` in `TourAudio.kt`) until they are re-recorded from the new `narration` / `more` text.** No TTS pipeline lives in-repo (the clips came from the web `public/tour-audio/` set).
+
 ## 2026-09-17 — iOS-parity pass: barge-in (a)(b)(c), the home, the interview in the assistant, coral-only colours
 
 Ported from the iOS reference (unstuck_ios head 4bc5110, builds 56–61). Unit tests green (`./gradlew test`); `:app:assembleDebug` compiles.

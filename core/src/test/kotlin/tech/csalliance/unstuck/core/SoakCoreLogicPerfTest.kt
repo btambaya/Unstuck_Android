@@ -19,7 +19,6 @@ import tech.csalliance.unstuck.core.logic.goldenHours
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
 import tech.csalliance.unstuck.core.logic.patternGaps
 import tech.csalliance.unstuck.core.logic.pickMoment
-import tech.csalliance.unstuck.core.logic.pickTodayHero
 import tech.csalliance.unstuck.core.logic.projectOccurrences
 import tech.csalliance.unstuck.core.logic.projectOverdueOccurrences
 import tech.csalliance.unstuck.core.logic.usableToday
@@ -51,7 +50,6 @@ class SoakCoreLogicPerfTest {
         Bench.run("visibleTasks(UPCOMING)") { visibleTasks(TaskListView.UPCOMING, tasks, blocks, now, null, null, false) }
         Bench.run("projectOccurrences") { projectOccurrences(tasks, blocks, today) }
         Bench.run("projectOverdueOccurrences") { projectOverdueOccurrences(tasks, blocks, today) }
-        Bench.run("pickTodayHero") { pickTodayHero(tasks, blocks, now, null, null, emptySet()) }
         Bench.run("usableToday") { usableToday(blocks, today) }
         Bench.run("freeWindowsToday") { freeWindowsToday(blocks, today, "09:30") }
         Bench.run("composeBrief") { composeBrief(tasks, blocks, today, now, 90) }
@@ -105,18 +103,6 @@ class SoakCoreLogicPerfTest {
             Bench.run("A/B visibleTasks($view) AFTER ") { visibleTasks(view, tasks, blocks, now, null, null, false) }
         }
 
-        // 3. pickTodayHero re-bucketing TODAY that the caller already computed.
-        val todayRows = visibleTasks(TaskListView.TODAY, tasks, blocks, now, null, null, false)
-        Bench.run("A/B pickTodayHero BEFORE: re-buckets TODAY itself") { pickTodayHero(tasks, blocks, now, null, null, emptySet()) }
-        Bench.run("A/B pickTodayHero AFTER : given the caller's rows") { pickTodayHero(tasks, blocks, now, null, null, emptySet(), todayRows) }
-        Bench.run("A/B Today derivation BEFORE: visibleTasks + hero") {
-            val r = legacyVisibleTasks(TaskListView.TODAY, tasks, blocks, now, null, null, false)
-            pickTodayHero(tasks, blocks, now, null, null, emptySet()) to r
-        }
-        Bench.run("A/B Today derivation AFTER : visibleTasks + hero") {
-            val r = visibleTasks(TaskListView.TODAY, tasks, blocks, now, null, null, false)
-            pickTodayHero(tasks, blocks, now, null, null, emptySet(), r) to r
-        }
     }
 
     /** The pre-optimisation visibleTasks body, verbatim (see

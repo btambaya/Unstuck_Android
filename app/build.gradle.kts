@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 94
-        versionName = "0.5.10"
+        versionCode = 95
+        versionName = "0.5.11"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.4.64 — Assistant redesign: one endless conversation with day markers, a live NEXT / USABLE / PAUSED strip you can tap, tappable suggestions built from your real tasks and lists, a tick-list of exactly what it changed with Undo, a daily check-in, and it can now prepare a task share that only goes out when you confirm. Feedback moved to Settings - Account, and you can switch the AI Assistant off entirely in Settings - Interface."
+    releaseNotes = "v0.5.11 — The + button now creates whatever you're looking at: a new list on the Collections tab, an item inside a list, a task everywhere else. And the assistant stops announcing success out loud — no more 'Done —' opening every spoken reply, and no more tagging advice with where it remembered something from."
 }
 
 dependencies {

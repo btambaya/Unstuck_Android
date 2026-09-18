@@ -112,10 +112,14 @@ val ESSENTIAL_STEPS: List<TourStep> = listOf(
         // The Start-Next hero left the home (2026-09-18): the list IS Today, so
         // the step rings the list area itself — always on screen, no fallback.
         target = TourAnchorIds.TODAY_LIST,
+        // Copy describes the hero-less home (2026-09-18): greeting → week pill →
+        // assistant input pill → the Today list. SAME strings as iOS
+        // TourData.swift; tour_today.m4a / tour_today_more.m4a were synthesised
+        // from EXACTLY these (TourLogicTest pins them — edit here = re-record).
         title = "Today narrows it down",
-        body = "Today shows only the work you planned for today — each task with its area and estimate, nothing more. Everything else waits in Backlog, so the list stays short enough to begin. Open any task to focus on it.",
-        narration = "This is Today. Instead of a long list, it shows only the work you planned for today, with the time each piece takes. Everything else waits quietly in your Backlog, so what’s in front of you stays short enough to begin. Open any task to focus on it.",
-        more = "Usable Time already accounts for meetings and fragmentation, so what Today asks of you fits the time you actually have.",
+        body = "Your home: a greeting, how much you’ve focused this week, and the assistant pill — ask, plan, or brain-dump; say it or type it, and it does it. Below that, Today lists only what’s planned for today, filtered by area. Everything else waits in Backlog. Focus starts from any task row, or from inside the task.",
+        narration = "This is Today. Up top: a greeting, how much you’ve focused this week, and the assistant pill — ask, plan, or brain-dump. Say it or type it, and it does it. Under that, the list shows only what’s planned for today, filtered by area; everything else waits quietly in Backlog. Focus starts from any task row, or from inside the task.",
+        more = "Filter Today by area with the pills above the list, or switch to Backlog to see what’s waiting. Any row can start Focus — so can the task itself. Nothing unplanned is lost; it just isn’t in the way.",
         primary = "Continue",
     ),
     TourStep(

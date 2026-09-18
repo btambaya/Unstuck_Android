@@ -35,15 +35,17 @@ const val TOUR_AUDIO_VOICE = "Cherry"
  *  (both maps below resolve to 0) until the clips are re-recorded — then
  *  bundle the new m4a, map it, and drop the id here (TourLogicTest pins the
  *  pairing).
- *  · "today" — 2026-09-18: the Start-Next hero left the home; the old clip
- *    still narrated "Start Next offers one realistic suggestion". */
-val TOUR_STEPS_AWAITING_NARRATION: Set<String> = setOf("today")
+ *  EMPTY since 2026-09-18: the "today" clips (tour_today / tour_today_more)
+ *  were re-recorded from the hero-less home's copy — DashScope
+ *  qwen3-tts-flash, voice "Cherry", the same bytes iOS bundles. */
+val TOUR_STEPS_AWAITING_NARRATION: Set<String> = emptySet()
 
 /** Step id → bundled raw resource (0 = none → Listen hidden for that step).
  *  Explicit map so a typo'd id fails visibly in review, not at runtime. */
 @RawRes
 fun tourAudioRes(stepId: String): Int = when (stepId) {
     "welcome" -> R.raw.tour_welcome
+    "today" -> R.raw.tour_today
     "first-action" -> R.raw.tour_first_action
     "assistant" -> R.raw.tour_assistant
     "focus" -> R.raw.tour_focus
@@ -72,6 +74,7 @@ fun tourNarrationShouldRewind(moreActive: Boolean, narrationFinished: Boolean): 
 @RawRes
 fun tourMoreAudioRes(stepId: String): Int = when (stepId) {
     "welcome" -> R.raw.tour_welcome_more
+    "today" -> R.raw.tour_today_more
     "first-action" -> R.raw.tour_first_action_more
     "assistant" -> R.raw.tour_assistant_more
     "focus" -> R.raw.tour_focus_more

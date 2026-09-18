@@ -481,13 +481,51 @@ class TourLogicTest {
         // Every step in both modes maps to a name in the bundled set (bar the
         // steps whose clips are awaiting a re-record — see TourAudio.kt).
         val bundled = setOf(
-            "tour_welcome", "tour_first_action", "tour_assistant", "tour_focus",
+            "tour_welcome", "tour_today", "tour_first_action", "tour_assistant", "tour_focus",
             "tour_capture", "tour_reentry", "tour_notifications", "tour_finish", "tour_calendar",
             "tour_captures", "tour_collections", "tour_sharing", "tour_insights", "tour_personalization",
         )
         for (s in FULL_STEPS + ESSENTIAL_STEPS) {
             if (s.id in TOUR_STEPS_AWAITING_NARRATION) continue
             assertTrue("missing clip for ${s.id}", tourAudioResName(s.id) in bundled)
+        }
+    }
+
+    /** The regenerated today clips (2026-09-18, DashScope qwen3-tts-flash,
+     *  voice "Cherry") speak EXACTLY these strings — the same copy iOS ships.
+     *  Editing the step's copy without re-recording would put the captions
+     *  and the audio out of step; this pin makes that a test failure. */
+    @Test
+    fun todayClipsMatchTheStepCopy() {
+        val today = ESSENTIAL_STEPS.first { it.id == "today" }
+        assertEquals(
+            "This is Today. Up top: a greeting, how much you’ve focused this week, and the assistant pill — ask, plan, or brain-dump. Say it or type it, and it does it. Under that, the list shows only what’s planned for today, filtered by area; everything else waits quietly in Backlog. Focus starts from any task row, or from inside the task.",
+            today.narration,
+        )
+        assertEquals(
+            "Filter Today by area with the pills above the list, or switch to Backlog to see what’s waiting. Any row can start Focus — so can the task itself. Nothing unplanned is lost; it just isn’t in the way.",
+            today.more,
+        )
+        // Both modes carry the one today step.
+        val inFull = FULL_STEPS.first { it.id == "today" }
+        assertEquals(today.narration, inFull.narration)
+        assertEquals(today.more, inFull.more)
+        assertEquals(today.body, inFull.body)
+    }
+
+    /** The two regenerated clips are really in res/raw (a wired R.raw id
+     *  proves the file existed at compile time; this proves it is the file we
+     *  mean, next to the rest of the Cherry set). Gradle runs unit tests with
+     *  the module dir as cwd; fall back to the repo root for IDE runs. */
+    @Test
+    fun todayClipsArePresentInResRaw() {
+        val raw = listOf("src/main/res/raw", "app/src/main/res/raw")
+            .map { java.io.File(it) }
+            .firstOrNull { it.isDirectory }
+        assertTrue("res/raw not found from ${java.io.File(".").absolutePath}", raw != null)
+        for (name in listOf("tour_today.m4a", "tour_today_more.m4a", "tour_welcome.m4a")) {
+            val f = java.io.File(raw, name)
+            assertTrue("$name missing from res/raw", f.isFile && f.length() > 10_000)
         }
     }
 
@@ -578,8 +616,11 @@ class TourLogicTest {
                 assertTrue("no raw resource wired for ${s.id}", tourAudioRes(s.id) != 0)
             }
         }
-        // The today clip narrated the Start-Next hero, gone 2026-09-18.
-        assertEquals(setOf("today"), TOUR_STEPS_AWAITING_NARRATION)
+        // The today clips were re-recorded for the hero-less home (2026-09-18):
+        // nothing is parked any more — every step narrates, including today.
+        assertEquals(emptySet<String>(), TOUR_STEPS_AWAITING_NARRATION)
+        assertTrue(tourAudioRes("today") != 0)
+        assertTrue(tourMoreAudioRes("today") != 0)
         assertEquals(0, tourAudioRes("nope"))
     }
 

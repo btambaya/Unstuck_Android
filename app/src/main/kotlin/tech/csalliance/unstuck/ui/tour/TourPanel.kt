@@ -6,6 +6,7 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.ScrollState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -45,6 +46,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,7 +57,7 @@ import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.onGloballyPositioned
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -109,10 +111,6 @@ fun TourPanel(
     collapsed: Boolean,
     /** Hard height cap from the host (dock-side space outside the ring). */
     maxHeight: Dp,
-    /** Reports the panel's measured EXPANDED height so the host's collapse
-     *  decision uses real geometry (never re-measured while collapsed, or the
-     *  decision would oscillate — iOS parity). */
-    onExpandedHeight: (Int) -> Unit,
     /** Reports the Ask field's focus so the host can lift the panel above the
      *  keyboard (dock=TOP, collapse suppressed) while the user types. */
     onAskFocus: (Boolean) -> Unit = {},
@@ -144,6 +142,12 @@ fun TourPanel(
     val qa = remember(step.id) { mutableStateListOf<TourQaBubble>() }
     val wire = remember(step.id) { mutableStateListOf<ChatMessage>() }
     var seq by remember(step.id) { mutableIntStateOf(0) }
+    // …and so is the body's SCROLL OFFSET. TourHost calls TourPanel from ONE
+    // stable call site with no key(), so an un-keyed rememberScrollState would
+    // outlive the step: leave step N scrolled down and step N+1 — whose cap
+    // may leave only a line or two of viewport — opens already scrolled past
+    // its own first line. Keyed, every step opens at its title.
+    val bodyScroll = rememberSaveable(step.id, saver = ScrollState.Saver) { ScrollState(0) }
 
     fun submitQuestion() {
         val q = question.trim()
@@ -169,10 +173,17 @@ fun TourPanel(
             .fillMaxWidth()
             // Round-2 #5 confirm priority: while the pause confirm is armed the
             // cap is floored so the confirm's buttons + Settings line NEVER
-            // clip at the 150dp collapse floor — the weighted body gives way
+            // clip at the collapsed floor — the weighted body gives way
             // instead (it scrolls; the unweighted footer measures before it).
-            .heightIn(max = tourPanelMaxHeight(maxHeight, pauseConfirmArmed))
-            .onGloballyPositioned { if (!collapsed) onExpandedHeight(it.size.height) }
+            // The floor is the confirm's REAL requirement at this font scale,
+            // which sits below the readable minimum, so an already-expanded
+            // panel is never grown out over the ring by arming the confirm.
+            // NOTE: the panel deliberately reports NO measured height. An
+            // expanded panel is routinely rendered CAPPED (the body scrolls),
+            // so its measurement is the cap, not its natural height — feeding
+            // that back into the collapse decision made it oscillate. The
+            // decision runs off panelPlacement's derived readable minimum.
+            .heightIn(max = tourPanelMaxHeight(maxHeight, pauseConfirmArmed, LocalDensity.current.fontScale))
             .shadow(18.dp, RoundedCornerShape(18.dp))
             .clip(RoundedCornerShape(18.dp))
             .background(c.bg)
@@ -221,7 +232,7 @@ fun TourPanel(
         Column(
             Modifier
                 .weight(1f, fill = false)
-                .verticalScroll(rememberScrollState())
+                .verticalScroll(bodyScroll)
                 .padding(horizontal = 16.dp)
                 .padding(top = 12.dp, bottom = 4.dp),
         ) {
@@ -471,18 +482,38 @@ private fun TourListenBar(audio: TourAudioController, speed: Float, onCycleSpeed
 fun formatTourSpeed(speed: Float): String =
     if (speed % 1f == 0f) speed.toInt().toString() else speed.toString().trimEnd('0').trimEnd('.')
 
+/* ── The panel's height minima ──────────────────────────────────────────────
+ * All three are summed in TourData.kt (tourPanelCollapsedMinDp /
+ * tourPanelReadableMinDp / tourPauseConfirmMinDp) from the literal paddings,
+ * sizes and line heights of the composables ABOVE — change a padding here and
+ * the matching term there. They live next to panelPlacement because the
+ * placement rule is what decides with them, and only a pure function can be
+ * unit-tested; the two Dp values below are just the fontScale-1 readings, for
+ * docs and for callers with no Density to hand. */
+
 /** Round-2 #5 confirm priority: the panel's height floor while the pause
- *  confirm is armed — comfortably fits header + title + the confirm's buttons
- *  + the Settings-path line (with font-scale slack). */
-val TOUR_PAUSE_CONFIRM_MIN_PANEL_HEIGHT: Dp = 280.dp
+ *  confirm is armed, at fontScale 1 — header + title + the confirm's buttons
+ *  + the Settings-path line. */
+val TOUR_PAUSE_CONFIRM_MIN_PANEL_HEIGHT: Dp = tourPauseConfirmMinDp().dp
+
+/** The READABLE minimum at fontScale 1 — the height at or above which the
+ *  panel keeps the step's body copy and lets it scroll under the dock-side cap
+ *  instead of collapsing to title-only. */
+val TOUR_PANEL_READABLE_MIN_HEIGHT: Dp = tourPanelReadableMinDp().dp
 
 /** The panel's effective height cap: the host's dock-side geometric cap,
- *  floored while the pause confirm is armed so the confirm never clips at the
- *  150dp collapse floor. (heightIn can't exceed the parent's incoming
- *  constraints, so the floor is still screen-safe; a transient ring overlap
- *  during the confirm beats clipped actions.) Pure — unit-tested. */
-fun tourPanelMaxHeight(cap: Dp, pauseConfirmArmed: Boolean): Dp =
-    if (pauseConfirmArmed) maxOf(cap, TOUR_PAUSE_CONFIRM_MIN_PANEL_HEIGHT) else cap
+ *  floored while the pause confirm is armed so the confirm's buttons and
+ *  Settings line never clip at the collapsed floor. (heightIn can't exceed the
+ *  parent's incoming constraints, so the floor is still screen-safe; a
+ *  transient ring overlap during the confirm beats clipped actions.)
+ *
+ *  The floor is exactly what the confirm NEEDS and never more — it sits below
+ *  [tourPanelReadableMinDp], so a panel that the placement rule already sized
+ *  EXPANDED (cap ≥ readable) is never grown by arming the confirm. A flat
+ *  floor above the readable minimum pushed such a panel out over the ring the
+ *  moment Pause was tapped. Pure — unit-tested. */
+fun tourPanelMaxHeight(cap: Dp, pauseConfirmArmed: Boolean, fontScale: Float = 1f): Dp =
+    if (pauseConfirmArmed) maxOf(cap, tourPauseConfirmMinDp(fontScale).dp) else cap
 
 /* ============================================================
  * Shared shells for the welcome + paused cards.

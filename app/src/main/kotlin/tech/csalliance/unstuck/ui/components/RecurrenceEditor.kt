@@ -39,9 +39,19 @@ private fun withUntil(r: Recurrence?, until: String?): Recurrence? = when (r) {
 }
 
 /** Inline recurrence picker. Emits a [Recurrence]? (null = does not repeat),
- *  including an optional `until` (end date) — web/iOS parity. */
+ *  including an optional `until` (end date) — web/iOS parity.
+ *
+ *  [showHeading] owns the "REPEAT" [SectionLabel]. It defaults to true so a
+ *  bare call site (NewTaskSheet) is labelled on its own; a sheet that already
+ *  prints its own "Repeat" heading — plus a summary line above the picker, as
+ *  TaskDetailSheet does — MUST pass false, or the heading stacks twice. */
 @Composable
-fun RecurrenceEditor(value: Recurrence?, modifier: Modifier = Modifier, onChange: (Recurrence?) -> Unit) {
+fun RecurrenceEditor(
+    value: Recurrence?,
+    modifier: Modifier = Modifier,
+    showHeading: Boolean = true,
+    onChange: (Recurrence?) -> Unit,
+) {
     val c = UTheme.colors
     val context = LocalContext.current
     val mode = when (value) {
@@ -54,7 +64,7 @@ fun RecurrenceEditor(value: Recurrence?, modifier: Modifier = Modifier, onChange
     val until = untilOf(value)
 
     Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SectionLabel("Repeat")
+        if (showHeading) SectionLabel("Repeat")
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             SelectableChip("Never", selected = mode == Mode.NONE) { onChange(null) }
             SelectableChip("Daily", selected = mode == Mode.DAILY) { onChange(Recurrence.Daily(until)) }

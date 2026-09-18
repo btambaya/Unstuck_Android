@@ -441,6 +441,79 @@ fun panelAvailablePx(ringTop: Float?, ringBottom: Float?, screenHeightPx: Float,
 fun panelCollapsed(availablePx: Float, collapseThresholdPx: Float): Boolean =
     availablePx < collapseThresholdPx
 
+/* ── Panel height metrics ───────────────────────────────────────────────────
+ * Every number below is a literal padding / size / line height read off
+ * TourPanel.kt's composables, split into the part that is FIXED in dp and the
+ * part that is typed in sp and therefore SCALES with the system font size.
+ * Keep them in sync with the panel; TourLogicTest pins the sums.
+ *
+ * The minima live HERE, next to [panelPlacement], and not in the host: the
+ * host may only report physical facts (density, font scale, insets, the ring).
+ * A minimum the caller could choose is a decision the unit tests cannot guard.
+ */
+
+/** sp-typed text scales with the system font size, so every text row in the
+ *  sums below is `× fontScale`. Clamped to [1, 2]: below 1 the audited
+ *  fontScale-1 numbers already carry slack, and above 2 (Android's largest
+ *  setting) demanding three full body lines would collapse nearly every step —
+ *  a scrolling body beats title-only. */
+private fun panelFontScale(fontScale: Float): Float = fontScale.coerceIn(1f, 2f)
+
+/** Header: 12 top + max(orbit 26, close 32, stage label + 5 + 6dp dots)
+ *  + 10 bottom + the 1dp hairline. mono(10) ≈ 14dp a line. */
+private fun panelHeaderDp(fs: Float): Float = 23f + maxOf(32f, 11f + 14f * fs)
+
+/** Body, title only (what a COLLAPSED panel shows): 12 top pad
+ *  + serifItalic(20) ≈ 26dp + 4 bottom pad. */
+private fun panelBodyTitleOnlyDp(fs: Float): Float = 16f + 26f * fs
+
+/** Body, readable: the title plus the 8dp gap and THREE 20sp lines of step
+ *  copy. Everything else in the body (Tell-me-more, the Listen bar, the Ask
+ *  thread, the link row) is deliberately NOT counted — it scrolls. */
+private fun panelBodyReadableDp(fs: Float): Float = panelBodyTitleOnlyDp(fs) + 8f + 60f * fs
+
+/** Footer: 8 + 1dp hairline + 10 + the primary pill (9+9 pad + sans(13)
+ *  ≈ 17dp) + 10. */
+private fun panelFooterDp(fs: Float): Float = 47f + 17f * fs
+
+/** Pause-confirm footer: 8 + 1dp hairline + 10 + the confirm title (13sp)
+ *  + 8 + the button row (9+9 pad + 13sp) + 8 + the Settings-path line
+ *  (11sp/16sp leading, TWO lines) + 10. */
+private fun panelConfirmFooterDp(fs: Float): Float = 63f + 66f * fs
+
+/** One text line of slack on every minimum below. */
+private const val PANEL_MIN_SLACK_DP = 11f
+
+/** The COLLAPSED minimum: header + the step title + the footer controls. At
+ *  anything less the title itself clips — the old hand-picked 150dp floor was
+ *  ~11dp short of the 161dp this sums to at fontScale 1. */
+fun tourPanelCollapsedMinDp(fontScale: Float = 1f): Float = panelFontScale(fontScale).let { fs ->
+    panelHeaderDp(fs) + panelBodyTitleOnlyDp(fs) + panelFooterDp(fs) + PANEL_MIN_SLACK_DP
+}
+
+/** The READABLE minimum: header + title + three lines of body + footer — the
+ *  height at or above which the panel KEEPS the step's copy and lets it scroll
+ *  under the dock-side cap instead of collapsing to title-only.
+ *
+ *  It is derived, never measured. An expanded panel is routinely rendered
+ *  CAPPED (its body scrolls), so its measured height IS the cap; feeding that
+ *  back into the collapse test would flip expanded/collapsed frame after
+ *  frame. And it is NOT the panel's full natural height: testing against that
+ *  threw the body away on every side that could not hold the whole panel at
+ *  once. */
+fun tourPanelReadableMinDp(fontScale: Float = 1f): Float = panelFontScale(fontScale).let { fs ->
+    panelHeaderDp(fs) + panelBodyReadableDp(fs) + panelFooterDp(fs) + PANEL_MIN_SLACK_DP
+}
+
+/** The armed pause-confirm's minimum: header + title + the confirm footer
+ *  (buttons + Settings path). The panel's cap is floored to this so the
+ *  confirm can never clip at the collapsed floor — and to NO MORE than this,
+ *  because a floor above [tourPanelReadableMinDp] would grow an already
+ *  expanded panel out over the ring the moment Pause is tapped. */
+fun tourPauseConfirmMinDp(fontScale: Float = 1f): Float = panelFontScale(fontScale).let { fs ->
+    panelHeaderDp(fs) + panelBodyTitleOnlyDp(fs) + panelConfirmFooterDp(fs) + PANEL_MIN_SLACK_DP
+}
+
 /** The host's full placement decision for one frame. [availablePx] is the
  *  hard height cap the panel is laid out with. */
 data class PanelPlacement(val dock: PanelDock, val availablePx: Float, val collapsed: Boolean)
@@ -455,7 +528,8 @@ data class PanelPlacement(val dock: PanelDock, val availablePx: Float, val colla
  *  1. Preferred dock = opposite the target (no target → bottom); while the
  *     Ask field is focused with the keyboard up, prefer TOP and suppress the
  *     collapse so the field + thread never hide (iOS parity).
- *  2. If the preferred side fits the expanded panel → expanded there.
+ *  2. If the preferred side fits a READABLE panel → expanded there, capped to
+ *     the space outside the ring (the body scrolls under the cap).
  *  3. If it at least fits the collapsed minimum → collapsed there.
  *  4. Otherwise FLIP to the other side (expanded/collapsed by its space) —
  *     never cap over the ring just because the preferred side is tight.
@@ -463,8 +537,18 @@ data class PanelPlacement(val dock: PanelDock, val availablePx: Float, val colla
  *     whole usable screen) take the roomier side with the minimum as a
  *     usability floor — the single, physically-unavoidable overlap case.
  *
+ * The READABLE minimum ([tourPanelReadableMinDp]) — NOT the panel's full
+ * natural height — is what separates expanded from collapsed, and it is
+ * computed HERE from [densityPx] + [fontScale] rather than handed in by the
+ * host. The body already scrolls under [PanelPlacement.availablePx], so a side
+ * only has to hold a READABLE panel (header + title + 3 lines of body +
+ * footer) to keep the step's copy; testing against the FULL expanded height
+ * threw the body away on every side that could not hold the whole panel at
+ * once.
+ *
  * [bottomInsetPx] must already include the IME while it's up, so this whole
- * decision re-runs as the keyboard shows/hides.
+ * decision re-runs as the keyboard shows/hides. [fontScale] is the system font
+ * size: every minimum below is part text, so they all grow with it.
  */
 fun panelPlacement(
     ringTop: Float?,
@@ -473,10 +557,12 @@ fun panelPlacement(
     topInsetPx: Float,
     bottomInsetPx: Float,
     marginPx: Float,
-    expandedHeightPx: Float,
-    collapsedMinPx: Float,
+    densityPx: Float,
+    fontScale: Float = 1f,
     askFocused: Boolean = false,
 ): PanelPlacement {
+    val readableMinPx = tourPanelReadableMinDp(fontScale) * densityPx
+    val collapsedMinPx = tourPanelCollapsedMinDp(fontScale) * densityPx
     fun availOn(dock: PanelDock): Float {
         val raw = panelAvailablePx(ringTop, ringBottom, screenHeightPx, dock)
         val inset = if (dock == PanelDock.TOP) topInsetPx else bottomInsetPx
@@ -490,17 +576,23 @@ fun panelPlacement(
     }
     val avail = availOn(preferred)
     // Ask-focused: TOP + never collapsed (the field lives in the body). The
+    // floor is the READABLE minimum, not the collapsed one: at the collapsed
+    // floor the body viewport is ~50dp — the field the user is typing into
+    // sits below the fold with nowhere to scroll into view. The
     // floor may overlap a top-docked ring in the extreme — but the keyboard is
     // up and the user is typing; geometry restores the moment focus/IME drop.
-    if (askFocused) return PanelPlacement(PanelDock.TOP, maxOf(avail, collapsedMinPx), collapsed = false)
+    if (askFocused) return PanelPlacement(PanelDock.TOP, maxOf(avail, readableMinPx), collapsed = false)
     if (!hasRing) return PanelPlacement(preferred, avail, collapsed = false)
-    if (avail >= collapsedMinPx) return PanelPlacement(preferred, avail, collapsed = avail < expandedHeightPx)
+    // ONE collapse test, applied to whatever cap the panel ends up with —
+    // preferred side, flipped side and the floor alike.
+    fun collapsedAt(capPx: Float) = capPx < readableMinPx
+    if (avail >= collapsedMinPx) return PanelPlacement(preferred, avail, collapsed = collapsedAt(avail))
     val other = if (preferred == PanelDock.TOP) PanelDock.BOTTOM else PanelDock.TOP
     val otherAvail = availOn(other)
-    if (otherAvail >= collapsedMinPx) return PanelPlacement(other, otherAvail, collapsed = otherAvail < expandedHeightPx)
+    if (otherAvail >= collapsedMinPx) return PanelPlacement(other, otherAvail, collapsed = collapsedAt(otherAvail))
     // Neither side fits even the collapsed minimum — roomier side + floor.
-    return if (otherAvail > avail) PanelPlacement(other, collapsedMinPx, collapsed = true)
-    else PanelPlacement(preferred, collapsedMinPx, collapsed = true)
+    return if (otherAvail > avail) PanelPlacement(other, collapsedMinPx, collapsed = collapsedAt(collapsedMinPx))
+    else PanelPlacement(preferred, collapsedMinPx, collapsed = collapsedAt(collapsedMinPx))
 }
 
 /* ============================================================

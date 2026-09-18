@@ -181,10 +181,11 @@ fun TourHost(
     var explicit by remember { mutableStateOf(false) }
     // Two-tap assistant step: which step id already opened the bubble.
     var assistantOpenedForStep by remember { mutableStateOf<String?>(null) }
-    // The panel's measured EXPANDED height — the collapse decision compares
-    // real geometry, and keeps the last expanded measure while collapsed so
-    // the decision can't oscillate (iOS parity).
-    var expandedHeightPx by remember { mutableIntStateOf(0) }
+    // (No measured panel height is kept, and no height threshold is chosen
+    // here: panelPlacement derives its own minima from density + font scale.
+    // An expanded panel is routinely rendered capped — its measurement IS the
+    // cap — so feeding a measure back into the decision could only make it
+    // oscillate.)
     // The Ask field has focus (panel reports it): with the keyboard up, the
     // panel prefers dock=TOP and suppresses the collapse so the field + thread
     // are never hidden (iOS parity).
@@ -517,11 +518,13 @@ fun TourHost(
                 // ── Non-negotiable #1: dock OPPOSITE the target, hard-capped to
                 // the space outside the ring MINUS the dock-side insets (the
                 // panel is laid out inside systemBars+IME padding, the ring is
-                // in raw window coords). Tight side → collapse; even the
-                // collapsed minimum not fitting → FLIP, never cap over the
-                // ring. Reading WindowInsets.ime here re-runs the decision as
-                // the keyboard shows/hides; an Ask-focused panel prefers TOP
-                // with the collapse suppressed so the field never hides. ──
+                // in raw window coords). A side that holds a READABLE panel
+                // keeps the body (it scrolls under the cap); only a side below
+                // that collapses to title-only; even the collapsed minimum not
+                // fitting → FLIP, never cap over the ring. Reading
+                // WindowInsets.ime here re-runs the decision as the keyboard
+                // shows/hides; an Ask-focused panel prefers TOP with the
+                // collapse suppressed so the field never hides. ──
                 val ringPadPx = with(density) { 14.dp.toPx() }   // 8dp pad + ring/glow
                 val marginPx = with(density) { 12.dp.toPx() }
                 val imeBottomPx = WindowInsets.ime.getBottom(density).toFloat()
@@ -534,9 +537,12 @@ fun TourHost(
                     topInsetPx = WindowInsets.systemBars.getTop(density).toFloat(),
                     bottomInsetPx = bottomInsetPx,
                     marginPx = marginPx,
-                    expandedHeightPx = expandedHeightPx.takeIf { it > 0 }?.toFloat()
-                        ?: with(density) { 360.dp.toPx() },
-                    collapsedMinPx = with(density) { 150.dp.toPx() },
+                    // Physical facts only: the readable / collapsed minima are
+                    // the placement rule's own business (TourData), derived
+                    // from these. A threshold the host got to pick would be a
+                    // behavioural decision no unit test could guard.
+                    densityPx = density.density,
+                    fontScale = density.fontScale,
                     askFocused = askFocused && imeBottomPx > 0f,
                 )
                 val dock = placement.dock
@@ -565,7 +571,6 @@ fun TourHost(
                         stepHasAudio = tourAudioRes(step.id) != 0,
                         collapsed = collapsed,
                         maxHeight = capDp,
-                        onExpandedHeight = { expandedHeightPx = it },
                         onAskFocus = { askFocused = it },
                         askTransport = { msgs, s -> vm.tourAsk(msgs, s.id, s.title) },
                         primaryLabel = tourPrimaryLabel(step, index, steps.size, assistantOpenedForStep),

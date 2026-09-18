@@ -337,22 +337,40 @@ class TourLogicTest {
     }
 
     /* ── inset-aware placement (dock w/ IME + flip-not-cap) ─────────────── */
+    /* panelPlacement derives its OWN minima from density + font scale, so the
+     * tests below hand it physical facts only — exactly what TourHost passes.
+     * At fontScale 1 they come out at: collapsed 172dp, readable 240dp. */
+
+    private val minCollapsed1 get() = tourPanelCollapsedMinDp()   // 172dp
+    private val minReadable1 get() = tourPanelReadableMinDp()     // 240dp
+
+    @Test
+    fun placementMinimaAreSummedFromThePanelsOwnMetrics() {
+        // header 55 + title-only body 42 + footer 64 + 11 slack.
+        assertEquals(172f, tourPanelCollapsedMinDp(1f), 0.01f)
+        // …+ the 8dp gap and three 20sp lines of step copy.
+        assertEquals(240f, tourPanelReadableMinDp(1f), 0.01f)
+        // …and the confirm swaps those three lines for its own footer.
+        assertEquals(237f, tourPauseConfirmMinDp(1f), 0.01f)
+    }
 
     @Test
     fun placementSubtractsDockSideInsetsBeforeTheCollapseDecision() {
-        // Ring 100..600 on 2000px, docked BOTTOM: raw space below = 1400. The
-        // panel is laid out inside the bottom inset (100) + margins (24), so
-        // only 1276 is really available — with a 1300px expanded panel that
-        // MUST collapse (the raw 1376 would have said "expanded" and overlapped
-        // the ring by the inset height).
+        // Ring 100..1450 on 2000px @2x, docked BOTTOM: raw space below = 550,
+        // comfortably over the 480px (240dp) readable minimum. But the panel is
+        // laid out inside the bottom inset (100) + margins (24), so only 426 is
+        // really available — it MUST collapse (the raw 550 would have said
+        // "expanded" and overlapped the ring by the inset height).
         val p = panelPlacement(
-            ringTop = 100f, ringBottom = 600f, screenHeightPx = 2000f,
+            ringTop = 100f, ringBottom = 1450f, screenHeightPx = 2000f,
             topInsetPx = 80f, bottomInsetPx = 100f, marginPx = 12f,
-            expandedHeightPx = 1300f, collapsedMinPx = 400f,
+            densityPx = 2f,
         )
         assertEquals(PanelDock.BOTTOM, p.dock)
-        assertEquals(1276f, p.availablePx)
+        assertEquals(426f, p.availablePx)
         assertTrue(p.collapsed)
+        // The point of the test: the RAW space would have read as expanded.
+        assertTrue(550f >= minReadable1 * 2f)
     }
 
     @Test
@@ -361,38 +379,39 @@ class TourLogicTest {
         val down = panelPlacement(
             ringTop = 200f, ringBottom = 700f, screenHeightPx = 2000f,
             topInsetPx = 80f, bottomInsetPx = 60f, marginPx = 12f,
-            expandedHeightPx = 360f, collapsedMinPx = 150f,
+            densityPx = 2f,
         )
         assertEquals(PanelDock.BOTTOM, down.dock)
+        assertEquals(1216f, down.availablePx)
         assertFalse(down.collapsed)
-        // Keyboard up (bottom inset includes the 1000px IME): the same dock
+        // Keyboard up (bottom inset includes the 800px IME): the same dock
         // decision re-runs and collapses instead of covering the ring.
         val up = panelPlacement(
             ringTop = 200f, ringBottom = 700f, screenHeightPx = 2000f,
-            topInsetPx = 80f, bottomInsetPx = 1000f, marginPx = 12f,
-            expandedHeightPx = 360f, collapsedMinPx = 150f,
+            topInsetPx = 80f, bottomInsetPx = 800f, marginPx = 12f,
+            densityPx = 2f,
         )
         assertEquals(PanelDock.BOTTOM, up.dock)
-        assertEquals(276f, up.availablePx)
+        assertEquals(476f, up.availablePx)
         assertTrue(up.collapsed)
     }
 
     @Test
     fun flipNotCapWhenEvenTheCollapsedMinimumCannotFit() {
-        // Ring 200..1500 (center in the top half → prefer BOTTOM), but the IME
-        // leaves only 76px below — less than the 150px collapsed minimum. The
-        // old 150dp floor would have capped OVER the ring; the rule now FLIPS
-        // to the top, where 176px fits the collapsed panel outside the ring.
+        // Ring 400..1500 (center in the top half → prefer BOTTOM), but the IME
+        // leaves only 76px below — less than the 344px (172dp) collapsed
+        // minimum. The old flat floor would have capped OVER the ring; the rule
+        // FLIPS to the top, where 376px fits the collapsed panel outside it.
         val p = panelPlacement(
-            ringTop = 200f, ringBottom = 1500f, screenHeightPx = 2000f,
+            ringTop = 400f, ringBottom = 1500f, screenHeightPx = 2000f,
             topInsetPx = 0f, bottomInsetPx = 400f, marginPx = 12f,
-            expandedHeightPx = 360f, collapsedMinPx = 150f,
+            densityPx = 2f,
         )
         assertEquals(PanelDock.TOP, p.dock)
-        assertEquals(176f, p.availablePx)
+        assertEquals(376f, p.availablePx)
         assertTrue(p.collapsed)
         // The cap never exceeds the space outside the ring on the flipped side.
-        assertTrue(p.availablePx <= 200f - 12f * 2)
+        assertTrue(p.availablePx <= 400f - 12f * 2)
     }
 
     @Test
@@ -403,10 +422,10 @@ class TourLogicTest {
         val p = panelPlacement(
             ringTop = 60f, ringBottom = 1800f, screenHeightPx = 2000f,
             topInsetPx = 0f, bottomInsetPx = 150f, marginPx = 12f,
-            expandedHeightPx = 360f, collapsedMinPx = 150f,
+            densityPx = 2f,
         )
-        assertEquals(PanelDock.TOP, p.dock)   // 36px above beats 26px below
-        assertEquals(150f, p.availablePx)     // usability floor
+        assertEquals(PanelDock.TOP, p.dock)              // 36px above beats 26px below
+        assertEquals(minCollapsed1 * 2f, p.availablePx)  // usability floor
         assertTrue(p.collapsed)
     }
 
@@ -416,23 +435,26 @@ class TourLogicTest {
         // field focused (keyboard up) the panel prefers TOP and must never
         // collapse (the field lives in the body).
         val p = panelPlacement(
-            ringTop = 300f, ringBottom = 700f, screenHeightPx = 2000f,
+            ringTop = 700f, ringBottom = 900f, screenHeightPx = 2000f,
             topInsetPx = 80f, bottomInsetPx = 900f, marginPx = 12f,
-            expandedHeightPx = 360f, collapsedMinPx = 150f,
-            askFocused = true,
+            densityPx = 2f, askFocused = true,
         )
         assertEquals(PanelDock.TOP, p.dock)
+        assertEquals(596f, p.availablePx)
         assertFalse(p.collapsed)
-        // Even in a tight top the collapse stays suppressed (floored, usable).
+        // Even with NO room above, the collapse stays suppressed — and the
+        // floor is the READABLE minimum, not the collapsed one: at the
+        // collapsed floor the body viewport is a few dp tall and the field the
+        // user is typing into has nowhere to scroll into view.
         val tight = panelPlacement(
             ringTop = 100f, ringBottom = 700f, screenHeightPx = 2000f,
             topInsetPx = 80f, bottomInsetPx = 900f, marginPx = 12f,
-            expandedHeightPx = 360f, collapsedMinPx = 150f,
-            askFocused = true,
+            densityPx = 2f, askFocused = true,
         )
         assertEquals(PanelDock.TOP, tight.dock)
         assertFalse(tight.collapsed)
-        assertEquals(150f, tight.availablePx)
+        assertEquals(minReadable1 * 2f, tight.availablePx)
+        assertTrue(tight.availablePx > minCollapsed1 * 2f)
     }
 
     @Test
@@ -440,11 +462,111 @@ class TourLogicTest {
         val p = panelPlacement(
             ringTop = null, ringBottom = null, screenHeightPx = 2000f,
             topInsetPx = 80f, bottomInsetPx = 100f, marginPx = 12f,
-            expandedHeightPx = 360f, collapsedMinPx = 150f,
+            densityPx = 2f,
         )
         assertEquals(PanelDock.BOTTOM, p.dock)
         assertEquals(2000f - 100f - 24f, p.availablePx)
         assertFalse(p.collapsed)
+    }
+
+    /* ── readable minimum: cap-and-scroll instead of throwing the body away ─
+     * Real 6.3"-class geometry (Pixel 8/9: 1080×2400px, 411×914dp @2.625).
+     * Before the readable minimum the collapse test was `avail < FULL panel
+     * height`, so any side that could not hold the whole panel at once lost
+     * the step's copy — even with room for the header, title, three lines and
+     * the footer. These pin the three bands: readable → expanded + capped,
+     * between the two minima → collapsed, neither side → the floor.
+     */
+
+    private val density = 2.625f                 // Pixel 8/9
+    private fun dp(v: Float) = v * density
+    private val screen63 get() = dp(914f)
+
+    /** Pixel-8 geometry with the host's real inset/margin numbers. */
+    private fun placeOn63(ringTopDp: Float, ringBottomDp: Float, fontScale: Float = 1f) = panelPlacement(
+        ringTop = dp(ringTopDp), ringBottom = dp(ringBottomDp), screenHeightPx = screen63,
+        topInsetPx = dp(24f),           // status bar
+        bottomInsetPx = dp(48f),        // 3-button nav bar
+        marginPx = dp(12f),
+        densityPx = density, fontScale = fontScale,
+    )
+
+    @Test
+    fun readablePanelStaysExpandedAndScrollsUnderTheCap() {
+        // A task-list spotlight covering ~2/3 of a Pixel 8 (300dp down to the
+        // bottom edge): dock TOP with 252dp above it. That is more than the
+        // readable minimum but LESS than the panel's ~360dp natural height —
+        // the old `avail < expandedHeight` test dropped the body here.
+        val p = placeOn63(ringTopDp = 300f, ringBottomDp = 914f)
+        assertEquals(PanelDock.TOP, p.dock)
+        assertEquals(dp(252f), p.availablePx)
+        assertFalse(p.collapsed)
+        // …and it really is a CAPPED render (the body scrolls): the cap is
+        // below the panel's natural height, which must no longer matter.
+        assertTrue(p.availablePx < dp(360f))
+    }
+
+    @Test
+    fun belowTheReadableMinimumStillCollapses() {
+        // Same shape, 50dp taller ring: 202dp above it — past the 172dp
+        // collapsed floor but under the readable minimum, so title-only.
+        val p = placeOn63(ringTopDp = 250f, ringBottomDp = 914f)
+        assertEquals(PanelDock.TOP, p.dock)
+        assertEquals(dp(202f), p.availablePx)
+        assertTrue(p.availablePx > dp(minCollapsed1))
+        assertTrue(p.collapsed)
+    }
+
+    @Test
+    fun nearlyFullScreenRingStillCollapsesToTheFloor() {
+        // A ring from 120dp to 880dp on a 914dp screen: 72dp above, nothing
+        // below once the nav bar + margins come off — neither side fits even
+        // the collapsed minimum, so the roomier side takes the floor.
+        val p = placeOn63(ringTopDp = 120f, ringBottomDp = 880f)
+        assertEquals(PanelDock.TOP, p.dock)
+        assertEquals(dp(minCollapsed1), p.availablePx)
+        assertTrue(p.collapsed)
+    }
+
+    @Test
+    fun theReadableMinimumScalesWithTheSystemFontSize() {
+        // The three body lines the readable minimum buys are 20sp, so they
+        // grow with the system font size. The SAME 252dp cap that reads as
+        // readable at fontScale 1 cannot show three lines at fontScale 2 —
+        // it must collapse instead of pretending.
+        val big = placeOn63(ringTopDp = 300f, ringBottomDp = 914f, fontScale = 2f)
+        assertEquals(dp(252f), big.availablePx)
+        assertTrue(big.collapsed)
+        // …and it is the READABLE minimum that moved, not the floor: 252dp is
+        // still well clear of the (also scaled) collapsed minimum.
+        assertTrue(dp(252f) > dp(tourPanelCollapsedMinDp(2f)))
+        assertTrue(tourPanelReadableMinDp(2f) > tourPanelReadableMinDp(1f))
+        assertTrue(tourPanelCollapsedMinDp(2f) > tourPanelCollapsedMinDp(1f))
+        // Past Android's largest setting the requirement stops growing — a
+        // scrolling body beats collapsing every step on the phone.
+        assertEquals(tourPanelReadableMinDp(2f), tourPanelReadableMinDp(3.5f), 0.01f)
+    }
+
+    @Test
+    fun theCollapsedFloorFitsAWholeTitleLine() {
+        // The old floor was a hand-picked 150dp — ~11dp SHORT of the 161dp a
+        // collapsed panel actually needs (header 55 + 16dp body insets + one
+        // 26dp title line + footer 64), so the step title clipped at the floor.
+        assertTrue(tourPanelCollapsedMinDp(1f) >= 161f)
+        assertTrue(tourPanelCollapsedMinDp(1f) > 150f)
+        // …and it scales too: a 26sp title needs more room than a 13sp one.
+        assertTrue(tourPanelCollapsedMinDp(2f) >= 2f * 26f + 55f + 16f + 64f)
+    }
+
+    @Test
+    fun readableMinimumSitsBetweenTheCollapsedFloorAndAFullPanel() {
+        // The constant is the whole point of the rule: below the panel's
+        // natural height (else it collapses everything that has to scroll),
+        // above the title-only floor, and never BELOW the pause-confirm floor
+        // (which may only grow a panel that is already collapsed).
+        assertTrue(TOUR_PANEL_READABLE_MIN_HEIGHT > minCollapsed1.dp)
+        assertTrue(TOUR_PANEL_READABLE_MIN_HEIGHT < 360.dp)
+        assertTrue(TOUR_PANEL_READABLE_MIN_HEIGHT >= TOUR_PAUSE_CONFIRM_MIN_PANEL_HEIGHT)
     }
 
     /* ── Android-localized canned answers ───────────────────────────────── */
@@ -1009,15 +1131,36 @@ class TourLogicTest {
 
     @Test
     fun pauseConfirmFloorsThePanelHeightCap() {
-        // At the 150dp collapse floor the ARMED confirm raises the cap so its
+        // At the collapsed floor the ARMED confirm raises the cap so its
         // buttons + Settings-path line never clip…
-        assertEquals(TOUR_PAUSE_CONFIRM_MIN_PANEL_HEIGHT, tourPanelMaxHeight(150.dp, pauseConfirmArmed = true))
+        assertEquals(TOUR_PAUSE_CONFIRM_MIN_PANEL_HEIGHT, tourPanelMaxHeight(minCollapsed1.dp, pauseConfirmArmed = true))
         // …a roomy cap is untouched…
         assertEquals(600.dp, tourPanelMaxHeight(600.dp, pauseConfirmArmed = true))
         // …and the un-armed footer keeps the host's geometric cap exactly.
-        assertEquals(150.dp, tourPanelMaxHeight(150.dp, pauseConfirmArmed = false))
-        // The floor comfortably clears header (~50dp) + dividers + the
-        // confirm footer's intrinsic (~125dp) with font-scale slack.
-        assertTrue(TOUR_PAUSE_CONFIRM_MIN_PANEL_HEIGHT >= 240.dp)
+        assertEquals(minCollapsed1.dp, tourPanelMaxHeight(minCollapsed1.dp, pauseConfirmArmed = false))
+        // The floor clears header (55dp) + a title line + the confirm footer's
+        // intrinsic (~129dp).
+        assertTrue(TOUR_PAUSE_CONFIRM_MIN_PANEL_HEIGHT >= 226.dp)
+    }
+
+    @Test
+    fun pauseConfirmNeverGrowsAnAlreadyExpandedPanelOverTheRing() {
+        // Worked example: a ring whose top leaves EXACTLY the readable minimum
+        // above it. The panel is expanded there, its body scrolling under the
+        // cap — and arming the confirm (a Pause tap, or the back gesture) must
+        // NOT push the cap past that, or the panel grows out over the ring.
+        // A flat 280dp floor did exactly that from every cap in [240, 280).
+        val cap = TOUR_PANEL_READABLE_MIN_HEIGHT
+        assertEquals(cap, tourPanelMaxHeight(cap, pauseConfirmArmed = true))
+        // The invariant behind it, at every font scale the panel can see: the
+        // confirm needs LESS than a readable body (it trades three lines of
+        // step copy for its own buttons), so the floor can only ever lift a
+        // panel that is already collapsed.
+        for (fs in listOf(1f, 1.15f, 1.3f, 1.5f, 1.8f, 2f, 3f)) {
+            assertTrue("fontScale $fs", tourPauseConfirmMinDp(fs) <= tourPanelReadableMinDp(fs))
+            assertTrue("fontScale $fs", tourPauseConfirmMinDp(fs) > tourPanelCollapsedMinDp(fs))
+        }
+        // …and it still lifts a collapsed one: at the floor the confirm fits.
+        assertTrue(tourPanelMaxHeight(minCollapsed1.dp, pauseConfirmArmed = true) > minCollapsed1.dp)
     }
 }

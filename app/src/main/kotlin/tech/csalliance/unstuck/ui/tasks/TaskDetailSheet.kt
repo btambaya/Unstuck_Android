@@ -303,7 +303,9 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                 Text("One day of “${template!!.name}” (${recurrenceLabel(template!!.recurrence)}).", style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(bottom = 6.dp))
             } else {
                 Text(recurrenceLabel(task.recurrence).ifEmpty { "Does not repeat" }, style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(bottom = 6.dp))
-                RecurrenceEditor(task.recurrence) { vm.setRecurrence(editTarget, it) }
+                // The heading above + the summary line are this sheet's — the
+                // editor must not print its own "Repeat" on top of them.
+                RecurrenceEditor(task.recurrence, showHeading = false) { vm.setRecurrence(editTarget, it) }
             }
 
             SectionLabel("Tags", Modifier.padding(top = 18.dp, bottom = 6.dp))

@@ -765,9 +765,14 @@ class BargeInControllerTest {
         assertEquals(listOf("im", "doing", "well"), BargeInController.tokens("I'm doing well."))
     }
 
-    @Test fun `19c the reply's tail echoing after the queue drained is still echo`() {
+    @Test fun `19c a segment begun after the queue drained is the user's turn, whatever its words`() {
         // 22:39:35.645 drained; 35.680 a segment began; it transcribed as the
-        // reply's last words.
+        // reply's last words — the loudspeaker's tail, before echo
+        // cancellation came back on. Since it did, no tail echo has reached
+        // the transcriber, and the drain grace is exactly when the user
+        // answers ("Have you set up the call?", "What is today?" were deleted
+        // as echo, 2026-09-20 15:21 / 15:36): a segment begun in the grace is
+        // never judged by its words.
         val c = controller(speaker)
         c.h(BargeInEvent.ResponseCreated("r1"), 0.0)
         c.h(BargeInEvent.AudioDelta("r1"), 0.1)
@@ -776,9 +781,9 @@ class BargeInControllerTest {
         c.h(BargeInEvent.PlaybackDrained, 3.0)
         c.h(started("tail"), 3.03)                      // 30 ms after drain
         c.h(stopped, 3.8)
-        assertEquals("the tail is echo, not a question from the user", emptyList<BargeInCommand>(), c.h(tr("Want to block something?", "tail", final = true), 3.9))
-        assertEquals("held until the next segment starts", listOf("tail"), c.pendingDeletes)
-        assertFalse(c.pendingCreate)
+        assertEquals("begun in the grace: theirs", cmds(turn("Want to block something?"), timer(500), thinking), c.h(tr("Want to block something?", "tail", final = true), 3.9))
+        assertEquals("nothing deleted", emptyList<String>(), c.pendingDeletes)
+        assertTrue(c.pendingCreate)
         // Well after the grace window, the same words from the user are a turn.
         val d = controller(speaker)
         d.h(BargeInEvent.ResponseCreated("r1"), 0.0)
@@ -960,8 +965,8 @@ class BargeInControllerTest {
     // reply and were answered again. Filler words are ignored, plurals and
     // possessives fold, a segment that began while the reply's AUDIO was on
     // air needs only half its content words to match, one in the drain grace
-    // (only the tail can echo) needs more, and one that began while the model
-    // was merely thinking is never echo.
+    // is never judged by its words (19c, 25), and one that began while the
+    // model was merely thinking is never echo.
 
     @Test fun `21a a garbled echo of a short reply is still echo`() {
         val c = speaking(speaker)
@@ -992,7 +997,7 @@ class BargeInControllerTest {
         assertEquals("only \"tuesday\" carries content", 1, c.lastEchoScore.heard)
     }
 
-    @Test fun `21c in the drain grace only the tail can echo`() {
+    @Test fun `21c in the drain grace nothing is judged echo`() {
         // A follow-up sharing one topic word, right after the reply ended: a turn.
         val c = controller(speaker)
         c.h(BargeInEvent.ResponseCreated("r1"), 0.0)
@@ -1003,7 +1008,8 @@ class BargeInControllerTest {
         c.h(started("f"), 2.3)                          // inside the grace window
         c.h(stopped, 3.2)
         assertEquals("1 of 2 content words in the grace window is not echo", cmds(turn("Tuesday morning"), timer(500), thinking), c.h(tr("Tuesday morning", "f", final = true), 3.4))
-        // The tail itself, in the grace window, is.
+        // Even the reply's own last words, in the grace window, are theirs:
+        // with echo cancellation on no tail reaches the transcriber (19c).
         val t = controller(speaker)
         t.h(BargeInEvent.ResponseCreated("r1"), 0.0)
         t.h(BargeInEvent.AudioDelta("r1"), 0.1)
@@ -1011,8 +1017,8 @@ class BargeInControllerTest {
         t.h(done("r1"), 1.0)
         t.h(BargeInEvent.PlaybackDrained, 2.0)
         t.h(started("tail"), 2.05)
-        assertEquals(emptyList<BargeInCommand>(), t.h(tr("wide open.", "tail", final = true), 2.9))
-        assertEquals("held until the next segment starts", listOf("tail"), t.pendingDeletes)
+        assertEquals(cmds(turn("wide open."), timer(500), thinking), t.h(tr("wide open.", "tail", final = true), 2.9))
+        assertEquals("nothing deleted", emptyList<String>(), t.pendingDeletes)
         // The same follow-up while that reply's audio was still on air would be echo.
         val d = speaking(speaker)
         said(d, "Tuesday's wide open.")
@@ -1122,20 +1128,25 @@ class BargeInControllerTest {
         assertEquals(cmds(turn("book the dentist"), timer(500), thinking), c.h(tr("book the dentist", "u", final = true), 7.0))
     }
 
-    @Test fun `22d a flush starts the echo grace window`() {
+    @Test fun `22d a flush starts the grace window, and words in it are the user's`() {
         val c = speaking(speaker)
         said(c, "Looks pretty solid. Friday's coming up.")
         c.h(started("q"), 1.0)
         val cut = c.h(tr("What about Monday?", "q", final = true), 1.9)
         assertTrue(cut.contains(flush))
         assertTrue(c.pendingCreate)
-        // 90 ms later the flushed audio's last words come back through the mic.
+        // 90 ms later a segment begins in the flush's grace window. Never
+        // judged by its words (19c): the user going on — "And Friday."
         c.h(started("e"), 1.99)
         c.h(stopped, 2.7)
-        assertEquals("echo of the flushed tail: no second cancel, no second ask", emptyList<BargeInCommand>(), c.h(tr("And Friday.", "e", final = true), 2.8))
-        assertEquals(listOf("e"), c.pendingDeletes)
-        assertTrue("the user's ask is still the one waiting", c.pendingCreate)
-        assertEquals("hold up, server quiet, cancel settled", cmds(create, thinking), c.h(done("r1", "cancelled"), 3.0))
+        val more = c.h(tr("And Friday.", "e", final = true), 2.8)
+        assertTrue(more.contains(turn("And Friday.")))
+        assertEquals("the reply is already cut: no second cancel", 0, count(more, cancel))
+        assertFalse(more.contains(delete("e")))
+        assertEquals("nothing deleted", emptyList<String>(), c.pendingDeletes)
+        assertTrue("one ask still waiting, re-held from their last words", c.pendingCreate)
+        assertEquals("the hold restarted at 2.8: not yet", 0, count(c.h(done("r1", "cancelled"), 3.0), create))
+        assertEquals("hold up, server quiet, cancel settled", cmds(create, thinking), c.h(tick, 3.4))
     }
 
     @Test fun `22e no words first then words for the same item is a turn`() {
@@ -1299,6 +1310,73 @@ class BargeInControllerTest {
         assertEquals("\"friday\" it never said", 1, count(c.h(tr("Have to go through Friday", "h", final = false), 1.9), cancel))
     }
 
+    // ── 25: the calls test, 2026-09-20 15:21–15:37 (assistant_turns), with
+    // echo cancellation back on: no true echo reached the transcriber, and
+    // the word rule deleted the user's real speech three times — "Have you
+    // set up the call?" and "What is today?" right after a reply ended
+    // (segments begun in the drain grace) and "Book the cool call now." over
+    // "…would you like me to book a quick call now?" (3 of 4 content words,
+    // on air). A segment begun in the grace is never judged by its words;
+    // one on air of four words or more is echo only when near verbatim
+    // (every content word said, at most one filler not).
+
+    @Test fun `25a a long answer in the reply's own terms is the user's`() {
+        val c = speaking(speaker)
+        said(c, "I can't set a reminder without a call being booked first. Shall I schedule a task to remind you, or would you like me to book a quick call now?")
+        c.h(started("b"), 1.0)
+        val out = c.h(tr("Book the cool call now.", "b", final = true), 2.4)
+        assertTrue("3 of 4 content words said, but \"cool\" never: theirs", out.contains(turn("Book the cool call now.")))
+        assertEquals("exactly one cancel", 1, count(out, cancel))
+        assertFalse(out.contains(delete("b")))
+        assertEquals("nothing deleted", emptyList<String>(), c.pendingDeletes)
+        assertTrue(c.pendingCreate)
+    }
+
+    @Test fun `25b an answer right after the reply ended is never judged by its words`() {
+        val c = controller(speaker)
+        c.h(BargeInEvent.ResponseCreated("r1"), 0.0)
+        c.h(BargeInEvent.AudioDelta("r1"), 0.1)
+        said(c, "Got it, I'll set that up now. What's the call about?")
+        c.h(done("r1"), 2.0)
+        c.h(BargeInEvent.PlaybackDrained, 3.0)
+        c.h(started("a"), 3.3)                          // 0.3 s into the grace
+        c.h(stopped, 4.4)
+        assertEquals(cmds(turn("Have you set up the call?"), timer(500), thinking), c.h(tr("Have you set up the call?", "a", final = true), 4.6))
+        assertEquals("nothing deleted", emptyList<String>(), c.pendingDeletes)
+        // On air the same words would be theirs too: two fillers the model
+        // never said ("have", "you") is more than the one the transcriber slips in.
+        assertFalse(c.isEcho(BargeInController.tokens("Have you set up the call?"), onAir = true))
+    }
+
+    @Test fun `25c the answer to "ask me what's on today" is a turn`() {
+        val c = controller(speaker)
+        c.h(BargeInEvent.ResponseCreated("r1"), 0.0)
+        c.h(BargeInEvent.AudioDelta("r1"), 0.1)
+        said(c, "You're all set. Want to try something — ask me what's on today?")
+        c.h(done("r1"), 2.0)
+        c.h(BargeInEvent.PlaybackDrained, 3.0)
+        c.h(started("w"), 3.2)
+        c.h(stopped, 4.0)
+        assertEquals(cmds(turn("What is today?"), timer(500), thinking), c.h(tr("What is today?", "w", final = true), 4.2))
+        assertEquals("nothing deleted", emptyList<String>(), c.pendingDeletes)
+    }
+
+    @Test fun `25d four words on air are echo only when near verbatim`() {
+        val c = speaking(speaker)
+        said(c, "You've got a few tasks wrapped up, and Friday coming up.")
+        c.h(started("e"), 1.0)
+        assertEquals("one slipped filler (\"on\"): still the echo", emptyList<BargeInCommand>(), c.h(tr("Coming up on Friday", "e", final = true), 1.9))
+        assertEquals("held until the next segment starts", listOf("e"), c.pendingDeletes)
+        assertTrue("the reply plays on", c.shouldEnqueueAudio("r1"))
+        val d = speaking(speaker)
+        said(d, "You've got a few tasks wrapped up, and Friday coming up.")
+        d.h(started("u"), 1.0)
+        val out = d.h(tr("Coming up on Sunday", "u", final = true), 1.9)
+        assertTrue("a content word it never said: theirs", out.contains(turn("Coming up on Sunday")))
+        assertEquals(1, count(out, cancel))
+        assertEquals("nothing deleted", emptyList<String>(), d.pendingDeletes)
+    }
+
     // ── Android-only: the RMS gate at the Android floor, the noisy-room chip,
     // and the hold-to-talk buffer error ──
 
@@ -1306,7 +1384,6 @@ class BargeInControllerTest {
         val amp = (32768.0 * 10.0.pow(db / 20.0)).toInt().coerceIn(0, 32767).toShort()
         return ShortArray(n) { amp }
     }
-
     @Test fun `10 gate calibrates by median, opens with hysteresis, pre-rolls, emits silence, no adaptation while playing`() {
         val g = RmsGate()
         val floor = -60.0

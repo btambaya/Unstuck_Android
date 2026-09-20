@@ -176,10 +176,14 @@ class VoiceRealtimeClientTest {
         assertEquals("nothing injected mid-utterance", 0, s.correctives())
         factory.done("r1")
         assertEquals(1, s.correctives())
-        // The corrective is a hidden user item immediately followed by a response.create.
+        // The corrective is a hidden user item immediately followed by a
+        // response.create that FORCES a tool call: spoken, the corrective was
+        // answered with another promise (2026-09-20 15:37).
         val types = s.types()
         val idx = types.lastIndexOf("conversation.item.create")
         assertEquals("response.create", types[idx + 1])
+        val forced = Json.parseToJsonElement(s.sent[idx + 1]).jsonObject["response"]?.jsonObject
+        assertEquals("required", forced?.get("tool_choice")?.jsonPrimitive?.contentOrNull)
         // The correction's own follow-up is NEVER scored — no loop.
         factory.created("r2")
         factory.transcript("r2", "Added it now.")

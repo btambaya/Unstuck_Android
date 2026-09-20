@@ -288,6 +288,10 @@ class BargeInController(
          *  then 30 ms later a segment that transcribed as the reply's tail). A
          *  segment starting inside this window counts as begun on air. */
         const val DRAIN_ECHO_GRACE_MS = 1500L
+        /** From this many words an on-air utterance is echo only when (near)
+         *  verbatim (see [isEcho]); shorter ones are scored by their content
+         *  words. */
+        const val ECHO_VERBATIM_FROM = 4
 
         /** DashScope rejects response.cancel with no response in flight ("Conversation has
          *  no active response") and a second response.create with one running ("already
@@ -691,9 +695,16 @@ class BargeInController(
         var notATurn = words.isEmpty()                              // a cough, "um", "…", an echo heard as Chinese
         if (!notATurn && segment.echoJudged && words.size < 3) {
             notATurn = true                                         // a later piece of the echo already judged
-        } else if (!notATurn && (segment.echoPossible || segment.echoJudged)) {
+        } else if (!notATurn && (segment.onAir || segment.echoJudged)) {
+            // Judged by its words only when it began while the reply's
+            // audio was ON AIR. After the drain the words are the user's:
+            // with echo cancellation on no tail echo has reached the
+            // transcriber, and that window is exactly when they answer —
+            // "Have you set up the call?", "What is today?" were deleted as
+            // echo of the question they answered (assistant_turns,
+            // 2026-09-20 15:21 / 15:36).
             lastEchoScore = score(words)
-            notATurn = isEcho(words, segment.onAir)                 // the model's own words, back through the mic
+            notATurn = isEcho(words, true)                          // the model's own words, back through the mic
         }
         if (notATurn) {
             if (words.isNotEmpty()) segments[index] = segment.copy(echoJudged = true)
@@ -855,6 +866,20 @@ class BargeInController(
      *  open") stays a turn: 60 %. Filler-only utterances: 70 % of all words. */
     fun isEcho(heard: List<String>, onAir: Boolean = true): Boolean {
         if (heard.isEmpty() || spokenSet.isEmpty()) return false
+        // Four words or more: echo only when every CONTENT word is one the
+        // model said and at most ONE filler is one it never said. An echo
+        // that survives echo cancellation is short and garbled; a longer
+        // utterance that shares most of the reply's words is the user
+        // answering in its terms — "Book the cool call now" over "…book a
+        // quick call now?" was deleted at 3 of 4 (2026-09-20 15:37) and the
+        // call was never booked. The one filler: the transcriber slips one
+        // into an echo ("Coming up on Friday" for "…and Friday coming up.",
+        // "Monday is open"), but the user's framing adds more ("HAVE YOU set
+        // up the call?").
+        if (heard.size >= ECHO_VERBATIM_FROM) {
+            val unsaid = heard.filter { !matches(it) }
+            return unsaid.size <= 1 && unsaid.all { it in STOP_WORDS }
+        }
         val e = echoEvidence(heard)
         // Their words and the echo's in ONE segment: a question riding on the
         // echo's tail ("…coming up on Friday. What about Monday?" — the reply

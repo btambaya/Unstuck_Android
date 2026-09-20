@@ -4,6 +4,36 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
+## 2026-09-20 (night) — vc99 / 0.5.15: the echo verdict narrowed, the corrective forces the tool
+
+Mirror of iOS build 74 (evidence in `assistant_turns`, Ahmad's 15:21–15:37
+Talk session on iOS: three real utterances deleted as echo of the question
+they answered — "Have you set up the call?", "What is today?", "Book the cool
+call now." — and zero true echoes caught since echo cancellation came back).
+Ahmad's steer: the solution that cannot make the experience worse — tiered,
+not off.
+
+- `core/logic/BargeIn.kt` — a completed transcript is judged by its words
+  ONLY when its segment began while the reply's audio was on air (or is a
+  later piece of an echo-judged segment); after the drain the words are the
+  user's. On air, four words or more (`ECHO_VERBATIM_FROM`) are echo only
+  when every content word is the model's and at most one filler is not (the
+  transcriber slips a filler into an echo — "Coming up on Friday" — the
+  user's framing adds more — "HAVE YOU set up the call?"); three or fewer keep
+  the content-word scoring. The live-guess early cut is unchanged. Tests
+  19c/21c/22d (pinned pre-AEC iOS device logs) flipped; section 25 added.
+- `ui/assistant/VoiceRealtimeClient.kt` — the integrity corrective's
+  `response.create` carries `response.tool_choice = required` (measured
+  honoured by DashScope); spoken-only, the model answered it with another
+  promise and the same question. New corrective text (verbatim with iOS/web).
+- Contract: `unstuck/docs/voice-turn-taking.md` §2/§4. The voice-proxy now
+  logs the turn-taking as `assistant_turns` role `event` (migration 073).
+- Android caveat: the OEM AEC is the only echo removal on the loudspeaker
+  now for anything after the drain or longer than three words; if a device
+  answers its own words, that is where to look (not word matching).
+
+Tests: core 885, app 591, all green. Shipped to Firebase (2 testers) as vc99.
+
 ## 2026-09-20 (evening) — vc98 / 0.5.14: a promised action is a claim; the voice prompt gets the CALLS rule
 
 Ahmad asked Talk (iOS) "call me in one minute and remind me…" and no call came:

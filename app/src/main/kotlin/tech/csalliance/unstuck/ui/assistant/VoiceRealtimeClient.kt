@@ -194,7 +194,7 @@ class VoiceIntegrityGuard {
 
     companion object {
         /** The corrective injected as a hidden user item (verbatim from the web / iOS). */
-        const val correctiveText = "(integrity check from the app, not the user: you claimed an action or said you would note something, but no tool ran — nothing actually happened. If it is still needed, call the right tool NOW, then say in a few words what you did (e.g. \"Added it now\") — no apology, no explanation. Never claim an action without its tool call.)"
+        const val correctiveText = "(integrity check from the app, not the user: you said you did or would do something, but no tool ran — nothing happened. Call the right tool NOW, with sensible defaults for anything you were not told (a call label can be a few words, a call time is context.now plus what they said); do not ask again what you already asked. Then say in a few words what the result was — no apology, no explanation.)"
     }
 }
 
@@ -742,7 +742,16 @@ class VoiceRealtimeClient(
                 putJsonArray("content") { addJsonObject { put("type", "input_text"); put("text", VoiceIntegrityGuard.correctiveText) } }
             }
         })
-        send(buildJsonObject { put("type", "response.create") })
+        // Forced: the corrective's response is created with `tool_choice:
+        // required`, so the model MUST call a tool in it. Spoken, the
+        // corrective was answered with another promise and the same question
+        // ("I'll book the call now. What time should it be?" twice,
+        // 2026-09-20 15:37); forced, the same turn booked the call.
+        // tool_choice on response.create measured honoured by DashScope.
+        send(buildJsonObject {
+            put("type", "response.create")
+            putJsonObject("response") { put("tool_choice", "required") }
+        })
     }
 
     private fun handleToolCall(name: String?, callId: String?, arguments: String?) {

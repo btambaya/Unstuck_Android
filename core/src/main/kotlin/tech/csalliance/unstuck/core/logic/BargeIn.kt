@@ -9,103 +9,147 @@ import kotlin.math.max
 import kotlin.math.min
 import kotlin.math.sqrt
 
-// BargeIn — the pure, headless half of realtime-voice barge-in. Mirrors
-// lib/voice/barge-in.ts (web) and App/Voice/BargeInController.swift (iOS) so
-// the three platforms stay in lock-step (same 12 unit cases).
+// BargeIn — the pure, headless half of realtime-voice turn-taking. A faithful
+// port of iOS App/Voice/BargeIn.swift (2026-09-20, builds 66–70 of the iOS
+// app, each verified on a phone), so the two platforms stay in lock-step:
+// the same events, the same commands, the same 64 unit cases
+// (core/src/test/.../BargeInControllerTest.kt ↔ Tests/UnstuckAppTests/BargeInTests.swift).
 //
-//   * BargeInController: a state machine fed with transport/audio EVENTS plus a
-//     monotonic clock; it emits COMMANDS the transport + audio layers execute
-//     (duck/restore the player, flush, send response.cancel, mute stale deltas,
-//     drive the UI state). "Duck-and-confirm": the first hint of the user
-//     talking over the model only ducks the playback (-12 dB); the reply is
-//     cancelled only once the barge-in is CONFIRMED — and a confirm needs BOTH
-//     sides: the server VAD inside a speech segment AND the mic still above the
-//     gate at the tick (or a transcription while the gate is open, or the
-//     server agreeing with a gate duck). The timer alone confirms nothing
-//     (2026-09-17): speech_stopped can only arrive after 600 ms of silence, so
-//     a timer-only confirm cut every reply on any loudspeaker noise. A blip
-//     ducks then restores without cancelling (and the reply the server makes
-//     from a committed blip is cancelled on creation).
-//   * RmsGate: the client-side energy gate that runs in the capture path (20 ms
-//     sub-frames). Calibrates a noise floor, opens with hysteresis, flushes a
-//     300 ms pre-roll so the onset isn't clipped, and emits DIGITAL SILENCE while
-//     closed (the server's silence_duration_ms timer has to observe silence).
-//     On the loudspeaker it is HELD CLOSED for the whole reply (half-duplex —
-//     BargeInProfile.gateForcedClosed): the reply's own echo re-entering the
-//     mic was transcribed, cancelled the reply, then got answered.
+// The contract with the server (DashScope Qwen-Omni realtime) since iOS build
+// 66: server_vad with `interrupt_response:false` and `create_response:false`.
+// Measured against the live proxy on 2026-09-19:
 //
-// No Android, no network — every function here is deterministic.
+//   * with the defaults the server CANCELS its own reply the moment its VAD
+//     hears speech (response.done status=cancelled, reason=turn_detected). On
+//     the loudspeaker that "speech" is the reply's own echo, so replies came
+//     out in fragments — nothing a client could prevent after the fact;
+//   * with both flags off it still segments (speech_started(item_id) …
+//     speech_stopped), commits and transcribes what it heard (the completed
+//     transcript ~300 ms after speech_stopped), but neither truncates nor
+//     answers anything by itself;
+//   * a `response.create` in the same breath as a `response.cancel` drops the
+//     connection ("thread pool exhausted"); sent after the cancelled
+//     response.done (~300 ms later) it works.
+//
+// So the CLIENT owns turn-taking:
+//
+//   1. REPLY: a speech segment's completed transcript with real words →
+//      `response.create`. No words (a cough, an echo the transcriber heard
+//      as Chinese) → the item is deleted, nothing is answered. If a reply is
+//      still generating, cancel it first and create only when its done
+//      arrives (`pendingCreate`) — and never before TURN_HOLD_MS of quiet,
+//      so a pause mid-sentence does not get the fragment answered.
+//   2. INTERRUPT: on low-echo routes (earphones, Bluetooth) the DUCK →
+//      CONFIRM → CANCEL energy machine: the first hint of speech ducks
+//      −12 dB; the server VAD in a segment AND the mic above the gate for
+//      confirmMs cancels; a blip restores. On the loudspeaker the mic hears
+//      every reply, so WORDS decide: the first real words of a segment that
+//      began while a reply was on air stop it.
+//   3. ECHO: a transcript that is (≥70 %) words the model itself just said,
+//      from a segment that began while a reply was on air or within 1.5 s of
+//      its audio draining, is echo → nothing answered, nothing shown, and
+//      the item deleted once the next segment starts (the user's question
+//      often shares the segment with the echo's tail and arrives as a later
+//      piece of the same item). The reference is the reply on air and the
+//      one before it, not a long tail, so a real sentence sharing everyday
+//      words with older replies does not look like echo.
+//   4. An RMS noise gate in the capture path: floor-calibrated, hysteresis,
+//      300 ms pre-roll, DIGITAL SILENCE while closed (the server's
+//      silence_duration_ms timer must observe silence to end a turn), and no
+//      floor adaptation while the model is playing (residual echo).
+//
+// The loudspeaker is FULL-DUPLEX again (it was half-duplex — mic muted for
+// the whole reply — from 2026-09-17): the platform echo canceller keeps the
+// reply out of the mic stream (VoiceAudioEngine: VOICE_COMMUNICATION source
+// + MODE_IN_COMMUNICATION + AcousticEchoCanceler), and the word rules here
+// are the backstop for what is left. Talk-over works on the speaker.
+//
+// Hold-to-talk (turn_detection null) is unchanged: the client commits and
+// creates on release. Inputs are events + a monotonic clock (ms); outputs
+// are commands the transport/audio layers execute (VoiceRealtimeClient /
+// VoiceAudioEngine). No Android, no network — every function here is
+// deterministic.
 
-/** Output route class. Drives the server-VAD threshold + client confirm timing. */
+/** Where the model's audio comes out — what decides the barge-in profile. */
 enum class VoiceRoute { LOW_ECHO, SPEAKER }
 
 /**
- * Per-route tuning (spec §1). [assistedDuplex] = upload mic frames THROUGH the
- * gate at [gateMarginPlayingDb] while the model plays, so the server VAD can
- * barge in (full duplex — earphones / Bluetooth, which run their own AEC).
- * `false` = HALF-DUPLEX while the model is audible: the gate is held closed
- * (digital silence up, pre-roll dropped) from response.created until the
- * playback has drained, and the Interrupt button is the way to cut a reply.
- * Hold-to-talk overrides it (the press opens the gate).
- *
- * Half-duplex is the loudspeaker DEFAULT (2026-09-17, iOS
- * `BargeInProfile.halfDuplexWhilePlaying`): with the gate open, the reply's
- * own echo re-entered the mic, the server VAD + transcription called it
- * speech, cancelled the reply and then ANSWERED the echo. The assisted-duplex
- * speaker profile stays available as an opt-in for devices whose AEC proves
- * good enough.
+ * How a barge-in is CONFIRMED (iOS `BargeInProfile.Confirm`).
+ * [ENERGY]: the two-sided rule — server VAD in a speech segment AND the mic
+ *   still above the gate for `confirmMs`. Right where the mic hears little
+ *   playback (earphones, Bluetooth).
+ * [TRANSCRIPT]: by WORDS. Nothing ducks and no confirm timer runs; the
+ *   server's transcription of what it heard is compared with what the model
+ *   just said. Echo → discarded (its item deleted). Real words → the reply
+ *   stops. A cough has no words. This is the loudspeaker answer: half-duplex
+ *   took talk-over away entirely, and words don't care about acoustics.
+ */
+enum class BargeInConfirm { ENERGY, TRANSCRIPT }
+
+/**
+ * Per-route tuning (spec §1). [halfDuplexWhilePlaying] is kept for the gate
+ * helper the audio engine calls per frame, but no shipped profile sets it
+ * any more: the loudspeaker runs full-duplex since the 2026-09-20 port (iOS
+ * build 69), with echo cancellation on and words as the backstop.
  */
 data class BargeInProfile(
     val route: VoiceRoute,
+    /** server_vad threshold — above the 0.5 default because the gate + AEC
+     *  already remove floor noise. */
     val threshold: Double,
+    /** How long a DUCK lasts before it becomes a CANCEL (energy confirm). */
     val confirmMs: Long,
     val gateMarginDb: Double,
     val gateMarginPlayingDb: Double,
-    val assistedDuplex: Boolean,
+    val confirm: BargeInConfirm,
+    val halfDuplexWhilePlaying: Boolean = false,
 ) {
+    /** The RMS gate's margin above the noise floor — higher on the loudspeaker
+     *  while the model plays, where residual echo is the false-trigger source. */
     fun gateMargin(playbackQueued: Boolean): Double = if (playbackQueued) gateMarginPlayingDb else gateMarginDb
 
-    /** The mic upload is muted while the model is audible (iOS `halfDuplexWhilePlaying`). */
-    val halfDuplexWhilePlaying: Boolean get() = !assistedDuplex
-
     companion object {
-        /** Wired / BT headset, phone receiver: T 0.5, confirm 200 ms, +6 dB, full duplex. */
-        val LOW_ECHO = BargeInProfile(VoiceRoute.LOW_ECHO, 0.5, 200L, 6.0, 6.0, assistedDuplex = true)
+        /** Wired / BT headset: T 0.5, confirm 200 ms, +6 dB, energy confirm. */
+        val LOW_ECHO = BargeInProfile(VoiceRoute.LOW_ECHO, 0.5, 200L, 6.0, 6.0, BargeInConfirm.ENERGY)
         /** Built-in loudspeaker: T 0.6, confirm 300 ms, +9 dB while playing, +6
-         *  otherwise — and HALF-DUPLEX while the model is audible (the default). */
-        val SPEAKER = BargeInProfile(VoiceRoute.SPEAKER, 0.6, 300L, 6.0, 9.0, assistedDuplex = false)
-        /** The same speaker tuning, spelled out. */
-        val SPEAKER_HALF_DUPLEX = SPEAKER
-        /** Opt-in: talk-over on the loudspeaker for a device whose AEC leaves no residual echo. */
-        val SPEAKER_ASSISTED_DUPLEX = SPEAKER.copy(assistedDuplex = true)
+         *  otherwise — confirmed by WORDS, full-duplex. */
+        val SPEAKER = BargeInProfile(VoiceRoute.SPEAKER, 0.6, 300L, 6.0, 9.0, BargeInConfirm.TRANSCRIPT)
 
-        fun forRoute(route: VoiceRoute, speakerHalfDuplex: Boolean = true): BargeInProfile = when (route) {
+        fun forRoute(route: VoiceRoute): BargeInProfile = when (route) {
             VoiceRoute.LOW_ECHO -> LOW_ECHO
-            VoiceRoute.SPEAKER -> if (speakerHalfDuplex) SPEAKER_HALF_DUPLEX else SPEAKER_ASSISTED_DUPLEX
+            VoiceRoute.SPEAKER -> SPEAKER
         }
 
-        /** Whether the capture gate must be held closed right now (iOS
-         *  `GateContext.forcedClosed`): the half-duplex profile, the model busy
-         *  (a reply in flight OR audio still queued — the queue runs dry for a
-         *  moment at the start of a reply and between bursts, and each gap let
-         *  the gate open on room noise), and no hold-to-talk press overriding. */
+        /** Whether the capture gate must be held closed right now: a
+         *  half-duplex profile, the model busy, and no hold-to-talk press
+         *  overriding. False for every shipped profile since 2026-09-20. */
         fun gateForcedClosed(profile: BargeInProfile, modelBusy: Boolean, pttPressed: Boolean): Boolean =
             profile.halfDuplexWhilePlaying && modelBusy && !pttPressed
     }
 }
 
-/** The `turn_detection` block of session.update. `null` = hold-to-talk (client commits). */
+/**
+ * The `turn_detection` block of session.update. `null` = hold-to-talk (client
+ * commits). prefix_padding 300 matches the gate's 300 ms pre-roll; 600 ms
+ * silence is inside the doc's 500–600 recommendation for short turns.
+ * [interruptResponse] / [createResponse] are OFF (see the file header): the
+ * server segments and transcribes; the client cancels and creates.
+ */
 data class TurnDetection(
     val type: String = "server_vad",
     val threshold: Double,
     val prefixPaddingMs: Int = PREFIX_PADDING_MS,
     val silenceDurationMs: Int = SILENCE_DURATION_MS,
+    val interruptResponse: Boolean = false,
+    val createResponse: Boolean = false,
 ) {
     fun toJson(): JsonObject = buildJsonObject {
         put("type", type)
         put("threshold", threshold)
         put("prefix_padding_ms", prefixPaddingMs)
         put("silence_duration_ms", silenceDurationMs)
+        put("interrupt_response", interruptResponse)
+        put("create_response", createResponse)
     }
 
     companion object {
@@ -129,14 +173,23 @@ enum class DuckTrigger { GATE, SERVER }
 
 sealed class BargeInEvent {
     data class ResponseCreated(val id: String?) : BargeInEvent()
+    /** An audio delta arrived; the controller answers [BargeInCommand.EnqueueAudio] when it should play. */
     data class AudioDelta(val id: String?) : BargeInEvent()
+    /** A caption delta for the model's reply; answered with [BargeInCommand.ShowCaption] when accepted. */
     data class TranscriptDelta(val id: String?) : BargeInEvent()
     data class ResponseDone(val id: String?, val status: String? = null) : BargeInEvent()
     object PlaybackDrained : BargeInEvent()
-    object SpeechStarted : BargeInEvent()
+    /** The server VAD opened a segment; [itemId] is the conversation item it
+     *  will commit that speech into (DashScope sends it), so a transcript can
+     *  be tied back to WHEN its speech began — while a reply was busy, or not. */
+    data class SpeechStarted(val itemId: String? = null) : BargeInEvent()
     object SpeechStopped : BargeInEvent()
-    object TranscriptionDelta : BargeInEvent()
-    object TranscriptionCompleted : BargeInEvent()
+    /** transcription.delta (`final = false`, the transcriber's live guess) or
+     *  .completed (`final = true`) for the user's input. Deltas can stop a
+     *  reply early; only the completed transcript decides what is answered. */
+    data class Transcription(val text: String, val itemId: String?, val final: Boolean) : BargeInEvent()
+    /** response.audio_transcript.delta — the model's own words, the echo reference. */
+    data class AssistantTranscript(val delta: String) : BargeInEvent()
     object GateOpen : BargeInEvent()
     object GateClose : BargeInEvent()
     object InterruptPressed : BargeInEvent()
@@ -144,39 +197,63 @@ sealed class BargeInEvent {
     data class RouteChanged(val profile: BargeInProfile) : BargeInEvent()
     object PttDown : BargeInEvent()
     object PttUp : BargeInEvent()
+    /** A protocol `error` event; "active response" ones are benign (iOS `benignActiveResponseError`). */
     data class Error(val message: String?) : BargeInEvent()
 }
 
 sealed class BargeInCommand {
-    /** Drop playback gain to -12 dB (×0.25) with a ~20 ms ramp; schedule a Tick after [confirmMs]. */
-    data class Duck(val confirmMs: Long) : BargeInCommand()
-    /** Gain back to unity with a ~50 ms ramp. */
+    /** Playback gain −12 dB (linear 0.25), ~20 ms ramp. */
+    object Duck : BargeInCommand()
+    /** Gain back to unity, ~50 ms ramp. */
     object Restore : BargeInCommand()
+    /** Drop queued + playing model audio now. */
     object FlushPlayback : BargeInCommand()
+    /** `response.cancel` — only ever emitted while a response is active. */
     object SendCancel : BargeInCommand()
-    data class SetMuted(val muted: Boolean) : BargeInCommand()
     /** The audio delta that produced this event should be enqueued for playback. */
     object EnqueueAudio : BargeInCommand()
     /** The transcript delta that produced this event should be shown as caption. */
     object ShowCaption : BargeInCommand()
+    /** The reply being cancelled must not linger on screen. */
     object ClearCaption : BargeInCommand()
-    /** Hold-to-talk: input_audio_buffer.commit + response.create. */
+    /** Hold-to-talk release: input_audio_buffer.commit + response.create. */
     object CommitAndRespond : BargeInCommand()
     /** Hold-to-talk: force the capture gate open (flush pre-roll) / release it. */
     data class ForceGate(val open: Boolean) : BargeInCommand()
     data class Ui(val state: BargeInUi) : BargeInCommand()
-    /** Re-send session.update with this turn_detection (route profile changed). */
+    /** Re-send session.update with this turn_detection (route profile changed / mode). */
     data class SessionUpdate(val turnDetection: TurnDetection?) : BargeInCommand()
     /** Surface a real server error (anything NOT about an active response). */
     data class ReportError(val message: String) : BargeInCommand()
     /** 3 duck→restore cycles within 2 min: offer "Noisy room? Switch to hold to talk". */
     object SuggestHoldToTalk : BargeInCommand()
+    /** Arm a timer: deliver [BargeInEvent.Tick] after this many ms (the energy
+     *  confirm, the turn hold, and the fallback for a cancelled reply whose
+     *  done never comes). Stale ticks are harmless: the controller checks the
+     *  elapsed time against the CURRENT duck / pending turn. */
+    data class StartTimer(val ms: Long) : BargeInCommand()
+    /** `conversation.item.delete` — the segment was the model's own echo, or
+     *  had no words (a cough, "um", an echo the transcriber heard as Chinese);
+     *  take it out so the model never sees it as the user's turn. */
+    data class DeleteItem(val id: String) : BargeInCommand()
+    /** `response.create` — a user turn is complete (its transcript has real
+     *  words) and nothing is generating. The server never creates replies by
+     *  itself (create_response:false). */
+    object CreateResponse : BargeInCommand()
+    /** The user's completed words, for the caption — REAL turns only. Every
+     *  completed transcript used to be shown as the user's line, so the
+     *  reply's own echo wiped the reply's caption a second in and left "a
+     *  Chinese phrase" there (Ahmad, 2026-09-19). */
+    data class UserTurn(val text: String) : BargeInCommand()
 }
+
+/** The last echo decision, as hits/heard/reference — for the device log. */
+data class EchoScore(val hits: Int, val heard: Int, val spoken: Int)
 
 /**
  * The barge-in state machine (spec §2). Not thread-safe — the caller serializes
  * [handle] (the Android client wraps it in a lock; events come from the WS
- * reader, capture and main threads).
+ * reader, capture, playback and main threads).
  *
  * @param now monotonic clock in ms (injected so tests drive time).
  */
@@ -193,6 +270,25 @@ class BargeInController(
         const val SUGGEST_AFTER_RESTORES = 3
         const val SUGGEST_WINDOW_MS = 120_000L
 
+        /** A pause mid-sentence ends a VAD segment (600 ms of silence) and the
+         *  fragment was answered on its own; the continuation then cancelled
+         *  that reply and got its own — "it kept tripping itself" on long
+         *  questions (iOS device log 2026-09-20 00:25). Half a second more
+         *  before asking bridges a pause of ~1.2 s; a longer one still gets
+         *  cancel-and-re-ask. */
+        const val TURN_HOLD_MS = 500L
+        /** If a cancelled reply's done never comes (or the cancel found
+         *  nothing), ask anyway. 2.5 s: a done took 1.9 s once (a tool call in flight). */
+        const val PENDING_CREATE_FALLBACK_MS = 2500L
+        /** Echo reference cap per reply. */
+        const val SPOKEN_CAP = 400
+        const val SEGMENT_HISTORY = 8
+        /** The reply whose audio just finished: its LAST words echo back after
+         *  the queue has drained (iOS device log 2026-09-19 22:39:35: drained,
+         *  then 30 ms later a segment that transcribed as the reply's tail). A
+         *  segment starting inside this window counts as begun on air. */
+        const val DRAIN_ECHO_GRACE_MS = 1500L
+
         /** DashScope rejects response.cancel with no response in flight ("Conversation has
          *  no active response") and a second response.create with one running ("already
          *  has an active response") — both benign for us. */
@@ -204,6 +300,43 @@ class BargeInController(
          *  "buffer is empty". Not an error state: the next press just works (iOS parity). */
         fun isEmptyBufferError(message: String?): Boolean =
             message?.lowercase()?.contains("buffer") == true
+
+        /** Words that carry no content — the transcriber adds and drops them
+         *  freely ("Monday's open" came back as "Monday is open", iOS device
+         *  log 2026-09-19 23:50), and a real interruption is full of them
+         *  ("How about Tuesday?" shares two of three with "How about you?").
+         *  They only count when an utterance has nothing else ("How about
+         *  you?", "Okay."). */
+        val STOP_WORDS: Set<String> = setOf(
+            "a", "an", "the", "and", "or", "but", "if", "so", "of", "to", "in", "on", "at", "by", "for", "with", "from", "as",
+            "into", "over", "about", "up", "down", "out", "off", "than", "then", "too", "also",
+            "is", "are", "was", "were", "be", "been", "being", "am", "do", "does", "did", "have", "has", "had",
+            "will", "would", "can", "could", "should", "may", "might", "shall", "must",
+            "i", "me", "my", "mine", "you", "your", "yours", "youre", "youve", "youll", "youd", "he", "him", "his", "she", "her", "hers",
+            "it", "its", "im", "ive", "ill", "id", "we", "us", "our", "ours", "weve", "well", "they", "them", "their", "theyre",
+            "this", "that", "these", "those", "there", "here", "what", "which", "who", "whom", "whose", "how", "when", "where", "why",
+            "not", "no", "yes", "ok", "okay", "oh", "um", "uh", "hmm", "just", "really", "very", "quite",
+        )
+
+        /** Plurals and possessives fold ("mondays" / "players" → "monday" /
+         *  "player"): the model writes Monday's, the transcriber Monday is. */
+        fun stem(t: String): String = if (t.length >= 4 && t.endsWith("s")) t.dropLast(1) else t
+
+        private val NON_WORD = Regex("[^\\p{L}\\p{N}]+")
+
+        /** Lower-cased word tokens, punctuation and APOSTROPHES stripped,
+         *  one-letter tokens dropped ("a", "I" match everything). The model
+         *  writes Tuesday’s with a curly apostrophe and the transcriber
+         *  Tuesday's with a straight one — that one character failed a
+         *  three-word echo at 2/3 (iOS device log 2026-09-19 22:39:30), so
+         *  both become "tuesdays". Tokens without a Latin letter or digit are
+         *  dropped: the transcriber sometimes hears the loudspeaker's echo as
+         *  Chinese ("嘿。" for "Hey", same log), and this assistant speaks
+         *  English — such a transcript is noise, never an instruction to stop. */
+        fun tokens(text: String): List<String> =
+            text.replace("’", "").replace("'", "").lowercase()
+                .split(NON_WORD)
+                .filter { t -> t.length >= 2 && t.any { it in 'a'..'z' || it in '0'..'9' } }
     }
 
     var profile: BargeInProfile = profile
@@ -211,40 +344,84 @@ class BargeInController(
     var holdToTalk: Boolean = holdToTalk
         private set
 
+    var phase: BargeInPhase = BargeInPhase.IDLE; private set
     var responseActive = false; private set
     var activeResponseId: String? = null; private set
     var cancelledResponseId: String? = null; private set
     var playbackQueued = false; private set
+    /** Drop audio/transcript deltas until the next (non-cancelled) response. */
     var muted = false; private set
     var gateOpen = false; private set
-    var gateOpenSince = 0L; private set
+    var gateOpenSince: Long? = null; private set
     /** The server VAD is inside a speech segment (speech_started … speech_stopped). */
     var serverSpeaking = false; private set
-    var suppressNextResponse = false; private set
     var pttPressed = false; private set
+    /** The last UI state emitted. */
     var ui: BargeInUi = BargeInUi.LISTENING; private set
+    /** How many DUCK→restore cycles happened (the "noisy room?" chip, spec §8). */
+    var falseBargeIns = 0; private set
 
     private var duckedSince: Long? = null
     private var duckTrigger: DuckTrigger? = null
-    private var sawSpeechStartedWhileDucked = false
     private val restoreTimes = ArrayDeque<Long>()
     private var suggested = false
 
-    val speaking: Boolean get() = responseActive || playbackQueued
+    /** A real turn waiting to be asked for: `since` = the last moment the
+     *  user was heard (their completed transcript, or a further speech start
+     *  while nothing plays). Asked once the hold has elapsed, the server VAD
+     *  is silent and no reply is generating — a `response.create` in the same
+     *  breath as a `response.cancel` drops the connection (measured 2026-09-19). */
+    private var pendingTurnSince: Long? = null
+    val pendingCreate: Boolean get() = pendingTurnSince != null
 
-    /** Half-duplex: the capture gate must be held closed right now — the
-     *  loudspeaker profile while the model is busy (reply in flight or audio
-     *  queued), unless hold-to-talk's press is opening the mic. The audio
-     *  engine derives the same answer per frame from its own volatiles (it
-     *  knows the playback tail); this is the controller's view for tests/UI. */
-    val gateForcedClosed: Boolean get() = BargeInProfile.gateForcedClosed(profile, speaking, pttPressed)
-    val phase: BargeInPhase
-        get() = when {
-            holdToTalk -> BargeInPhase.HOLD
-            duckedSince != null -> BargeInPhase.DUCKED
-            speaking -> BargeInPhase.SPEAKING
-            else -> BargeInPhase.IDLE
-        }
+    /** Echo reference: the words of the reply on air and of the one before
+     *  it (a reply's tail echoes after the next response was created). Not a
+     *  long history — everyday words pile up and a real question starts to
+     *  look like echo (iOS device log 2026-09-19 23:01: 8/12 on a real one). */
+    var spokenCurrent: List<String> = emptyList(); private set
+    var spokenPrevious: List<String> = emptyList(); private set
+    private var spokenSet: Set<String> = emptySet()
+    /** The response whose audio is (or was last) queued for playback. */
+    var playingResponseId: String? = null; private set
+
+    /** One server VAD speech segment (speech_started … stopped), by the item
+     *  id the server commits it into. */
+    data class Segment(
+        val itemId: String?,
+        /** Began while a reply was on air / generating, or within the drain
+         *  grace — only those words can be echo or an interruption. A segment
+         *  that began while nothing played is the user, whatever it says. */
+        val echoPossible: Boolean,
+        /** The reply's AUDIO was on air when it began (as opposed to the
+         *  drain grace, where only the reply's tail can still echo). */
+        val onAir: Boolean = false,
+        /** `response.create` already issued (or pending) for it. */
+        val responded: Boolean = false,
+        /** Judged echo by its words. The transcriber can complete one segment
+         *  in pieces ("Coming up on." then "Day.", iOS device log 2026-09-20
+         *  00:04:43): a short later piece is more of the same echo, not a turn. */
+        val echoJudged: Boolean = false,
+    )
+    private val segments = ArrayList<Segment>()
+    /** Items judged echo / no words, whose `conversation.item.delete` is HELD
+     *  until the next segment starts or a reply is asked for: the user often
+     *  starts talking inside the same VAD segment as the reply's echo tail,
+     *  and their words then arrive as a later completed transcript for the
+     *  same item — deleted already, it would answer nothing. */
+    private val _pendingDeletes = ArrayList<String>()
+    val pendingDeletes: List<String> get() = _pendingDeletes.toList()
+    private var lastDrained: Pair<String?, Long>? = null
+    /** For the device log: the last echo decision. */
+    var lastEchoScore = EchoScore(0, 0, 0); private set
+
+    /** True while the model is (or is about to be) audible — the Interrupt
+     *  button's enablement and the DUCK precondition. */
+    val modelBusy: Boolean get() = responseActive || playbackQueued
+    /** Android's name for [modelBusy] (the client's `canInterrupt`). */
+    val speaking: Boolean get() = modelBusy
+
+    /** Half-duplex view for tests/UI — false for every shipped profile. */
+    val gateForcedClosed: Boolean get() = BargeInProfile.gateForcedClosed(profile, modelBusy, pttPressed)
 
     /** The turn_detection to send at session start (and after every route change). */
     fun turnDetection(): TurnDetection? = TurnDetection.forProfile(profile, holdToTalk)
@@ -252,82 +429,173 @@ class BargeInController(
     /** Gate margin the capture path should use right now. */
     fun gateMarginDb(): Double = profile.gateMargin(playbackQueued)
 
+    /** Whether an audio delta for [id] should be played. */
+    fun shouldEnqueueAudio(id: String?): Boolean {
+        if (id != null && id == cancelledResponseId) return false
+        // The reply on air keeps streaming whatever else is going on.
+        if (id != null && playingResponseId != null && id == playingResponseId) return true
+        if (muted) return false
+        if (id != null && activeResponseId != null && id != activeResponseId) return false
+        return true
+    }
+
+    /** Whether a transcript (caption) delta for [id] should be shown. */
+    fun acceptsTranscript(id: String?): Boolean = shouldEnqueueAudio(id)
+
+    /** The UI state right now (the initial session.update / after a resync). */
+    val uiStateNow: BargeInUi
+        get() = when {
+            phase == BargeInPhase.HOLD -> BargeInUi.LISTENING
+            playbackQueued -> BargeInUi.SPEAKING
+            responseActive -> BargeInUi.THINKING
+            else -> BargeInUi.LISTENING
+        }
+
     fun handle(event: BargeInEvent): List<BargeInCommand> {
-        val out = ArrayList<BargeInCommand>(4)
+        val out = ArrayList<BargeInCommand>(6)
+        val t = now()
         when (event) {
-            is BargeInEvent.ResponseCreated -> onResponseCreated(event.id, out)
-            is BargeInEvent.AudioDelta -> {
-                val id = event.id ?: activeResponseId
-                if (!muted && (cancelledResponseId == null || id != cancelledResponseId) && id == activeResponseId) {
-                    playbackQueued = true
-                    out += BargeInCommand.EnqueueAudio
-                    setUi(BargeInUi.SPEAKING, out)
+            is BargeInEvent.ResponseCreated -> {
+                val id = event.id
+                if (id == null || id != cancelledResponseId) {   // never resurrect a cancelled reply
+                    responseActive = true
+                    activeResponseId = id
+                    muted = false
+                    pendingTurnSince = null
+                    // A new reply: the one before it is now the "previous" reference.
+                    spokenPrevious = spokenCurrent
+                    spokenCurrent = emptyList()
+                    spokenSet = spokenPrevious.map(::stem).toSet()
+                    ui(BargeInUi.THINKING, out)
+                    if (phase == BargeInPhase.IDLE) phase = BargeInPhase.SPEAKING
                 }
             }
-            is BargeInEvent.TranscriptDelta -> {
-                val id = event.id ?: activeResponseId
-                if (!muted && (cancelledResponseId == null || id != cancelledResponseId)) out += BargeInCommand.ShowCaption
+            is BargeInEvent.AudioDelta -> {
+                if (shouldEnqueueAudio(event.id)) {
+                    playbackQueued = true
+                    event.id?.let { playingResponseId = it }
+                    if (phase == BargeInPhase.IDLE) phase = BargeInPhase.SPEAKING
+                    out += BargeInCommand.EnqueueAudio
+                    ui(BargeInUi.SPEAKING, out)
+                }
             }
+            is BargeInEvent.TranscriptDelta -> if (acceptsTranscript(event.id)) out += BargeInCommand.ShowCaption
             is BargeInEvent.ResponseDone -> {
-                if (event.id == null || event.id == activeResponseId) {
+                // Only the ACTIVE response's done counts (or an id-less one): a
+                // cancelled reply's late done must not clear the flag for the new
+                // reply that has already started.
+                val id = event.id
+                if (id == null || activeResponseId == null || id == activeResponseId) {
                     responseActive = false
-                    if (duckedSince != null && !playbackQueued) restore(out) // nothing left to protect
-                    setUi(if (playbackQueued) BargeInUi.SPEAKING else BargeInUi.LISTENING, out)
+                    if (pendingCreate) {
+                        // The reply we cancelled is finished server-side: the user's
+                        // turn can be asked for once its hold is up and they are quiet.
+                        val ask = tryAsk(t)
+                        if (ask.isEmpty()) out += BargeInCommand.StartTimer(TURN_HOLD_MS) else out += ask
+                    } else if (!playbackQueued) {
+                        if (phase == BargeInPhase.SPEAKING) phase = BargeInPhase.IDLE
+                        ui(BargeInUi.LISTENING, out)
+                    } else {
+                        ui(BargeInUi.SPEAKING, out)
+                    }
                 }
             }
             BargeInEvent.PlaybackDrained -> {
                 playbackQueued = false
+                lastDrained = playingResponseId to t
+                playingResponseId = null
                 if (!responseActive) {
-                    if (duckedSince != null) restore(out)
-                    setUi(BargeInUi.LISTENING, out)
+                    if (phase == BargeInPhase.SPEAKING) phase = BargeInPhase.IDLE
+                    ui(BargeInUi.LISTENING, out)
                 }
             }
-            BargeInEvent.SpeechStarted -> onSpeechStarted(out)
-            BargeInEvent.SpeechStopped -> onSpeechStopped(out)
-            BargeInEvent.TranscriptionDelta, BargeInEvent.TranscriptionCompleted -> {
-                // The accelerator is subject to the same two-sided rule as the
-                // tick: transcription deltas also stream for the PREVIOUS turn
-                // and for the model's own echo (iOS device log 2026-09-17: a
-                // speech_started and a delta 0.4 ms apart cancelled a reply the
-                // user never interrupted). A transcript with the mic already
-                // closed is not the user talking over.
-                if (duckedSince != null && gateOpen) cancel(out)
+            BargeInEvent.GateOpen -> {
+                gateOpen = true
+                gateOpenSince = t
+                if (phase == BargeInPhase.SPEAKING && modelBusy && profile.confirm == BargeInConfirm.ENERGY) duck(t, DuckTrigger.GATE, out)
             }
-            BargeInEvent.GateOpen -> onGateOpen(out)
-            BargeInEvent.GateClose -> onGateClose(out)
-            BargeInEvent.Tick -> onTick(out)
-            BargeInEvent.InterruptPressed -> if (speaking) cancel(out)
-            is BargeInEvent.RouteChanged -> {
-                profile = event.profile
-                if (!holdToTalk) out += BargeInCommand.SessionUpdate(turnDetection())
+            BargeInEvent.GateClose -> {
+                gateOpen = false
+                gateOpenSince = null
+                // Below threshold before confirm and the server never agreed:
+                // nothing was committed server-side, just restore.
+                if (phase == BargeInPhase.DUCKED && duckTrigger == DuckTrigger.GATE) restoreToSpeaking(out)
             }
-            BargeInEvent.PttDown -> {
-                if (!holdToTalk) return out
-                pttPressed = true
-                if (speaking) cancel(out)
-                out += BargeInCommand.ForceGate(true)
-                setUi(BargeInUi.LISTENING, out)
+            is BargeInEvent.SpeechStarted -> onSpeechStarted(event.itemId, t, out)
+            BargeInEvent.SpeechStopped -> {
+                serverSpeaking = false
+                // A held turn is asked for TURN_HOLD_MS after the user's last
+                // sound, whether or not that segment produced a transcript.
+                if (pendingCreate) out += BargeInCommand.StartTimer(TURN_HOLD_MS)
+                // A blip: nothing confirmed it. Its completed transcript decides
+                // whether anything is answered (no words → nothing).
+                if (phase == BargeInPhase.DUCKED && duckTrigger == DuckTrigger.SERVER) restoreToSpeaking(out)
             }
-            BargeInEvent.PttUp -> {
-                if (!holdToTalk || !pttPressed) return out
-                pttPressed = false
-                out += BargeInCommand.ForceGate(false)
-                out += BargeInCommand.CommitAndRespond
-                setUi(BargeInUi.THINKING, out)
+            is BargeInEvent.Transcription -> onTranscription(event.text, event.itemId, event.final, t, out)
+            is BargeInEvent.AssistantTranscript -> {
+                val words = tokens(event.delta)
+                if (words.isNotEmpty()) {
+                    var cur = spokenCurrent + words
+                    if (cur.size > SPOKEN_CAP) cur = cur.drop(cur.size - SPOKEN_CAP)
+                    spokenCurrent = cur
+                    spokenSet = (spokenPrevious + spokenCurrent).map(::stem).toSet()
+                }
+            }
+            BargeInEvent.Tick -> {
+                val since = duckedSince
+                if (phase == BargeInPhase.DUCKED && since != null && t - since >= profile.confirmMs) {
+                    // CONFIRM needs evidence from both sides: the server VAD is
+                    // inside a speech segment AND the mic is still above the
+                    // gate — sound that lasted the whole confirm window. The
+                    // timer alone confirmed nothing: the server's speech_stopped
+                    // can only arrive after silence_duration_ms (600) of silence,
+                    // i.e. never inside a 300 ms window, so every VAD blip on a
+                    // loudspeaker — a tap, a chair, a cough — cancelled the reply
+                    // (Ahmad's iPhone, 2026-09-17: "interrupted by any noise").
+                    if (gateOpen && serverSpeaking) cancel(t, out) else restoreToSpeaking(out)
+                }
+                out += tryAsk(t)
+            }
+            BargeInEvent.InterruptPressed -> {
+                if (phase != BargeInPhase.HOLD) {
+                    pendingTurnSince = null   // the user wants silence, not the next reply
+                    if (modelBusy) cancel(t, out, hard = true)
+                }
             }
             is BargeInEvent.Error -> when {
-                isBenignError(event.message) -> {
-                    responseActive = false
-                    if (duckedSince != null && !playbackQueued) restore(out)
-                    setUi(if (playbackQueued) BargeInUi.SPEAKING else BargeInUi.LISTENING, out)
-                }
+                isBenignError(event.message) -> onBenignActiveResponseError(t, out)
                 // A too-short press committed nothing: the session is intact (mic,
                 // socket, comm mode all live), so go back to the hold prompt instead
                 // of a dead ERROR screen. Only in hold mode — in open-mic mode a
                 // buffer error is a real protocol fault and is surfaced.
-                holdToTalk && isEmptyBufferError(event.message) ->
-                    setUi(if (speaking) BargeInUi.SPEAKING else BargeInUi.LISTENING, out)
+                holdToTalk && isEmptyBufferError(event.message) -> ui(uiStateNow, out)
                 else -> out += BargeInCommand.ReportError(event.message?.takeIf { it.isNotBlank() } ?: "Voice error")
+            }
+            is BargeInEvent.RouteChanged -> {
+                if (event.profile != profile) {
+                    profile = event.profile
+                    if (!holdToTalk) out += BargeInCommand.SessionUpdate(turnDetection())
+                }
+            }
+            BargeInEvent.PttDown -> {
+                if (holdToTalk && phase != BargeInPhase.HOLD) {
+                    if (modelBusy) cancel(t, out, hard = true)
+                    phase = BargeInPhase.HOLD
+                    pttPressed = true
+                    out += BargeInCommand.ForceGate(true)
+                    ui(BargeInUi.LISTENING, out)
+                }
+            }
+            BargeInEvent.PttUp -> {
+                if (holdToTalk && phase == BargeInPhase.HOLD) {
+                    // The press already cancelled + flushed whatever was playing; the
+                    // reply to this turn arrives as a fresh response.created.
+                    phase = BargeInPhase.IDLE
+                    pttPressed = false
+                    out += BargeInCommand.ForceGate(false)
+                    out += BargeInCommand.CommitAndRespond
+                    ui(BargeInUi.THINKING, out)
+                }
             }
         }
         return out
@@ -338,131 +606,318 @@ class BargeInController(
         val out = ArrayList<BargeInCommand>(3)
         if (on == holdToTalk) return out
         holdToTalk = on
-        if (duckedSince != null) restore(out)
-        if (!on && pttPressed) { pttPressed = false; out += BargeInCommand.ForceGate(false) }
+        if (phase == BargeInPhase.DUCKED) restoreToSpeaking(out)
+        if (!on && phase == BargeInPhase.HOLD) {
+            phase = BargeInPhase.IDLE
+            pttPressed = false
+            out += BargeInCommand.ForceGate(false)
+        }
         out += BargeInCommand.SessionUpdate(turnDetection())
         return out
     }
 
+    // ── events ──
+
+    private fun onSpeechStarted(itemId: String?, t: Long, out: MutableList<BargeInCommand>) {
+        serverSpeaking = true
+        // Echo needs AUDIO: the reply on air, or just drained — its tail is
+        // still in the room and comes back as a segment of its own. A model
+        // that is only thinking (its transcript arrives ~1 s before its audio)
+        // has said nothing aloud yet.
+        val onAir = playbackQueued
+        val inGrace = !onAir && lastDrained?.let { t - it.second <= DRAIN_ECHO_GRACE_MS } == true
+        flushPendingDeletes(except = itemId, out)
+        segments += Segment(itemId, echoPossible = onAir || inGrace, onAir = onAir)
+        // They go on talking before their turn was asked for: hold from here.
+        if (pendingCreate && !(onAir || inGrace)) pendingTurnSince = t
+        while (segments.size > SEGMENT_HISTORY) segments.removeAt(0)
+        when {
+            // Words decide. The server VAD hears the loudspeaker's echo on
+            // every reply, so ducking here would dim every reply.
+            phase == BargeInPhase.SPEAKING && modelBusy && profile.confirm == BargeInConfirm.TRANSCRIPT -> Unit
+            phase == BargeInPhase.SPEAKING && modelBusy -> duck(t, DuckTrigger.SERVER, out)
+            // The server agrees with the gate — that's speech.
+            phase == BargeInPhase.DUCKED && duckTrigger == DuckTrigger.GATE -> cancel(t, out)
+        }
+    }
+
+    private fun onTranscription(text: String, itemId: String?, final: Boolean, t: Long, out: MutableList<BargeInCommand>) {
+        // Energy routes: an accelerator, under the same two-sided rule as the
+        // tick — a transcript with the mic already closed is not the user
+        // talking over (deltas also stream for the model's echo).
+        if (profile.confirm == BargeInConfirm.ENERGY && phase == BargeInPhase.DUCKED && gateOpen) cancel(t, out)
+        val words = tokens(text)
+        val index = segmentIndex(itemId)
+        val alreadyCancelled = activeResponseId != null && activeResponseId == cancelledResponseId
+        if (!final) {
+            // Streaming words. On the loudspeaker the first REAL ones of a
+            // segment we saw begin, while a reply is busy, stop it — once.
+            // A segment we never saw begin never cuts a reply.
+            if (profile.confirm != BargeInConfirm.TRANSCRIPT || words.isEmpty() || !modelBusy || alreadyCancelled || index == null) return
+            val segment = segments[index]
+            if (segment.echoJudged) return
+            if (segment.echoPossible) {
+                // The live guess grows word by word while they speak; the
+                // reply is cut the moment it is clearly theirs, not when the
+                // segment ends (which, on the loudspeaker, is when the reply
+                // pauses — iOS device log 2026-09-20 00:04: three
+                // interruptions "ignored until it finished").
+                lastEchoScore = score(words)
+                if (!isEarlyInterruption(words, segment.onAir)) return
+            }
+            cancel(t, out)
+            return
+        }
+        if (index != null && segments[index].responded) return   // a completed transcript re-sent
+        val id = index?.let { segments[it].itemId } ?: itemId
+        if (index == null) {
+            if (words.isEmpty()) {
+                if (id != null) out += BargeInCommand.DeleteItem(id)   // no words, no segment: nothing to wait for
+                return
+            }
+            // No segment we saw begin: a server that sends no speech_started,
+            // or the ASR of the turn a reply is already answering, landing
+            // late (it used to wipe the reply's first words). Caption it;
+            // answer it only if nothing is on air; never cut a reply on it.
+            out += BargeInCommand.UserTurn(text)
+            if (!holdToTalk && !modelBusy) {
+                pendingTurnSince = t
+                out += BargeInCommand.StartTimer(TURN_HOLD_MS)
+                ui(BargeInUi.THINKING, out)
+            }
+            return
+        }
+        val segment = segments[index]
+        var notATurn = words.isEmpty()                              // a cough, "um", "…", an echo heard as Chinese
+        if (!notATurn && segment.echoJudged && words.size < 3) {
+            notATurn = true                                         // a later piece of the echo already judged
+        } else if (!notATurn && (segment.echoPossible || segment.echoJudged)) {
+            lastEchoScore = score(words)
+            notATurn = isEcho(words, segment.onAir)                 // the model's own words, back through the mic
+        }
+        if (notATurn) {
+            if (words.isNotEmpty()) segments[index] = segment.copy(echoJudged = true)
+            if (id != null && id !in _pendingDeletes) _pendingDeletes += id
+            return
+        }
+        // The user's turn — possibly riding on the echo's tail inside the
+        // same segment; then the whole item is theirs and stays.
+        if (id != null) _pendingDeletes.remove(id)
+        segments[index] = segments[index].copy(echoJudged = false)
+        out += BargeInCommand.UserTurn(text)
+        if (holdToTalk) return   // the release already committed + asked
+        segments[index] = segments[index].copy(responded = true)
+        flushPendingDeletes(except = null, out)   // before the ask: the model never sees the echo items
+        if (modelBusy && !alreadyCancelled) cancel(t, out)
+        // Not asked for yet: the hold first (they may be mid-sentence),
+        // and, if a cancel is in flight, its done — or the fallback.
+        pendingTurnSince = t
+        out += BargeInCommand.StartTimer(TURN_HOLD_MS)
+        if (responseActive) out += BargeInCommand.StartTimer(PENDING_CREATE_FALLBACK_MS)
+        ui(BargeInUi.THINKING, out)
+    }
+
+    /** "no active response" / "already has an active response": the server
+     *  and we disagree about what's generating — resync, never an error state. */
+    private fun onBenignActiveResponseError(t: Long, out: MutableList<BargeInCommand>) {
+        responseActive = false
+        when {
+            phase == BargeInPhase.DUCKED -> {
+                duckedSince = null; duckTrigger = null
+                out += BargeInCommand.Restore
+                phase = if (playbackQueued) BargeInPhase.SPEAKING else BargeInPhase.IDLE
+            }
+            phase == BargeInPhase.SPEAKING && !playbackQueued -> phase = BargeInPhase.IDLE
+        }
+        if (pendingCreate) {
+            // Our cancel found nothing to cancel — the reply had already
+            // finished. Its done is not coming; ask once the hold is up.
+            val ask = tryAsk(t)
+            if (ask.isEmpty()) out += BargeInCommand.StartTimer(TURN_HOLD_MS) else out += ask
+        } else {
+            ui(uiStateNow, out)
+        }
+    }
+
+    // ── transcript confirm ──
+
+    /** The segment a transcript belongs to: by item id when both sides carry
+     *  one; otherwise (id-less on either side) the most recent segment. Two
+     *  different ids is no match — never attribute one item's words to
+     *  another's segment. */
+    private fun segmentIndex(itemId: String?): Int? {
+        if (itemId != null) {
+            val i = segments.indexOfLast { it.itemId == itemId }
+            if (i >= 0) return i
+        }
+        val last = segments.lastIndex
+        if (last < 0) return null
+        return if (itemId == null || segments[last].itemId == null) last else null
+    }
+
+    /** The held turn, asked for when it is ready: the hold has elapsed since
+     *  the user was last heard, the server VAD is silent, and no reply is
+     *  generating — or the cancelled reply's done never came (the fallback). */
+    private fun tryAsk(t: Long): List<BargeInCommand> {
+        val since = pendingTurnSince ?: return emptyList()
+        val elapsed = t - since
+        if (responseActive) {
+            if (elapsed < PENDING_CREATE_FALLBACK_MS) return emptyList()
+            responseActive = false
+        } else {
+            if (elapsed < TURN_HOLD_MS || serverSpeaking) return emptyList()
+        }
+        pendingTurnSince = null
+        return listOf(BargeInCommand.CreateResponse, uiTracked(BargeInUi.THINKING))
+    }
+
+    /** The held deletes, as commands — all of them, or all but one item's. */
+    private fun flushPendingDeletes(except: String?, out: MutableList<BargeInCommand>) {
+        val due = _pendingDeletes.filter { it != except }
+        _pendingDeletes.retainAll { it == except }
+        for (id in due) out += BargeInCommand.DeleteItem(id)
+    }
+
+    private fun score(heard: List<String>): EchoScore {
+        val e = echoEvidence(heard)
+        return EchoScore(e.hits, e.heard, spokenPrevious.size + spokenCurrent.size)
+    }
+
+    /** Content words heard vs the reference (whole utterance if it has none),
+     *  and the stretches BEFORE the first / AFTER the last content word the
+     *  model said: how many words each, and whether either holds a content
+     *  word the model never said. */
+    private class EchoEvidence {
+        var hits = 0; var heard = 0
+        var fallback = false
+        var leading = 0; var leadingMisses = 0
+        var trailing = 0; var trailingMisses = 0
+        var firstContentIsHit = false
+    }
+
+    /** A heard word matches a said one outright, or is the START of one at
+     *  least two letters longer: the transcriber heard "Alright" as "All
+     *  right" and caught "anything" mid-word as "any" (iOS device log
+     *  2026-09-20 00:25, both cut the reply). Three letters at least, so "on"
+     *  is not "Monday". */
+    private fun matches(t: String): Boolean {
+        val s = stem(t)
+        if (s in spokenSet) return true
+        if (s.length < 3) return false
+        return spokenSet.any { it.length >= s.length + 2 && it.startsWith(s) }
+    }
+
+    private fun echoEvidence(heard: List<String>): EchoEvidence {
+        val e = EchoEvidence()
+        val isContent: (String) -> Boolean = { it !in STOP_WORDS }
+        val isHit: (String) -> Boolean = { isContent(it) && matches(it) }
+        // A content word the model never said — of three letters or more:
+        // "go" alone cut a reply ("Have to go", same log).
+        val isMiss: (String) -> Boolean = { isContent(it) && !matches(it) && it.length >= 3 }
+        val content = heard.filter(isContent)
+        val judged = if (content.isEmpty()) heard else content
+        e.hits = judged.count { matches(it) }
+        e.heard = judged.size
+        e.fallback = content.isEmpty()
+        e.firstContentIsHit = content.firstOrNull()?.let(isHit) ?: false
+        val first = heard.indexOfFirst(isHit).takeIf { it >= 0 }
+        val last = heard.indexOfLast(isHit).takeIf { it >= 0 }
+        val head = heard.subList(0, first ?: heard.size)
+        val tail = if (last != null) heard.subList(last + 1, heard.size) else heard
+        e.leading = head.size
+        e.leadingMisses = head.count(isMiss)
+        e.trailing = tail.size
+        e.trailingMisses = tail.count(isMiss)
+        return e
+    }
+
+    /** While a segment is still open, from the transcriber's live guess: cut
+     *  the reply only on clear evidence — three or more words, the first
+     *  content word not one the model said (the user's words come first in a
+     *  mixed segment; an echo's do not), at least one content word the model
+     *  never said, and not echo by the usual rules. A garbled echo ("Lucks
+     *  pretty solid") stays echo; "How will this be like" cuts at word five. */
+    fun isEarlyInterruption(heard: List<String>, onAir: Boolean): Boolean {
+        if (heard.size < 3) return false
+        if (spokenSet.isEmpty()) return true
+        val e = echoEvidence(heard)
+        if (e.fallback || e.firstContentIsHit || e.leadingMisses + e.trailingMisses < 1) return false
+        return !isEcho(heard, onAir)
+    }
+
+    /** Echo: the content words heard are words the model just said. Not all
+     *  of them — the transcriber garbles short echoes ("Saturday's clear" →
+     *  "Saturday's players", 1 of 2). While the reply's audio is ON AIR half
+     *  is enough: echo is the likeliest source of a match, and a two-word
+     *  interruption that shares one topic word can be repeated once the reply
+     *  ends. In the drain grace only the reply's tail can echo, so a
+     *  follow-up sharing one word ("Tuesday morning" after "Tuesday's wide
+     *  open") stays a turn: 60 %. Filler-only utterances: 70 % of all words. */
+    fun isEcho(heard: List<String>, onAir: Boolean = true): Boolean {
+        if (heard.isEmpty() || spokenSet.isEmpty()) return false
+        val e = echoEvidence(heard)
+        // Their words and the echo's in ONE segment: a question riding on the
+        // echo's tail ("…coming up on Friday. What about Monday?" — the reply
+        // ended, they spoke before the VAD's 600 ms), or their interruption
+        // with the echo of what played after it ("How will this be like?
+        // You've got a few tasks wrapped up", iOS device log 2026-09-20).
+        // Three or more words before the first / after the last word the
+        // model said, with a content word among them it never said, are
+        // theirs, whatever the ratio. A garbled echo differs by one word.
+        if (!e.fallback && e.trailing >= 3 && e.trailingMisses >= 1) return false
+        if (!e.fallback && e.leading >= 3 && e.leadingMisses >= 1) return false
+        val threshold = if (e.fallback) 0.7 else if (onAir) 0.5 else 0.6
+        return e.hits.toDouble() / e.heard >= threshold
+    }
+
     // ── transitions ──
 
-    private fun onResponseCreated(id: String?, out: MutableList<BargeInCommand>) {
-        responseActive = true
-        activeResponseId = id
-        if (suppressNextResponse) {
-            // The server replied to a false-start blip we already restored from:
-            // kill it before a single delta plays.
-            suppressNextResponse = false
-            cancelledResponseId = id
-            responseActive = false
-            muted = true
-            out += BargeInCommand.SendCancel
-            out += BargeInCommand.SetMuted(true)
-            return
-        }
-        if (id == null || id != cancelledResponseId) {
-            muted = false
-            out += BargeInCommand.SetMuted(false)
-        }
-        setUi(BargeInUi.THINKING, out)
-    }
-
-    private fun onSpeechStarted(out: MutableList<BargeInCommand>) {
-        serverSpeaking = true
-        if (holdToTalk) return
-        if (duckedSince != null) {
-            sawSpeechStartedWhileDucked = true
-            if (duckTrigger == DuckTrigger.GATE) cancel(out) // server agrees with the gate
-            return
-        }
-        if (speaking) duck(DuckTrigger.SERVER, out)
-        else out += BargeInCommand.ClearCaption // new user turn while idle: caption is the last reply
-    }
-
-    private fun onSpeechStopped(out: MutableList<BargeInCommand>) {
-        serverSpeaking = false
-        if (holdToTalk) return
-        if (duckedSince == null || duckTrigger != DuckTrigger.SERVER) return
-        // The server saw a blip and WILL commit + reply to it: restore now and
-        // cancel that reply the moment it is created. (A GATE duck that the
-        // server never agreed with is restored by gate_close / the tick.)
-        suppressNextResponse = true
-        restore(out)
-        noteFalseBargeIn(out)
-    }
-
-    private fun onGateOpen(out: MutableList<BargeInCommand>) {
-        gateOpen = true
-        gateOpenSince = now()
-        if (holdToTalk) return
-        if (duckedSince == null && speaking) duck(DuckTrigger.GATE, out)
-    }
-
-    private fun onGateClose(out: MutableList<BargeInCommand>) {
-        gateOpen = false
-        if (holdToTalk) return
-        if (duckedSince == null || duckTrigger != DuckTrigger.GATE) return
-        // Below the server's threshold the whole time: nothing was committed,
-        // no suppression needed. (A gate duck the server agreed with was
-        // cancelled on the spot in onSpeechStarted.)
-        restore(out)
-        noteFalseBargeIn(out)
-    }
-
-    private fun onTick(out: MutableList<BargeInCommand>) {
-        val since = duckedSince ?: return
-        if (now() - since < profile.confirmMs) return
-        // CONFIRM needs evidence from both sides: the server VAD is inside a
-        // speech segment AND the mic is still above the gate — sound that
-        // lasted the whole confirm window. The timer alone confirmed nothing:
-        // the server's speech_stopped can only arrive after silence_duration_ms
-        // (600) of silence, i.e. never inside a 300 ms window, so every VAD
-        // blip on a loudspeaker — a tap, a chair, a cough — cancelled the reply
-        // (Ahmad's iPhone, 2026-09-17: "interrupted by any noise").
-        if (gateOpen && serverSpeaking) {
-            cancel(out)
-            return
-        }
-        // A blip. If the server is still in its segment it WILL commit + reply
-        // to it — suppress that reply, as the speech_stopped path does. A
-        // gate-only duck the server never called speech committed nothing.
-        if (serverSpeaking) suppressNextResponse = true
-        restore(out)
-        noteFalseBargeIn(out)
-    }
-
-    private fun duck(trigger: DuckTrigger, out: MutableList<BargeInCommand>) {
-        duckedSince = now()
+    private fun duck(t: Long, trigger: DuckTrigger, out: MutableList<BargeInCommand>) {
+        phase = BargeInPhase.DUCKED
+        duckedSince = t
         duckTrigger = trigger
-        sawSpeechStartedWhileDucked = false
-        out += BargeInCommand.Duck(profile.confirmMs)
+        out += BargeInCommand.Duck
+        out += BargeInCommand.StartTimer(profile.confirmMs)
     }
 
-    private fun restore(out: MutableList<BargeInCommand>) {
+    private fun restoreToSpeaking(out: MutableList<BargeInCommand>) {
+        phase = if (modelBusy) BargeInPhase.SPEAKING else BargeInPhase.IDLE
         duckedSince = null
         duckTrigger = null
-        sawSpeechStartedWhileDucked = false
+        falseBargeIns += 1
         out += BargeInCommand.Restore
+        noteFalseBargeIn(out)
     }
 
-    /** CANCEL: stop the reply for good — cancel server-side (only if one is in
-     *  flight), flush the player, drop every later delta of that response. */
-    private fun cancel(out: MutableList<BargeInCommand>) {
-        val wasDucked = duckedSince != null
-        duckedSince = null
-        duckTrigger = null
-        sawSpeechStartedWhileDucked = false
-        cancelledResponseId = activeResponseId
-        if (responseActive) out += BargeInCommand.SendCancel
-        // The server's response.done for the cancelled id only confirms this.
-        responseActive = false
+    /** CANCEL: stop the reply for good. `hard` = the Interrupt button, which
+     *  never went through DUCKED; the restore is idempotent either way and
+     *  keeps the NEXT reply at unity. `responseActive` stays true until the
+     *  server's done: the pending ask waits for it. */
+    private fun cancel(t: Long, out: MutableList<BargeInCommand>, hard: Boolean = false) {
+        if (responseActive) {
+            cancelledResponseId = activeResponseId
+            out += BargeInCommand.SendCancel
+        } else if (activeResponseId != null) {
+            // Only the buffered tail was left; make sure late deltas for it
+            // (if any) stay dropped.
+            cancelledResponseId = activeResponseId
+        }
         out += BargeInCommand.FlushPlayback
+        if (playbackQueued) {
+            // The last of the flushed audio is already in the room and comes
+            // back as a segment of its own, exactly as after a natural drain
+            // (iOS device log 2026-09-20 00:04:43: "And Friday." 90 ms after a flush).
+            lastDrained = playingResponseId to t
+            playingResponseId = null
+        }
         playbackQueued = false
         muted = true
-        out += BargeInCommand.SetMuted(true)
-        if (wasDucked) out += BargeInCommand.Restore // unity gain for the NEXT reply
+        out += BargeInCommand.Restore
         out += BargeInCommand.ClearCaption
-        setUi(BargeInUi.LISTENING, out)
+        ui(BargeInUi.LISTENING, out)
+        phase = BargeInPhase.IDLE
+        duckedSince = null
+        duckTrigger = null
     }
 
     private fun noteFalseBargeIn(out: MutableList<BargeInCommand>) {
@@ -475,11 +930,9 @@ class BargeInController(
         }
     }
 
-    private fun setUi(state: BargeInUi, out: MutableList<BargeInCommand>) {
-        if (ui == state) return
-        ui = state
-        out += BargeInCommand.Ui(state)
-    }
+    /** Emit a UI state (every time, like iOS — the screen dedupes). */
+    private fun ui(state: BargeInUi, out: MutableList<BargeInCommand>) { out += uiTracked(state) }
+    private fun uiTracked(state: BargeInUi): BargeInCommand { ui = state; return BargeInCommand.Ui(state) }
 }
 
 /**
@@ -623,11 +1076,10 @@ class RmsGate(
      * @param marginDb  profile margin (6 dB; 9 dB on the speaker profile while playing)
      * @param playbackQueued  model audio still playing/queued (blocks adaptation)
      * @param responseActive  a reply is in flight (blocks adaptation)
-     * @param forcedClosed  half-duplex (the loudspeaker while the model is
-     *   audible — [BargeInProfile.gateForcedClosed]): the gate is held shut —
-     *   digital silence out, the pre-roll discarded — so nothing from the mic
-     *   reaches the server; its own echo is what tripped the VAD. Hold-to-talk's
-     *   [forceOpen] wins over it.
+     * @param forcedClosed  half-duplex ([BargeInProfile.gateForcedClosed] — no
+     *   shipped profile since 2026-09-20): the gate is held shut — digital
+     *   silence out, the pre-roll discarded — so nothing from the mic reaches
+     *   the server. Hold-to-talk's [forceOpen] wins over it.
      */
     fun process(
         samples: ShortArray, marginDb: Double, playbackQueued: Boolean, responseActive: Boolean,

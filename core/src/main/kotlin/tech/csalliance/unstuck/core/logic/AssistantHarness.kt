@@ -82,22 +82,30 @@ object AssistantHarnessRules {
     /** The per-request model window (matches the web's MAX_MODEL_WINDOW / iOS). */
     const val MAX_MODEL_WINDOW = ASSISTANT_MAX_MODEL_WINDOW
 
+    // The registry's tool CLASSES (lib/assistant/tool-registry.json `kind`).
+    // :core cannot see the generated ToolRegistry (it lives in :app), so these
+    // are pinned copies — ToolRegistryParityTest (:app) asserts they equal
+    // ToolRegistry.READ_ONLY / NAVIGATION / STAGED, so a regenerated registry
+    // that adds a read tool fails a test instead of silently arming the guard.
+
     /** Reads never disarm the fabrication guard and earn no receipt. */
-    val READ_ONLY_TOOLS: Set<String> = setOf("get_schedule", "get_tasks", "get_captures", "get_lists", "get_insights", "get_calls")
+    val READ_ONLY_TOOLS: Set<String> = setOf("get_tasks", "find_tasks", "get_schedule", "get_lists", "get_captures", "get_settings", "get_insights", "get_calls")
 
     /** Tools that only NAVIGATE — no data changes, no staged card. Neither a
      *  write (they must not disarm the guard) nor "nothing changed" (the
      *  empty-reply fallback says what was opened instead). */
     val NAVIGATION_TOOLS: Set<String> = setOf("open_screen")
 
-    /** share_task only STAGES a confirm card — the one receipt-less write the
-     *  "check the card below" fallback is written for. */
-    const val STAGE_TOOL = "share_task"
+    /** share_task / share_list only STAGE a confirm card — the receipt-less
+     *  writes the "check the card below" fallback is written for. */
+    val STAGED_TOOLS: Set<String> = setOf("share_task", "share_list")
 
     /** Hidden user-role bounce after a fabricated claim. NOT from the user, and
-     *  the user never saw the claim — so the retry must read like a first answer.
-     *  Verbatim from AssistantHarness.swift. */
-    const val CORRECTIVE = "(integrity check from the app — not the user. The user did NOT see your last message. No tool was called, so nothing was done. If the action is still needed, call the right tool NOW, then answer as if for the first time: no apology, no \"I said\", no \"I didn't\", no mention of this note.)"
+     *  the user never saw the claim. It never asserts "nothing was done": that
+     *  wording invited the model to REDO an earlier turn's action (a duplicate
+     *  task) when the bounced sentence was a truthful recap. Verbatim on web,
+     *  iOS and Android — docs/assistant-tooling-rules.md §3 (2026-09-20). */
+    const val CORRECTIVE = "(from the app, not the user: you described an action, but no tool ran THIS turn. If it is still needed, call the right tool now and then say in a few words what happened; if you were describing something from an earlier turn, answer plainly without claiming it again. Never claim an action without its tool result.)"
 
     /** Hidden hint when the upstream says the reply was cut off by length. */
     const val CUT_OFF_HINT = "(your previous reply was cut off by the length limit — continue from where it stopped, splitting any large tool call into smaller calls of at most 12 items.)"
@@ -117,7 +125,10 @@ object AssistantHarnessRules {
     fun partway(n: Int): String =
         "I got partway through — $n thing${if (n == 1) "" else "s"} went through (receipts below). Tell me what's still missing."
 
-    private fun succeeded(result: String) = !result.startsWith("error")
+    /** The executor contract (docs/assistant-tooling-rules.md §1): a result is a
+     *  success ONLY when it starts with `ok:` — "not an error" also let a bare
+     *  "ok" or a malformed result arm the guard. */
+    fun succeeded(result: String) = result.startsWith("ok:")
 
     /** A WRITE tool succeeded (even receipt-less ones like share_task). Read-only
      *  successes, navigation and errored tools don't count — and don't disarm the guard. */
@@ -125,7 +136,7 @@ object AssistantHarnessRules {
         results.any { (call, result) -> succeeded(result) && call.name !in READ_ONLY_TOOLS && call.name !in NAVIGATION_TOOLS }
 
     private fun stagedShare(results: List<Pair<HarnessToolCall, String>>): Boolean =
-        results.any { (call, result) -> succeeded(result) && call.name == STAGE_TOOL }
+        results.any { (call, result) -> succeeded(result) && call.name in STAGED_TOOLS }
 
     /** The screen a successful navigation opened ("ok: opened today" → "today"), or null. */
     fun navigatedTo(results: List<Pair<HarnessToolCall, String>>): String? =
@@ -296,7 +307,9 @@ class AssistantHarness(
                 } catch (e: Throwable) {
                     "error: ${e.message ?: "failed"}"
                 }
-                if (!result.startsWith("error") &&
+                // "Write succeeded" = a tool outside the registry's read-only and
+                // navigation sets whose result starts with `ok:` (rules §3).
+                if (AssistantHarnessRules.succeeded(result) &&
                     call.name !in AssistantHarnessRules.READ_ONLY_TOOLS &&
                     call.name !in AssistantHarnessRules.NAVIGATION_TOOLS
                 ) writeSucceeded = true

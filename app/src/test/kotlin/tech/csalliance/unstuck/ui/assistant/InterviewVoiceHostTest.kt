@@ -19,7 +19,8 @@ import tech.csalliance.unstuck.core.model.ProfileFactSource
  * primer runs the intro while the account's interview is pending — listing the
  * seven questions, saving via save_profile_fact, allowing skips, closing with
  * finish_interview — and greets by name otherwise; finish_interview is a
- * talk-level tool (58 with the 57 contract tools), never a contract or call tool.
+ * registry tool on the voice surface (an executor case since 2026-09-20), never
+ * a call tool.
  */
 class InterviewVoiceHostTest {
 
@@ -74,23 +75,41 @@ class InterviewVoiceHostTest {
         }
     }
 
-    @Test fun `finish_interview is a talk-level tool - in the Talk schema, never a contract or call tool`() {
-        assertFalse(FinishInterviewTool.NAME in ASSISTANT_TOOL_NAMES)
-        assertEquals(57, voiceToolsJson().size)
-        assertTrue(voiceToolsJson().none { it.jsonObject["name"]!!.jsonPrimitive.content == FinishInterviewTool.NAME })
+    @Test fun `finish_interview is a registry tool on the voice surface, never advertised to a call`() {
+        // 2026-09-20 tooling rewrite: the Talk schema IS the registry's voice
+        // surface (VoiceToolSchema.kt parses ToolRegistry.JSON), so finish_interview
+        // is an ordinary registry name with an executor case, not an appended spec.
+        assertTrue(FinishInterviewTool.NAME in ToolRegistry.NAMES)
+        assertFalse(FinishInterviewTool.NAME in ToolRegistry.READ_ONLY)
         val talk = talkVoiceToolsJson()
-        assertEquals(58, talk.size)
-        val spec = talk.last().jsonObject
-        assertEquals(FinishInterviewTool.NAME, spec["name"]!!.jsonPrimitive.content)
+        assertEquals(RegistryTools.forSurface("voice").size, talk.size)
+        val spec = talk.first { it.jsonObject["name"]!!.jsonPrimitive.content == FinishInterviewTool.NAME }.jsonObject
         assertEquals("function", spec["type"]!!.jsonPrimitive.content)
-        assertEquals(FinishInterviewTool.DESCRIPTION, spec["description"]!!.jsonPrimitive.content)
         assertEquals(0, spec["parameters"]!!.jsonObject["required"]!!.jsonArray.size)
         assertTrue(spec["parameters"]!!.jsonObject["properties"]!!.jsonObject.isEmpty())
-        assertTrue("every contract tool is still there", talk.map { it.jsonObject["name"]!!.jsonPrimitive.content }.containsAll(ASSISTANT_TOOL_NAMES))
+        assertFalse("the surfaces marker never reaches the session", spec.containsKey("_surfaces"))
         // A call from Unstuck never advertises it (CallScript.callTools is the list).
-        assertTrue(callVoiceToolSpecs(CallScript.callTools() + FinishInterviewTool.NAME).none { it.name == FinishInterviewTool.NAME })
-        assertFalse(FINISH_INTERVIEW_SPEC.readOnly)
+        assertTrue(callVoiceTools(CallScript.callTools()).none { it.name == FinishInterviewTool.NAME })
         assertTrue(FinishInterviewTool.OK.startsWith("ok"))
+        assertTrue(FinishInterviewTool.ALREADY.startsWith("error"))
+    }
+
+    @Test fun `finish_interview runs through the executor - marks the seam done once, then says so`() = runTest {
+        var pending = true
+        val fake = AssistantToolsTest().FakeApi()
+        val api = object : AssistantApi by fake {
+            override fun interviewPending(): Boolean = pending
+            override fun markInterviewDone(): Boolean { pending = false; return true }
+        }
+        assertEquals(FinishInterviewTool.OK, runAssistantTool(FinishInterviewTool.NAME, ToolArgs(), api, TurnScratch()))
+        assertFalse(api.interviewPending())
+        assertEquals(FinishInterviewTool.ALREADY, runAssistantTool(FinishInterviewTool.NAME, ToolArgs(), api, TurnScratch()))
+        // No account to mark: an error, never an `ok:` over nothing.
+        val signedOut = object : AssistantApi by fake {
+            override fun interviewPending(): Boolean = true
+            override fun markInterviewDone(): Boolean = false
+        }
+        assertTrue(runAssistantTool(FinishInterviewTool.NAME, ToolArgs(), signedOut, TurnScratch()).startsWith("error:"))
     }
 
     @Test fun `interviewPending defaults to false on the seam`() {

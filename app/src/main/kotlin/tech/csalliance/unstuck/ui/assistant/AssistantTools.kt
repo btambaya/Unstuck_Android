@@ -40,14 +40,21 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
 
-// Assistant tool executor — the CLIENT half of the shared assistant contract
-// (docs/assistant-tool-contract.md, vendored). The `assistant` edge function
-// owns the tool SCHEMAS and the prompt; this file executes the calls through
-// the same write paths the UI uses, returning the contract's exact result
-// strings (`ok: …` / `error: …`) — the server prompt reads them, so wording is
-// not ours to change. 1:1 port of lib/assistant/tools.ts `runAssistantTool`
-// and iOS AssistantTools.swift (the base tools + the call tools live here; the
-// 2026-09-02 app-surface tools in AssistantToolsSurface.kt).
+// Assistant tool executor — the CLIENT half of the shared assistant contract.
+// The registry (lib/assistant/tool-registry.json → ToolRegistry.generated.kt)
+// owns every tool's name / description / parameters; this file executes the
+// calls through the same write paths the UI uses and answers in the contract's
+// result style (`ok: …` / `error: …`) — the server prompt reads them. 1:1 port
+// of lib/assistant/tools.ts `runAssistantTool` and iOS AssistantTools.swift
+// (the base tools + the call tools live here; the app-surface tools in
+// AssistantToolsSurface.kt).
+//
+// 2026-09-20 tooling rewrite (docs/assistant-tooling-rules.md §1): an `ok:` is
+// returned ONLY after the seam confirmed the change; a no-op is `error: …
+// nothing changed`; a partial result names, in one line the model can repeat,
+// exactly what was and was not done (create_tasks past its cap, complete_tasks
+// over done/unknown ids, carry_to_tomorrow's skipped-instead-of-moved). The
+// audit that led here: "the model says it did something it didn't".
 //
 // Written against [AssistantApi] (not AppViewModel) so it runs unchanged in
 // unit tests against an in-memory fake, and in the app against
@@ -55,8 +62,13 @@ import java.time.ZoneId
 // session dispatch through it.
 
 /** Tools that never change anything — a success here must NOT count as "the
- *  assistant acted" for either fabrication guard (text or voice). */
-val READ_ONLY_TOOLS: Set<String> = setOf("get_schedule", "get_tasks", "get_captures", "get_lists", "get_insights", "get_calls")
+ *  assistant acted" for either fabrication guard (text or voice). The
+ *  registry's read set, never a second copy. */
+val READ_ONLY_TOOLS: Set<String> get() = ToolRegistry.READ_ONLY
+
+/** create_tasks writes at most this many per call and NAMES every item past
+ *  it (the old cap of 25 silently dropped the rest). */
+const val MAX_CREATE_TASKS = 50
 
 /** Entities created THIS turn/session, so a later call (schedule_task after
  *  create_task) can reference them by id before the optimistic write has
@@ -217,12 +229,26 @@ suspend fun runAssistantTool(name: String, args: ToolArgs, api: AssistantApi, sc
     return unknownToolResult(name)
 }
 
-/** Every tool the executor knows (the registry mirrors the executor 1:1), so
- *  an unknown-tool result names the real options — the model picks one next
- *  round instead of guessing again (three narrated guesses at a list-reading
- *  tool, tester round 2026-09-06). Same wording on web + iOS. */
+/** Every tool the executor knows is exactly the registry (ToolRegistryParityTest
+ *  pins both directions), so an unknown-tool result names the real options —
+ *  the model picks one next round instead of guessing again (three narrated
+ *  guesses at a list-reading tool, tester round 2026-09-06). Wording from
+ *  docs/assistant-tooling-rules.md §1, the same on web + iOS. */
 fun unknownToolResult(name: String): String =
-    "error: unknown tool \"$name\" — available: ${ASSISTANT_TOOL_NAMES.sorted().joinToString(", ")}"
+    "error: unknown tool \"$name\". The tools are: ${ToolRegistry.NAMES.joinToString(", ")}"
+
+/** Tags as the task stores them: trimmed, blanks dropped, case-insensitively
+ *  unique, null when nothing is left (the row's own convention). */
+private fun cleanTags(raw: List<String>?): List<String>? =
+    raw?.map { it.trim() }?.filter { it.isNotEmpty() }?.distinctBy { it.lowercase() }?.ifEmpty { null }
+
+/** "none" (or a JSON null) clears an optional text field — the registry's
+ *  convention for update_task's lifeArea / firstPhysicalAction / dueAt. */
+private fun ToolArgs.clearableStr(k: String): Pair<Boolean, String?> {
+    val v = str(k)
+    val cleared = isNull(k) || v == null || v.equals("none", ignoreCase = true)
+    return cleared to (if (cleared) null else v)
+}
 
 /** The base (pre-2026-09-02) tools: tasks, schedule, lists, profile, sharing. */
 private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi, scratch: TurnScratch): String? {
@@ -231,15 +257,36 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
     return when (name) {
         "create_task" -> {
             val nm = args.str("name") ?: return "error: name required"
+            val date = args.str("date")
+            val startTime = args.str("startTime")
+            if (startTime != null && date == null) return "error: startTime needs a date — give date (YYYY-MM-DD) as well"
+            if (date != null) {
+                rejectPastDate(api, date)?.let { return it }
+                if (startTime != null) rejectPastTime(api, date, startTime)?.let { return it }
+            }
+            val later = args.bool("later") ?: false
             val t = TaskItem(
                 id = newUuid(), name = nm, estimateMin = args.int("estimateMin") ?: 25, totalFocused = 0, done = false,
-                tags = args.strList("tags"), lifeArea = args.str("lifeArea"),
-                firstPhysicalAction = args.str("firstPhysicalAction"), later = args.bool("later") ?: false,
+                tags = cleanTags(args.strList("tags")), lifeArea = args.str("lifeArea"),
+                firstPhysicalAction = args.str("firstPhysicalAction"),
+                // A dated task is on the calendar, not parked — the two exclude each other.
+                later = later && date == null,
                 dueAt = args.str("dueAt"), createdAt = now(), updatedAt = now(),
             )
             api.upsertTask(t)
             scratch.newTasks[t.id] = t
-            "ok: created task id=${t.id} name=\"${t.name}\""
+            val sb = StringBuilder("ok: created task id=${t.id} name=\"${t.name}\"")
+            when {
+                date != null && startTime != null -> {
+                    val landed = scheduleTask(api, t, date, startTime)
+                    sb.append(" — scheduled $date $landed")
+                    if (later) sb.append(" (not parked in Later: it has a date)")
+                }
+                // A day WITHOUT a time: never invent 09:00 — create it unscheduled and ask.
+                date != null -> sb.append(". NOTE: it has a day ($date) but no time — left unscheduled. Ask ONE question suggesting a time, then schedule_task it.")
+                later -> sb.append(" — parked in Later")
+            }
+            sb.toString()
         }
 
         "schedule_task" -> {
@@ -265,23 +312,39 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             if (args.has("date") || args.has("startTime") || args.has("scheduledDate") || args.has("scheduledTime")) {
                 return "error: update_task cannot change the schedule — use schedule_task(taskId, date, startTime?) instead"
             }
-            val upd = t.copy(
-                name = args.str("name") ?: t.name,
-                estimateMin = args.int("estimateMin") ?: t.estimateMin,
-                lifeArea = args.str("lifeArea") ?: t.lifeArea,
-                tags = args.strList("tags") ?: t.tags,
-                firstPhysicalAction = args.str("firstPhysicalAction") ?: t.firstPhysicalAction,
+            // Only what actually changes is written, and the result names it —
+            // an "ok: updated" over a no-op call read as a change (rules §1).
+            val changed = ArrayList<String>()
+            var upd = t
+            args.str("name")?.let { if (it != t.name) { upd = upd.copy(name = it); changed += "name" } }
+            args.int("estimateMin")?.let { if (it != t.estimateMin) { upd = upd.copy(estimateMin = it); changed += "estimate ${it}m" } }
+            if (args.has("lifeArea")) {
+                val (cleared, v) = args.clearableStr("lifeArea")
+                if (v != t.lifeArea) { upd = upd.copy(lifeArea = v); changed += if (cleared) "area cleared" else "area $v" }
+            }
+            if (args.has("tags")) {
+                val v = cleanTags(args.strList("tags"))
+                if (v != t.tags) { upd = upd.copy(tags = v); changed += if (v == null) "tags cleared" else "tags ${v.joinToString(", ")}" }
+            }
+            if (args.has("firstPhysicalAction")) {
+                val (cleared, v) = args.clearableStr("firstPhysicalAction")
+                if (v != t.firstPhysicalAction) { upd = upd.copy(firstPhysicalAction = v); changed += if (cleared) "first step cleared" else "first step" }
+            }
+            if (args.has("dueAt")) {
                 // "make that due Friday" was unreachable (inventory 2026-09-02)
-                dueAt = if (args.isNull("dueAt")) null else (args.str("dueAt") ?: t.dueAt),
-                updatedAt = now(),
-            )
+                val (cleared, v) = args.clearableStr("dueAt")
+                if (v != t.dueAt) { upd = upd.copy(dueAt = v); changed += if (cleared) "deadline cleared" else "due $v" }
+            }
+            args.bool("later")?.let { if (it != (t.later ?: false)) { upd = upd.copy(later = it); changed += if (it) "parked in Later" else "back from Later" } }
+            if (changed.isEmpty()) return "error: nothing to change on \"${t.name}\" — every field given already has that value"
+            upd = upd.copy(updatedAt = now())
             api.upsertTask(upd)
             scratch.newTasks[upd.id] = upd
             // A new estimate resizes the live block, like the calendar editor does.
             if (upd.estimateMin != t.estimateMin) {
                 nextLiveBlock(api, t.id)?.let { api.upsertBlock(it.copy(durationMinutes = upd.estimateMin)) }
             }
-            "ok: updated \"${upd.name}\""
+            "ok: updated \"${upd.name}\" — ${changed.joinToString(", ")}"
         }
 
         "set_task_later" -> {
@@ -295,20 +358,27 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             val upd = t.copy(later = wantLater, updatedAt = now())
             api.upsertTask(upd)
             scratch.newTasks[t.id] = upd
-            "ok"
+            if (wantLater) "ok: parked \"${t.name}\" in Later" else "ok: brought \"${t.name}\" back from Later"
         }
 
         "set_task_recurrence" -> {
             val t = findTask(args.str("taskId"), api, scratch) ?: return "error: task not found"
-            val kind = args.str("kind")
+            val kind = args.str("kind")?.lowercase() ?: return "error: kind required — daily, weekly, monthly, or none"
             // F1: an unrecognized kind used to silently CLEAR the recurrence and report ok.
-            if (kind != null && kind !in listOf("daily", "weekly", "monthly", "none")) {
+            if (kind !in listOf("daily", "weekly", "monthly", "none")) {
                 return "error: unknown recurrence kind \"$kind\" — use daily, weekly, monthly, or none"
             }
             val until = args.str("until")
+            val days = args.intList("daysOfWeek")?.distinct()?.sorted()
+            if (kind == "weekly") {
+                // Weekly with no days generated NOTHING and still said ok (rules §1).
+                if (days.isNullOrEmpty()) return "error: weekly needs daysOfWeek (0=Sunday … 6=Saturday) — ask which days"
+                if (days.any { it !in 0..6 }) return "error: daysOfWeek must be 0=Sunday … 6=Saturday"
+            }
+            if (kind == "none" && t.recurrence == null) return "error: \"${t.name}\" doesn't repeat — nothing changed"
             val rec: Recurrence? = when (kind) {
                 "daily" -> Recurrence.Daily(until)
-                "weekly" -> Recurrence.Weekly(args.intList("daysOfWeek") ?: emptyList(), until)
+                "weekly" -> Recurrence.Weekly(days ?: emptyList(), until)
                 "monthly" -> Recurrence.Monthly(until)
                 else -> null
             }
@@ -323,7 +393,16 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 for (b in plan.toUpsert) api.upsertBlock(b)
                 for (id in plan.toDelete) api.deleteBlock(id)
             }
-            "ok"
+            if (rec == null) {
+                "ok: \"${t.name}\" no longer repeats${if (anchor != null) " (its future slots were removed)" else ""}"
+            } else {
+                val how = when (kind) {
+                    "weekly" -> "weekly on " + (days ?: emptyList()).joinToString(", ") { WEEKDAY_NAMES_CAP[it].take(3) }
+                    else -> kind
+                }
+                "ok: \"${t.name}\" now repeats $how${if (until != null) " until $until" else ""}" +
+                    if (anchor != null) " (calendar slots regenerated from its next slot)" else " (not on the calendar yet — schedule_task it to place the series)"
+            }
         }
 
         "complete_task" -> {
@@ -339,18 +418,26 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
         }
 
         "create_tasks" -> {
-            // Bulk brain-dump — ten spoken tasks must land as ONE call.
+            // Bulk brain-dump — ten spoken tasks must land as ONE call. Past the
+            // cap, every item is NAMED as not created (the old cap dropped them
+            // and reported the count that fit).
             val items = args.objList("tasks")?.takeIf { it.isNotEmpty() } ?: return "error: tasks required"
             val made = ArrayList<Pair<String, String>>()
             val needsTime = ArrayList<String>()
-            for (it in items.take(25)) {
-                val nm = it.str("name") ?: continue
-                val t = TaskItem(id = newUuid(), name = nm, estimateMin = it.int("estimateMin") ?: 25, totalFocused = 0, done = false,
-                    lifeArea = it.str("lifeArea"), later = false, createdAt = now(), updatedAt = now())
-                api.upsertTask(t)
-                scratch.newTasks[t.id] = t
+            val notCreated = ArrayList<String>()
+            var nameless = 0
+            for (it in items) {
+                val nm = it.str("name")
+                if (nm == null) { nameless += 1; continue }
+                if (made.size >= MAX_CREATE_TASKS) { notCreated += "\"$nm\""; continue }
                 val date = it.str("date")
                 val startTime = it.str("startTime")
+                val later = it.bool("later") ?: false
+                val t = TaskItem(id = newUuid(), name = nm, estimateMin = it.int("estimateMin") ?: 25, totalFocused = 0, done = false,
+                    tags = cleanTags(it.strList("tags")), lifeArea = it.str("lifeArea"), firstPhysicalAction = it.str("firstPhysicalAction"),
+                    later = later && date == null, dueAt = it.str("dueAt"), createdAt = now(), updatedAt = now())
+                api.upsertTask(t)
+                scratch.newTasks[t.id] = t
                 // Date + time → schedule. Date WITHOUT time → do NOT invent 09:00:
                 // create it unscheduled and tell the model to ask ONE question.
                 val past = date?.let { d -> rejectPastDate(api, d) ?: rejectPastTime(api, d, startTime) }
@@ -361,28 +448,44 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 }
                 made += t.id to t.name
             }
-            if (made.isEmpty()) return "error: no valid tasks in the list"
-            val ask = if (needsTime.isEmpty()) "" else
-                " NOTE: ${needsTime.joinToString(", ")} ${if (needsTime.size == 1) "has" else "have"} a day but no time — left unscheduled. Ask ONE question suggesting a time for them, then schedule_task each."
-            "ok: created ${made.size} tasks ids=${made.joinToString(",") { it.first }} — ${made.joinToString(", ") { "\"${it.second}\"" }}.$ask"
+            if (made.isEmpty()) return "error: no valid tasks in the list — every entry needs a name"
+            val partial = notCreated.isNotEmpty() || nameless > 0
+            val sb = StringBuilder(
+                "ok: created ${made.size}${if (partial) " of ${items.size}" else ""} tasks ids=${made.joinToString(",") { it.first }} — ${made.joinToString(", ") { "\"${it.second}\"" }}",
+            )
+            if (notCreated.isNotEmpty()) sb.append(" — not created: ${notCreated.joinToString(", ")} (limit $MAX_CREATE_TASKS per call — call create_tasks again for them)")
+            if (nameless > 0) sb.append(" — not created: $nameless item${if (nameless == 1) "" else "s"} with no name")
+            sb.append(".")
+            if (needsTime.isNotEmpty()) {
+                sb.append(" NOTE: ${needsTime.joinToString(", ")} ${if (needsTime.size == 1) "has" else "have"} a day but no time — left unscheduled. Ask ONE question suggesting a time for them, then schedule_task each.")
+            }
+            sb.toString()
         }
 
         "complete_tasks" -> {
-            // Bulk close — "close all my tasks" must be ONE reliable call.
-            val ids = args.strList("taskIds") ?: emptyList()
+            // Bulk close — "close all my tasks" must be ONE reliable call, and
+            // the result says which were NOT done and why (rules §1).
+            val ids = args.strList("taskIds")?.filter { it.isNotBlank() }?.distinct() ?: emptyList()
             if (ids.isEmpty()) return "error: taskIds required"
             // Report only the ids we ACTUALLY flipped — the receipt's undo re-opens exactly these.
-            val flipped = ArrayList<String>()
+            val flipped = ArrayList<Pair<String, String>>()
+            val skipped = ArrayList<String>()
             for (id in ids) {
-                val t = findTask(id, api, scratch) ?: continue
-                if (t.done) continue
-                val upd = t.copy(done = true, completedAt = now(), updatedAt = now())
-                api.upsertTask(upd)
-                scratch.newTasks[t.id] = upd
-                flipped += t.id
+                val t = findTask(id, api, scratch)
+                when {
+                    t == null -> skipped += "\"$id\" (not found)"
+                    t.done -> skipped += "\"${t.name}\" (already done)"
+                    else -> {
+                        val upd = t.copy(done = true, completedAt = now(), updatedAt = now())
+                        api.upsertTask(upd)
+                        scratch.newTasks[t.id] = upd
+                        flipped += t.id to t.name
+                    }
+                }
             }
-            if (flipped.isEmpty()) return "error: no matching open tasks"
-            "ok: completed ${flipped.size} tasks ids=${flipped.joinToString(",")}"
+            if (flipped.isEmpty()) return "error: none completed — ${skipped.joinToString(", ")}"
+            "ok: completed ${flipped.size} tasks ids=${flipped.joinToString(",") { it.first }} — ${flipped.joinToString(", ") { "\"${it.second}\"" }}" +
+                if (skipped.isEmpty()) "" else " — not done: ${skipped.joinToString(", ")}"
         }
 
         "delete_task" -> {
@@ -397,10 +500,12 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
 
         "create_list" -> {
             val nm = args.str("name") ?: return "error: name required"
-            val color = args.str("color") ?: "indigo"
+            val colors = RegistryTools.enumOf("create_list", "color")
+            val color = args.str("color")?.lowercase() ?: "indigo"
+            if (colors.isNotEmpty() && color !in colors) return "error: unknown colour \"$color\" — use ${colors.joinToString(", ")}"
             val id = api.addCollection(nm, color) ?: return "error: could not create list"
-            scratch.newLists[id] = ItemCollection(id = id, name = nm, color = color, subtitle = null, items = emptyList(), sortOrder = 0)
-            "ok: created list id=$id name=\"$nm\""
+            scratch.newLists[id] = ItemCollection(id = id, name = nm.trim(), color = color, subtitle = null, items = emptyList(), sortOrder = 0)
+            "ok: created list id=$id name=\"${nm.trim()}\""
         }
 
         "add_to_list" -> {
@@ -409,8 +514,8 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 return "error: you only have view access to \"${c.name}\" — can't add to it"
             }
             val body = args.str("body") ?: return "error: body required"
-            api.addCollectionItem(c.id, body)
-            "ok: added to \"${c.name}\""
+            val id = api.addCollectionItem(c.id, body) ?: return "error: couldn't add to \"${c.name}\" — try again"
+            "ok: added \"${body.trim()}\" to \"${c.name}\" id=$id"
         }
 
         "promote_item_to_task" -> {
@@ -423,9 +528,18 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 return "error: \"${item.body}\" is already promoted — its task is still in flight"
             }
             val shared = c.members.isNotEmpty() || c.myRole == "editor" || c.myRole == "viewer"
-            val loop = args.str("mode") == "loop" && shared
-            api.promoteItemToTask(c.id, item.id, loop, if (loop) args.str("dueAt") else null)
-            "ok: promoted \"${item.body}\""
+            val wantLoop = args.str("mode") == "loop"
+            val loop = wantLoop && shared
+            val dueAt = if (loop) args.str("dueAt") else null
+            val taskId = api.promoteItemToTask(c.id, item.id, loop, dueAt)
+                ?: return "error: couldn't promote \"${item.body}\" — get_lists and try again"
+            // The loop → self downgrade on an unshared list is SAID, not silent.
+            val how = when {
+                loop -> " — the list's members are in the loop${if (dueAt != null) " (by $dueAt)" else ""}"
+                wantLoop -> " — this list isn't shared, so it is just their task (loop mode not applied)"
+                else -> " (just theirs)"
+            }
+            "ok: promoted \"${item.body}\" to a task id=$taskId$how"
         }
 
         "save_profile_fact" -> {

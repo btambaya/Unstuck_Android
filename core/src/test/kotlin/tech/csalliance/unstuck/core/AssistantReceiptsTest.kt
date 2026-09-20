@@ -301,4 +301,39 @@ class AssistantReceiptsTest {
         assertEquals(ReceiptUndo.deleteTask("abc"), legacy.undo)
         assertTrue(legacy.isUndoable)
     }
+
+    // ── 2026-09-20 tooling rewrite: cards for the new write tools (rules §4) ──
+
+    @Test fun `add_to_list names the item and the list, and still reads the old shape`() {
+        assertEquals("Added “Milk” to “Groceries”", r("add_to_list", "ok: added \"Milk\" to \"Groceries\" id=i9")!!.label)
+        assertEquals(ReceiptIcon.LIST, r("add_to_list", "ok: added \"Milk\" to \"Groceries\" id=i9")!!.icon)
+        assertEquals("Added to “Groceries”", r("add_to_list", "ok: added to \"Groceries\"")!!.label)
+    }
+
+    @Test fun `the new write tools each get a card and no undo`() {
+        // Echo cards are the `ok:` line itself (straight quotes and all), minus a trailing parenthetical.
+        assertEquals("recoloured list \"Groceries\" → green", r("recolor_list", "ok: recoloured list \"Groceries\" → green")!!.label)
+        assertEquals("pinned \"Milk\" in \"Groceries\"", r("pin_list_item", "ok: pinned \"Milk\" in \"Groceries\"")!!.label)
+        assertEquals("left list \"Team\" — the owner keeps it", r("leave_list", "ok: left list \"Team\" — the owner keeps it")!!.label)
+        assertEquals("reminder for \"Dentist\" set to 10 minutes before", r("set_task_reminder", "ok: reminder for \"Dentist\" set to 10 minutes before (no upcoming slot yet — it applies once the task is scheduled)")!!.label)
+        assertEquals("theme set to dark", r("set_theme", "ok: theme set to dark")!!.label)
+        assertEquals("focus defaults — length 45m, soft exit off", r("set_focus_defaults", "ok: focus defaults — length 45m, soft exit off")!!.label)
+        assertEquals("ambient sound set to brown noise", r("set_ambient_sound", "ok: ambient sound set to brown noise")!!.label)
+        assertEquals(Receipt(ReceiptIcon.PLUS, "Restored: Call the plumber"), r("restore_capture", "ok: restored capture \"Call the plumber\" to the inbox"))
+        assertEquals(Receipt(ReceiptIcon.CHECK, "Focus finished: Report"), r("finish_focus", "ok: finished focus on \"Report\" — logged 12m"))
+        assertEquals(Receipt(ReceiptIcon.CHECK, "Focus finished: Report · done"), r("finish_focus", "ok: finished focus on \"Report\" — logged 12m, task marked done"))
+        for (name in listOf("recolor_list", "pin_list_item", "leave_list", "set_task_reminder", "set_theme", "set_focus_defaults", "set_ambient_sound")) {
+            assertNull("$name has no undo", r(name, "ok: x")!!.undo)
+            assertEquals(ReceiptIcon.PENCIL, r(name, "ok: x")!!.icon)
+        }
+    }
+
+    @Test fun `staged shares and reads never earn a card`() {
+        assertNull(r("share_list", "ok: prepared a share of list \"Groceries\" with Sam (viewer)."))
+        assertNull(r("share_task", "ok: prepared a share of \"Report\" with Sam (view)."))
+        assertNull(r("find_tasks", "ok: 1 match for \"milk\":\n- Buy milk [id=a] 25m"))
+        assertNull(r("get_settings", "ok: settings:\n- theme: dark"))
+        assertNull(r("finish_interview", "ok: intro finished — it won't be asked again"))
+        assertNull(r("recolor_list", "error: unknown colour \"pink\""))
+    }
 }

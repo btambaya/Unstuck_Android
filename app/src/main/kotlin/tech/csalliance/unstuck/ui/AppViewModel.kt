@@ -95,7 +95,6 @@ import tech.csalliance.unstuck.ui.assistant.buildVoiceInstructions
 import tech.csalliance.unstuck.ui.assistant.buildVoiceOpening
 import tech.csalliance.unstuck.ui.assistant.runAssistantTool
 import tech.csalliance.unstuck.ui.assistant.talkVoiceToolsJson
-import tech.csalliance.unstuck.ui.assistant.FinishInterviewTool
 import tech.csalliance.unstuck.ui.assistant.callVoiceToolsJson
 import tech.csalliance.unstuck.ui.assistant.CallToolLogic
 import tech.csalliance.unstuck.calls.CallSettingsStore
@@ -673,6 +672,16 @@ class AppViewModel(
     /** Per-task reminder lead override in minutes, or null to use the global default. */
     fun reminderOverride(taskId: String): Int? = graph.settings.reminderOverride(taskId)
     fun setReminderOverride(taskId: String, leadMin: Int?) = graph.settings.setReminderOverride(taskId, leadMin)
+    /** The assistant's set_task_reminder (2026-09-20): the same prefs write the
+     *  task sheet's "Remind me" chips make, then the alarms re-armed the way the
+     *  sheet does it. TRUE when the override reads back as set. */
+    internal fun setReminderOverrideNow(taskId: String, leadMin: Int?): Boolean {
+        graph.settings.setReminderOverride(taskId, leadMin)
+        (graph.appContext as? tech.csalliance.unstuck.UnstuckApp)?.let { app ->
+            runCatching { tech.csalliance.unstuck.surface.ReminderScheduler.reschedule(app) }
+        }
+        return graph.settings.reminderOverride(taskId) == leadMin
+    }
 
     // --- notification deep links (set by MainActivity from the launch intent) ---
     val pendingDeepLink: StateFlow<String?> get() = graph.pendingDeepLink
@@ -731,12 +740,15 @@ class AppViewModel(
     private val captureArchiveMutex = Mutex()
     fun archiveCapture(id: String) = setCaptureArchived(id, true)
     fun unarchiveCapture(id: String) = setCaptureArchived(id, false)
-    private fun setCaptureArchived(id: String, archived: Boolean) {
+    /** TRUE once the device cache reflects it (the queued server write follows) —
+     *  the assistant's resolve_capture / restore_capture read this back. */
+    private fun setCaptureArchived(id: String, archived: Boolean): Boolean {
         applyArchivedCaptureIds(if (archived) _archivedCaptureIds.value + id else _archivedCaptureIds.value - id)
         // Queue the server write durably, then try to land it now. A failure (offline)
         // leaves it queued; every pull retries (reconcileCaptureArchive).
         graph.settings.savePendingCaptureArchiveWrites(graph.settings.loadPendingCaptureArchiveWrites() + (id to archived))
         viewModelScope.launch { runCatching { drainCaptureArchiveWrites() } }
+        return (id in _archivedCaptureIds.value) == archived
     }
     private fun applyArchivedCaptureIds(next: Set<String>) {
         _archivedCaptureIds.value = next
@@ -1585,11 +1597,17 @@ class AppViewModel(
 
     // --- focus / live session ---
 
-    fun startFocus(task: TaskItem) = launchWrite {
+    fun startFocus(task: TaskItem) = launchWrite { startFocusNow(task) }
+
+    /** [startFocus], committed before returning — the assistant's start_focus
+     *  reads the live session back in the same turn (2026-09-20: a seam that
+     *  launched and answered `ok:` before the row existed). TRUE when a live
+     *  session on this task is set (already running counts); FALSE when refused. */
+    internal suspend fun startFocusNow(task: TaskItem): Boolean {
         // Defense in depth: a task the owner ASSIGNED OUT is view-only — never open a live
         // session on it, even via a deep-link / command that bypasses the hidden button.
         // (Recurring occurrences are never assigned out, so their block id won't match.)
-        if (assignedOut.value.containsKey(task.id)) return@launchWrite
+        if (assignedOut.value.containsKey(task.id)) return false
         val cur = store.getLiveSession()
         // Focusing a recurring OCCURRENCE: run the session on the TEMPLATE (so
         // totalFocused accrues on the series) but remember the occurrence block so
@@ -1618,7 +1636,7 @@ class AppViewModel(
                     if (cur.sessionStart != null && cur.occurrenceBlockId != occ.id) {
                         store.setLiveSession(cur.copy(occurrenceBlockId = occ.id))
                     }
-                    return@launchWrite
+                    return true
                 }
                 // Displacing a DIFFERENT task's live session (own OR shared): finalize it
                 // first so its elapsed isn't silently discarded — same guard the
@@ -1641,13 +1659,13 @@ class AppViewModel(
                     FocusTimer.start(base, tpl.id, estimateMin = occ.durationMinutes, priorAccumulatedSec = if (partnerSharedOcc) 0 else tpl.totalFocused, now = nowMs(), occurrenceBlockId = occ.id)
                 }
                 store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
-                return@launchWrite
+                return true
             }
         }
         // Re-entering the SAME task's live session keeps its current state — a
         // paused session stays paused (the user resumes explicitly), it isn't
         // auto-resumed just by opening the focus screen.
-        if (cur?.taskId == task.id) return@launchWrite
+        if (cur?.taskId == task.id) return true
         // Replacing a DIFFERENT task's live session: finalize it first (own → write its
         // Session row + accumulate focus; shared → accrue onto the owner) so the elapsed
         // time isn't silently discarded — same finalize as finishFocus(markDone=false).
@@ -1664,12 +1682,13 @@ class AppViewModel(
             registerAdoptedSession(adopted.sessionId)
             val live = FocusTimer.adopt(base, task.id, adopted, now = nowMs(), priorAccumulatedSec = 0)
             store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
-            return@launchWrite
+            return true
         }
         // Seed prior focus so reopening after "End for now" continues from the
         // accumulated total instead of restarting the displayed timer at 0.
         val live = FocusTimer.start(base, task.id, estimateMin = task.estimateMin, priorAccumulatedSec = if (partnerShared) 0 else task.totalFocused, now = nowMs())
         store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
+        return true
     }
 
     /** Start a REAL focus session on a task someone shared WITH me (T3, Option B). The
@@ -1748,8 +1767,13 @@ class AppViewModel(
      *   (returning later resumes at the accumulated total). This is the safe default.
      * - markDone = true → "Mark complete / Done early": also flip the task done.
      */
-    fun finishFocus(task: TaskItem, markDone: Boolean = false) = launchWrite {
-        val live = store.getLiveSession() ?: return@launchWrite
+    fun finishFocus(task: TaskItem, markDone: Boolean = false) = launchWrite { finishFocusNow(task, markDone) }
+
+    /** [finishFocus], committed before returning — the assistant's finish_focus
+     *  (2026-09-20) runs the SAME path the Focus screen's Done / Stop here
+     *  buttons do. FALSE when no session was running (nothing logged). */
+    internal suspend fun finishFocusNow(task: TaskItem, markDone: Boolean = false): Boolean {
+        val live = store.getLiveSession() ?: return false
         val elapsed = FocusTimer.elapsedSec(live, nowMs())
         // Shared focus (T3, Option B): the task isn't in MY store — reflect the time
         // onto the OWNER's task via log_shared_focus (partner/assign only) instead of
@@ -1773,7 +1797,7 @@ class AppViewModel(
             refreshShares()
             runCatching { graph.coordinator?.notifications?.sessionRecap(sharedTitle, away = false) }
             _lastRecap.value = RecapState(taskName = sharedTitle, focusedSec = elapsed, at = nowMs())
-            return@launchWrite
+            return true
         }
         // Resolve a recurring OCCURRENCE robustly — via live.occurrenceBlockId OR
         // (defensively) the passed task's id being a cal_block id. The session +
@@ -1844,6 +1868,7 @@ class AppViewModel(
         // server only pushes when away — finishing in-app means away = false.
         runCatching { graph.coordinator?.notifications?.sessionRecap(realTask.name, away = false) }
         _lastRecap.value = RecapState(taskName = realTask.name, focusedSec = elapsed, at = nowMs())
+        return true
     }
 
     // The most recent session-end recap, surfaced as a dismissible card on Today
@@ -1852,8 +1877,10 @@ class AppViewModel(
     val lastRecap: StateFlow<RecapState?> = _lastRecap
     fun dismissRecap() { _lastRecap.value = null }
 
-    private suspend fun mutateLive(control: Boolean = false, transform: (LiveSession) -> LiveSession) {
-        val cur = store.getLiveSession() ?: return
+    /** FALSE when there is no live session to change (the assistant's pause /
+     *  resume / extend answer `error:` off that, never `ok:` — 2026-09-20). */
+    private suspend fun mutateLive(control: Boolean = false, transform: (LiveSession) -> LiveSession): Boolean {
+        val cur = store.getLiveSession() ?: return false
         var next = transform(cur)
         // One-true-shared-session: a LOCAL control (pause/resume/extend) on a partner
         // co-focus session stamps the next (rev, atMs) ATOMICALLY (same Room write),
@@ -1870,6 +1897,7 @@ class AppViewModel(
             )
         }
         store.setLiveSession(next)
+        return true
     }
 
     // --- captures / reasons ---
@@ -1935,7 +1963,13 @@ class AppViewModel(
     fun deleteCollection(id: String) = launchWrite { deleteCollectionNow(id) }
     /** [deleteCollection], committed before returning (the assistant executor
      *  reads the lists back in the same round). */
-    suspend fun deleteCollectionNow(id: String) { write?.deleteCollection(id) }
+    suspend fun deleteCollectionNow(id: String): Boolean {
+        // No write layer (demo / tests) used to make this a silent no-op that
+        // still answered "deleted" — fall back to the local store like the
+        // other row deletes do (2026-09-20).
+        write?.deleteCollection(id) ?: store.delete(tech.csalliance.unstuck.data.db.Tables.COLLECTIONS, id)
+        return true
+    }
 
     // --- shared-collection helpers (migration 020/022) ---
     internal fun currentUid(): String? = currentUidProvider?.invoke() ?: auth?.currentUserId
@@ -1962,9 +1996,11 @@ class AppViewModel(
      *  reads its own writes back inside a single turn (rename_list then get_lists
      *  in one round), so its entry points must await the local commit — the
      *  fire-and-forget launch made those reads miss the change (review section 4). */
-    private suspend fun mutateCollectionNow(id: String, transform: (ItemCollection) -> ItemCollection) {
+    private suspend fun mutateCollectionNow(id: String, transform: (ItemCollection) -> ItemCollection): Boolean =
         collectionMutex.withLock {
-            val latest = store.collections().first().firstOrNull { it.id == id } ?: return@withLock
+            // FALSE when the row is gone: the assistant maps it to `error:` instead
+            // of reporting a rename / recolour / archive that never happened.
+            val latest = store.collections().first().firstOrNull { it.id == id } ?: return@withLock false
             val next = transform(latest)
             if (isShared(latest) && share != null) {
                 // Shared list: rename/recolor/archive update ONLY the metadata columns
@@ -1975,8 +2011,8 @@ class AppViewModel(
             } else {
                 write?.upsertCollection(next)
             }
+            true
         }
-    }
     private fun mutateCollectionItem(
         id: String,
         transform: (ItemCollection) -> ItemCollection,
@@ -1987,9 +2023,9 @@ class AppViewModel(
         id: String,
         transform: (ItemCollection) -> ItemCollection,
         rpc: () -> tech.csalliance.unstuck.sync.CollectionRpc,
-    ) {
+    ): Boolean =
         collectionMutex.withLock {
-            val latest = store.collections().first().firstOrNull { it.id == id } ?: return@withLock
+            val latest = store.collections().first().firstOrNull { it.id == id } ?: return@withLock false
             val next = transform(latest)
             if (isShared(latest)) {
                 // Optimistic local write, then the atomic item RPC goes through the
@@ -2003,22 +2039,24 @@ class AppViewModel(
             } else {
                 write?.upsertCollection(next)
             }
+            true
         }
-    }
     fun addCollectionItem(col: ItemCollection, body: String) = launchWrite { addCollectionItemNow(col, body) }
-    /** [addCollectionItem], committed before returning (the assistant executor). */
-    suspend fun addCollectionItemNow(col: ItemCollection, body: String) {
-        val text = body.trim(); if (text.isEmpty()) return
+    /** [addCollectionItem], committed before returning (the assistant executor).
+     *  → the new item's id, or null when nothing was written (blank body, list gone). */
+    suspend fun addCollectionItemNow(col: ItemCollection, body: String): String? {
+        val text = body.trim(); if (text.isEmpty()) return null
         val item = tech.csalliance.unstuck.core.model.CollectionItem(newUuid(), text, at = isoNow())
-        mutateCollectionItemNow(col.id,
+        val written = mutateCollectionItemNow(col.id,
             { it.copy(items = it.items + item) },
             { CollectionRpcs.addItem(col.id, item.id, item.body, item.at) })
+        return if (written) item.id else null
     }
     fun updateCollectionItemBody(col: ItemCollection, itemId: String, body: String) = launchWrite { updateCollectionItemBodyNow(col, itemId, body) }
     /** [updateCollectionItemBody], committed before returning. */
-    suspend fun updateCollectionItemBodyNow(col: ItemCollection, itemId: String, body: String) {
+    suspend fun updateCollectionItemBodyNow(col: ItemCollection, itemId: String, body: String): Boolean {
         val text = body.trim()
-        mutateCollectionItemNow(col.id,
+        return mutateCollectionItemNow(col.id,
             { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(body = text) else it }) },
             { CollectionRpcs.updateItem(col.id, itemId, text) })
     }
@@ -2028,21 +2066,26 @@ class AppViewModel(
             { c -> c.copy(items = c.items.map { if (it.id == itemId) { nextVal = !(it.pinned ?: false); it.copy(pinned = nextVal) } else it }) },
             { CollectionRpcs.setItemFlag(col.id, itemId, "pinned", nextVal) })
     }
+    /** The assistant's pin_list_item (2026-09-20): the same flag write as the
+     *  list row's pin, but to an explicit state and committed before returning. */
+    suspend fun setCollectionItemPinnedNow(col: ItemCollection, itemId: String, pinned: Boolean): Boolean =
+        mutateCollectionItemNow(col.id,
+            { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(pinned = pinned) else it }) },
+            { CollectionRpcs.setItemFlag(col.id, itemId, "pinned", pinned) })
     fun toggleCollectionItemDone(col: ItemCollection, itemId: String) = launchWrite { toggleCollectionItemDoneNow(col, itemId) }
     /** [toggleCollectionItemDone], committed before returning. */
-    suspend fun toggleCollectionItemDoneNow(col: ItemCollection, itemId: String) {
+    suspend fun toggleCollectionItemDoneNow(col: ItemCollection, itemId: String): Boolean {
         var nextVal = false
-        mutateCollectionItemNow(col.id,
+        return mutateCollectionItemNow(col.id,
             { c -> c.copy(items = c.items.map { if (it.id == itemId) { nextVal = !(it.done ?: false); it.copy(done = nextVal) } else it }) },
             { CollectionRpcs.setItemFlag(col.id, itemId, "done", nextVal) })
     }
     fun removeCollectionItem(col: ItemCollection, itemId: String) = launchWrite { removeCollectionItemNow(col, itemId) }
     /** [removeCollectionItem], committed before returning. */
-    suspend fun removeCollectionItemNow(col: ItemCollection, itemId: String) {
+    suspend fun removeCollectionItemNow(col: ItemCollection, itemId: String): Boolean =
         mutateCollectionItemNow(col.id,
             { c -> c.copy(items = c.items.filterNot { it.id == itemId }) },
             { CollectionRpcs.removeItem(col.id, itemId) })
-    }
 
     /** Shared-list edits the server refused (rolled back already) — the detail
      *  screen shows them. Empty flow when there's no sync engine (tests / demo). */
@@ -2050,8 +2093,9 @@ class AppViewModel(
         get() = graph.coordinator?.collectionSyncErrors ?: kotlinx.coroutines.flow.emptyFlow()
     fun renameCollection(col: ItemCollection, name: String) = launchWrite { renameCollectionNow(col, name) }
     /** [renameCollection], committed before returning. */
-    suspend fun renameCollectionNow(col: ItemCollection, name: String) {
-        val nm = name.trim(); if (nm.isNotEmpty()) mutateCollectionNow(col.id) { it.copy(name = nm) }
+    suspend fun renameCollectionNow(col: ItemCollection, name: String): Boolean {
+        val nm = name.trim()
+        return nm.isNotEmpty() && mutateCollectionNow(col.id) { it.copy(name = nm) }
     }
     fun recolorCollection(col: ItemCollection, color: String) = mutateCollection(col.id) { it.copy(color = color) }
     /** [recolorCollection], committed before returning. */
@@ -2322,10 +2366,18 @@ class AppViewModel(
      *  Runs the same task_share RPC + share-notify ping the share sheet uses. */
     fun confirmPendingShare(id: String) = launchWrite {
         val p = _pendingShares.value.firstOrNull { it.id == id && it.outcome == null } ?: return@launchWrite
-        val ok = runCatching { circleClient?.taskShare(p.taskId, p.recipientUserId, p.level) }.isSuccess
-        if (ok) {
-            runCatching { circleClient?.notifyTaskShare(p.taskId, p.recipientUserId) }
-            refreshShares()
+        val ok = if (p.subject == tech.csalliance.unstuck.core.logic.ShareSubject.LIST) {
+            // share_list (2026-09-20): the SAME edge-fn path the list share sheet
+            // takes — by member user id, or by the email the user named.
+            val r = shareCollectionDetailed(p.taskId, email = p.recipientEmail, userId = p.recipientUserId.ifBlank { null }, role = p.role ?: "viewer")
+            r.outcome.failureReason == null
+        } else {
+            val shared = runCatching { circleClient?.taskShare(p.taskId, p.recipientUserId, p.level) }.isSuccess
+            if (shared) {
+                runCatching { circleClient?.notifyTaskShare(p.taskId, p.recipientUserId) }
+                refreshShares()
+            }
+            shared
         }
         _pendingShares.value = _pendingShares.value.map {
             if (it.id == id) it.copy(outcome = if (ok) ShareOutcome.SHARED else ShareOutcome.FAILED) else it
@@ -2785,10 +2837,15 @@ class AppViewModel(
     /** Every "the interview is done" path (I'm done, the rituals picker, reaching
      *  the end, the ≥1-fact auto-done): local flag + resume step dropped + the
      *  account (best-effort; a failed push is re-pushed by the next pull). */
-    override fun markInterviewDone() {
-        val uid = currentUid() ?: return
+    override fun markInterviewDone() { markInterviewDoneNow() }
+
+    /** [markInterviewDone] answering whether there was an account to mark —
+     *  the assistant's finish_interview reports the real outcome (2026-09-20). */
+    internal fun markInterviewDoneNow(): Boolean {
+        val uid = currentUid() ?: return false
         markInterviewDoneLocal(uid)
         pushInterviewDone(uid)
+        return true
     }
 
     private fun markInterviewDoneLocal(uid: String) {
@@ -3482,13 +3539,9 @@ class AppViewModel(
     }
 
     suspend fun runVoiceTool(name: String, args: JsonObject): String {
-        // The talk-level finish_interview (voice-only, 2026-09-17): the opening
-        // primer's intro is over — mark the account done (local flag + resume
-        // step dropped + the server), exactly as the in-thread picker does.
-        if (name == FinishInterviewTool.NAME) {
-            markInterviewDone()
-            return FinishInterviewTool.OK
-        }
+        // finish_interview used to be intercepted here; since the 2026-09-20
+        // tooling rewrite it is a registry tool the executor answers through
+        // AssistantApi.markInterviewDone (same local flag + server push).
         val parsed = ToolArgs(args)
         val result = runAssistantTool(name, parsed, assistantApi, voiceScratch)
         // Derived exactly like the text harness: tool name + args + the executor's
@@ -3524,13 +3577,13 @@ class AppViewModel(
     fun voiceInstructions(): String = kotlinx.coroutines.runBlocking { buildVoiceInstructions(assistantApi) }
     suspend fun voiceInstructionsAsync(): String = buildVoiceInstructions(assistantApi)
 
-    /** Tool schemas for the realtime TALK session — generated from the ONE
-     *  registry the executor runs (VoiceToolSchema.kt) plus the talk-level
-     *  finish_interview, so voice can never advertise a tool the executor lacks. */
+    /** Tool schemas for the realtime TALK session — the generated registry's
+     *  voice surface (VoiceToolSchema.kt parses ToolRegistry.JSON), so voice can
+     *  never advertise a tool the executor lacks (ToolRegistryParityTest). */
     fun voiceTools(): JsonArray = talkVoiceToolsJson()
 
     /** Tool schemas for a CALL session (CallVoiceService): the same registry
-     *  filtered to core `CallScript.callTools()` plus the call-level snooze_call. */
+     *  filtered to core `CallScript.callTools()` plus the call-only snooze_call. */
     fun callVoiceTools(): JsonArray = callVoiceToolsJson(CallScript.callTools())
 
     /** The app-side seams an ANSWERED call's conversation runs on (instructions,
@@ -3635,21 +3688,29 @@ class AppViewModel(
 
     /** A LOCAL focus control (pause / resume / extend) — the same transition the
      *  Focus screen runs, committed before returning. */
-    internal suspend fun mutateLiveControl(transform: (LiveSession) -> LiveSession) = mutateLive(control = true, transform)
+    internal suspend fun mutateLiveControl(transform: (LiveSession) -> LiveSession): Boolean = mutateLive(control = true, transform)
 
     /** Abandon the running focus session WITHOUT logging it (the assistant's
      *  cancel_focus). Nothing is written to Sessions / totalFocused; the timer
      *  service + paused check-in are torn down like the Focus screen's exit. */
     fun cancelFocus() = launchWrite { cancelFocusNow() }
 
-    internal suspend fun cancelFocusNow() {
-        val cur = store.getLiveSession() ?: return
-        if (cur.sessionStart == null) return
+    internal suspend fun cancelFocusNow(): Boolean {
+        val cur = store.getLiveSession() ?: return false
+        if (cur.sessionStart == null) return false
         store.setLiveSession(null)
+        tearDownFocusSurfaces()
+        _coFocusAttribution.value = null
+        return true
+    }
+
+    /** The timer notification + the paused check-in the Focus screen tears down
+     *  on its own exit — the assistant's cancel_focus / finish_focus (2026-09-20)
+     *  end a session with no screen to do it. */
+    internal fun tearDownFocusSurfaces() {
         val ctx = graph.appContext
         runCatching { tech.csalliance.unstuck.surface.FocusTimerService.stop(ctx) }
         runCatching { tech.csalliance.unstuck.surface.PausedCheckinScheduler.cancel(ctx) }
-        _coFocusAttribution.value = null
     }
 
     suspend fun signIn(email: String, password: String): AuthOutcome =

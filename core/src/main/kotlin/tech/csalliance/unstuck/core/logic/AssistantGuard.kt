@@ -82,7 +82,10 @@ object AssistantGuard {
     private const val CLAIM_VERBS =
         "added|created|scheduled|rescheduled|moved|shifted|pushed|postponed|completed|deleted|removed|saved|updated|blocked" +
             "|booked|skipped|reopened|ticked|unticked|renamed|unscheduled|carried|paused|resumed|extended|cancelled|canceled" +
-            "|forgot|forgotten|remembered|promoted|started|set|turned|noted|archived|unarchived|resolved|captured|shared|unshared"
+            "|forgot|forgotten|remembered|promoted|started|set|turned|noted|archived|unarchived|resolved|captured|shared|unshared" +
+            // 2026-09-20 tooling rewrite: the new write tools' past tenses
+            // (restore_capture, pin_list_item, recolor_list) — same list on web + iOS.
+            "|restored|pinned|recoloured|recolored"
 
     // The leads that open honest sentences ("Set aside 20 minutes for it?",
     // "Shared tasks show up under…", "Turned out…", "Started already?").

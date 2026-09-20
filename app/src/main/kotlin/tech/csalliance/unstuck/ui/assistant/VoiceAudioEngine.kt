@@ -21,6 +21,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.Looper
 import android.os.SystemClock
+import android.util.Log
 import androidx.core.content.ContextCompat
 import tech.csalliance.unstuck.SettingsStore
 import tech.csalliance.unstuck.core.logic.BargeInController
@@ -40,25 +41,32 @@ import kotlin.concurrent.thread
 // startCapture().
 //
 // ECHO / BARGE-IN STRATEGY (spec: bargein.md §3–§5; pure logic in :core BargeIn.kt)
-// 1. Communication mode: we put AudioManager into MODE_IN_COMMUNICATION, take
-//    transient-exclusive audio focus, and route to a communication device
-//    BEFORE creating the streams. This is what designates our AudioTrack as the
-//    call "downlink", giving the hardware AcousticEchoCanceler an actual echo
+// 1. Communication mode + ECHO CANCELLATION ON, every route, the loudspeaker
+//    included (2026-09-20, iOS build 69 parity — Apple voice processing is on
+//    for the speaker again over there): AudioManager goes into
+//    MODE_IN_COMMUNICATION, we take transient-exclusive audio focus and route
+//    to a communication device BEFORE creating the streams, the capture source
+//    is VOICE_COMMUNICATION and the platform AcousticEchoCanceler is attached
+//    to its session. That is what designates our USAGE_VOICE_COMMUNICATION
+//    AudioTrack as the call "downlink" and gives the canceller an actual echo
 //    reference — without it, VOICE_COMMUNICATION + AEC are a near no-op on a
-//    loudspeaker. Reverted fully on shutdown (global audio policy).
+//    loudspeaker. Reverted fully on shutdown (global audio policy). The
+//    canceller keeps the reply's echo out of the mic stream at the source;
+//    the WORD rules in BargeIn.kt are the backstop for what is left.
 // 2. RMS noise gate in the capture thread (RmsGate, 20 ms sub-frames): calibrated
 //    floor, hysteresis, 300 ms pre-roll, DIGITAL SILENCE while closed. Gate
-//    open/close are barge-in events for the controller (duck → confirm → cancel).
-// 3. Route profiles: headset/BT = LOW_ECHO, full duplex — frames flow through
-//    the gate while the model plays so the server VAD can barge in (talk-over).
-//    Built-in speaker = SPEAKER, HALF-DUPLEX for the whole reply (2026-09-17,
-//    iOS parity): from response.created until the playback has drained the
-//    gate is held closed — DIGITAL SILENCE is uploaded (the server's silence
-//    timer must keep running), the pre-roll is dropped, gate events stop — so
-//    the reply's own echo can never be transcribed, cancel the reply and get
-//    answered. Interrupt (tap / button) cuts a reply; hold-to-talk's press
-//    overrides the mute. SPEAKER_ASSISTED_DUPLEX (talk-over on the speaker) is
-//    the opt-in for devices whose AEC proves good enough.
+//    open/close are barge-in events for the controller (duck → confirm → cancel
+//    on low-echo routes; ignored on the loudspeaker, where words decide).
+// 3. Route profiles: headset/BT = LOW_ECHO; built-in speaker = SPEAKER. BOTH
+//    are FULL-DUPLEX: frames flow through the gate while the model plays, so
+//    talk-over works on the speaker. The loudspeaker was HALF-DUPLEX (mic
+//    muted for the whole reply, "button to interrupt") from 2026-09-17 because
+//    the reply's own echo was transcribed, cancelled the reply and got
+//    answered — iOS build 66 measured that the server's OWN turn detection
+//    (`interrupt_response` / `create_response`, now off) was doing the
+//    cutting, and the client owns turn-taking since. The gate still honours a
+//    forced close (BargeInProfile.gateForcedClosed) but no shipped profile asks
+//    for one; hold-to-talk's press still forces it open.
 // 4. Playback drain is measured from the track's playbackHeadPosition (frames
 //    written − head ≤ 0, then a 300 ms tail) — NOT from write() returning, which
 //    only means "buffered". That is the playback_drained event.
@@ -383,6 +391,13 @@ open class VoiceAudioEngine(private val context: Context) {
         if (rec == null || rec.state != AudioRecord.STATE_INITIALIZED) { bailCapture(rec); return }
         record = rec
         enableEffects(rec.audioSessionId)
+        // Whether the platform gave us a canceller is the first thing to read
+        // off a device log when the loudspeaker misbehaves (the iOS engine logs
+        // `voiceProcessing=` the same way).
+        Log.i(
+            VoiceRealtimeClient.TAG,
+            "voice engine route=${route} aec=${aec?.enabled == true} ns=${ns?.enabled == true} agc=${agc?.enabled == true} mode=${runCatching { am.mode }.getOrDefault(-1)}",
+        )
         runCatching { rec.startRecording() }
         if (rec.recordingState != AudioRecord.RECORDSTATE_RECORDING) {
             // Mic is held by another app (or start failed): bail instead of letting
@@ -417,13 +432,11 @@ open class VoiceAudioEngine(private val context: Context) {
                     val prof = profile
                     val playing = playbackQueued()
                     val respActive = responseActive
-                    // Half-duplex (the loudspeaker profile while the model is busy —
-                    // a reply in flight OR audio still queued/in the tail): the gate
-                    // is held closed. Digital silence still goes up (the server VAD's
-                    // silence timer must observe silence), the pre-roll is dropped,
-                    // and nothing from the mic — least of all the reply's own echo —
-                    // can reach the server or the barge-in controller. A hold-to-talk
-                    // press overrides it (the user is deliberately talking over).
+                    // Half-duplex (a profile that asks for the gate held closed while
+                    // the model is busy — none shipped since 2026-09-20; the
+                    // loudspeaker is full-duplex with echo cancellation on, see the
+                    // file header): digital silence goes up, the pre-roll is dropped.
+                    // A hold-to-talk press overrides it.
                     val forcedClosed = echoProne && BargeInProfile.gateForcedClosed(prof, playing || respActive, pttPressed)
                     // Hold-to-talk while released: append nothing (null VAD needs no
                     // silence) and never let energy open the gate — the press does that,
@@ -463,6 +476,8 @@ open class VoiceAudioEngine(private val context: Context) {
     }
 
     // Best-effort platform DSP: echo cancellation, noise suppression, auto gain.
+    // The canceller is what lets the loudspeaker run full-duplex (file header
+    // §1): OEMs that report it unavailable fall back to the word rules alone.
     private fun enableEffects(sessionId: Int) {
         runCatching { if (AcousticEchoCanceler.isAvailable()) aec = AcousticEchoCanceler.create(sessionId)?.apply { enabled = true } }
         runCatching { if (NoiseSuppressor.isAvailable()) ns = NoiseSuppressor.create(sessionId)?.apply { enabled = true } }
@@ -507,7 +522,8 @@ open class VoiceAudioEngine(private val context: Context) {
     open fun playbackQueued(): Boolean = playing && (queue.isNotEmpty() || drainPending)
 
     /** True while the model's audio is (or just was) playing — with [responseActive]
-     *  it is the "model busy" half of the loudspeaker's half-duplex mute. */
+     *  it is the "model busy" the gate helper reads per frame (which only
+     *  matters for a half-duplex profile; none ships since 2026-09-20). */
     open fun outputBusy(): Boolean = playbackQueued()
 
     open fun startPlayback() {

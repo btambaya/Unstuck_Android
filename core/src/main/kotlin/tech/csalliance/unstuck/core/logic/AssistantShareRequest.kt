@@ -19,16 +19,29 @@ data class ShareCandidate(val userId: String, val name: String)
 /** What the user's tap resolved a staged share to. */
 enum class ShareOutcome { SHARED, DISMISSED, FAILED }
 
+/** What a staged share hands over: one task, or a whole list (`share_list`,
+ *  2026-09-20 tooling rewrite — staged exactly like a task, never performed here). */
+enum class ShareSubject { TASK, LIST }
+
 data class PendingShare(
     /** Stable id so the confirm card can key/dedupe. */
     val id: String,
+    /** The subject's id — the task's, or the LIST's id when [subject] is LIST. */
     val taskId: String,
+    /** The subject's name — the task's title, or the list's name. */
     val taskName: String,
+    /** Empty for a list share addressed to an email ([recipientEmail]) — there is no member yet. */
     val recipientUserId: String,
     val recipientName: String,
+    /** Task shares only; a list share carries [role] instead (VIEW here is a placeholder). */
     val level: ShareLevel,
     /** Set once the user confirms or dismisses — the card stops offering. */
     val outcome: ShareOutcome? = null,
+    val subject: ShareSubject = ShareSubject.TASK,
+    /** LIST only: "editor" | "viewer" — lists have roles, not the task's three levels. */
+    val role: String? = null,
+    /** LIST only: the address the user named instead of a circle member. */
+    val recipientEmail: String? = null,
 )
 
 /** Loose name match: exact (case-insensitive), then first-name, then prefix.
@@ -110,5 +123,71 @@ fun resolveShareRequest(
         ),
         message = "ok: prepared a share of \"${task.name}\" with ${match.name} (${lvl.wire}). " +
             "The user must CONFIRM it on screen — tell them it's ready to confirm, and do not claim it is shared.",
+    )
+}
+
+// ── share_list (2026-09-20 tooling rewrite) ──
+// A list share is staged exactly like a task share: resolved here, confirmed by
+// the user's tap, never performed on the model's say-so. Unlike a task, a list
+// can also be shared with an EMAIL ADDRESS (the list share sheet offers it), so
+// an address in `person` stages an invite instead of a circle match.
+
+/** The list share's role vocabulary; anything else degrades to viewer. */
+fun normalizeListRole(raw: String?): String = if (raw?.trim()?.lowercase() == "editor") "editor" else "viewer"
+
+private val EMAIL_SHAPE = Regex("^[^\\s@]+@[^\\s@]+\\.[^\\s@]+$")
+
+/** Does the person the user named read as an email address? */
+fun looksLikeEmail(s: String): Boolean = EMAIL_SHAPE.matches(s.trim())
+
+private fun listShareMessage(listName: String, who: String, role: String) =
+    "ok: prepared a share of list \"$listName\" with $who ($role). " +
+        "The user must CONFIRM it on screen — tell them it's ready to confirm, and do not claim it is shared."
+
+/**
+ * Resolve a `share_list` call into something the user can confirm. NEVER
+ * performs the share. The caller has already checked the list exists and the
+ * user owns it (only an owner can share a list — the server refuses anyone
+ * else). Every refusal path returns a model-readable message.
+ */
+fun resolveListShareRequest(
+    listId: String,
+    listName: String,
+    person: String?,
+    role: String?,
+    people: List<ShareCandidate>,
+    newId: () -> String,
+): ResolveShareResult {
+    val who = person.orEmpty().trim()
+    if (who.isEmpty()) {
+        return ResolveShareResult(message = "error: needs a person — ask who to share \"$listName\" with (someone in their circle, or an email address)")
+    }
+    val r = normalizeListRole(role)
+    if (looksLikeEmail(who)) {
+        val email = who.lowercase()
+        return ResolveShareResult(
+            pending = PendingShare(
+                id = newId(), taskId = listId, taskName = listName, recipientUserId = "", recipientName = email,
+                level = ShareLevel.VIEW, subject = ShareSubject.LIST, role = r, recipientEmail = email,
+            ),
+            message = listShareMessage(listName, email, r),
+        )
+    }
+    if (people.isEmpty()) {
+        return ResolveShareResult(
+            message = "error: the user has nobody in their trusted circle yet — share with an email address instead, or tell them to add someone in Settings → People first",
+        )
+    }
+    val match = matchCandidate(who, people)
+        ?: return ResolveShareResult(
+            message = "error: no circle member matches \"$who\" — their circle is: " +
+                people.joinToString(", ") { it.name } + ". Ask which person, or use an email address.",
+        )
+    return ResolveShareResult(
+        pending = PendingShare(
+            id = newId(), taskId = listId, taskName = listName, recipientUserId = match.userId, recipientName = match.name,
+            level = ShareLevel.VIEW, subject = ShareSubject.LIST, role = r,
+        ),
+        message = listShareMessage(listName, match.name, r),
     )
 }

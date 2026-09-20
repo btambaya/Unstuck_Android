@@ -7,6 +7,7 @@ import android.content.ContextWrapper
 import android.content.pm.PackageManager
 import android.os.Handler
 import android.os.Looper
+import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.core.RepeatMode
@@ -82,7 +83,11 @@ import tech.csalliance.unstuck.ui.AppViewModel
  *  - [detach] on a plain dispose ends the session; on a config change it arms a
  *    short re-attach deadline instead — if no screen comes back (the host didn't
  *    restore the sheet), the session is ended rather than left as a headless call;
- *  - [end] is the ONLY real teardown (user left, focus lost, backgrounded).
+ *  - [end] is the ONLY real teardown (user left, focus lost, backgrounded);
+ *  - a session the server fails BEFORE ANY REPLY (its capacity error — iOS
+ *    device 2026-09-20 00:41: "Socket is not connected" on the first try,
+ *    fine on the second) is reconnected quietly on a fresh engine + client,
+ *    twice at most, before the user sees anything (iOS build 70 parity).
  */
 class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
     private val main = Handler(Looper.getMainLooper())
@@ -114,6 +119,10 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
     /** Bumped by [end] so a start still building its prompt aborts instead of
      *  dialling into a session the user already left. */
     private var startEpoch = 0
+    /** Quiet reconnects after the server failed the session before any reply
+     *  (VoiceRealtimeClient.failedBeforeAnyReply). Per user-initiated start. */
+    private var reconnects = 0
+    private var reconnectRunnable: Runnable? = null
 
     /** A client exists and hasn't been stop()ped (CONNECTING counts — the dial is in flight). */
     val sessionActive: Boolean get() = client?.let { !it.isStopped } == true
@@ -173,6 +182,7 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
         if (token.isNullOrBlank()) { fail("Please sign in to use voice."); return }
         if (!vm.voiceConfigured()) { fail("Voice isn't set up yet."); return }
         note = null; caption = ""; state = VoiceState.CONNECTING
+        reconnects = 0
         vm.resetVoiceScratch()
         // The session prompt IS the whole app context (tasks, blocks, captures,
         // lists, circle, profile facts) — a dozen Room reads. The blocking
@@ -236,6 +246,33 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
             rc.stop()
             main.post { if (current()) fail("Couldn't access the microphone — it may be in use by another app.") }
         }
+        // Dead on arrival (the server failed before any reply — the provider's
+        // capacity, not the user's problem): reconnect on a fresh engine +
+        // client, twice at most, before telling the user anything. Any other
+        // transport end was already reported by the client (ERROR / CLOSED).
+        rc.onTransportEnded = { error ->
+            main.post {
+                if (!current() || !rc.failedBeforeAnyReply) return@post
+                if (reconnects < 2) {
+                    reconnects += 1
+                    Log.i(VoiceRealtimeClient.TAG, "voice reconnect #$reconnects: the server failed before any reply (${error ?: "closed"})")
+                    client = null          // rc's late CLOSED/ERROR reports are ignored from here
+                    rc.stop()
+                    state = VoiceState.CONNECTING
+                    val epoch = startEpoch
+                    val r = Runnable {
+                        reconnectRunnable = null
+                        if (epoch != startEpoch || sessionActive) return@Runnable   // ended (or restarted) meanwhile
+                        dial(vm, token, instructions, opening)
+                    }
+                    reconnectRunnable = r
+                    main.postDelayed(r, RECONNECT_DELAY_MS)
+                } else {
+                    note = DROPPED_TWICE
+                    state = VoiceState.ERROR
+                }
+            }
+        }
         client = rc
         rc.start()
     }
@@ -244,7 +281,9 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
      *  directly only covers the never-started case, where it's a cheap no-op sweep. */
     fun end() {
         main.removeCallbacks(reattachDeadline)
-        startEpoch++          // abort a start whose prompt is still being read
+        reconnectRunnable?.let { main.removeCallbacks(it) }
+        reconnectRunnable = null
+        startEpoch++          // abort a start whose prompt is still being read (or a reconnect)
         val rc = client
         val engine = audio
         val didEnd = sessionDidEnd
@@ -269,6 +308,10 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
         const val REATTACH_GRACE_MS = 2_000L
         /** Refusal shown when Talk is opened while a call FROM Unstuck is live. */
         const val ON_A_CALL = "You’re on a call with Unstuck."
+        /** Pause between a dead-on-arrival session and its quiet reconnect (iOS: 800 ms). */
+        const val RECONNECT_DELAY_MS = 800L
+        /** Shown only after the second quiet reconnect failed too. */
+        const val DROPPED_TWICE = "The voice server dropped the session twice. Please try again in a moment."
     }
 }
 

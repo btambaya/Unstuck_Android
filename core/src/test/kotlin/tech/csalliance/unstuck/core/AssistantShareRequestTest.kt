@@ -1,10 +1,14 @@
 package tech.csalliance.unstuck.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.PendingShare
+import tech.csalliance.unstuck.core.logic.looksLikeEmail
+import tech.csalliance.unstuck.core.logic.resolveListShareRequest
+import tech.csalliance.unstuck.core.logic.ShareSubject
 import tech.csalliance.unstuck.core.logic.ShareCandidate
 import tech.csalliance.unstuck.core.logic.matchCandidate
 import tech.csalliance.unstuck.core.logic.normalizeLevel
@@ -105,5 +109,45 @@ class AssistantShareRequestTest {
         val r = resolveShareRequest(null, null, "Ana", null, tasks, people, ids)
         assertNull(r.pending)
         assertTrue(r.message.contains("task not found"))
+    }
+
+    // ── share_list (2026-09-20): staged like a task, plus the email path ──
+
+    @Test fun `a list share stages a LIST subject with a role, never a task level`() {
+        val r = resolveListShareRequest("l1", "Groceries", "Ana", "editor", people, ids)
+        assertEquals(
+            PendingShare(
+                id = "fixed-id", taskId = "l1", taskName = "Groceries", recipientUserId = "u2", recipientName = "Ana Silva",
+                level = ShareLevel.VIEW, subject = ShareSubject.LIST, role = "editor",
+            ),
+            r.pending,
+        )
+        assertEquals("ok: prepared a share of list \"Groceries\" with Ana Silva (editor). The user must CONFIRM it on screen — tell them it's ready to confirm, and do not claim it is shared.", r.message)
+        assertEquals("viewer", resolveListShareRequest("l1", "Groceries", "Ana", "boss", people, ids).pending!!.role)
+        assertEquals("viewer", resolveListShareRequest("l1", "Groceries", "Ana", null, people, ids).pending!!.role)
+    }
+
+    @Test fun `a list share to an email address stages an invite even with an empty circle`() {
+        val r = resolveListShareRequest("l1", "Groceries", " Sam@Example.com ", "viewer", emptyList(), ids)
+        val p = r.pending!!
+        assertEquals("sam@example.com", p.recipientEmail)
+        assertEquals("sam@example.com", p.recipientName)
+        assertEquals("", p.recipientUserId)
+        assertEquals(ShareSubject.LIST, p.subject)
+        assertTrue(r.message.startsWith("ok: prepared a share of list \"Groceries\" with sam@example.com (viewer)."))
+        assertTrue(looksLikeEmail("a@b.co"))
+        assertFalse(looksLikeEmail("Ana"))
+        assertFalse(looksLikeEmail("a@b"))
+    }
+
+    @Test fun `a list share refuses a missing person, an empty circle and an ambiguous name without staging`() {
+        assertNull(resolveListShareRequest("l1", "Groceries", null, null, people, ids).pending)
+        assertTrue(resolveListShareRequest("l1", "Groceries", " ", null, people, ids).message.startsWith("error: needs a person"))
+        val empty = resolveListShareRequest("l1", "Groceries", "Ana", null, emptyList(), ids)
+        assertNull(empty.pending)
+        assertTrue(empty.message.contains("share with an email address instead"))
+        val unknown = resolveListShareRequest("l1", "Groceries", "Zed", null, people, ids)
+        assertNull(unknown.pending)
+        assertTrue(unknown.message.startsWith("error: no circle member matches \"Zed\""))
     }
 }

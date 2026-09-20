@@ -1921,7 +1921,9 @@ class AppViewModelTest {
         )
         val result = vm.runAssistantTool("promote_item_to_task", args, HashMap(), HashMap())
         advanceUntilIdle()
-        assertEquals("ok: promoted \"Buy milk\"", result)
+        // 2026-09-20: the result carries the new task's id and says which mode applied.
+        assertTrue(result, result.startsWith("ok: promoted \"Buy milk\" to a task id="))
+        assertTrue(result, result.endsWith("(just theirs)"))
         assertEquals("Buy milk", awaitTasks { it.isNotEmpty() }.single().name)
     }
 

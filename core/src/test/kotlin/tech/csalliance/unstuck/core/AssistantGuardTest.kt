@@ -94,6 +94,23 @@ class AssistantGuardTest {
         ).forEach { assertTrue(it, looksLikeActionClaim(it)) }
     }
 
+    // 2026-09-20 tooling rewrite: the new write tools' past tenses.
+    @Test fun `catches the restored, pinned and recoloured claims`() {
+        listOf(
+            "Restored “Call the plumber” to your inbox.",
+            "I've restored that capture.",
+            "Pinned “Milk” to the top of Groceries.",
+            "I've pinned it for you.",
+            "Recoloured “Groceries” to green.",
+            "I've recolored the list.",
+            "The list has been recoloured.",
+            "I just pinned the first item.",
+        ).forEach { assertTrue(it, looksLikeActionClaim(it)) }
+        // Turn awareness still applies to the new verbs.
+        assertFalse(looksLikeActionClaim("I restored it earlier — it is back in the inbox."))
+        assertFalse(looksLikeActionClaim("As I said, I pinned it for you."))
+    }
+
     @Test fun `does not trip on honest sentence-leads that share a verb`() {
         assertFalse(looksLikeActionClaim("Set aside twenty minutes for it?"))
         assertFalse(looksLikeActionClaim("Shared tasks show up under People in Settings."))

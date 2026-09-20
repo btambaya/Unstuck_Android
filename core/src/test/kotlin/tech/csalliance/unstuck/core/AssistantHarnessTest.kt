@@ -106,8 +106,11 @@ class AssistantHarnessTest {
         assertEquals(listOf("user", "assistant", "user"), second.map { it.role })
         assertEquals("Done — added \"Milk\" to your list.", second[1].content)
         assertEquals(AssistantHarnessRules.CORRECTIVE, second[2].content)
+        // The 2026-09-20 wording (docs/assistant-tooling-rules.md §3), verbatim on
+        // every platform: it never asserts "nothing was done" — that invited the
+        // model to redo an EARLIER turn's action when the bounced line was a recap.
         assertEquals(
-            "(integrity check from the app — not the user. The user did NOT see your last message. No tool was called, so nothing was done. If the action is still needed, call the right tool NOW, then answer as if for the first time: no apology, no \"I said\", no \"I didn't\", no mention of this note.)",
+            "(from the app, not the user: you described an action, but no tool ran THIS turn. If it is still needed, call the right tool now and then say in a few words what happened; if you were describing something from an earlier turn, answer plainly without claiming it again. Never claim an action without its tool result.)",
             second[2].content,
         )
         // The user never sees the claim or the check.
@@ -332,11 +335,28 @@ class AssistantHarnessTest {
         assertEquals(2, AssistantHarnessRules.modelWindow(List(50) { HarnessMessage("user", "u$it") }, max = 2).size)
     }
 
-    @Test fun `the rules expose the contract's tool classes`() {
-        assertEquals(setOf("get_schedule", "get_tasks", "get_captures", "get_lists", "get_insights", "get_calls"), AssistantHarnessRules.READ_ONLY_TOOLS)
+    @Test fun `the rules expose the registry's tool classes`() {
+        // Pinned copies of ToolRegistry.READ_ONLY / NAVIGATION / STAGED (:core can't
+        // see the generated file) — ToolRegistryParityTest in :app holds them equal.
+        assertEquals(setOf("get_tasks", "find_tasks", "get_schedule", "get_lists", "get_captures", "get_settings", "get_insights", "get_calls"), AssistantHarnessRules.READ_ONLY_TOOLS)
         assertEquals(setOf("open_screen"), AssistantHarnessRules.NAVIGATION_TOOLS)
+        assertEquals(setOf("share_task", "share_list"), AssistantHarnessRules.STAGED_TOOLS)
         assertEquals(5, AssistantHarnessRules.MAX_ROUNDS)
         assertTrue(AssistantHarnessRules.writeToolSucceeded(listOf(HarnessToolCall("1", "share_task", "{}") to "ok: staged")))
+        assertTrue(AssistantHarnessRules.writeToolSucceeded(listOf(HarnessToolCall("1", "share_list", "{}") to "ok: prepared a share of list \"Groceries\"")))
         assertFalse(AssistantHarnessRules.writeToolSucceeded(listOf(HarnessToolCall("1", "create_task", "{}") to "error: name required")))
+        // "Write succeeded" means the result STARTS WITH `ok:` — a bare "ok", a read
+        // tool's ok or a navigation never disarm the guard.
+        assertFalse(AssistantHarnessRules.writeToolSucceeded(listOf(HarnessToolCall("1", "set_task_later", "{}") to "ok")))
+        assertFalse(AssistantHarnessRules.writeToolSucceeded(listOf(HarnessToolCall("1", "find_tasks", "{}") to "ok: 1 match")))
+        assertFalse(AssistantHarnessRules.writeToolSucceeded(listOf(HarnessToolCall("1", "get_settings", "{}") to "ok: settings:")))
+        assertFalse(AssistantHarnessRules.writeToolSucceeded(listOf(HarnessToolCall("1", "open_screen", "{}") to "ok: opened today")))
+        assertTrue(AssistantHarnessRules.writeToolSucceeded(listOf(HarnessToolCall("1", "pin_list_item", "{}") to "ok: pinned \"Milk\" in \"Groceries\"")))
+    }
+
+    @Test fun `a share_list stage earns the staged fallback like share_task`() {
+        val results = listOf(HarnessToolCall("1", "share_list", "{}") to "ok: prepared a share of list \"Groceries\" with Sam (viewer).")
+        assertEquals(AssistantHarnessRules.STAGED_READY, AssistantHarnessRules.honestFallback(HarnessFallback.PARTWAY, results))
+        assertEquals(AssistantHarnessRules.PARTWAY_STAGED, AssistantHarnessRules.honestFallback(HarnessFallback.RAN_OUT, results))
     }
 }

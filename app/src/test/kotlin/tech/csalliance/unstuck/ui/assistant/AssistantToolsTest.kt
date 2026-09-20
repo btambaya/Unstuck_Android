@@ -93,6 +93,25 @@ class AssistantToolsTest {
         var canEditOverride: Boolean? = null
         var userId: String? = "me"
         var callStoreAvailable = false
+        // 2026-09-20 tooling rewrite: the seams that report REAL outcomes.
+        val reminders = HashMap<String, Int?>()
+        var reminderSaveOk = true
+        val left = ArrayList<String>()
+        var leaveOk = true
+        var startFocusOk = true
+        var finishFocusOk = true
+        val finished = ArrayList<Boolean>()
+        var interviewPending = false
+        var interviewDoneCalls = 0
+        var theme = "system"
+        var ambient = "off"
+        var focusDefaultMin = 25
+        var focusOverrunMin = 5
+        var focusSoftExit = true
+        var focusPauseReasons = true
+        // Defaults chosen so the pre-rewrite set_ritual assertions still change something.
+        val rituals = mutableMapOf("morning" to false, "evening" to true, "friday" to false, "sunday" to true)
+        var settingsSaveOk = true
     }
 
     inner class FakeApi(val state: FakeState = FakeState()) : AssistantApi {
@@ -113,30 +132,52 @@ class AssistantToolsTest {
         override suspend fun notifyTaskReopenedIfShared(t: TaskItem) {}
         override suspend fun upsertBlock(b: CalBlock) { val i = state.blocks.indexOfFirst { it.id == b.id }; if (i >= 0) state.blocks[i] = b else state.blocks += b }
         override suspend fun deleteBlock(id: String) { state.blocks.removeAll { it.id == id } }
-        private fun patchCol(id: String, fn: (ItemCollection) -> ItemCollection) {
+        override fun getTaskReminder(taskId: String): Int? = state.reminders[taskId]
+        override fun setTaskReminder(taskId: String, minutes: Int?): Boolean {
+            if (!state.reminderSaveOk) return false
+            state.reminders[taskId] = minutes
+            state.prefCalls += "reminder:$taskId:$minutes"
+            return true
+        }
+        /** TRUE when the list exists (the write landed), like the ViewModel's mutateCollectionNow. */
+        private fun patchCol(id: String, fn: (ItemCollection) -> ItemCollection): Boolean {
             val i = state.collections.indexOfFirst { it.id == id }
-            if (i >= 0) state.collections[i] = fn(state.collections[i])
+            if (i < 0) return false
+            state.collections[i] = fn(state.collections[i])
+            return true
         }
         override suspend fun addCollection(name: String, color: String): String? {
             val id = nid("c"); state.collections += ItemCollection(id, name, color, null, emptyList(), state.collections.size); return id
         }
-        override suspend fun addCollectionItem(collectionId: String, body: String) {
-            val id = nid("i"); patchCol(collectionId) { it.copy(items = it.items + CollectionItem(id, body, at = nowIso())) }
+        override suspend fun addCollectionItem(collectionId: String, body: String): String? {
+            val text = body.trim(); if (text.isEmpty()) return null
+            val id = nid("i")
+            return if (patchCol(collectionId) { it.copy(items = it.items + CollectionItem(id, text, at = nowIso())) }) id else null
         }
-        override suspend fun promoteItemToTask(collectionId: String, itemId: String, loop: Boolean, dueAt: String?) {
-            val c = state.collections.firstOrNull { it.id == collectionId } ?: return
-            val item = c.items.firstOrNull { it.id == itemId } ?: return
-            state.tasks += TaskItem(id = nid("t"), name = item.body, estimateMin = 25, createdAt = nowIso(), updatedAt = nowIso())
+        override suspend fun promoteItemToTask(collectionId: String, itemId: String, loop: Boolean, dueAt: String?): String? {
+            val c = state.collections.firstOrNull { it.id == collectionId } ?: return null
+            val item = c.items.firstOrNull { it.id == itemId } ?: return null
+            val id = nid("t")
+            state.tasks += TaskItem(id = id, name = item.body, estimateMin = 25, createdAt = nowIso(), updatedAt = nowIso(),
+                sourceCollectionId = if (loop) collectionId else null, sourceItemId = if (loop) itemId else null, dueAt = if (loop) dueAt else null)
             patchCol(collectionId) { col -> col.copy(items = col.items.map { if (it.id == itemId) it.copy(promoted = true, promotedDone = null) else it }) }
+            return id
         }
-        override suspend fun renameCollection(id: String, name: String) = patchCol(id) { it.copy(name = name) }
+        override suspend fun renameCollection(id: String, name: String) = patchCol(id) { it.copy(name = name.trim()) }
         override suspend fun updateCollection(id: String, archived: Boolean?, color: String?) =
             patchCol(id) { it.copy(archived = archived ?: it.archived, color = color ?: it.color) }
-        override suspend fun removeCollection(id: String) { state.collections.removeAll { it.id == id } }
+        override suspend fun removeCollection(id: String): Boolean = state.collections.removeAll { it.id == id }
         override suspend fun updateCollectionItem(collectionId: String, itemId: String, body: String?, done: Boolean?) =
-            patchCol(collectionId) { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(body = body ?: it.body, done = done ?: it.done) else it }) }
+            patchCol(collectionId) { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(body = body?.trim() ?: it.body, done = done ?: it.done) else it }) }
+        override suspend fun setCollectionItemPinned(collectionId: String, itemId: String, pinned: Boolean) =
+            patchCol(collectionId) { c -> c.copy(items = c.items.map { if (it.id == itemId) it.copy(pinned = pinned) else it }) }
         override suspend fun removeCollectionItem(collectionId: String, itemId: String) =
             patchCol(collectionId) { c -> c.copy(items = c.items.filterNot { it.id == itemId }) }
+        override suspend fun leaveCollection(id: String): Boolean {
+            if (!state.leaveOk) return false
+            state.left += id
+            return state.collections.removeAll { it.id == id }
+        }
         // Mirrors use-assistant-api: unknown → false; else editable unless viewer.
         override suspend fun canEditCollection(id: String): Boolean {
             state.canEditOverride?.let { return it }
@@ -165,6 +206,8 @@ class AssistantToolsTest {
             val i = state.facts.indexOfFirst { it.id == id }; if (i < 0) return false
             state.facts.removeAt(i); state.removedFactIds += id; return true
         }
+        override fun interviewPending(): Boolean = state.interviewPending
+        override fun markInterviewDone(): Boolean { state.interviewDoneCalls += 1; state.interviewPending = false; return true }
         override suspend fun getSessions(): List<Session> = emptyList()
         override suspend fun getReasonLogs(): List<ReasonLog> = emptyList()
         override fun getStruggles(): List<String> = emptyList()
@@ -172,30 +215,56 @@ class AssistantToolsTest {
         override fun getArchivedCaptureIds() = state.archivedIds.toSet()
         override suspend fun upsertCapture(c: Capture) { val i = state.captures.indexOfFirst { it.id == c.id }; if (i >= 0) state.captures[i] = c else state.captures += c }
         override suspend fun removeCapture(id: String) { state.captures.removeAll { it.id == id } }
-        override fun archiveCapture(id: String, archived: Boolean) { state.archivedIds.remove(id); if (archived) state.archivedIds += id }
+        override fun archiveCapture(id: String, archived: Boolean): Boolean { state.archivedIds.remove(id); if (archived) state.archivedIds += id; return true }
         override suspend fun getLiveFocus() = state.live
-        override suspend fun startFocus(taskId: String, estimateMin: Int?, occurrenceBlockId: String?) {
+        override suspend fun startFocus(taskId: String, estimateMin: Int?, occurrenceBlockId: String?): Boolean {
+            if (!state.startFocusOk) return false
             state.focusCalls += "start:$taskId:$estimateMin"; state.live = liveSession(taskId, estimate = estimateMin ?: 25)
+            return true
         }
-        override suspend fun pauseFocus() { state.focusCalls += "pause"; state.live = state.live?.copy(paused = true, pausedAt = NOW_MS) }
-        override suspend fun resumeFocus() { state.focusCalls += "resume"; state.live = state.live?.copy(paused = false, pausedAt = null) }
-        override suspend fun extendFocus(minutes: Int) { state.focusCalls += "extend:$minutes"; state.live = state.live?.let { it.copy(sessionEstimateMin = it.sessionEstimateMin + minutes) } }
-        override suspend fun cancelFocus() { state.focusCalls += "cancel"; state.live = null }
+        override suspend fun pauseFocus(): Boolean { state.live ?: return false; state.focusCalls += "pause"; state.live = state.live?.copy(paused = true, pausedAt = NOW_MS); return true }
+        override suspend fun resumeFocus(): Boolean { state.live ?: return false; state.focusCalls += "resume"; state.live = state.live?.copy(paused = false, pausedAt = null); return true }
+        override suspend fun extendFocus(minutes: Int): Boolean { state.live ?: return false; state.focusCalls += "extend:$minutes"; state.live = state.live?.let { it.copy(sessionEstimateMin = it.sessionEstimateMin + minutes) }; return true }
+        override suspend fun finishFocus(markDone: Boolean): Boolean {
+            if (!state.finishFocusOk || state.live == null) return false
+            state.focusCalls += "finish:$markDone"; state.finished += markDone; state.live = null
+            return true
+        }
+        override suspend fun cancelFocus(): Boolean { state.live ?: return false; state.focusCalls += "cancel"; state.live = null; return true }
         override fun navigate(screen: String, id: String?) { state.navigated += "$screen:$id" }
-        override suspend fun addArea(name: String, color: String?) { state.areas += LifeArea(nid("ar"), name, color ?: "indigo", state.areas.size) }
-        override suspend fun updateArea(id: String, name: String?, color: String?) {
-            val i = state.areas.indexOfFirst { it.id == id }; if (i >= 0) state.areas[i] = state.areas[i].copy(name = name ?: state.areas[i].name, color = color ?: state.areas[i].color)
+        override suspend fun addArea(name: String, color: String?): Boolean { state.areas += LifeArea(nid("ar"), name, color ?: "indigo", state.areas.size); return true }
+        override suspend fun updateArea(id: String, name: String?, color: String?): Boolean {
+            val i = state.areas.indexOfFirst { it.id == id }; if (i < 0) return false
+            state.areas[i] = state.areas[i].copy(name = name ?: state.areas[i].name, color = color ?: state.areas[i].color); return true
         }
-        override suspend fun removeArea(id: String) { state.areas.removeAll { it.id == id } }
-        override suspend fun addTag(name: String) { state.tags += TagRow(nid("tg"), name, null, state.tags.size) }
-        override suspend fun updateTag(id: String, name: String?) {
-            val i = state.tags.indexOfFirst { it.id == id }; if (i >= 0) state.tags[i] = state.tags[i].copy(name = name ?: state.tags[i].name)
+        override suspend fun removeArea(id: String): Boolean = state.areas.removeAll { it.id == id }
+        override suspend fun addTag(name: String): Boolean { state.tags += TagRow(nid("tg"), name, null, state.tags.size); return true }
+        override suspend fun updateTag(id: String, name: String?): Boolean {
+            val i = state.tags.indexOfFirst { it.id == id }; if (i < 0) return false
+            state.tags[i] = state.tags[i].copy(name = name ?: state.tags[i].name); return true
         }
-        override suspend fun removeTag(id: String) { state.tags.removeAll { it.id == id } }
+        override suspend fun removeTag(id: String): Boolean = state.tags.removeAll { it.id == id }
+        override fun getSettings() = AssistantSettingsSnapshot(
+            notificationLevel = "balanced", reminderLeadMin = 10, usableWeekdayMin = null, usableWeekendMin = null,
+            focusDefaultMin = state.focusDefaultMin, focusOverrunMin = state.focusOverrunMin, focusSoftExit = state.focusSoftExit,
+            focusPauseReasons = state.focusPauseReasons, theme = state.theme, ambient = state.ambient, rituals = state.rituals.toMap(),
+        )
         override suspend fun setUsableMinutes(weekday: Int?, weekend: Int?): Boolean { state.prefCalls += "usable:$weekday:$weekend"; return true }
         override suspend fun setNotificationLevel(level: String): Boolean { state.prefCalls += "notif:$level"; return state.notifLevelOk }
         override suspend fun setReminderLead(minutes: Int): Boolean { state.prefCalls += "lead:$minutes"; return state.reminderLeadOk }
-        override fun setRitual(ritual: String, on: Boolean) { state.prefCalls += "ritual:$ritual:$on" }
+        override fun setRitual(ritual: String, on: Boolean): Boolean {
+            state.prefCalls += "ritual:$ritual:$on"
+            if (!state.settingsSaveOk) return false
+            state.rituals[ritual] = on; return true
+        }
+        override fun setTheme(theme: String): Boolean { if (!state.settingsSaveOk) return false; state.theme = theme; state.prefCalls += "theme:$theme"; return true }
+        override fun setAmbientSound(sound: String): Boolean { if (!state.settingsSaveOk) return false; state.ambient = sound; state.prefCalls += "ambient:$sound"; return true }
+        override fun setFocusDefaults(defaultMinutes: Int?, overrunMinutes: Int?, softExit: Boolean?, pauseReasons: Boolean?): Boolean {
+            if (!state.settingsSaveOk) return false
+            defaultMinutes?.let { state.focusDefaultMin = it }; overrunMinutes?.let { state.focusOverrunMin = it }
+            softExit?.let { state.focusSoftExit = it }; pauseReasons?.let { state.focusPauseReasons = it }
+            state.prefCalls += "focusDefaults:$defaultMinutes:$overrunMinutes:$softExit:$pauseReasons"; return true
+        }
         override fun currentUserId() = state.userId
         override fun callStore(): AssistantCallStore? = if (state.callStoreAvailable) FakeCalls() else null
 
@@ -454,7 +523,9 @@ class AssistantToolsTest {
             tasks += listOf(task("a", "Alpha"), task("b", "Beta", moveCount = 1), task("c", "Gamma"))
             blocks += listOf(block("a_td", "a", TODAY, "09:00"), block("b_td", "b", TODAY, "10:00"), block("b_tm", "b", TOMORROW, "10:00"), block("c_td", "c", TODAY, "11:00", done = true))
         }
-        assertEquals("ok: carried 2 to $TOMORROW — \"Alpha\", \"Beta\"", h.run("carry_to_tomorrow"))
+        // Beta already has tomorrow: it is SKIPPED today, and the result says so
+        // instead of counting it as carried (rules §1).
+        assertEquals("ok: carried 1 to $TOMORROW — \"Alpha\" — not moved: \"Beta\" (tomorrow already has it; skipped today instead)", h.run("carry_to_tomorrow"))
         h.state.blocks.first { it.id == "a_td" }.let { assertEquals(TOMORROW, it.date); assertEquals("09:00", it.startTime) }
         h.state.blocks.first { it.id == "b_td" }.let { assertEquals(TODAY, it.date); assertTrue(it.skipped) }
         assertEquals(1, h.state.blocks.count { it.taskId == "b" && it.date == TOMORROW })
@@ -505,7 +576,7 @@ class AssistantToolsTest {
 
     @Test fun `update_task sets dueAt and resizes the live block when the estimate changes`() = runTest {
         val h = makeApi { tasks += task("a", "Alpha"); blocks += listOf(block("old", "a", YESTERDAY, "09:00", done = true), block("live", "a", TOMORROW, "09:00")) }
-        assertEquals("ok: updated \"Alpha\"", h.run("update_task", "taskId" to "a", "estimateMin" to 50, "dueAt" to "2026-09-05T17:00:00Z"))
+        assertEquals("ok: updated \"Alpha\" — estimate 50m, due 2026-09-05T17:00:00Z", h.run("update_task", "taskId" to "a", "estimateMin" to 50, "dueAt" to "2026-09-05T17:00:00Z"))
         assertEquals(50, h.state.tasks[0].estimateMin); assertEquals("2026-09-05T17:00:00Z", h.state.tasks[0].dueAt)
         assertEquals(50, h.state.blocks.first { it.id == "live" }.durationMinutes)
         assertEquals(25, h.state.blocks.first { it.id == "old" }.durationMinutes)
@@ -513,11 +584,11 @@ class AssistantToolsTest {
 
     @Test fun `update_task clears dueAt with null and leaves blocks alone when the estimate is unchanged`() = runTest {
         val h = makeApi { tasks += task("a", "Alpha", dueAt = "2026-09-05T17:00:00Z"); blocks += block("live", "a", TOMORROW) }
-        assertEquals("ok: updated \"Alpha 2\"", h.run("update_task", "taskId" to "a", "name" to "Alpha 2", "dueAt" to null))
+        assertEquals("ok: updated \"Alpha 2\" — name, deadline cleared", h.run("update_task", "taskId" to "a", "name" to "Alpha 2", "dueAt" to null))
         h.state.tasks[0].let { assertEquals("Alpha 2", it.name); assertNull(it.dueAt); assertEquals(25, it.estimateMin) }
         assertEquals(25, h.state.blocks[0].durationMinutes)
         h.run("update_task", "taskId" to "a", "dueAt" to "2026-09-06T09:00:00Z")
-        assertEquals("ok: updated \"Alpha 3\"", h.run("update_task", "taskId" to "a", "name" to "Alpha 3"))
+        assertEquals("ok: updated \"Alpha 3\" — name", h.run("update_task", "taskId" to "a", "name" to "Alpha 3"))
         assertEquals("2026-09-06T09:00:00Z", h.state.tasks[0].dueAt)
     }
 
@@ -532,10 +603,11 @@ class AssistantToolsTest {
         val h = makeApi { tasks += task("a", "Gym", recurrence = Recurrence.Weekly(listOf(1, 3))) }
         assertEquals("error: unknown recurrence kind \"fortnightly\" — use daily, weekly, monthly, or none", h.run("set_task_recurrence", "taskId" to "a", "kind" to "fortnightly"))
         assertEquals(Recurrence.Weekly(listOf(1, 3)), h.state.tasks[0].recurrence)
-        assertEquals("ok", h.run("set_task_recurrence", "taskId" to "a", "kind" to "daily"))
+        assertEquals("ok: \"Gym\" now repeats daily (not on the calendar yet — schedule_task it to place the series)", h.run("set_task_recurrence", "taskId" to "a", "kind" to "daily"))
         assertEquals(Recurrence.Daily(), h.state.tasks[0].recurrence)
-        assertEquals("ok", h.run("set_task_recurrence", "taskId" to "a", "kind" to "none"))
+        assertEquals("ok: \"Gym\" no longer repeats", h.run("set_task_recurrence", "taskId" to "a", "kind" to "none"))
         assertNull(h.state.tasks[0].recurrence)
+        assertEquals("error: \"Gym\" doesn't repeat — nothing changed", h.run("set_task_recurrence", "taskId" to "a", "kind" to "none"))
     }
 
     @Test fun `complete_task returns the id so the receipt undo targets THIS task (F8)`() = runTest {
@@ -564,8 +636,10 @@ class AssistantToolsTest {
 
     @Test fun `add_to_list adds to an editable list`() = runTest {
         val h = makeApi { collections += list("e", "Groceries", myRole = "editor") }
-        assertEquals("ok: added to \"Groceries\"", h.run("add_to_list", "listId" to "e", "body" to "Milk"))
+        // The item AND the list are named, with the new item's id (rules §1).
+        assertEquals("ok: added \"Milk\" to \"Groceries\" id=i1", h.run("add_to_list", "listId" to "e", "body" to "Milk"))
         assertEquals(listOf("Milk"), h.state.collections[0].items.map { it.body })
+        assertEquals("error: body required", h.run("add_to_list", "listId" to "e", "body" to "  "))
     }
 
     @Test fun `add_to_list a list created this turn bypasses the permission gate`() = runTest {
@@ -573,7 +647,7 @@ class AssistantToolsTest {
         assertTrue(h.run("add_to_list", "listId" to "x", "body" to "Nope").startsWith("error: you only have view access"))
         val created = h.run("create_list", "name" to "Fresh")
         val id = Regex("id=(\\S+) ").find(created)!!.groupValues[1]
-        assertEquals("ok: added to \"Fresh\"", h.run("add_to_list", "listId" to id, "body" to "Yes"))
+        assertTrue(h.run("add_to_list", "listId" to id, "body" to "Yes").startsWith("ok: added \"Yes\" to \"Fresh\" id="))
         assertEquals(listOf("Yes"), h.state.collections.first { it.id == id }.items.map { it.body })
         assertTrue(h.state.collections.first { it.id == "x" }.items.isEmpty())
     }
@@ -583,14 +657,14 @@ class AssistantToolsTest {
     @Test fun `complete_tasks closes every listed open task in one call`() = runTest {
         val h = makeApi { tasks += listOf(task("a", "One"), task("b", "Two"), task("c", "Done already", done = true)) }
         val r = h.run("complete_tasks", "taskIds" to listOf("a", "b", "c"))
-        assertEquals("ok: completed 2 tasks ids=a,b", r)
+        assertEquals("ok: completed 2 tasks ids=a,b — \"One\", \"Two\" — not done: \"Done already\" (already done)", r)
         assertTrue(h.state.tasks.all { it.done })
     }
 
-    @Test fun `complete_tasks errors on empty or unmatched ids`() = runTest {
-        val h = makeApi()
-        assertTrue(h.run("complete_tasks").startsWith("error"))
-        assertTrue(h.run("complete_tasks", "taskIds" to listOf("nope")).startsWith("error"))
+    @Test fun `complete_tasks errors on empty or unmatched ids, naming each one`() = runTest {
+        val h = makeApi { tasks += task("d", "Done", done = true) }
+        assertEquals("error: taskIds required", h.run("complete_tasks"))
+        assertEquals("error: none completed — \"nope\" (not found), \"Done\" (already done)", h.run("complete_tasks", "taskIds" to listOf("nope", "d")))
     }
 
     @Test fun `create_tasks creates the whole brain-dump in one call and schedules dated items`() = runTest {
@@ -607,14 +681,20 @@ class AssistantToolsTest {
         assertEquals(h.state.tasks[1].id, h.state.blocks[0].taskId)
     }
 
-    @Test fun `create_tasks skips nameless entries, errors when nothing is valid, caps at 25 and never invents a time`() = runTest {
+    @Test fun `create_tasks names nameless entries, errors when nothing is valid, caps at 50 naming the rest, never invents a time`() = runTest {
         val h = makeApi()
-        assertTrue(h.run("create_tasks", "tasks" to listOf(mapOf("name" to "Real"), mapOf("estimateMin" to 5))).startsWith("ok: created 1 tasks"))
+        val nameless = h.run("create_tasks", "tasks" to listOf(mapOf("name" to "Real"), mapOf("estimateMin" to 5)))
+        assertTrue(nameless, nameless.startsWith("ok: created 1 of 2 tasks ids="))
+        assertTrue(nameless, nameless.contains("— not created: 1 item with no name."))
         assertEquals(1, h.state.tasks.size)
         assertTrue(h.run("create_tasks", "tasks" to listOf(mapOf<String, Any>())).startsWith("error"))
         assertTrue(h.run("create_tasks").startsWith("error: tasks required"))
-        val thirty = (1..30).map { mapOf("name" to "T$it") }
-        assertTrue(h.run("create_tasks", "tasks" to thirty).startsWith("ok: created 25 tasks"))
+        val sixty = (1..60).map { mapOf("name" to "T$it") }
+        val capped = h.run("create_tasks", "tasks" to sixty)
+        assertTrue(capped, capped.startsWith("ok: created 50 of 60 tasks ids="))
+        assertTrue(capped, capped.contains("— not created: \"T51\", \"T52\""))
+        assertTrue(capped, capped.contains("\"T60\" (limit 50 per call — call create_tasks again for them)"))
+        assertEquals(51, h.state.tasks.size)
         val dated = h.run("create_tasks", "tasks" to listOf(mapOf("name" to "Dated", "date" to TOMORROW)))
         assertTrue(dated, dated.contains("has a day but no time — left unscheduled"))
         assertEquals(0, h.state.blocks.size)
@@ -774,8 +854,9 @@ class AssistantToolsTest {
             collections += list("l1", "Groceries").copy(items = listOf(
                 CollectionItem("i1", "Milk", at = PAST_CREATED, promoted = true, promotedDone = true), CollectionItem("i2", "Eggs", at = PAST_CREATED)))
         }
-        assertEquals("ok: promoted \"Milk\"", h.run("promote_item_to_task", "listId" to "l1", "itemId" to "i1", "mode" to "self"))
-        assertEquals("ok: promoted \"Eggs\"", h.run("promote_item_to_task", "listId" to "l1", "itemId" to "i2", "mode" to "self"))
+        val milk = h.run("promote_item_to_task", "listId" to "l1", "itemId" to "i1", "mode" to "self")
+        assertTrue(milk, milk.startsWith("ok: promoted \"Milk\" to a task id=") && milk.endsWith(" (just theirs)"))
+        assertTrue(h.run("promote_item_to_task", "listId" to "l1", "itemId" to "i2", "mode" to "self").startsWith("ok: promoted \"Eggs\" to a task id="))
         assertEquals(listOf("Milk", "Eggs"), h.state.tasks.map { it.name })
         assertEquals("error: item not found", h.run("promote_item_to_task", "listId" to "l1", "itemId" to "zz", "mode" to "self"))
         assertEquals("error: list not found", h.run("promote_item_to_task", "listId" to "zz", "itemId" to "i1", "mode" to "self"))
@@ -826,7 +907,7 @@ class AssistantToolsTest {
         assertEquals(listOf("Team groceries"), h.state.collections.map { it.name })
         assertNull(h.state.collections[0].archived)
         // …while the editor's ITEM powers are untouched.
-        assertEquals("ok: added to \"Team groceries\"", h.run("add_to_list", "listId" to "s", "body" to "Bread"))
+        assertTrue(h.run("add_to_list", "listId" to "s", "body" to "Bread").startsWith("ok: added \"Bread\" to \"Team groceries\" id="))
         assertEquals(listOf("Milk", "Bread"), h.state.collections[0].items.map { it.body })
     }
 
@@ -908,7 +989,8 @@ class AssistantToolsTest {
 
     @Test fun `tags create, rename and delete`() = runTest {
         val h = makeApi()
-        assertEquals("ok: tag \"deep\" ready", h.run("create_tag", "name" to "deep"))
+        assertEquals("ok: created tag \"deep\"", h.run("create_tag", "name" to "deep"))
+        assertEquals("error: tag \"Deep\" already exists", h.run("create_tag", "name" to "Deep"))
         assertEquals(listOf("deep"), h.state.tags.map { it.name })
         assertEquals("ok: renamed tag \"DEEP\" → \"focus\"", h.run("rename_tag", "name" to "DEEP", "newName" to "focus"))
         assertEquals(listOf("focus"), h.state.tags.map { it.name })
@@ -1007,6 +1089,7 @@ class AssistantToolsTest {
         val h = makeApi()
         assertEquals("ok: morning moment on", h.run("set_ritual", "ritual" to "Morning"))
         assertEquals("ok: sunday moment off", h.run("set_ritual", "ritual" to "sunday", "on" to false))
+        assertEquals("error: the morning moment is already on — nothing changed", h.run("set_ritual", "ritual" to "morning"))
         assertEquals(listOf("ritual:morning:true", "ritual:sunday:false"), h.state.prefCalls)
         assertEquals("error: ritual must be morning, evening, friday, or sunday", h.run("set_ritual", "ritual" to "lunch"))
     }
@@ -1105,9 +1188,9 @@ class AssistantToolsTest {
         assertEquals("error: \"Alpha\" is already in Later — nothing changed", h.run("set_task_later", "taskId" to "a", "later" to true))
         assertEquals("error: \"Beta\" is not in Later — nothing changed", h.run("set_task_later", "taskId" to "b", "later" to false))
         assertEquals(before, h.state.tasks)
-        assertEquals("ok", h.run("set_task_later", "taskId" to "a", "later" to false))
+        assertEquals("ok: brought \"Alpha\" back from Later", h.run("set_task_later", "taskId" to "a", "later" to false))
         assertEquals(false, h.state.tasks[0].later)
-        assertEquals("ok", h.run("set_task_later", "taskId" to "b"))
+        assertEquals("ok: parked \"Beta\" in Later", h.run("set_task_later", "taskId" to "b"))
         assertEquals(true, h.state.tasks[1].later)
     }
 
@@ -1126,7 +1209,9 @@ class AssistantToolsTest {
         val h = makeApi()
         assertEquals(CallToolLogic.UNAVAILABLE, h.run("get_calls"))
         val unknown = h.run("make_coffee")
-        assertTrue(unknown, unknown.startsWith("error: unknown tool \"make_coffee\" — available: add_capture, add_to_list, archive_list, "))
+        // The rules' wording: every registry tool, in registry order (2026-09-20).
+        assertTrue(unknown, unknown.startsWith("error: unknown tool \"make_coffee\". The tools are: get_tasks, find_tasks, get_schedule, "))
+        assertEquals(unknownToolResult("make_coffee"), unknown)
         assertTrue("names every real tool, so the model picks one next round", unknown.contains(", get_lists,"))
     }
 
@@ -1197,26 +1282,25 @@ class AssistantToolsTest {
         assertEquals("error: the call has ended", SnoozeCallTool.CALL_ENDED)
     }
 
-    @Test fun `the call-mode registry is the executor's schemas filtered to CallScript callTools plus snooze_call`() {
-        // snooze_call is NOT a contract tool (ContractDiffTest pins the 57).
-        assertFalse("snooze_call" in ASSISTANT_TOOL_NAMES)
-        val specs = callVoiceToolSpecs(listOf("complete_task", "add_capture", "schedule_task", "start_focus", "update_call", "snooze_call", "no_such_tool"))
+    @Test fun `the call-mode schema is the registry filtered to CallScript callTools plus the call-only snooze_call`() {
+        // snooze_call is a registry tool on the CALL surface alone (2026-09-20):
+        // plain Talk never advertises it, a call always resolves it.
+        assertTrue("snooze_call" in ToolRegistry.NAMES)
+        assertEquals(listOf("call"), RegistryTools.byName("snooze_call")!!.surfaces)
+        val specs = callVoiceTools(listOf("complete_task", "add_capture", "schedule_task", "start_focus", "update_call", "snooze_call", "no_such_tool"))
         assertEquals(listOf("complete_task", "add_capture", "schedule_task", "start_focus", "update_call", "snooze_call"), specs.map { it.name })
         val json = callVoiceToolsJson(listOf("snooze_call", "complete_task"))
         assertEquals(2, json.size)
         val snooze = json[0].jsonObject
         assertEquals("snooze_call", snooze["name"]!!.jsonPrimitive.content)
-        assertEquals("\"Call me back in ten\" — hang up now and ring again in `minutes`. Say the minutes out loud, then a quick goodbye.", snooze["description"]!!.jsonPrimitive.content)
         val minutes = snooze["parameters"]!!.jsonObject["properties"]!!.jsonObject["minutes"]!!.jsonObject
         assertEquals("integer", minutes["type"]!!.jsonPrimitive.content)
-        assertEquals("Minutes until the call-back (1–180).", minutes["description"]!!.jsonPrimitive.content)
         assertEquals(10, minutes["default"]!!.jsonPrimitive.content.toInt())
         assertEquals(0, snooze["parameters"]!!.jsonObject["required"]!!.jsonArray.size)
-        // The base registry never carries snooze_call (plain Talk can't hang up a call).
         assertTrue(voiceToolsJson().none { it.jsonObject["name"]!!.jsonPrimitive.content == "snooze_call" })
         // The real call list from :core resolves entirely (no unknown names dropped).
         val core = tech.csalliance.unstuck.core.logic.CallScript.callTools()
-        assertEquals(core, callVoiceToolSpecs(core).map { it.name })
+        assertEquals(core, callVoiceTools(core).map { it.name })
     }
 
     @Test fun `a request_call receipt undoes through CANCEL_CALL once, and its control reads cancelling while in flight`() = runTest {
@@ -1236,5 +1320,229 @@ class AssistantToolsTest {
         assertEquals("cancelled", h.state.calls[0].status)
         assertNull(store.cancelCall("call1"))
         assertEquals("error: that call is already cancelled", h.run("cancel_call", "callId" to "call1"))
+    }
+
+    // ── 2026-09-20 tooling rewrite: real outcomes, partial results, the new tools ──
+
+    @Test fun `unknown tool names every registry tool in the rules' wording`() = runTest {
+        val r = makeApi().run("no_such_tool")
+        assertTrue(r, r.startsWith("error: unknown tool \"no_such_tool\". The tools are: get_tasks, find_tasks, "))
+        assertTrue(r.endsWith("snooze_call"))
+    }
+
+    @Test fun `create_task takes tags, first step, a date with time, and parks in Later`() = runTest {
+        val h = makeApi()
+        val r = h.run("create_task", "name" to "Deck", "tags" to listOf("Work", " deep ", "work"), "firstPhysicalAction" to "Open the file", "date" to TOMORROW, "startTime" to "11:00")
+        assertTrue(r, r.startsWith("ok: created task id=") && r.endsWith("name=\"Deck\" — scheduled $TOMORROW 11:00"))
+        h.state.tasks[0].let { assertEquals(listOf("Work", "deep"), it.tags); assertEquals("Open the file", it.firstPhysicalAction); assertEquals(false, it.later) }
+        assertEquals(TOMORROW, h.state.blocks.single().date)
+        val later = h.run("create_task", "name" to "Someday", "later" to true)
+        assertTrue(later, later.endsWith("name=\"Someday\" — parked in Later"))
+        assertEquals(true, h.state.tasks[1].later)
+        // A day without a time is created UNSCHEDULED and the model is told to ask.
+        val dated = h.run("create_task", "name" to "Dated", "date" to TOMORROW)
+        assertTrue(dated, dated.contains("has a day ($TOMORROW) but no time — left unscheduled"))
+        assertEquals(1, h.state.blocks.size)
+        assertEquals("error: startTime needs a date — give date (YYYY-MM-DD) as well", h.run("create_task", "name" to "X", "startTime" to "10:00"))
+        assertTrue(h.run("create_task", "name" to "Past", "date" to YESTERDAY).startsWith("error:"))
+        assertEquals(3, h.state.tasks.size)
+    }
+
+    @Test fun `update_task replaces tags, clears area and first step with none, toggles Later, refuses a no-op`() = runTest {
+        val h = makeApi { tasks += task("a", "Alpha", lifeArea = "Work", tags = listOf("x")) }
+        assertEquals("ok: updated \"Alpha\" — area cleared, tags a, b, first step", h.run("update_task", "taskId" to "a", "lifeArea" to "none", "tags" to listOf("a", "b"), "firstPhysicalAction" to "Open it"))
+        h.state.tasks[0].let { assertNull(it.lifeArea); assertEquals(listOf("a", "b"), it.tags); assertEquals("Open it", it.firstPhysicalAction) }
+        assertEquals("ok: updated \"Alpha\" — first step cleared, parked in Later", h.run("update_task", "taskId" to "a", "firstPhysicalAction" to "none", "later" to true))
+        assertEquals(true, h.state.tasks[0].later)
+        assertEquals("error: nothing to change on \"Alpha\" — every field given already has that value", h.run("update_task", "taskId" to "a", "later" to true, "name" to "Alpha"))
+        assertEquals("ok: updated \"Alpha\" — area Home, back from Later", h.run("update_task", "taskId" to "a", "lifeArea" to "Home", "later" to false))
+    }
+
+    @Test fun `set_task_recurrence weekly needs days and names them`() = runTest {
+        val h = makeApi { tasks += task("a", "Gym"); blocks += block("b1", "a", TOMORROW, "07:00") }
+        assertEquals("error: weekly needs daysOfWeek (0=Sunday … 6=Saturday) — ask which days", h.run("set_task_recurrence", "taskId" to "a", "kind" to "weekly"))
+        assertEquals("error: daysOfWeek must be 0=Sunday … 6=Saturday", h.run("set_task_recurrence", "taskId" to "a", "kind" to "weekly", "daysOfWeek" to listOf(1, 9)))
+        assertNull(h.state.tasks[0].recurrence)
+        assertEquals("ok: \"Gym\" now repeats weekly on Mon, Wed until 2026-12-01 (calendar slots regenerated from its next slot)",
+            h.run("set_task_recurrence", "taskId" to "a", "kind" to "weekly", "daysOfWeek" to listOf(3, 1), "until" to "2026-12-01"))
+        assertEquals(Recurrence.Weekly(listOf(1, 3), "2026-12-01"), h.state.tasks[0].recurrence)
+        assertEquals("error: kind required — daily, weekly, monthly, or none", h.run("set_task_recurrence", "taskId" to "a"))
+    }
+
+    @Test fun `find_tasks matches by phrase or by every word, skips done unless asked, never picks`() = runTest {
+        val h = makeApi { tasks += listOf(task("a", "Buy oat milk"), task("b", "Milk the goats", done = true), task("c", "Call mum"), task("d", "Buy milk")) }
+        assertEquals("error: query required — words from the task's title", h.run("find_tasks"))
+        val one = h.run("find_tasks", "query" to "call")
+        assertEquals("ok: 1 match for \"call\":\n- Call mum [id=c] 25m", one)
+        val two = h.run("find_tasks", "query" to "buy milk")
+        assertTrue(two, two.startsWith("ok: 2 matches for \"buy milk\" — more than one: ask which, never pick:\n- Buy milk [id=d] 25m\n- Buy oat milk [id=a] 25m"))
+        assertEquals("ok: no open task matches \"goats\" — includeDone=true searches finished ones too", h.run("find_tasks", "query" to "goats"))
+        assertEquals("ok: 1 match for \"goats\":\n- Milk the goats [id=b] 25m · done", h.run("find_tasks", "query" to "GOATS", "includeDone" to true))
+        assertTrue("a read never disarms the fabrication guard", "find_tasks" in READ_ONLY_TOOLS)
+    }
+
+    @Test fun `set_task_reminder sets, turns off, resets and refuses no-ops and bad values`() = runTest {
+        val h = makeApi { tasks += task("a", "Dentist"); blocks += block("b1", "a", TOMORROW, "09:00") }
+        assertEquals("ok: reminder for \"Dentist\" set to 10 minutes before", h.run("set_task_reminder", "taskId" to "a", "minutes" to 10))
+        assertEquals(10, h.state.reminders["a"])
+        assertEquals("error: reminder for \"Dentist\" is already set to 10 minutes before — nothing changed", h.run("set_task_reminder", "taskId" to "a", "minutes" to 10))
+        assertEquals("ok: reminder for \"Dentist\" off", h.run("set_task_reminder", "taskId" to "a", "minutes" to 0))
+        assertEquals("ok: reminder for \"Dentist\" back to the default", h.run("set_task_reminder", "taskId" to "a"))
+        assertNull(h.state.reminders["a"])
+        assertEquals("error: minutes must be 0 (off), 5, 10, or 15 — or omit it for the default", h.run("set_task_reminder", "taskId" to "a", "minutes" to 7))
+        assertEquals("error: task not found", h.run("set_task_reminder", "taskId" to "zz", "minutes" to 5))
+        val unscheduled = makeApi { tasks += task("u", "Loose") }
+        assertEquals("ok: reminder for \"Loose\" set to 5 minutes before (no upcoming slot yet — it applies once the task is scheduled)", unscheduled.run("set_task_reminder", "taskId" to "u", "minutes" to 5))
+        val broken = makeApi { tasks += task("a", "Dentist"); reminderSaveOk = false }
+        assertEquals("error: couldn't save the reminder — try again", broken.run("set_task_reminder", "taskId" to "a", "minutes" to 5))
+    }
+
+    @Test fun `finish_focus logs the running session, marks the task or today's occurrence done, errors idle`() = runTest {
+        val h = makeApi { tasks += task("a", "Report"); live = liveSession("a") }
+        assertEquals("ok: finished focus on \"Report\" — logged 5m, task marked done", h.run("finish_focus", "markDone" to true))
+        assertEquals(listOf("finish:true"), h.state.focusCalls); assertNull(h.state.live)
+        assertEquals("error: no focus session is running", h.run("finish_focus"))
+        val rec = makeApi { tasks += task("r", "Gym", recurrence = Recurrence.Daily()); live = liveSession("r") }
+        assertEquals("ok: finished focus on \"Gym\" — logged 5m, today's occurrence marked done", rec.run("finish_focus", "markDone" to true))
+        val open = makeApi { tasks += task("a", "Report"); live = liveSession("a") }
+        assertEquals("ok: finished focus on \"Report\" — logged 5m", open.run("finish_focus"))
+        val stuck = makeApi { tasks += task("a", "Report"); live = liveSession("a"); finishFocusOk = false }
+        assertEquals("error: couldn't end the session — try again", stuck.run("finish_focus"))
+        assertTrue(stuck.state.live != null)
+    }
+
+    @Test fun `start_focus reports a refused start instead of ok`() = runTest {
+        val h = makeApi { tasks += task("a", "Alpha"); startFocusOk = false }
+        assertEquals("error: couldn't start a session on \"Alpha\" — it may be assigned out; ask the user", h.run("start_focus", "taskId" to "a"))
+        assertTrue(h.state.navigated.isEmpty())
+    }
+
+    @Test fun `recolor_list recolours an owned list from the registry palette only`() = runTest {
+        val h = makeApi { collections += listOf(list("l1", "Groceries"), list("s", "Shared", myRole = "editor", ownerId = "grace")) }
+        assertEquals("ok: recoloured list \"Groceries\" → green", h.run("recolor_list", "listId" to "l1", "color" to "Green"))
+        assertEquals("green", h.state.collections[0].color)
+        assertEquals("error: \"Groceries\" is already green — nothing changed", h.run("recolor_list", "listId" to "l1", "color" to "green"))
+        assertEquals("error: unknown colour \"pink\" — use indigo, coral, green, amber, blue, violet", h.run("recolor_list", "listId" to "l1", "color" to "pink"))
+        assertEquals(ownerOnly("Shared", "recolour"), h.run("recolor_list", "listId" to "s", "color" to "blue"))
+        assertEquals("error: list not found", h.run("recolor_list", "listId" to "zz", "color" to "blue"))
+    }
+
+    @Test fun `leave_list leaves a list shared with the user only when the server confirms`() = runTest {
+        val h = makeApi { collections += listOf(list("s", "Team", myRole = "editor", ownerId = "grace"), list("m", "Mine", myRole = "owner", ownerId = "me")) }
+        assertEquals("error: \"Mine\" is the user's own list — there is nothing to leave; delete_list or archive_list it instead", h.run("leave_list", "listId" to "m"))
+        assertEquals("ok: left list \"Team\" — the owner keeps it", h.run("leave_list", "listId" to "s"))
+        assertEquals(listOf("s"), h.state.left); assertEquals(listOf("m"), h.state.collections.map { it.id })
+        val refused = makeApi { collections += list("s", "Team", myRole = "viewer", ownerId = "grace"); leaveOk = false }
+        assertEquals("error: couldn't leave \"Team\" — try again", refused.run("leave_list", "listId" to "s"))
+        assertEquals(1, refused.state.collections.size)
+    }
+
+    @Test fun `share_list only STAGES a list share for the confirm card, owner only, email allowed`() = runTest {
+        val h = makeApi { collections += listOf(list("l1", "Groceries"), list("s", "Theirs", myRole = "editor", ownerId = "grace")) }
+        assertEquals("error: only its owner can share \"Theirs\"", h.run("share_list", "listId" to "s", "person" to "Sam"))
+        assertTrue(h.run("share_list", "listId" to "l1", "person" to "Sam").startsWith("error: the user has nobody in their trusted circle yet"))
+        assertTrue(h.state.staged.isEmpty())
+        val r = h.run("share_list", "listId" to "l1", "person" to "sam@example.com", "role" to "editor")
+        assertEquals("ok: prepared a share of list \"Groceries\" with sam@example.com (editor). The user must CONFIRM it on screen — tell them it's ready to confirm, and do not claim it is shared.", r)
+        val p = h.state.staged.single()
+        assertEquals(tech.csalliance.unstuck.core.logic.ShareSubject.LIST, p.subject)
+        assertEquals("l1", p.taskId); assertEquals("Groceries", p.taskName); assertEquals("editor", p.role); assertEquals("sam@example.com", p.recipientEmail)
+        assertEquals("error: list not found", h.run("share_list", "listId" to "zz", "person" to "Sam"))
+    }
+
+    @Test fun `pin_list_item pins and unpins, refuses no-ops and view-only lists, and get_lists shows the pin`() = runTest {
+        val h = makeApi { collections += listOf(list("l1", "Groceries", listOf("i1" to "Milk")), list("v", "Shared", listOf("s1" to "Theirs"), myRole = "viewer")) }
+        assertEquals("ok: pinned \"Milk\" in \"Groceries\"", h.run("pin_list_item", "listId" to "l1", "itemId" to "i1"))
+        assertEquals(true, h.state.collections[0].items[0].pinned)
+        assertTrue(h.run("get_lists", "listId" to "l1").contains("  - Milk (pinned) [id=i1]"))
+        assertEquals("error: \"Milk\" is already pinned — nothing changed", h.run("pin_list_item", "listId" to "l1", "itemId" to "i1", "pinned" to true))
+        assertEquals("ok: unpinned \"Milk\" in \"Groceries\"", h.run("pin_list_item", "listId" to "l1", "itemId" to "i1", "pinned" to false))
+        assertEquals("error: you can't edit \"Shared\"", h.run("pin_list_item", "listId" to "v", "itemId" to "s1"))
+        assertEquals("error: list item not found", h.run("pin_list_item", "listId" to "l1", "itemId" to "zz"))
+    }
+
+    @Test fun `list item edits refuse no-ops and rename refuses the same name`() = runTest {
+        val h = makeApi { collections += list("l1", "Groceries", listOf("i1" to "Milk")) }
+        assertEquals("error: that item already says \"Milk\" — nothing changed", h.run("edit_list_item", "listId" to "l1", "itemId" to "i1", "body" to " Milk "))
+        assertEquals("error: \"Milk\" is already unticked — nothing changed", h.run("set_list_item_done", "listId" to "l1", "itemId" to "i1", "done" to false))
+        assertEquals("error: \"Groceries\" is already called that — nothing changed", h.run("rename_list", "listId" to "l1", "name" to "Groceries"))
+        assertEquals("error: \"Groceries\" is already unarchived — nothing changed", h.run("archive_list", "listId" to "l1", "archived" to false))
+    }
+
+    @Test fun `restore_capture brings an archived capture back, resolve refuses a second time`() = runTest {
+        val h = makeApi { captures += listOf(capture("c1", "One"), capture("c2", "Two")); archivedIds += "c1" }
+        assertEquals("error: \"Two\" is already in the inbox — nothing changed", h.run("restore_capture", "captureId" to "c2"))
+        assertEquals("ok: restored capture \"One\" to the inbox", h.run("restore_capture", "captureId" to "c1"))
+        assertTrue(h.state.archivedIds.isEmpty())
+        assertEquals("ok: resolved capture \"One\"", h.run("resolve_capture", "captureId" to "c1"))
+        assertEquals("error: \"One\" is already resolved — nothing changed", h.run("resolve_capture", "captureId" to "c1"))
+        assertEquals("error: capture not found", h.run("restore_capture", "captureId" to "zz"))
+    }
+
+    @Test fun `add_capture reports a cut body, promote_capture invents no area`() = runTest {
+        val h = makeApi { captures += capture("c1", "Buy milk") }
+        val long = "x".repeat(600)
+        val r = h.run("add_capture", "body" to long)
+        assertTrue(r, r.endsWith("(cut to 500 characters — the rest was not saved)"))
+        assertEquals(500, h.state.captures.last().body.length)
+        h.run("promote_capture", "captureId" to "c1")
+        assertNull(h.state.tasks.single().lifeArea)
+    }
+
+    @Test fun `promote_item_to_task says which mode applied, including the loop to self downgrade`() = runTest {
+        val h = makeApi {
+            collections += listOf(
+                list("solo", "Solo", listOf("i1" to "Paint")),
+                list("team", "Team", listOf("i2" to "Bread"), myRole = "owner", ownerId = "me").copy(members = listOf("grace")),
+            )
+        }
+        val solo = h.run("promote_item_to_task", "listId" to "solo", "itemId" to "i1", "mode" to "loop")
+        assertTrue(solo, solo.endsWith(" — this list isn't shared, so it is just their task (loop mode not applied)"))
+        assertNull(h.state.tasks[0].sourceCollectionId)
+        val team = h.run("promote_item_to_task", "listId" to "team", "itemId" to "i2", "mode" to "loop", "dueAt" to "2026-09-25T17:00:00Z")
+        assertTrue(team, team.endsWith(" — the list's members are in the loop (by 2026-09-25T17:00:00Z)"))
+        assertEquals("team", h.state.tasks[1].sourceCollectionId)
+    }
+
+    @Test fun `get_settings reads everything the Settings screen shows`() = runTest {
+        val h = makeApi { theme = "dark"; ambient = "brown"; focusOverrunMin = 0 }
+        assertEquals(
+            "ok: settings:\n- notifications: balanced\n- reminders: 10 minutes before (the default for every task)\n" +
+                "- usable minutes: not readable in this app (set_usable_minutes still sets them)\n" +
+                "- focus defaults: 25m sessions, overrun off, soft exit on, pause reasons on\n- theme: dark\n- ambient sound: brown\n" +
+                "- rituals: morning off, evening on, friday off, sunday on",
+            h.run("get_settings"),
+        )
+        assertTrue("get_settings" in READ_ONLY_TOOLS)
+    }
+
+    @Test fun `set_theme, set_ambient_sound and set_focus_defaults validate, save and refuse no-ops`() = runTest {
+        val h = makeApi()
+        assertEquals("ok: theme set to dark", h.run("set_theme", "theme" to "Dark"))
+        assertEquals("dark", h.state.theme)
+        assertEquals("error: the theme is already dark — nothing changed", h.run("set_theme", "theme" to "dark"))
+        assertEquals("error: theme must be system, light, dark", h.run("set_theme", "theme" to "sepia"))
+        assertEquals("ok: ambient sound set to pink noise", h.run("set_ambient_sound", "sound" to "pink"))
+        assertEquals("ok: ambient sound off", h.run("set_ambient_sound", "sound" to "off"))
+        assertEquals("error: sound must be off, brown, pink", h.run("set_ambient_sound", "sound" to "rain"))
+        assertEquals("ok: focus defaults — length 45m, overrun off, soft exit off", h.run("set_focus_defaults", "defaultMinutes" to 45, "overrunMinutes" to 0, "softExit" to false))
+        assertEquals(45, h.state.focusDefaultMin); assertEquals(0, h.state.focusOverrunMin); assertEquals(false, h.state.focusSoftExit)
+        assertEquals("error: the focus defaults are already set that way — nothing changed", h.run("set_focus_defaults", "defaultMinutes" to 45))
+        assertEquals("error: defaultMinutes must be 15, 25, 45", h.run("set_focus_defaults", "defaultMinutes" to 30))
+        assertEquals("error: overrunMinutes must be 0, 5, 10 (0 = none)", h.run("set_focus_defaults", "overrunMinutes" to 7))
+        assertEquals("error: give at least one of defaultMinutes, overrunMinutes, softExit, pauseReasons", h.run("set_focus_defaults"))
+        val offline = makeApi { settingsSaveOk = false }
+        assertEquals("error: could not save the theme", offline.run("set_theme", "theme" to "light"))
+        assertEquals("error: could not save the ambient sound", offline.run("set_ambient_sound", "sound" to "brown"))
+        assertEquals("error: could not save the focus defaults", offline.run("set_focus_defaults", "pauseReasons" to false))
+        assertEquals("error: could not save the morning moment (offline?)", offline.run("set_ritual", "ritual" to "morning"))
+    }
+
+    @Test fun `forget_fact reports a store that refused`() = runTest {
+        val fake = makeApi { facts += fact("f1", "Sam — partner") }
+        val api = object : AssistantApi by fake.api {
+            override suspend fun removeProfileFact(id: String): Boolean = false
+        }
+        assertEquals("error: couldn't forget that just now — try again", runAssistantTool("forget_fact", ToolArgs(json("factId" to "f1")), api, TurnScratch()))
     }
 }

@@ -5,6 +5,7 @@ import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
+import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -24,6 +25,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import tech.csalliance.unstuck.SettingsStore
+import tech.csalliance.unstuck.core.logic.BargeInController
 import java.time.Duration
 
 /**
@@ -63,7 +65,8 @@ class VoiceRealtimeClientTest {
         override fun stopPlayback() {}
         override fun duck() {}
         override fun restore() {}
-        override fun flushPlayback() {}
+        var flushes = 0
+        override fun flushPlayback() { flushes++ }
         override fun enqueue(pcm: ByteArray) {}
         override fun playbackQueued(): Boolean = false
         override fun outputBusy(): Boolean = false
@@ -115,12 +118,13 @@ class VoiceRealtimeClientTest {
     private fun client(
         engine: FakeEngine, factory: FakeFactory, states: MutableList<VoiceState>,
         errors: MutableList<String> = mutableListOf(),
+        captions: MutableList<Triple<String, String, Boolean>> = mutableListOf(),
         runTool: suspend (String, kotlinx.serialization.json.JsonObject) -> String = { _, _ -> "ok" },
     ) = VoiceRealtimeClient(
         proxyUrl = "wss://voice.example/ws", token = "t", model = "m", instructions = "i",
         tools = JsonArray(emptyList()), opening = "hello", audio = engine,
         runTool = runTool,
-        onState = { states += it }, onCaption = { _, _, _ -> }, onError = { errors += it },
+        onState = { states += it }, onCaption = { r, t, d -> captions += Triple(r, t, d) }, onError = { errors += it },
         socketFactory = factory,
     )
 
@@ -390,5 +394,184 @@ class VoiceRealtimeClientTest {
         assertEquals(listOf("rate limited"), errors)
         assertEquals(VoiceState.ERROR, states.last())
         assertTrue(c.isOpen)
+    }
+
+    // ── the CLIENT owns turn-taking (iOS builds 66–70, ported 2026-09-20):
+    // the wiring between the socket events and BargeIn.kt, whose decisions
+    // are pinned in :core BargeInControllerTest ──
+
+    private fun str(s: String) = Json.encodeToString(kotlinx.serialization.serializer<String>(), s)
+    private fun FakeFactory.speechStarted(item: String) = message("""{"type":"input_audio_buffer.speech_started","item_id":"$item"}""")
+    private fun FakeFactory.speechStopped() = message("""{"type":"input_audio_buffer.speech_stopped"}""")
+    private fun FakeFactory.completed(item: String, text: String) =
+        message("""{"type":"conversation.item.input_audio_transcription.completed","item_id":"$item","transcript":${str(text)}}""")
+    /** DashScope's live guess: `text` stays empty until the segment ends, `stash` is the cumulative guess. */
+    private fun FakeFactory.guess(item: String, stash: String) =
+        message("""{"type":"conversation.item.input_audio_transcription.delta","item_id":"$item","text":"","stash":${str(stash)}}""")
+    private fun FakeFactory.audio(id: String) = message("""{"type":"response.audio.delta","response_id":"$id","delta":"AAAAAA=="}""")
+    private fun idle(ms: Long) = shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(ms))
+    private fun FakeSocket.creates() = types().count { it == "response.create" }
+    private fun FakeSocket.deletes(): List<String> = sent.mapNotNull { raw ->
+        val ev = Json.parseToJsonElement(raw).jsonObject
+        if (ev["type"]?.jsonPrimitive?.contentOrNull != "conversation.item.delete") null else ev["item_id"]?.jsonPrimitive?.contentOrNull
+    }
+    private val capacityError = """{"type":"error","error":{"code":"COMMON_ERROR","message":"thread pool exausted max_workers 100"}}"""
+
+    private fun session(
+        states: MutableList<VoiceState> = mutableListOf(), errors: MutableList<String> = mutableListOf(),
+        captions: MutableList<Triple<String, String, Boolean>> = mutableListOf(), hook: ((String?) -> Unit)? = null,
+    ): Triple<VoiceRealtimeClient, FakeFactory, FakeEngine> {
+        val engine = FakeEngine(app)
+        val factory = FakeFactory()
+        val c = client(engine, factory, states, errors, captions)
+        c.onTransportEnded = hook
+        c.start()
+        factory.open()
+        return Triple(c, factory, engine)
+    }
+
+    @Test
+    fun `session update turns the server's interrupt and auto-reply off`() {
+        val (_, factory, _) = session()
+        val td = Json.parseToJsonElement(factory.socket!!.sent.first()).jsonObject["session"]!!.jsonObject["turn_detection"]!!.jsonObject
+        assertEquals("server_vad", td["type"]!!.jsonPrimitive.content)
+        assertFalse("the server never cuts a reply on its own VAD", td["interrupt_response"]!!.jsonPrimitive.boolean)
+        assertFalse("and never answers by itself", td["create_response"]!!.jsonPrimitive.boolean)
+    }
+
+    @Test
+    fun `a real turn is the user's caption and is asked for after the hold, an echo is deleted and never shown`() {
+        val captions = mutableListOf<Triple<String, String, Boolean>>()
+        val (_, factory, _) = session(captions = captions)
+        val s = factory.socket!!
+        // The greeting.
+        factory.created("r1"); factory.audio("r1"); factory.transcript("r1", "Taxi's at quarter to eight, after the gym.")
+        assertEquals(1, s.creates())
+        // Its echo, back through the mic while it plays: out of the conversation,
+        // nothing asked, nothing shown — the delete HELD until the next segment.
+        factory.speechStarted("echo"); factory.speechStopped()
+        factory.completed("echo", "taxi's at quarter to eight after the gym")
+        assertTrue("never the user's line", captions.none { it.first == "user" && it.second.isNotEmpty() })
+        assertEquals("nothing asked", 1, s.creates())
+        assertFalse("held", "echo" in s.deletes())
+        factory.done("r1")   // (also deletes the opening primer — its own item, not the echo's)
+        idle(VoiceAudioEngine.OUTPUT_TAIL_MS)
+        // The user's question, well after the reply: captioned, asked for
+        // once 500 ms of quiet have passed — not before.
+        idle(2_000)
+        factory.speechStarted("q")
+        assertTrue("the held delete goes out when the next segment starts", "echo" in s.deletes())
+        factory.speechStopped()
+        factory.completed("q", "what have I got left today")
+        assertEquals(listOf(Triple("user", "what have I got left today", true)), captions.filter { it.first == "user" && it.second.isNotEmpty() })
+        assertEquals("the hold is not up", 1, s.creates())
+        idle(BargeInController.TURN_HOLD_MS + 20)
+        assertEquals("asked once the hold elapsed", 2, s.creates())
+        idle(3_000)
+        assertEquals("never twice", 2, s.creates())
+    }
+
+    @Test
+    fun `the transcriber's live guess cuts a reply mid-segment on the loudspeaker`() {
+        val (_, factory, engine) = session()
+        val s = factory.socket!!
+        factory.created("r1"); factory.audio("r1"); factory.transcript("r1", "Looks pretty solid. You've got a few tasks wrapped up.")
+        factory.speechStarted("o")
+        factory.guess("o", "How will this")
+        assertEquals("filler only: could be anything", 0, s.types().count { it == "response.cancel" })
+        assertEquals(0, engine.flushes)
+        factory.guess("o", "How will this be like")
+        assertEquals("\"like\" the model never said: theirs — cut now", 1, s.types().count { it == "response.cancel" })
+        assertEquals(1, engine.flushes)
+        // The echo's live guess never cuts.
+        val (_, f2, e2) = session()
+        f2.created("r1"); f2.audio("r1"); f2.transcript("r1", "Looks pretty solid. You've got a few tasks wrapped up.")
+        f2.speechStarted("e")
+        f2.guess("e", "Looks pretty solid you've got a few")
+        assertEquals(0, f2.socket!!.types().count { it == "response.cancel" })
+        assertEquals(0, e2.flushes)
+    }
+
+    @Test
+    fun `the opening watchdog asks again once when no reply has started in 2 and a half seconds`() {
+        val (_, factory, _) = session()
+        val s = factory.socket!!
+        assertEquals(1, s.creates())
+        idle(VoiceRealtimeClient.OPENING_WATCHDOG_MS + 50)
+        assertEquals("one retry", 2, s.creates())
+        idle(VoiceRealtimeClient.OPENING_WATCHDOG_MS + 50)
+        assertEquals("only one", 2, s.creates())
+        // A reply that did start: no retry.
+        val (_, f2, _) = session()
+        f2.created("r1")
+        idle(VoiceRealtimeClient.OPENING_WATCHDOG_MS + 50)
+        assertEquals(1, f2.socket!!.creates())
+    }
+
+    // Dead on arrival → reconnect, not an error (iOS VoiceReconnectTests): the
+    // server failed a session 1 s after the socket opened ("thread pool
+    // exausted max_workers 100", device 2026-09-20 00:41) and the user saw
+    // "Socket is not connected"; the second try was fine.
+
+    @Test
+    fun `a server error before any reply is swallowed for the reconnect, and the drop that follows hands it to the owner`() {
+        val states = mutableListOf<VoiceState>()
+        val errors = mutableListOf<String>()
+        val ended = mutableListOf<String?>()
+        val (c, factory, _) = session(states, errors, hook = { ended += it })
+        factory.message(capacityError)
+        assertTrue(c.failedBeforeAnyReply)
+        assertTrue("not the user's problem yet", errors.isEmpty())
+        assertFalse(states.contains(VoiceState.ERROR))
+        // The socket closes right after: the owner hears, the screen shows nothing.
+        factory.listener!!.onFailure(factory.socket!!, RuntimeException("Socket is not connected"), null)
+        assertEquals(listOf<String?>("Socket is not connected"), ended)
+        assertTrue(errors.isEmpty())
+        assertFalse(states.contains(VoiceState.ERROR))
+        assertFalse(c.isOpen)
+    }
+
+    @Test
+    fun `the same error after a reply started is reported`() {
+        val states = mutableListOf<VoiceState>()
+        val errors = mutableListOf<String>()
+        val (c, factory, _) = session(states, errors, hook = { })
+        factory.created("r1")
+        factory.message(capacityError)
+        assertFalse(c.failedBeforeAnyReply)
+        assertEquals(listOf("thread pool exausted max_workers 100"), errors)
+        assertTrue(states.contains(VoiceState.ERROR))
+    }
+
+    @Test
+    fun `with no owner to reconnect the error is reported at once`() {
+        val states = mutableListOf<VoiceState>()
+        val errors = mutableListOf<String>()
+        val (c, factory, _) = session(states, errors, hook = null)
+        factory.message(capacityError)
+        assertFalse(c.failedBeforeAnyReply)
+        assertEquals(listOf("thread pool exausted max_workers 100"), errors)
+        assertTrue(states.contains(VoiceState.ERROR))
+    }
+
+    @Test
+    fun `a drop after the handshake before any reply is dead on arrival too, a clean close is not`() {
+        val states = mutableListOf<VoiceState>()
+        val errors = mutableListOf<String>()
+        val ended = mutableListOf<String?>()
+        val (c, factory, _) = session(states, errors, hook = { ended += it })
+        factory.listener!!.onFailure(factory.socket!!, RuntimeException("boom"), null)
+        assertTrue(c.failedBeforeAnyReply)
+        assertEquals(listOf<String?>("boom"), ended)
+        assertTrue("the owner reconnects; nothing shown", errors.isEmpty())
+        assertFalse(states.contains(VoiceState.ERROR))
+        // A clean close is the server hanging up, not a failure.
+        val states2 = mutableListOf<VoiceState>()
+        val ended2 = mutableListOf<String?>()
+        val (c2, f2, _) = session(states2, hook = { ended2 += it })
+        f2.listener!!.onClosed(f2.socket!!, 1000, "bye")
+        assertFalse(c2.failedBeforeAnyReply)
+        assertEquals(listOf<String?>(null), ended2)
+        assertEquals(VoiceState.CLOSED, states2.last())
     }
 }

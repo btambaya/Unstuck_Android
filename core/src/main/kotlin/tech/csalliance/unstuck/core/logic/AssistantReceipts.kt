@@ -155,7 +155,14 @@ private val ECHO_TOOLS = setOf(
     "rename_list", "archive_list", "delete_list", "edit_list_item", "remove_list_item", "set_list_item_done",
     "create_area", "rename_area", "delete_area", "create_tag", "rename_tag", "delete_tag",
     "unshare_task", "set_usable_minutes", "set_notification_level", "set_reminder_lead", "set_ritual",
+    // 2026-09-20 tooling rewrite (docs/assistant-tooling-rules.md §4): the new
+    // write tools whose `ok:` line already reads as a card.
+    "recolor_list", "pin_list_item", "leave_list", "set_task_reminder", "set_theme", "set_focus_defaults", "set_ambient_sound",
 )
+
+/** add_to_list names BOTH the item and the list (`ok: added "Milk" to "Groceries"`)
+ *  since 2026-09-20; the pre-rewrite `ok: added to "Groceries"` still decodes. */
+private val ADDED_TO_LIST_RE = Regex("^ok: added \"(.*)\" to \"(.*)\"")
 
 /** Build the receipt for one SUCCESSFUL tool call (result starts "ok").
  *  [tasks] resolves live entities for undo targets and quiet-win move counts
@@ -245,7 +252,16 @@ fun deriveReceipt(name: String, args: ReceiptArgs, result: String, tasks: List<T
         }
         "forget_fact" -> Receipt(ReceiptIcon.PENCIL, "Forgot: ${quotedFragment(result) ?: "that"}")
         "create_list" -> Receipt(ReceiptIcon.LIST, "Created list “${quotedFragment(result) ?: "list"}”")
-        "add_to_list" -> Receipt(ReceiptIcon.LIST, "Added to “${quotedFragment(result) ?: "list"}”")
+        "add_to_list" -> {
+            val m = ADDED_TO_LIST_RE.find(result)
+            if (m != null) Receipt(ReceiptIcon.LIST, "Added “${m.groupValues[1]}” to “${m.groupValues[2]}”")
+            else Receipt(ReceiptIcon.LIST, "Added to “${quotedFragment(result) ?: "list"}”")
+        }
+        // ── 2026-09-20 tooling rewrite ──
+        "restore_capture" -> Receipt(ReceiptIcon.PLUS, "Restored: ${quotedFragment(result) ?: "capture"}")
+        // `ok: finished focus on "X" — logged 12m[, task marked done]`: the card
+        // says whether the task was closed, since that is the part Undo can't reach.
+        "finish_focus" -> Receipt(ReceiptIcon.CHECK, "Focus finished: ${quotedFragment(result) ?: "task"}${if (result.contains("marked done")) " · done" else ""}")
         "promote_item_to_task" -> Receipt(ReceiptIcon.PLUS, "Promoted “${quotedFragment(result) ?: "item"}” to a task")
 
         // ── calls ("Unstuck calls you", Part B) — "Call booked Thu 14:45 — speak to James · 4 notes" ──

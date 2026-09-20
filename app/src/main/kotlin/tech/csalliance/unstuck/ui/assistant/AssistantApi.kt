@@ -23,6 +23,15 @@ import tech.csalliance.unstuck.sync.CallsClient
 // (create_task → schedule_task → delete_task in one turn), and a fire-and-forget
 // write behind a read produced "capture not found" and ghost blocks on iOS.
 //
+// EVERY WRITE REPORTS ITS REAL OUTCOME (2026-09-20 tooling rewrite,
+// docs/assistant-tooling-rules.md §1): a seam that returns Unit can silently
+// no-op (the row vanished between the executor's read and the write, a blank
+// body, a missing write layer) while the executor still answered `ok:` — and
+// the model repeated the lie to the user. So a mutation returns Boolean / the
+// id it created / null for "nothing happened", and the executor maps every
+// false to `error:`. The base row writes (upsertTask & co.) stay Unit because
+// they THROW on failure, which the harness turns into `error:` as well.
+//
 // AppViewModel implements it through `AppViewModelAssistantApi`
 // (AssistantToolsAppModel.kt); the unit tests run the SAME executor against an
 // in-memory fake (AssistantToolsTest).
@@ -30,6 +39,28 @@ import tech.csalliance.unstuck.sync.CallsClient
 data class CirclePerson(val name: String, val status: String)
 
 data class TaskShareInfo(val shareId: String, val recipientName: String, val level: String)
+
+/** What `get_settings` reads back — the same values the Settings screen shows.
+ *  Usable minutes live on the server (`user_preferences`) and are null until
+ *  the account has set them. Rituals are keyed by the tool's names. */
+data class AssistantSettingsSnapshot(
+    /** calm | balanced | coach */
+    val notificationLevel: String,
+    /** Default minutes before a scheduled task; 0 = off. */
+    val reminderLeadMin: Int,
+    val usableWeekdayMin: Int?,
+    val usableWeekendMin: Int?,
+    val focusDefaultMin: Int,
+    val focusOverrunMin: Int,
+    val focusSoftExit: Boolean,
+    val focusPauseReasons: Boolean,
+    /** system | light | dark */
+    val theme: String,
+    /** off | brown | pink */
+    val ambient: String,
+    /** morning / evening / friday / sunday → on? */
+    val rituals: Map<String, Boolean>,
+)
 
 /** The call_requests reads/writes the call tools need — [CallsClient] in
  *  production, a fake in tests. Writes that can lose a race return null for
@@ -85,7 +116,7 @@ interface AssistantApi {
     /** ISO-8601 instant for `createdAt` / `updatedAt`. */
     fun nowIso(): String
 
-    // ── tasks + blocks (committed locally before returning) ──
+    // ── tasks + blocks (committed locally before returning; they throw on failure) ──
     suspend fun upsertTask(t: TaskItem)
     suspend fun removeTask(id: String)
     /** A task that just went done → open is a loop-promoted shared-list item:
@@ -93,18 +124,27 @@ interface AssistantApi {
     suspend fun notifyTaskReopenedIfShared(t: TaskItem)
     suspend fun upsertBlock(b: CalBlock)
     suspend fun deleteBlock(id: String)
+    /** Per-task reminder lead override (minutes; 0 = off), null = the default. */
+    fun getTaskReminder(taskId: String): Int?
+    /** Set / clear (null) the per-task reminder override and re-arm the alarms. False = not saved. */
+    fun setTaskReminder(taskId: String, minutes: Int?): Boolean
 
-    // ── lists ──
+    // ── lists (every write answers whether the row was really written) ──
     /** → the new list's id (null when it could not be created). */
     suspend fun addCollection(name: String, color: String): String?
-    suspend fun addCollectionItem(collectionId: String, body: String)
-    /** Turn a list item into a task through the SAME path the list UI uses. */
-    suspend fun promoteItemToTask(collectionId: String, itemId: String, loop: Boolean, dueAt: String?)
-    suspend fun renameCollection(id: String, name: String)
-    suspend fun updateCollection(id: String, archived: Boolean?, color: String?)
-    suspend fun removeCollection(id: String)
-    suspend fun updateCollectionItem(collectionId: String, itemId: String, body: String?, done: Boolean?)
-    suspend fun removeCollectionItem(collectionId: String, itemId: String)
+    /** → the new item's id (null when the list is gone or the body is blank). */
+    suspend fun addCollectionItem(collectionId: String, body: String): String?
+    /** Turn a list item into a task through the SAME path the list UI uses.
+     *  → the new task's id (null when the list/item is gone or the guard refused). */
+    suspend fun promoteItemToTask(collectionId: String, itemId: String, loop: Boolean, dueAt: String?): String?
+    suspend fun renameCollection(id: String, name: String): Boolean
+    suspend fun updateCollection(id: String, archived: Boolean?, color: String?): Boolean
+    suspend fun removeCollection(id: String): Boolean
+    suspend fun updateCollectionItem(collectionId: String, itemId: String, body: String?, done: Boolean?): Boolean
+    suspend fun setCollectionItemPinned(collectionId: String, itemId: String, pinned: Boolean): Boolean
+    suspend fun removeCollectionItem(collectionId: String, itemId: String): Boolean
+    /** Leave a list someone else shared with the user. TRUE only when the server confirmed it. */
+    suspend fun leaveCollection(id: String): Boolean
     /** Unknown → false (the web's use-assistant-api rule); else editable unless viewer. */
     suspend fun canEditCollection(id: String): Boolean
     /** Rename / archive / delete are OWNER-only — in the list UI (the pencil,
@@ -117,7 +157,7 @@ interface AssistantApi {
 
     // ── sharing ──
     fun getShareCandidates(): List<ShareCandidate>
-    /** Stage a share for the USER to confirm on screen. Never shares. */
+    /** Stage a share (task or list) for the USER to confirm on screen. Never shares. */
     fun stageShare(p: PendingShare)
     fun getCirclePeople(): List<CirclePerson>
     suspend fun listTaskShares(taskId: String): List<TaskShareInfo>
@@ -130,6 +170,8 @@ interface AssistantApi {
      *  finished or skipped — the same flag the in-thread interview keeps).
      *  Gates the voice opening primer's intro; `finish_interview` clears it. */
     fun interviewPending(): Boolean = false
+    /** Close the intro for good (local flag + the server). False = no account to mark. */
+    fun markInterviewDone(): Boolean = false
     /** Throws `ProfileFactSaveError` — the executor tells a text rejection
      *  (Empty / InstructionLike) from a store failure (StoreFailed). */
     suspend fun saveProfileFact(category: String?, fact: String, whenIso: String?): ProfileFact
@@ -145,34 +187,44 @@ interface AssistantApi {
     fun getArchivedCaptureIds(): Set<String>
     suspend fun upsertCapture(c: Capture)
     suspend fun removeCapture(id: String)
-    /** Device-local cache + the queued server write. */
-    fun archiveCapture(id: String, archived: Boolean)
+    /** Device-local cache + the queued server write. False when the cache did not take it. */
+    fun archiveCapture(id: String, archived: Boolean): Boolean
 
-    // ── focus ──
+    // ── focus (false = there was no session to act on / nothing was written) ──
     suspend fun getLiveFocus(): LiveSession?
-    suspend fun startFocus(taskId: String, estimateMin: Int?, occurrenceBlockId: String?)
-    suspend fun pauseFocus()
-    suspend fun resumeFocus()
-    suspend fun extendFocus(minutes: Int)
+    suspend fun startFocus(taskId: String, estimateMin: Int?, occurrenceBlockId: String?): Boolean
+    suspend fun pauseFocus(): Boolean
+    suspend fun resumeFocus(): Boolean
+    suspend fun extendFocus(minutes: Int): Boolean
+    /** End the running session and LOG it — the Focus screen's Done / Stop here
+     *  path; markDone also closes the task (today's occurrence for a repeat). */
+    suspend fun finishFocus(markDone: Boolean): Boolean
     /** Abandon the running session WITHOUT logging it. */
-    suspend fun cancelFocus()
+    suspend fun cancelFocus(): Boolean
 
     // ── navigation ──
     fun navigate(screen: String, id: String?)
 
-    // ── areas + tags ──
-    suspend fun addArea(name: String, color: String?)
-    suspend fun updateArea(id: String, name: String?, color: String?)
-    suspend fun removeArea(id: String)
-    suspend fun addTag(name: String)
-    suspend fun updateTag(id: String, name: String?)
-    suspend fun removeTag(id: String)
+    // ── areas + tags (false = the row was gone) ──
+    suspend fun addArea(name: String, color: String?): Boolean
+    suspend fun updateArea(id: String, name: String?, color: String?): Boolean
+    suspend fun removeArea(id: String): Boolean
+    suspend fun addTag(name: String): Boolean
+    suspend fun updateTag(id: String, name: String?): Boolean
+    suspend fun removeTag(id: String): Boolean
 
     // ── settings (the REAL outcome — false makes the contract's "could not save" reachable) ──
+    fun getSettings(): AssistantSettingsSnapshot
     suspend fun setUsableMinutes(weekday: Int?, weekend: Int?): Boolean
     suspend fun setNotificationLevel(level: String): Boolean
     suspend fun setReminderLead(minutes: Int): Boolean
-    fun setRitual(ritual: String, on: Boolean)
+    fun setRitual(ritual: String, on: Boolean): Boolean
+    /** system | light | dark */
+    fun setTheme(theme: String): Boolean
+    /** off | brown | pink */
+    fun setAmbientSound(sound: String): Boolean
+    /** Only the non-null fields change. */
+    fun setFocusDefaults(defaultMinutes: Int?, overrunMinutes: Int?, softExit: Boolean?, pauseReasons: Boolean?): Boolean
 
     // ── calls ("Unstuck calls you") ──
     fun currentUserId(): String?

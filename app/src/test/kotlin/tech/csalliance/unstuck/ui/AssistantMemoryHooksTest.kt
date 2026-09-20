@@ -369,7 +369,7 @@ class AssistantMemoryHooksTest {
         val vm = vm()
         val created = vm.runAssistantTool("create_list", buildJsonObject { put("name", "Shopping") }, HashMap(), HashMap())
         val id = Regex("id=(\\S+)").find(created)!!.groupValues[1].trimEnd(']')
-        assertEquals("ok: added to \"Shopping\"", vm.tool("add_to_list", buildJsonObject { put("listId", id); put("body", "Milk") }))
+        assertTrue(vm.tool("add_to_list", buildJsonObject { put("listId", id); put("body", "Milk") }).startsWith("ok: added \"Milk\" to \"Shopping\" id="))
         // No dispatcher hop between the two calls — the harness runs them back to back.
         assertTrue("the read must see the write", vm.tool("get_lists", buildJsonObject { put("listId", id) }).contains("Milk"))
         vm.tool("rename_list", buildJsonObject { put("listId", id); put("name", "Groceries") })

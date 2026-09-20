@@ -24,6 +24,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import tech.csalliance.unstuck.core.logic.PendingShare
 import tech.csalliance.unstuck.core.logic.ShareOutcome
+import tech.csalliance.unstuck.core.logic.ShareSubject
 import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
@@ -44,6 +45,11 @@ fun ShareConfirmCard(
     val done = pending.outcome == ShareOutcome.SHARED
     val dismissed = pending.outcome == ShareOutcome.DISMISSED
     val failed = pending.outcome == ShareOutcome.FAILED
+    // share_list (2026-09-20) stages through the same card: a list share names
+    // a role (can edit / can view) instead of a task level, and hands over the
+    // list's items rather than one task's title.
+    val isList = pending.subject == ShareSubject.LIST
+    val accessLabel = if (isList) (if (pending.role == "editor") "can edit" else "can view") else pending.level.ownerLabel
 
     Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface)
@@ -64,13 +70,14 @@ fun ShareConfirmCard(
                 withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append("“${pending.taskName}”") }
                 append(" with ")
                 withStyle(SpanStyle(fontWeight = FontWeight.SemiBold)) { append(pending.recipientName) }
-                withStyle(SpanStyle(color = c.ink2)) { append(" — ${pending.level.ownerLabel}") }
+                withStyle(SpanStyle(color = c.ink2)) { append(" — $accessLabel") }
             },
             style = UFont.sans(13), color = c.ink,
         )
         if (!done && !dismissed) {
             Text(
-                "They'll see this task's title and whether it's done. Nothing else is shared.",
+                if (isList) "They'll see the list and everything on it${if (pending.role == "editor") ", and can add and tick items" else ""}. Nothing else is shared."
+                else "They'll see this task's title and whether it's done. Nothing else is shared.",
                 style = UFont.sans(11), color = c.ink3,
             )
             if (failed) {
@@ -98,7 +105,8 @@ fun ShareConfirmCard(
         }
         if (done) {
             Text(
-                "Manage or revoke it any time from the task's share menu.",
+                if (isList) "Manage or revoke it any time from the list's share sheet."
+                else "Manage or revoke it any time from the task's share menu.",
                 style = UFont.sans(12), color = c.ink3,
             )
         }

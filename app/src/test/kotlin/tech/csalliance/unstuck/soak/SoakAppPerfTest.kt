@@ -30,6 +30,7 @@ import tech.csalliance.unstuck.sync.ChatMessage
 import tech.csalliance.unstuck.sync.ToolCall
 import tech.csalliance.unstuck.sync.ToolFunction
 import tech.csalliance.unstuck.ui.assistant.AssistantApi
+import tech.csalliance.unstuck.ui.assistant.AssistantSettingsSnapshot
 import tech.csalliance.unstuck.ui.assistant.AssistantCallStore
 import tech.csalliance.unstuck.ui.assistant.CirclePerson
 import tech.csalliance.unstuck.ui.assistant.GatewayInputs
@@ -202,14 +203,18 @@ class SoakAppPerfTest {
         override suspend fun notifyTaskReopenedIfShared(t: TaskItem) = Unit
         override suspend fun upsertBlock(b: CalBlock) = Unit
         override suspend fun deleteBlock(id: String) = Unit
+        override fun getTaskReminder(taskId: String): Int? = null
+        override fun setTaskReminder(taskId: String, minutes: Int?) = false
         override suspend fun addCollection(name: String, color: String): String? = null
-        override suspend fun addCollectionItem(collectionId: String, body: String) = Unit
-        override suspend fun promoteItemToTask(collectionId: String, itemId: String, loop: Boolean, dueAt: String?) = Unit
-        override suspend fun renameCollection(id: String, name: String) = Unit
-        override suspend fun updateCollection(id: String, archived: Boolean?, color: String?) = Unit
-        override suspend fun removeCollection(id: String) = Unit
-        override suspend fun updateCollectionItem(collectionId: String, itemId: String, body: String?, done: Boolean?) = Unit
-        override suspend fun removeCollectionItem(collectionId: String, itemId: String) = Unit
+        override suspend fun addCollectionItem(collectionId: String, body: String): String? = null
+        override suspend fun promoteItemToTask(collectionId: String, itemId: String, loop: Boolean, dueAt: String?): String? = null
+        override suspend fun renameCollection(id: String, name: String) = false
+        override suspend fun updateCollection(id: String, archived: Boolean?, color: String?) = false
+        override suspend fun removeCollection(id: String) = false
+        override suspend fun updateCollectionItem(collectionId: String, itemId: String, body: String?, done: Boolean?) = false
+        override suspend fun setCollectionItemPinned(collectionId: String, itemId: String, pinned: Boolean) = false
+        override suspend fun removeCollectionItem(collectionId: String, itemId: String) = false
+        override suspend fun leaveCollection(id: String) = false
         override suspend fun canEditCollection(id: String) = true
         override suspend fun isCollectionOwner(id: String) = true
         override fun getShareCandidates(): List<ShareCandidate> = emptyList()
@@ -227,24 +232,29 @@ class SoakAppPerfTest {
         override fun getArchivedCaptureIds(): Set<String> = emptySet()
         override suspend fun upsertCapture(c: Capture) = Unit
         override suspend fun removeCapture(id: String) = Unit
-        override fun archiveCapture(id: String, archived: Boolean) = Unit
+        override fun archiveCapture(id: String, archived: Boolean) = false
         override suspend fun getLiveFocus(): LiveSession? = null
-        override suspend fun startFocus(taskId: String, estimateMin: Int?, occurrenceBlockId: String?) = Unit
-        override suspend fun pauseFocus() = Unit
-        override suspend fun resumeFocus() = Unit
-        override suspend fun extendFocus(minutes: Int) = Unit
-        override suspend fun cancelFocus() = Unit
+        override suspend fun startFocus(taskId: String, estimateMin: Int?, occurrenceBlockId: String?) = false
+        override suspend fun pauseFocus() = false
+        override suspend fun resumeFocus() = false
+        override suspend fun extendFocus(minutes: Int) = false
+        override suspend fun finishFocus(markDone: Boolean) = false
+        override suspend fun cancelFocus() = false
         override fun navigate(screen: String, id: String?) = Unit
-        override suspend fun addArea(name: String, color: String?) = Unit
-        override suspend fun updateArea(id: String, name: String?, color: String?) = Unit
-        override suspend fun removeArea(id: String) = Unit
-        override suspend fun addTag(name: String) = Unit
-        override suspend fun updateTag(id: String, name: String?) = Unit
-        override suspend fun removeTag(id: String) = Unit
+        override suspend fun addArea(name: String, color: String?) = false
+        override suspend fun updateArea(id: String, name: String?, color: String?) = false
+        override suspend fun removeArea(id: String) = false
+        override suspend fun addTag(name: String) = false
+        override suspend fun updateTag(id: String, name: String?) = false
+        override suspend fun removeTag(id: String) = false
+        override fun getSettings() = AssistantSettingsSnapshot("balanced", 10, null, null, 25, 5, true, true, "system", "off", emptyMap())
         override suspend fun setUsableMinutes(weekday: Int?, weekend: Int?) = true
         override suspend fun setNotificationLevel(level: String) = true
         override suspend fun setReminderLead(minutes: Int) = true
-        override fun setRitual(ritual: String, on: Boolean) = Unit
+        override fun setRitual(ritual: String, on: Boolean) = false
+        override fun setTheme(theme: String) = false
+        override fun setAmbientSound(sound: String) = false
+        override fun setFocusDefaults(defaultMinutes: Int?, overrunMinutes: Int?, softExit: Boolean?, pauseReasons: Boolean?) = false
         override fun currentUserId(): String? = "me"
         override fun callStore(): AssistantCallStore? = null
     }

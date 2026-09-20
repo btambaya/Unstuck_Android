@@ -4,6 +4,35 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
+## 2026-09-20 — assistant v2 (vc96 / 0.5.12): one tool registry, tools that report real outcomes, and the new voice turn-taking
+
+Ported from the iOS work of 2026-09-19/20 (see unstuck/docs/voice-turn-taking.md and
+unstuck/docs/assistant-tooling-rules.md — the shared contracts).
+- **Tools**: the hand-maintained `VoiceToolSchema` specs and `ContractDiffTest` are
+  gone. `ToolRegistry.generated.kt` (from `unstuck/scripts/gen-tool-registry.mjs`,
+  71 tools, one hash shared with web + iOS) is the schema source; `RegistryTools`
+  parses it for the voice session and call mode; `ToolRegistryParityTest` pins the
+  executor to it. Every seam method reports an outcome (Unit → Boolean/id), every
+  executor returns `ok:` only when the store confirmed it, partial results are
+  spelled out, 13 new tools (find_tasks, set_task_reminder, finish_focus,
+  recolor_list, leave_list, share_list (staged), pin_list_item, restore_capture,
+  get_settings, set_theme, set_focus_defaults, set_ambient_sound, finish_interview
+  as an executor case). Guards: the harness's write rule is `ok:`-prefixed and not
+  read-only/navigation; the corrective wording is the shared one; the voice
+  integrity guard uses the same rule.
+- **Voice**: `BargeIn.kt` is the port of iOS `BargeIn.swift` (64 cases): the server's
+  own turn detection is OFF (`interrupt_response`/`create_response` false), the client
+  asks for every reply from the completed transcript with a 500 ms hold and never
+  before a cancelled reply's done, the transcriber's live guess (`stash`) cuts a
+  reply mid-segment, echo/no-word items are deleted only when the next segment
+  starts, echo scoring v2 is the backstop behind the platform AEC. The loudspeaker
+  is full-duplex again (talk-over works; the platform's VOICE_COMMUNICATION AEC/NS/
+  AGC were already wired — logged as `voice engine route=… aec=…`). Opening
+  watchdog + quiet reconnect when the server fails before any reply.
+- Tests: 1443 unit tests green (`:core:test` + `:app:testDebugUnitTest`).
+- Ship: vc96 to Firebase (the two testers). On-device validation of loudspeaker
+  talk-over pending.
+
 ## 2026-09-18 — the Start-Next hero is gone from the home
 
 The lavender "Start next" card (area · task, first-step headline, estimate, Focus, "Pick another") and its all-clear twin ("Nothing to start / You're all clear. / Add one thing") no longer render on Today, on iOS and Android alike. The home is now: top bar → date eyebrow → one-line greeting → "This week · focused" pill → the assistant input pill → the Today list (filters + rows). Focus stays reachable from every task row (detail / context menu) and the editor's Focus button; the Start-Next **home-screen widget** (`surface/StartNextWidget.kt`, `pickStartNext`) is untouched.

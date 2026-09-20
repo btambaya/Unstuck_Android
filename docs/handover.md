@@ -4,7 +4,28 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
-## 2026-09-20 (later) — calls build-out, Android half (parity with iOS; NOT bumped, not committed)
+## 2026-09-20 (evening) — vc98 / 0.5.14: a promised action is a claim; the voice prompt gets the CALLS rule
+
+Ahmad asked Talk (iOS) "call me in one minute and remind me…" and no call came:
+the assistant said "I'll set a reminder for one minute from now" and called no
+tool (`assistant_turns`, 15:18 UTC). Same holes existed here, fixed in lockstep
+with web (commit 40fbc94) and iOS (build 73):
+
+- `core/logic/AssistantGuard.kt` — a new claim pattern: any `I'll / I will /
+  I'm going to <tool verb>` (set, call, remind, book, add, move, mark, share…)
+  is an action claim, so a promise made INSTEAD of a tool call is bounced into
+  the real call by the existing corrective. Offers ("do you want me to call
+  you?") and refusals still pass. Test: `AssistantGuardTest.promisesOfAnActionAreClaims`.
+- `ui/assistant/AssistantContext.kt` — the voice honesty block now carries the
+  CALLS rule (verbatim from web `CALLS_RULE`): "call me at/in …" means
+  `request_call` NOW with `when` from `context.today` + `context.now`, reminders
+  verbatim as notes, a call exists only on `ok`, never book an unasked call, a
+  bare "remind me at 5" is a scheduled task.
+- Rules of record: `unstuck/docs/assistant-tooling-rules.md` §2 + §3.
+
+Tests: 1472 (core + app) green. Shipped to Firebase (2 testers) as vc98.
+
+## 2026-09-20 (later) — calls build-out, Android half (parity with iOS) — SHIPPED vc97 / 0.5.13 (commit acb53f2)
 
 The Android section of `unstuck/docs/calls-build-out.md`, against the LIVE server
 contract in `unstuck/docs/handbook/07-backend.md` "Calls" (migration 072:

@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 97
-        versionName = "0.5.13"
+        versionCode = 98
+        versionName = "0.5.14"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)

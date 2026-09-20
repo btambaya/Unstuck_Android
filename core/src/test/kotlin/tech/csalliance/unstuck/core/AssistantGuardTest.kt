@@ -185,4 +185,15 @@ class AssistantGuardTest {
     @Test fun `never blanks a reply that is only an apology`() {
         assertEquals("Sorry about that.", stripSelfCorrection("Sorry about that."))
     }
+
+    @Test fun promisesOfAnActionAreClaims() {
+        // Voice, 2026-09-20: "call me in one minute" → "I'll set a reminder for
+        // one minute from now" and no request_call. A promise IS a claim.
+        assertTrue(looksLikeActionClaim("Sure, just testing — I'll set a reminder for one minute from now."))
+        assertTrue(looksLikeActionClaim("I'll call you at three about James."))
+        assertTrue(looksLikeActionClaim("I'm going to add that to your list."))
+        assertTrue(looksLikeActionClaim("I will remind you before the dentist."))
+        assertFalse(looksLikeActionClaim("Do you want me to call you before the dentist?"))
+        assertFalse(looksLikeActionClaim("I can't book that outside your call hours — want 9am tomorrow?"))
+    }
 }

@@ -15,6 +15,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import tech.csalliance.unstuck.core.logic.CallNotificationKind
 import tech.csalliance.unstuck.core.logic.CallOutcome
 import tech.csalliance.unstuck.core.logic.IncomingCallPayload
 import tech.csalliance.unstuck.core.logic.PendingOutcome
@@ -48,15 +49,18 @@ class CallRingerTest {
     private fun fire(action: String, callId: String = payload.callId) =
         MissedCallReceiver().onReceive(context, MissedCallReceiver.intent(context, action, callId))
 
-    @Test fun `the missed alarm settles MISSED once, posts the notice, clears the ring`() {
+    @Test fun `the missed alarm settles MISSED once, hands the notice to the queue, clears the ring`() {
         ring()
         fire(MissedCallReceiver.ACTION_MISSED)
         assertEquals(listOf(CallOutcome.MISSED), queued().map { it.outcome })
         assertNull("ring notification gone", shadowOf(nm).getNotification(NotifIds.CALL))
-        val notice: Notification = shadowOf(nm).getNotification(NotifIds.callResult(payload.callId))
-        assertNotNull(notice)
-        assertEquals("I called about speak to James", notice.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
-        assertEquals("A\nB", notice.extras.getCharSequence(Notification.EXTRA_BIG_TEXT).toString())
+        // The "I called about X" notice is NOT posted here: it rides with the
+        // queued report and CallOutcomeStore posts it only once call-outcome
+        // answers `retry: false` (a first miss is re-rung by the server).
+        assertNull(shadowOf(nm).getNotification(NotifIds.callResult(payload.callId)))
+        val item = queued().single()
+        assertEquals(CallNotificationKind.MISSED, item.notify)
+        assertEquals(payload, item.ringPayload)
         assertNull(CallRinger.activeCallId(context, now))
         assertNull(CallRinger.ringing(context, now))
         assertTrue(shadowOf(context.getSystemService(AlarmManager::class.java)).scheduledAlarms.isEmpty())
@@ -180,15 +184,13 @@ class CallRingerTest {
         assertTrue(queued().isEmpty())
     }
 
-    @Test fun `recover reports the pending missed, posts the notice, clears the ring, and is idempotent`() {
+    @Test fun `recover reports the pending missed with its deferred notice, clears the ring, and is idempotent`() {
         ringAgo(CallRinger.MISSED_AFTER_MS + CallRinger.RING_STALE_GRACE_MS + 1_000)
         assertEquals(CallOutcome.MISSED, CallRinger.recover(context))
         assertEquals(listOf(CallOutcome.MISSED), queued().map { it.outcome })
-        assertEquals(
-            "I called about speak to James",
-            shadowOf(nm).getNotification(NotifIds.callResult(payload.callId))
-                .extras.getCharSequence(Notification.EXTRA_TITLE).toString(),
-        )
+        assertEquals("the notice rides with the report", CallNotificationKind.MISSED, queued().single().notify)
+        assertEquals(payload, queued().single().ringPayload)
+        assertNull("posted only when the server settles it", shadowOf(nm).getNotification(NotifIds.callResult(payload.callId)))
         assertNull(shadowOf(nm).getNotification(NotifIds.CALL))
         assertTrue(shadowOf(context.getSystemService(AlarmManager::class.java)).scheduledAlarms.isEmpty())
         // A second launch (or the FCM path) must not report it twice.

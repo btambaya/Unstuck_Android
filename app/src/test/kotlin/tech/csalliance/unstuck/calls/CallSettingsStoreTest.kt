@@ -10,6 +10,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import tech.csalliance.unstuck.core.logic.CallProactivePrefs
 import tech.csalliance.unstuck.core.logic.CallSettings
 
 /**
@@ -90,5 +91,44 @@ class CallSettingsStoreTest {
 
     @Test fun leadOptionsMatchIOS() {
         assertEquals(listOf(5, 10, 15, 30), CallSettingsStore.LEAD_OPTIONS)
+    }
+
+    // ── proactive calls (server-backed; the device cache) + the ring nudge ──
+
+    @Test fun proactivePrefsRoundTripPerAccountAndDefaultToOff() {
+        assertEquals(CallProactivePrefs.DEFAULTS, CallSettingsStore.loadProactive(context, "u1"))
+        val p = CallProactivePrefs(morningEnabled = true, morningTime = "07:45", eveningEnabled = true, eveningTime = "20:30", afterBlockEnabled = true)
+        CallSettingsStore.saveProactive(context, "u1", p)
+        assertEquals(p, CallSettingsStore.loadProactive(context, "u1"))
+        assertEquals("another account sees the defaults", CallProactivePrefs.DEFAULTS, CallSettingsStore.loadProactive(context, "u2"))
+        prefs().edit().putString("calls.proactive.u1", "{corrupt").apply()
+        assertEquals(CallProactivePrefs.DEFAULTS, CallSettingsStore.loadProactive(context, "u1"))
+    }
+
+    @Test fun pendingPushFlagIsPerAccountAndClearsCleanly() {
+        assertFalse(CallSettingsStore.pendingProactivePush(context, "u1"))
+        CallSettingsStore.setPendingProactivePush(context, "u1", true)
+        assertTrue(CallSettingsStore.pendingProactivePush(context, "u1"))
+        assertFalse(CallSettingsStore.pendingProactivePush(context, "u2"))
+        CallSettingsStore.setPendingProactivePush(context, "u1", false)
+        assertFalse(CallSettingsStore.pendingProactivePush(context, "u1"))
+        assertFalse("cleared, not written false", prefs().contains("calls.proactivePending.u1"))
+    }
+
+    @Test fun ringNudgeDismissalPersistsPerAccount() {
+        assertFalse(CallSettingsStore.ringNudgeDismissed(context, "u1"))
+        CallSettingsStore.setRingNudgeDismissed(context, "u1", true)
+        assertTrue(CallSettingsStore.ringNudgeDismissed(context, "u1"))
+        assertFalse(CallSettingsStore.ringNudgeDismissed(context, "u2"))
+    }
+
+    @Test fun clearDropsTheProactiveCacheAndTheNudgeToo() {
+        CallSettingsStore.saveProactive(context, "u1", CallProactivePrefs(afterBlockEnabled = true))
+        CallSettingsStore.setPendingProactivePush(context, "u1", true)
+        CallSettingsStore.setRingNudgeDismissed(context, "u1", true)
+        CallSettingsStore.clear(context, "u1")
+        assertEquals(CallProactivePrefs.DEFAULTS, CallSettingsStore.loadProactive(context, "u1"))
+        assertFalse(CallSettingsStore.pendingProactivePush(context, "u1"))
+        assertFalse(CallSettingsStore.ringNudgeDismissed(context, "u1"))
     }
 }

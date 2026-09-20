@@ -192,4 +192,25 @@ class PushTest {
         assertEquals("No notes on this one.", n.extras.getCharSequence(Notification.EXTRA_BIG_TEXT).toString())
         assertEquals("unstuck://today", shadowOf(n.contentIntent).savedIntent.data.toString())
     }
+
+    // ── callKind + endTime (calls build-out 2026-09-20) ──
+
+    @Test fun `a proactive ring carries its callKind and endTime into the persisted ring, and kind stays the discriminator`() {
+        val after = contract + mapOf("callKind" to "after_block", "endTime" to "11:30")
+        assertTrue(handle(after))
+        val ringing = CallRinger.ringing(context, now)!!
+        assertEquals(tech.csalliance.unstuck.core.model.CallKind.AFTER_BLOCK, ringing.resolvedKind)
+        assertEquals("11:30", ringing.endTime)
+        assertNotNull(shadowOf(nm).getNotification(NotifIds.CALL))
+        CallRinger.clear(context)
+        // A morning call has no anchor: it rings even though nothing is checked.
+        val morning = mapOf("kind" to "call", "callKind" to "morning", "callId" to "m1", "title" to "Morning plan", "label" to "Morning plan", "scheduledAt" to "2026-09-09T13:45:00Z")
+        assertTrue(handle(morning, env = ringEnv.copy(anchorExists = null)))
+        assertEquals(tech.csalliance.unstuck.core.model.CallKind.MORNING, CallRinger.ringing(context, now)!!.resolvedKind)
+        CallRinger.clear(context)
+        // A server that wrote the row's kind into `kind` still rings; a foreign kind still falls through.
+        assertTrue(handle(mapOf("kind" to "evening", "callId" to "e1", "title" to "Evening wrap-up", "scheduledAt" to "2026-09-09T13:45:00Z"), env = ringEnv.copy(anchorExists = null)))
+        assertEquals(tech.csalliance.unstuck.core.model.CallKind.EVENING, CallRinger.ringing(context, now)!!.resolvedKind)
+        assertFalse(handle(mapOf("kind" to "morning_brief", "callId" to "x", "title" to "y")))
+    }
 }

@@ -162,7 +162,10 @@ class IncomingCallActivityTest {
         shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(31))
         assertEquals(listOf(CallOutcome.MISSED), queued().map { it.outcome })
         assertTrue(a.isFinishing)
-        assertNotNull(shadowOf(nm).getNotification(NotifIds.callResult(payload.callId)))
+        // The notice is deferred with the report (posted by CallOutcomeStore on `retry: false`).
+        assertNull(shadowOf(nm).getNotification(NotifIds.callResult(payload.callId)))
+        assertEquals(tech.csalliance.unstuck.core.logic.CallNotificationKind.MISSED, queued().single().notify)
+        assertEquals(payload, queued().single().ringPayload)
         MissedCallReceiver().onReceive(context, MissedCallReceiver.intent(context, MissedCallReceiver.ACTION_MISSED, payload.callId))
         assertEquals(1, queued().size)
     }

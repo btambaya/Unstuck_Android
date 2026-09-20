@@ -99,8 +99,11 @@ import tech.csalliance.unstuck.ui.assistant.callVoiceToolsJson
 import tech.csalliance.unstuck.ui.assistant.CallToolLogic
 import tech.csalliance.unstuck.calls.CallSettingsStore
 import tech.csalliance.unstuck.core.logic.CallScript
+import tech.csalliance.unstuck.core.logic.CallProactivePrefs
+import tech.csalliance.unstuck.core.logic.CallProactiveSync
 import tech.csalliance.unstuck.core.logic.CallSettings
 import tech.csalliance.unstuck.core.logic.CallSettingsLogic
+import tech.csalliance.unstuck.core.logic.TestCallLogic
 import tech.csalliance.unstuck.sync.CallRequest
 import tech.csalliance.unstuck.sync.CallRequestsMirror
 import tech.csalliance.unstuck.sync.CallsClient
@@ -234,6 +237,16 @@ class AppViewModel(
      *  hours and default lead (calls/CallSettingsStore, same per-uid file as the
      *  rituals; scrubbed at sign-out). Push.kt's decide() reads it on receipt. */
     val callSettings: StateFlow<tech.csalliance.unstuck.core.logic.CallSettings> = _callSettings.asStateFlow()
+
+    /** The account's proactive calls (morning plan / evening wrap-up / check-in
+     *  after a block) — `notification_preferences.call_*`, cached per uid
+     *  (CallSettingsStore.loadProactive) and reconciled after every pull. */
+    private val _callProactive = MutableStateFlow(CallProactivePrefs.DEFAULTS)
+    val callProactivePrefs: StateFlow<CallProactivePrefs> = _callProactive.asStateFlow()
+
+    /** The one-time Settings › Calls "allow full-screen calls" nudge was dismissed. */
+    private val _ringNudgeDismissed = MutableStateFlow(false)
+    val ringNudgeDismissed: StateFlow<Boolean> = _ringNudgeDismissed.asStateFlow()
     private val _receiptUndosInFlight = MutableStateFlow<Set<String>>(emptySet())
     /** Receipt undos whose round-trip is still running (keyed
      *  [tech.csalliance.unstuck.ui.assistant.receiptUndoKey]) — the CANCEL_CALL
@@ -2744,10 +2757,14 @@ class AppViewModel(
             _interviewDone.value = false
             _struggles.value = emptyList()
             _callSettings.value = tech.csalliance.unstuck.core.logic.CallSettings()
+            _callProactive.value = CallProactivePrefs.DEFAULTS
+            _ringNudgeDismissed.value = false
             return
         }
         _callSettings.value = runCatching { tech.csalliance.unstuck.calls.CallSettingsStore.load(graph.appContext, uid) }
             .getOrDefault(tech.csalliance.unstuck.core.logic.CallSettings())
+        _callProactive.value = runCatching { CallSettingsStore.loadProactive(graph.appContext, uid) }.getOrDefault(CallProactivePrefs.DEFAULTS)
+        _ringNudgeDismissed.value = runCatching { CallSettingsStore.ringNudgeDismissed(graph.appContext, uid) }.getOrDefault(false)
         _rituals.value = PAPrefsLogic.decodeRituals(paPrefs.getString(paKey(PAPrefsLogic.RITUALS_KEY, uid), null))
         _dismissedMoments.value = PAPrefsLogic.parseDismissed(paPrefs.getString(paKey(PAPrefsLogic.DISMISSED_KEY, uid), null))
         _interviewDone.value = paPrefs.getBoolean(paKey(INTERVIEW_DONE_KEY, uid), false)
@@ -3075,6 +3092,8 @@ class AppViewModel(
         runCatching { tech.csalliance.unstuck.calls.CallOutcomeStore.clear(graph.appContext) }
         runCatching { paPrefs.edit().clear().apply() }
         _callSettings.value = tech.csalliance.unstuck.core.logic.CallSettings()
+        _callProactive.value = CallProactivePrefs.DEFAULTS
+        _ringNudgeDismissed.value = false
         _rituals.value = RitualPrefs.DEFAULTS
         _dismissedMoments.value = emptyList()
         _interviewDone.value = false
@@ -3582,9 +3601,9 @@ class AppViewModel(
      *  never advertise a tool the executor lacks (ToolRegistryParityTest). */
     fun voiceTools(): JsonArray = talkVoiceToolsJson()
 
-    /** Tool schemas for a CALL session (CallVoiceService): the same registry
-     *  filtered to core `CallScript.callTools()` plus the call-only snooze_call. */
-    fun callVoiceTools(): JsonArray = callVoiceToolsJson(CallScript.callTools())
+    /** Tool schemas for a CALL session: EVERY voice tool plus the call-only
+     *  snooze_call — the call is the full assistant (core `CallScript.callToolNames`). */
+    fun callVoiceTools(): JsonArray = callVoiceToolsJson()
 
     /** The app-side seams an ANSWERED call's conversation runs on (instructions,
      *  tools, the executor, the access token). CallVoiceService owns the socket
@@ -3613,6 +3632,60 @@ class AppViewModel(
         _callSettings.value = next
         val uid = currentUid() ?: return
         runCatching { CallSettingsStore.save(graph.appContext, uid, next) }
+    }
+
+    /** A USER change from Settings › Calls to the proactive calls: cache it for
+     *  this account, mark it pending, and push it to `notification_preferences`
+     *  now (best-effort — a failure leaves it pending for the next pull, which
+     *  re-pushes rather than pulling the server's older value over it). */
+    fun setCallProactivePrefs(p: CallProactivePrefs) {
+        _callProactive.value = p
+        val uid = currentUid() ?: return
+        runCatching {
+            CallSettingsStore.saveProactive(graph.appContext, uid, p)
+            CallSettingsStore.setPendingProactivePush(graph.appContext, uid, true)
+        }
+        viewModelScope.launch { runCatching { pushCallProactivePrefs(uid) } }
+    }
+
+    /** Settings › Calls opened: pull the account's proactive prefs (a toggle
+     *  made on the web / iPhone reaches this phone). */
+    fun refreshCallProactivePrefs() {
+        val uid = currentUid() ?: return
+        viewModelScope.launch { runCatching { reconcileCallProactivePrefs(uid) } }
+    }
+
+    private val callProactiveMutex = Mutex()
+
+    /** Push the cached copy up; clears the pending flag on success. */
+    private suspend fun pushCallProactivePrefs(uid: String) = callProactiveMutex.withLock {
+        val prefsClient = graph.coordinator?.preferences ?: return@withLock
+        if (!CallSettingsStore.pendingProactivePush(graph.appContext, uid)) return@withLock
+        val local = CallSettingsStore.loadProactive(graph.appContext, uid)
+        runCatching { prefsClient.setCallProactivePrefs(uid, local) }
+            .onSuccess { CallSettingsStore.setPendingProactivePush(graph.appContext, uid, false) }
+    }
+
+    /** After every pull (and on a prefs realtime event): land a pending
+     *  toggle first, then READ BACK — the server wins unless this device's own
+     *  write hasn't landed yet (core CallProactiveSync.resolve). */
+    private suspend fun reconcileCallProactivePrefs(uid: String) {
+        val prefsClient = graph.coordinator?.preferences ?: return
+        pushCallProactivePrefs(uid)
+        val pending = CallSettingsStore.pendingProactivePush(graph.appContext, uid)
+        val server = if (pending) null else runCatching { prefsClient.fetchCallProactivePrefs(uid) }.getOrNull()
+        val local = CallSettingsStore.loadProactive(graph.appContext, uid)
+        val next = CallProactiveSync.resolve(local, server, pending)
+        if (next != local) CallSettingsStore.saveProactive(graph.appContext, uid, next)
+        if (currentUid() == uid) _callProactive.value = next
+    }
+
+    /** "Not now" on the full-screen-calls nudge: never shown again on this
+     *  install for this account (the status line keeps saying calls degrade). */
+    fun dismissRingNudge() {
+        _ringNudgeDismissed.value = true
+        val uid = currentUid() ?: return
+        runCatching { CallSettingsStore.setRingNudgeDismissed(graph.appContext, uid, true) }
     }
 
     /** The live call anchored to a task (the editor's initial state). Reads the
@@ -3649,22 +3722,37 @@ class AppViewModel(
     suspend fun cancelCallRequest(callId: String): String =
         runEditorCallTool("cancel_call", buildJsonObject { put("callId", callId) })
 
-    /** Settings → "Test call now": a REAL `call_requests` row one minute from now
-     *  through request_call, so the whole server → FCM → ring path is exercised.
-     *  The assistant's guards apply (server window 06:00–23:00, past-time) PLUS the
-     *  user's own allowed hours — otherwise the phone would decline it quietly and
-     *  "Booked — ringing at …" would be a lie. A live earlier test call is
-     *  cancelled first (the one-live-call-per-label rule would refuse the retry). */
+    /** Settings → "Test call now": a REAL `call_requests` row of kind `test` one
+     *  minute from now, so the whole server → FCM → ring path is exercised (a
+     *  test call is never re-rung after a miss — the server's retry rule skips
+     *  kind `test`). The assistant's guards apply (server window 06:00–23:00,
+     *  past-time — CallToolLogic.timeGuard) PLUS the user's own allowed hours —
+     *  otherwise the phone would decline it quietly and "Booked — ringing at …"
+     *  would be a lie. Every live earlier test row (kind `test`, or the test
+     *  label from an older build) is cancelled first: two would ring twice, and
+     *  the one-live-call-per-label rule would refuse the retry. Returns the
+     *  request_call contract string ("ok: call booked …" / "error: …"). */
     suspend fun bookTestCall(): String {
         val at = nowMs() + 60_000L
         val s = _callSettings.value
         val hm = CallToolLogic.hhmm(at)
         if (!CallSettingsLogic.withinHours(hm, s)) return TEST_CALL_OUTSIDE_HOURS(hm, s)
-        val args = buildJsonObject { put("when", CallToolLogic.fmt(at)); put("label", TEST_CALL_LABEL); put("notes", notesJson(listOf(TEST_CALL_NOTE))) }
-        val first = runEditorCallTool("request_call", args)
-        val dup = DUPLICATE_ID_RE.find(first) ?: return first
-        runEditorCallTool("cancel_call", buildJsonObject { put("callId", dup.groupValues[1]) })
-        return runEditorCallTool("request_call", args)
+        if (!s.enabled) return TEST_CALL_CALLS_OFF
+        val store = assistantApi.callStore() ?: return CallToolLogic.UNAVAILABLE
+        val uid = assistantApi.currentUserId() ?: return CallToolLogic.UNAVAILABLE
+        return try {
+            CallToolLogic.timeGuard(at, assistantApi.todayIso(), assistantApi.nowHM(), assistantApi.getBlocks())?.let { return it }
+            for (stale in TestCallLogic.previousTestCalls(store.liveCalls())) {
+                runCatching { store.cancelCall(stale.id) }
+            }
+            val notes = listOf(TEST_CALL_NOTE)
+            val row = store.book(uid, null, null, at, null, TEST_CALL_LABEL, notes, kind = TestCallLogic.KIND)
+            "ok: call booked ${CallToolLogic.fmt(at)} \"$TEST_CALL_LABEL\" (${CallToolLogic.notesCount(notes.size)}) id=${row.id}"
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            CallToolLogic.NETWORK
+        }
     }
 
     // --- seams for the executor's AppViewModel adapter (AssistantToolsAppModel.kt) ---
@@ -3795,6 +3883,7 @@ class AppViewModel(
                 merge(c.hydrated, c.preferencesChanged).collect {
                     val uid = auth?.currentUserId ?: return@collect
                     runCatching { reconcileNotificationPrefs(uid) }
+                    runCatching { reconcileCallProactivePrefs(uid) }
                     runCatching { reconcileCaptureArchive(uid) }
                     // The account's interview flag + rituals land BEFORE
                     // profileFactsHydrated flips: the gateway's auto-open gate
@@ -3875,11 +3964,11 @@ const val VOICE_SESSION_RECEIPTS = "While we talked:"
 
 // ── "Test call now" (Settings → Calls) — copy from iOS CallSettingsView ──
 /** The label of the row "Test call now" books (a live one is cancelled before a retry). */
-const val TEST_CALL_LABEL = "Test call"
-const val TEST_CALL_NOTE = "This is what a call from Unstuck sounds like"
+const val TEST_CALL_LABEL = TestCallLogic.LABEL
+const val TEST_CALL_NOTE = TestCallLogic.NOTE
+/** Calls are switched off on this phone — the test would be declined quietly (iOS wording). */
+const val TEST_CALL_CALLS_OFF = "error: calls are off on this phone — switch them on above to try it"
 /** The user's own hours refuse the test — widen them (iOS wording). */
 @Suppress("FunctionName")
 fun TEST_CALL_OUTSIDE_HOURS(hm: String, s: CallSettings): String =
     "error: $hm is outside your allowed hours (${s.hoursStart}–${s.hoursEnd}) — the phone would decline it quietly. Widen the hours above to try it now."
-/** request_call's duplicate refusal carries the live row's id. */
-private val DUPLICATE_ID_RE = Regex("^error: a call is already booked for .* id=(\\S+) — ")

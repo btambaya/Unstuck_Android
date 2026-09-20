@@ -68,9 +68,12 @@ data class AssistantSettingsSnapshot(
 interface AssistantCallStore {
     suspend fun liveCalls(): List<CallRequest>
     suspend fun call(id: String): CallRequest?
+    /** [kind] is `requested` (the assistant / the task editor — the default) or
+     *  `test` (Settings' test button). The proactive kinds are the server's alone. */
     suspend fun book(
         userId: String, taskId: String?, blockId: String?, callAtMs: Long, leadMin: Int?,
         label: String, notes: List<String>,
+        kind: String = tech.csalliance.unstuck.core.model.CallKind.REQUESTED.wire,
     ): CallRequest
     suspend fun patch(
         id: String, callAtMs: Long?, blockId: CallsClient.Patch<String?>?, leadMin: CallsClient.Patch<Int?>?,
@@ -85,10 +88,10 @@ class CallsClientStore(private val client: CallsClient, private val newId: () ->
     override suspend fun call(id: String): CallRequest? = client.get(id)
     override suspend fun book(
         userId: String, taskId: String?, blockId: String?, callAtMs: Long, leadMin: Int?,
-        label: String, notes: List<String>,
+        label: String, notes: List<String>, kind: String,
     ): CallRequest = client.create(
         id = newId(), userId = userId, taskId = taskId, blockId = blockId, callAtMs = callAtMs,
-        leadMin = leadMin, label = label, notes = notes,
+        leadMin = leadMin, label = label, notes = notes, kind = kind,
     )
     override suspend fun patch(
         id: String, callAtMs: Long?, blockId: CallsClient.Patch<String?>?, leadMin: CallsClient.Patch<Int?>?,

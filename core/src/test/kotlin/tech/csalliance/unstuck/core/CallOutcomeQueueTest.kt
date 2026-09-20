@@ -5,8 +5,11 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tech.csalliance.unstuck.core.logic.CallNotificationKind
 import tech.csalliance.unstuck.core.logic.CallOutcome
 import tech.csalliance.unstuck.core.logic.CallOutcomeQueue
+import tech.csalliance.unstuck.core.logic.CallOutcomeReceipt
+import tech.csalliance.unstuck.core.logic.IncomingCallPayload
 import tech.csalliance.unstuck.core.logic.PendingOutcome
 
 // The persisted, ordered, retried outcome queue — the iOS
@@ -149,5 +152,38 @@ class CallOutcomeQueueTest {
         assertFalse(CallOutcomeQueue.isPermanentStatus(429))
         assertFalse(CallOutcomeQueue.isPermanentStatus(500))
         assertFalse(CallOutcomeQueue.isPermanentStatus(200))
+    }
+
+    // ── the retry-gated miss notice (calls build-out 2026-09-20 §5) ──
+
+    @Test fun `a missed item carries its notice and ring payload through JSON and a relaunch`() {
+        val ring = IncomingCallPayload(callId = "c1", label = "speak to James", notes = listOf("A"), taskId = "t1", taskName = "Call James", callKind = "requested")
+        val q = CallOutcomeQueue()
+        q.enqueue("c1", CallOutcome.MISSED, nowMs = t0, notify = CallNotificationKind.MISSED, payload = ring.toData())
+        q.enqueue("c2", CallOutcome.DONE, nowMs = t0)
+        val back = CallOutcomeQueue.fromJson(q.toJson())
+        val head = back.items[0]
+        assertEquals(CallNotificationKind.MISSED, head.notify)
+        assertEquals(ring, head.ringPayload)
+        assertNull(back.items[1].notify)
+        assertNull(back.items[1].ringPayload)
+        // An older queue on disk (no notify field) still loads.
+        val old = CallOutcomeQueue.fromJson("""[{"callId":"c","outcome":"missed","at":1}]""")
+        assertNull(old.items[0].notify)
+        assertNull(old.items[0].payload)
+    }
+
+    @Test fun `the receipt decodes tolerantly and retry alone decides the notice`() {
+        val r = CallOutcomeReceipt.fromJson("""{"ok":true,"status":"snoozed","retry":true,"snoozeUntil":"2026-09-02T15:05:00.000Z"}""")
+        assertTrue(r.ok); assertTrue(r.retry); assertEquals("snoozed", r.status); assertEquals("2026-09-02T15:05:00.000Z", r.snoozeUntil)
+        val final = CallOutcomeReceipt.fromJson("""{"ok":true,"status":"missed","retry":false}""")
+        assertFalse(final.retry); assertNull(final.snoozeUntil)
+        // A pre-072 server answers no `retry`; garbage is "delivered, no retry".
+        assertFalse(CallOutcomeReceipt.fromJson("""{"ok":true}""").retry)
+        assertEquals(CallOutcomeReceipt.EMPTY, CallOutcomeReceipt.fromJson(null))
+        assertEquals(CallOutcomeReceipt.EMPTY, CallOutcomeReceipt.fromJson("not json"))
+        assertEquals(CallOutcomeReceipt.EMPTY, CallOutcomeReceipt.fromJson("[]"))
+        assertFalse(CallOutcomeReceipt.shouldNotify(retry = true))
+        assertTrue(CallOutcomeReceipt.shouldNotify(retry = false))
     }
 }

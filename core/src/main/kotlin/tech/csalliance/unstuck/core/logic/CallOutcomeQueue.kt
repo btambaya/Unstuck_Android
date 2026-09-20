@@ -3,6 +3,11 @@ package tech.csalliance.unstuck.core.logic
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.builtins.ListSerializer
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonObject
 
 // CallOutcomeQueue — the pure half of the call-outcome reporter, ported from
 // iOS `CallsOutcomeReporter` (App/Calls/AppCallEnvironment.swift). A lost
@@ -19,7 +24,47 @@ import kotlinx.serialization.json.Json
 //     malformed — any other 4xx) drops THAT item at once and the drain
 //     continues: one dead report must never block every later outcome;
 //   • sign-out clears the queue — nothing left in it can be sent with the
-//     next account's JWT.
+//     next account's JWT;
+//   • a `missed` report carries the "I called about X" notification WITH it
+//     (`notify` + the ring `payload`, persisted too): the store posts it once
+//     the server takes the report and answers `retry: false`, or refuses it
+//     for good (no re-ring is coming either way) — and swallows it on
+//     `retry: true`, the server's one automatic ring-back 5 min later (calls
+//     build-out 2026-09-20 §5). The flag arrives asynchronously, so the ring
+//     path never posts it at the 30 s timeout itself.
+
+/** What `call-outcome` answered: `{ ok, status, retry, snoozeUntil? }` on
+ *  every outcome (072). `retry: true` ⇒ the server re-rings in 5 min, so the
+ *  app stays quiet about this miss. A pre-072 server answers no `retry` →
+ *  false. Tolerant decode — garbage → the defaults (the report DID land). */
+data class CallOutcomeReceipt(
+    val ok: Boolean = true,
+    val retry: Boolean = false,
+    val status: String? = null,
+    val snoozeUntil: String? = null,
+) {
+    companion object {
+        val EMPTY = CallOutcomeReceipt()
+
+        fun fromJson(raw: String?): CallOutcomeReceipt {
+            val s = raw?.trim().orEmpty()
+            if (s.isEmpty()) return EMPTY
+            val o = runCatching { Json.parseToJsonElement(s).jsonObject }.getOrNull() ?: return EMPTY
+            return fromJson(o)
+        }
+
+        fun fromJson(o: JsonObject): CallOutcomeReceipt = CallOutcomeReceipt(
+            ok = (o["ok"] as? JsonPrimitive)?.booleanOrNull ?: true,
+            retry = (o["retry"] as? JsonPrimitive)?.booleanOrNull ?: false,
+            status = (o["status"] as? JsonPrimitive)?.contentOrNull,
+            snoozeUntil = (o["snoozeUntil"] as? JsonPrimitive)?.contentOrNull,
+        )
+
+        /** `retry: true` ⇒ the server rings again in 5 min ⇒ stay quiet;
+         *  a report refused for good ⇒ no re-ring is coming ⇒ tell them. */
+        fun shouldNotify(retry: Boolean): Boolean = !retry
+    }
+}
 
 @Serializable
 data class PendingOutcome(
@@ -33,7 +78,15 @@ data class PendingOutcome(
     val outcomeNotes: List<String>? = null,
     /** Not before this instant (epoch ms) — the backoff after a transient failure. */
     val notBeforeMs: Long = 0,
-)
+    /** The local notification to post once the server settles this report
+     *  WITHOUT a retry (see the file header) — null = nothing to say. */
+    val notify: CallNotificationKind? = null,
+    /** The ring payload the notification is rendered from (IncomingCallPayload.toData). */
+    val payload: Map<String, String>? = null,
+) {
+    /** The ring this report is about, for the deferred notification. */
+    val ringPayload: IncomingCallPayload? get() = payload?.let { IncomingCallPayload.fromData(it) }
+}
 
 class CallOutcomeQueue(items: List<PendingOutcome> = emptyList()) {
     private val list: MutableList<PendingOutcome> = items.toMutableList()
@@ -48,8 +101,12 @@ class CallOutcomeQueue(items: List<PendingOutcome> = emptyList()) {
     fun enqueue(
         callId: String, outcome: CallOutcome, snoozeMin: Int? = null, outcomeNotes: List<String>? = null,
         nowMs: Long = System.currentTimeMillis(),
+        notify: CallNotificationKind? = null, payload: Map<String, String>? = null,
     ): PendingOutcome {
-        val item = PendingOutcome(callId = callId, outcome = outcome, snoozeMin = snoozeMin, at = nowMs, outcomeNotes = outcomeNotes)
+        val item = PendingOutcome(
+            callId = callId, outcome = outcome, snoozeMin = snoozeMin, at = nowMs, outcomeNotes = outcomeNotes,
+            notify = notify, payload = payload,
+        )
         enqueue(item)
         return item
     }

@@ -7,6 +7,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.IncomingCallPayload
+import tech.csalliance.unstuck.core.model.CallKind
 import java.time.LocalDateTime
 import java.time.ZoneId
 
@@ -122,6 +123,67 @@ class IncomingCallPayloadTest {
         assertEquals(-5, at(-5 * 60).minutesUntilStart(now))
         assertNull(IncomingCallPayload(callId = "c", label = "x").minutesUntilStart(now))
         assertTrue(IncomingCallPayload.roundHalfAwayFromZero(2.5) == 3 && IncomingCallPayload.roundHalfAwayFromZero(-2.5) == -3)
+    }
+
+    // ── callKind + endTime (calls build-out 2026-09-20, migration 072) ──
+
+    @Test fun `callKind and endTime decode, default to requested, and round-trip`() {
+        val plain = IncomingCallPayload.fromData(contract())!!
+        assertNull(plain.callKind)
+        assertNull(plain.endTime)
+        assertEquals(CallKind.REQUESTED, plain.resolvedKind)
+        assertNull("a push that named no kind round-trips without one", plain.toData()["callKind"])
+        assertEquals("call", plain.toData()["kind"])
+        assertEquals("requested", IncomingCallPayload.fromData(contract() + mapOf("callKind" to "requested"))!!.toData()["callKind"])
+
+        val after = IncomingCallPayload.fromData(contract() + mapOf("callKind" to "after_block", "endTime" to "11:30"))!!
+        assertEquals("after_block", after.callKind)
+        assertEquals("11:30", after.endTime)
+        assertEquals(CallKind.AFTER_BLOCK, after.resolvedKind)
+        assertEquals(after, IncomingCallPayload.fromData(after.toData()))
+        assertEquals("after_block", after.toData()["callKind"])
+        assertEquals("11:30", after.toData()["endTime"])
+
+        for (k in listOf("test", "morning", "evening")) {
+            assertEquals(CallKind.fromWire(k), IncomingCallPayload.fromData(mapOf("callId" to "x", "label" to "y", "callKind" to k))!!.resolvedKind)
+        }
+        // Case / blanks are tolerated; garbage is requested.
+        assertEquals(CallKind.MORNING, IncomingCallPayload.fromData(mapOf("callId" to "x", "label" to "y", "callKind" to " Morning "))!!.resolvedKind)
+        assertEquals(CallKind.REQUESTED, IncomingCallPayload.fromData(mapOf("callId" to "x", "label" to "y", "callKind" to "lunch"))!!.resolvedKind)
+        assertNull(IncomingCallPayload.fromData(mapOf("callId" to "x", "label" to "y", "callKind" to "  "))!!.callKind)
+    }
+
+    @Test fun `kind stays the push discriminator, but a server that wrote the row's kind there is accepted`() {
+        assertTrue(IncomingCallPayload.isCallPush("call"))
+        assertTrue(IncomingCallPayload.isCallPush(" CALL "))
+        for (k in CallKind.entries) assertTrue(k.wire, IncomingCallPayload.isCallPush(k.wire))
+        assertFalse(IncomingCallPayload.isCallPush("morning_brief"))
+        assertFalse(IncomingCallPayload.isCallPush("reminder"))
+        assertFalse(IncomingCallPayload.isCallPush(null))
+        assertFalse(IncomingCallPayload.isCallPush(""))
+        val p = IncomingCallPayload.fromData(mapOf("kind" to "evening", "callId" to "x", "label" to "Evening wrap-up"))!!
+        assertEquals(CallKind.EVENING, p.resolvedKind)
+        assertEquals("evening", p.kind)
+        // Once re-encoded the discriminator is `call` again and the kind rides as callKind.
+        assertEquals("call", p.toData()["kind"])
+        assertEquals("evening", p.toData()["callKind"])
+        assertNull(IncomingCallPayload.fromData(mapOf("kind" to "reminder", "callId" to "x", "label" to "y")))
+    }
+
+    @Test fun `spokenEnd speaks a clock end, an ISO end in the zone, and nothing for garbage`() {
+        val anchor = ms(2026, 9, 2, 10, 0)
+        fun p(end: String?) = IncomingCallPayload(callId = "c", label = "x", endTime = end)
+        assertEquals("11:30am", p("11:30").spokenEnd(anchor, london))
+        assertEquals("2pm", p("14:00").spokenEnd(anchor, london))
+        assertEquals("12:05am", p("00:05").spokenEnd(anchor, london))
+        assertEquals("12pm", p("12:00").spokenEnd(anchor, london))
+        // ISO → local London (BST in September: 13:45Z = 14:45).
+        assertEquals("2:45pm", p("2026-09-02T13:45:00Z").spokenEnd(anchor, london))
+        assertEquals(ms(2026, 9, 2, 14, 45), p("2026-09-02T13:45:00Z").endMs(anchor, london))
+        assertEquals("9:05am", p("2026-09-03 09:05").spokenEnd(anchor, london))
+        assertNull(p("soon").spokenEnd(anchor, london))
+        assertNull(p(null).spokenEnd(anchor, london))
+        assertNull(p("  ").endMs(anchor, london))
     }
 
     private fun assertEquals(expected: Int, actual: Int?, message: String) = assertEquals(message, expected, actual)

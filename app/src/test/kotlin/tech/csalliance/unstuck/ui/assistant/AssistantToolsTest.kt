@@ -271,8 +271,8 @@ class AssistantToolsTest {
         inner class FakeCalls : AssistantCallStore {
             override suspend fun liveCalls() = state.calls.filter { it.isLive }
             override suspend fun call(id: String) = state.calls.firstOrNull { it.id == id }
-            override suspend fun book(userId: String, taskId: String?, blockId: String?, callAtMs: Long, leadMin: Int?, label: String, notes: List<String>): CallRequest =
-                CallRequest(id = nid("call"), userId = userId, taskId = taskId, blockId = blockId, callAt = CallsClient.iso(callAtMs), leadMin = leadMin, label = label, notes = notes)
+            override suspend fun book(userId: String, taskId: String?, blockId: String?, callAtMs: Long, leadMin: Int?, label: String, notes: List<String>, kind: String): CallRequest =
+                CallRequest(id = nid("call"), userId = userId, taskId = taskId, blockId = blockId, callAt = CallsClient.iso(callAtMs), leadMin = leadMin, label = label, notes = notes, kind = kind)
                     .also { state.calls += it }
             override suspend fun patch(id: String, callAtMs: Long?, blockId: CallsClient.Patch<String?>?, leadMin: CallsClient.Patch<Int?>?, label: String?, notes: List<String>?): CallRequest? {
                 val i = state.calls.indexOfFirst { it.id == id }; if (i < 0) return null
@@ -1298,9 +1298,10 @@ class AssistantToolsTest {
         assertEquals(10, minutes["default"]!!.jsonPrimitive.content.toInt())
         assertEquals(0, snooze["parameters"]!!.jsonObject["required"]!!.jsonArray.size)
         assertTrue(voiceToolsJson().none { it.jsonObject["name"]!!.jsonPrimitive.content == "snooze_call" })
-        // The real call list from :core resolves entirely (no unknown names dropped).
-        val core = tech.csalliance.unstuck.core.logic.CallScript.callTools()
+        // The real call list — every voice tool + snooze_call — resolves entirely (no unknown names dropped).
+        val core = callToolNames()
         assertEquals(core, callVoiceTools(core).map { it.name })
+        assertTrue("a call is the full assistant", core.containsAll(voiceToolsJson().map { it.jsonObject["name"]!!.jsonPrimitive.content }))
     }
 
     @Test fun `a request_call receipt undoes through CANCEL_CALL once, and its control reads cancelling while in flight`() = runTest {

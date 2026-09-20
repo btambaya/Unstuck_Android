@@ -103,19 +103,37 @@ class CallVoiceServiceTest {
         assertTrue(comp.opening.startsWith("Hi Ahmad — you asked me to ring so you'd speak to James."))
         assertTrue(comp.primer.contains("\"${comp.opening}\""))
         assertTrue(comp.primer.contains("YOU rang them"))
-        assertEquals(CallScript.callTools(), comp.toolNames)
+        // The call is the full assistant: every voice tool handed in, in order, plus snooze_call.
+        assertEquals(listOf("create_task", "complete_task", "add_capture", "schedule_task", "start_focus", "update_call", "snooze_call"), comp.toolNames)
+        assertTrue(comp.instructions.contains("You have every tool you have in Talk"))
     }
 
-    @Test fun `call tool schemas - filtered to the call tools in order, snooze always ours, update_call synthesised`() {
+    @Test fun `compose varies the script by the ring's callKind`() {
+        val morning = CallVoiceService.compose(payload.copy(callKind = "morning", label = "Morning plan", taskId = null, notes = emptyList()), "BASE", registry("get_schedule"), nowMs = 0L)
+        assertEquals("Morning, Ahmad. Want to walk through today?", morning.opening)
+        assertTrue(morning.instructions.contains("THIS IS THE MORNING PLANNING CALL"))
+        val after = CallVoiceService.compose(payload.copy(callKind = "after_block", endTime = "11:30"), "BASE", registry("complete_task"), nowMs = 0L)
+        assertEquals("Hi Ahmad — Board prep was on till 11:30am. How did it go?", after.opening)
+        assertTrue(after.primer.contains("\"${after.opening}\""))
+    }
+
+    @Test fun `call tool schemas - every voice tool in order, snooze always ours, update_call synthesised`() {
         val tools = CallVoiceService.callToolSchemas(registry("get_schedule", "complete_task", "start_focus", "add_capture", "schedule_task", "snooze_call"))
         val names = tools.map { it.jsonObject["name"]!!.jsonPrimitive.content }
-        assertEquals(listOf("complete_task", "add_capture", "schedule_task", "start_focus", "update_call", "snooze_call"), names)
+        assertEquals(listOf("get_schedule", "complete_task", "start_focus", "add_capture", "schedule_task", "snooze_call", "update_call"), names)
         val snooze = tools.first { it.jsonObject["name"]!!.jsonPrimitive.content == CallMode.SNOOZE_TOOL }.jsonObject
         assertEquals("ours, not the registry's stub", "10", snooze["parameters"]!!.jsonObject["properties"]!!.jsonObject["minutes"]!!.jsonObject["default"]!!.jsonPrimitive.content)
         assertEquals("Change this call's notes for later (replaces them, verbatim), or its label/time.",
             tools.first { it.jsonObject["name"]!!.jsonPrimitive.content == "update_call" }.jsonObject["description"]!!.jsonPrimitive.content)
-        // A registry that lacks a call tool other than update_call just doesn't advertise it.
-        assertEquals(listOf("complete_task", "update_call", "snooze_call"), CallVoiceService.callToolSchemas(registry("complete_task")).map { it.jsonObject["name"]!!.jsonPrimitive.content })
+        // A registry that carries update_call keeps ITS schema and position; snooze_call is appended once.
+        val withUpdate = CallVoiceService.callToolSchemas(registry("complete_task", "update_call"))
+        assertEquals(listOf("complete_task", "update_call", "snooze_call"), withUpdate.map { it.jsonObject["name"]!!.jsonPrimitive.content })
+        assertEquals("d", withUpdate[1].jsonObject["description"]!!.jsonPrimitive.content)
+        // The real registry: the whole voice surface + snooze_call, nothing dropped, no duplicates.
+        val real = CallVoiceService.callToolSchemas(tech.csalliance.unstuck.ui.assistant.voiceToolsJson()).map { it.jsonObject["name"]!!.jsonPrimitive.content }
+        assertEquals(tech.csalliance.unstuck.ui.assistant.callToolNames(), real)
+        assertEquals(real.size, real.toSet().size)
+        assertTrue(real.containsAll(listOf("get_schedule", "get_tasks", "carry_to_tomorrow", "complete_occurrence", "skip_occurrence", "block_time", "update_call", "snooze_call")))
     }
 
     @Test fun `the start intent round-trips the payload, and a bare intent carries none`() {

@@ -94,6 +94,18 @@ class CallCoordinatorLogicTest {
         assertNull(unknown.statusEnum)
         assertNull(unknown.callAtMs)
         assertFalse(unknown.isLive)
+        // 072: kind + retries. A pre-072 row is a requested call with no retries.
+        assertEquals(tech.csalliance.unstuck.core.model.CallKind.REQUESTED, bare.kindEnum)
+        assertNull(bare.retries)
+        assertFalse(bare.isTestCall)
+        val proactive = Json { ignoreUnknownKeys = true }.decodeFromString(CallRequest.serializer(), """{"id":"r4","call_at":"2026-09-02T14:45:00Z","label":"Morning plan","kind":"morning","retries":1}""")
+        assertEquals(tech.csalliance.unstuck.core.model.CallKind.MORNING, proactive.kindEnum)
+        assertEquals(1, proactive.retries)
+        val test = Json { ignoreUnknownKeys = true }.decodeFromString(CallRequest.serializer(), """{"id":"r5","call_at":"2026-09-02T14:45:00Z","label":"Test call","kind":"test","retries":0}""")
+        assertTrue(test.isTestCall)
+        assertEquals(tech.csalliance.unstuck.core.model.CallKind.REQUESTED, test.copy(kind = "lunch").kindEnum)
+        assertEquals(tech.csalliance.unstuck.core.model.CallKind.AFTER_BLOCK, tech.csalliance.unstuck.core.model.CallKind.fromWire(" After_Block "))
+        assertNull(tech.csalliance.unstuck.core.model.CallKind.strict("lunch"))
     }
 
     // ── receipt rules ───────────────────────────────────────────────────────

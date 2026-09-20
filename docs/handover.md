@@ -4,6 +4,87 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
+## 2026-09-20 (later) — calls build-out, Android half (parity with iOS; NOT bumped, not committed)
+
+The Android section of `unstuck/docs/calls-build-out.md`, against the LIVE server
+contract in `unstuck/docs/handbook/07-backend.md` "Calls" (migration 072:
+`call_requests.kind/retries`, `notification_preferences.call_*`, `callKind` +
+`endTime` on the push, `call-outcome → { ok, status, retry, snoozeUntil? }`).
+Reference implementation: `unstuck_ios/App/Calls/*` (its handover top entry).
+
+- **Model + mirror + client** (`core/model/CallRequest.kt`, `sync/CallsClient.kt`):
+  `CallKind` (requested | test | morning | evening | after_block; tolerant
+  `fromWire` → requested), `CallRequest.kind` (String, default `requested`) +
+  `retries` (Int?), `kindEnum` / `isTestCall`. The mirror, catch-up and realtime
+  paths decode through the same serializer, so the two columns ride for free;
+  `CallsClient.createRow/create` write `kind` explicitly (`requested` default,
+  `test` for the button). `AssistantCallStore.book(kind)` threads it.
+- **Test call** (`AppViewModel.bookTestCall`): books kind `test` DIRECTLY through
+  the call store (iOS shape) after the same guards (server window + past-time via
+  `CallToolLogic.timeGuard`, the user's hours, calls-on) and after cancelling
+  every live earlier test row (`core TestCallLogic.previousTestCalls`: kind
+  `test`, or the old label). Same "ok: call booked …" contract string, so the
+  Settings card is unchanged. The old request_call + duplicate-regex dance is gone.
+- **Push payload** (`core/logic/IncomingCallPayload.kt`): `callKind` + `endTime`
+  decoded and round-tripped (`toData` always writes `callKind`); `resolvedKind`
+  (callKind → the push's own `kind` slot if a server wrote the row's kind there →
+  requested); `isCallPush(kind)` = "call" or one of the five kinds —
+  `CallPushHandler` keys on it (kind:"call" stays the discriminator); `endMs` /
+  `spokenEnd` ("11:30" → "11:30am"; ISO → the zone's clock).
+- **The call is the full assistant** (`core/logic/CallScript.kt`): `opening` /
+  `instructions` / `headline` / `conversationRule` vary by kind exactly like iOS
+  (requested unchanged; test; morning → get_schedule + plan; evening →
+  get_tasks(completed) + carry_to_tomorrow on request; after_block → "<task> was
+  on till <time>. How did it go?" → done / skip / reschedule). `- kind:` and
+  `- block ended at:` in the context. NEW **name-once rule**
+  (`CallScript.NAME_ONCE_RULE`, line 3 of every kind — a test call said the name
+  three times). `CALL_TOOLS` is gone: `callToolNames(voice, call)` = the
+  registry's voice surface + call surface + guaranteed `update_call` /
+  `snooze_call`; `:app callToolNames()` / `callVoiceToolsJson()` (no-arg) build it
+  from `RegistryTools`; `CallVoiceService.callToolSchemas` now emits EVERY voice
+  schema it is handed + snooze_call (always ours) + update_call (synthesised when
+  the registry lacks it). `finish_interview` is therefore live on a call too.
+- **Missed → retry-aware** (`CallOutcomeStore`, `CallRinger.settle(notifyUnlessRetry)`,
+  `MissedCallReceiver`, `IncomingCallActivity.onRingTimedOut`, `CallRinger.recover`):
+  nobody posts "I called about X" at the 30 s timeout any more. The `missed`
+  item carries `notify = MISSED` + the ring payload (persisted with the queue —
+  survives a kill), `CallsClient.reportOutcome` returns `Result<CallOutcomeReceipt>`
+  (body parsed tolerantly; a pre-072 server = `retry:false`), and the drain posts
+  the notice on `retry: false` or on a permanent refusal, swallows it on
+  `retry: true` (`CallOutcomeReceipt.shouldNotify`). Declined / busy / outside-
+  hours / voice-failed notices are unchanged (never retried server-side).
+- **Settings › Calls** (`SettingsScreen.CallsContent`): the existing `enabled` +
+  hours + lead stay; NEW "Calls Unstuck can make on its own" — Morning planning
+  call (time), Evening wrap-up call (time), Check in after a block, one-line copy
+  each verbatim from iOS — read/written through `PreferencesClient.
+  fetchCallProactivePrefs / setCallProactivePrefs` (`notification_preferences.
+  call_*`), cached per uid in `CallSettingsStore.loadProactive/saveProactive` with
+  a `pendingProactivePush` flag (`AppViewModel.setCallProactivePrefs` →
+  cache + pending + push; `reconcileCallProactivePrefs` after every pull / prefs
+  realtime event: push pending first, then server wins unless pending — pure
+  `core CallProactiveSync.resolve`; `refreshCallProactivePrefs` on screen open).
+  The full-screen-intent nudge (Android's twin of the iOS VoIP nudge) keeps the
+  `ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT` row, now with an explainer line and
+  a **"Not now"** dismissal persisted per uid (`CallSettingsStore.ringNudgeDismissed`,
+  `AppViewModel.dismissRingNudge`, pure `core CallRingNudge.shouldShow`); the
+  device-status line keeps saying calls degrade. `ToggleRow` gained an optional
+  sub-line.
+- **Tests**: core `CallScriptTest` (per-kind openings + instructions, callToolNames,
+  name-once, unknown kind = requested), `IncomingCallPayloadTest` (callKind /
+  endTime / isCallPush / spokenEnd), `CallSettingsTest` (spokenTime,
+  CallProactivePrefs + hhmm + sync rule, ring nudge, previousTestCalls),
+  `CallOutcomeQueueTest` (receipt decode, notify round-trip), `CallCoordinatorLogicTest`
+  (kind/retries decode); sync `CallsClientTest` (kind on create, 072 decode); app
+  `CallOutcomeStoreTest` (retry true swallows / false posts / pre-072 posts /
+  permanent posts / transient keeps the notice across a relaunch),
+  `CallRingerTest` + `IncomingCallActivityTest` + `PushTest` (deferred notice,
+  proactive rings, kind-tagged pushes), `CallVoiceServiceTest` (full tool set,
+  per-kind compose), `CallSettingsStoreTest` (proactive cache / pending / nudge),
+  `CallsSettingsCopyTest`, registry parity tests updated.
+- **Left**: on-device validation of each kind's ring + the proactive toggles
+  round-trip against prod; the Play "calling app" declaration draft for Ahmad
+  (not code); a `get_calls` line showing the kind (cosmetic).
+
 ## 2026-09-20 — assistant v2 (vc96 / 0.5.12): one tool registry, tools that report real outcomes, and the new voice turn-taking
 
 Ported from the iOS work of 2026-09-19/20 (see unstuck/docs/voice-turn-taking.md and

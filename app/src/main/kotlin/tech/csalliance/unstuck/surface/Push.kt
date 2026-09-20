@@ -44,9 +44,9 @@ fun registerFcmToken(app: UnstuckApp) {
  * unstuck/docs/ios-gateway-plan.md). Data-only FCM message, android priority
  * HIGH, ttl 120 s:
  *
- *   data = { kind:"call", callId, taskId?, title, notes? (JSON string array),
+ *   data = { kind:"call", callKind?, callId, taskId?, title, notes? (JSON string array),
  *            scheduledAt (ISO), deepLink:"unstuck://call/<callId>",
- *            label, blockId?, taskName?, startTime?, firstAction?, estimateMin?,
+ *            label, blockId?, taskName?, startTime?, endTime?, firstAction?, estimateMin?,
  *            captures? (JSON array), name?, body }
  *
  * The Android port of iOS `CallCoordinator.reportIncoming` (C1-android), run
@@ -70,17 +70,21 @@ fun registerFcmToken(app: UnstuckApp) {
  * seam so the whole decision table runs under Robolectric without a graph.
  */
 object CallPushHandler {
+    /** The push-type discriminator send-call ALWAYS sets; the call's own kind
+     *  (requested / test / morning / evening / after_block) rides as `callKind`. */
     const val KIND = "call"
 
     /** True when [data] was a call push and has been handled. False → not a
-     *  call, or not a VALID one: the caller falls back to the generic renderer. */
+     *  call, or not a VALID one: the caller falls back to the generic renderer.
+     *  Keys on `kind == "call"` (a server that wrote the row's kind into that
+     *  slot instead is tolerated — IncomingCallPayload.isCallPush). */
     fun handle(
         context: Context,
         data: Map<String, String>,
         nowMs: Long = System.currentTimeMillis(),
         env: (IncomingCallPayload) -> CallEnv = { AppCallEnvironment.env(context, it, nowMs) },
     ): Boolean {
-        if (data["kind"] != KIND) return false
+        if (!IncomingCallPayload.isCallPush(data["kind"])) return false
         val payload = IncomingCallPayload.fromData(data) ?: return false
 
         // Retire a ring nothing will ever settle BEFORE asking whether one is up: a

@@ -5,6 +5,7 @@ import io.github.jan.supabase.functions.functions
 import io.github.jan.supabase.postgrest.from
 import io.github.jan.supabase.postgrest.query.Order
 import io.ktor.client.request.setBody
+import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpMethod
 import io.ktor.http.contentType
@@ -15,6 +16,7 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.coroutines.flow.Flow
+import tech.csalliance.unstuck.core.logic.CallOutcomeReceipt
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.Tables
 import java.time.Instant
@@ -29,12 +31,16 @@ import java.time.format.DateTimeParseException
 // `call-outcome` edge fn the ring path reports every end state to. 1:1 with
 // iOS UnstuckSync/CallsClient.swift.
 //
-// Server contract (migrations 051 + 053):
+// Server contract (migrations 051 + 053 + 072):
 //   public.call_requests(id, user_id, task_id?, block_id?, call_at timestamptz,
 //     lead_min?, label, notes text[], status, snooze_until, outcome_notes text[],
-//     call_id, attempts, created_at, updated_at)
+//     call_id, attempts, kind, retries, created_at, updated_at)
 //   status: scheduled|calling|answered|declined|missed|busy|snoozed|stale|cancelled|done
+//   kind: requested|test|morning|evening|after_block (clients write requested / test)
 //   call-outcome (user JWT): { callId, outcome, snoozeMinutes?, outcomeNotes?[] }
+//     → { ok, status, retry, snoozeUntil? } — `retry: true` on a first miss of a
+//     non-test call (the server re-rings in 5 min; the app stays quiet), see
+//     core CallOutcomeReceipt.
 //
 // Writes that can lose a race (update / cancel) are compare-and-set on the row
 // still being LIVE and return the row the server actually wrote — null means
@@ -157,6 +163,7 @@ class CallsClient(private val client: SupabaseClient, private val mirror: CallRe
         fun createRow(
             id: String, userId: String, taskId: String?, blockId: String?, callAtMs: Long,
             leadMin: Int?, label: String, notes: List<String>, nowMs: Long,
+            kind: String = tech.csalliance.unstuck.core.model.CallKind.REQUESTED.wire,
         ): JsonObject = buildJsonObject {
             put("id", id)
             put("user_id", userId)
@@ -167,6 +174,10 @@ class CallsClient(private val client: SupabaseClient, private val mirror: CallRe
             put("label", label)
             put("notes", JsonArray(notes.map { JsonPrimitive(it) }))
             put("status", "scheduled")
+            // 072: who booked it. Clients only ever write `requested` (the
+            // assistant / the task editor) or `test` (Settings' test button); the
+            // proactive kinds are the dispatcher's alone.
+            put("kind", kind)
             put("updated_at", iso(nowMs))
         }
 
@@ -223,28 +234,29 @@ class CallsClient(private val client: SupabaseClient, private val mirror: CallRe
 
     // ── outcome (the ring path → call-outcome edge fn) ──────────────────────
 
-    /** Report how a call ended. Throws [CallOutcomeRejected] for a PERMANENT
-     *  refusal so the reporter can drop the item; every other failure (transport,
-     *  5xx, 401 refresh, 429) is rethrown as-is → retry. */
-    suspend fun outcome(callId: String, outcome: CallOutcome, snoozeMinutes: Int? = null, outcomeNotes: List<String>? = null) {
+    /** Report how a call ended; returns what the server answered (`retry`).
+     *  Throws [CallOutcomeRejected] for a PERMANENT refusal so the reporter can
+     *  drop the item; every other failure (transport, 5xx, 401 refresh, 429) is
+     *  rethrown as-is → retry. */
+    suspend fun outcome(callId: String, outcome: CallOutcome, snoozeMinutes: Int? = null, outcomeNotes: List<String>? = null): CallOutcomeReceipt =
         postOutcome(outcomeBody(callId, outcome.wire, snoozeMinutes, outcomeNotes))
-    }
 
     /** The C1 ring path's reporter entry point (CallOutcomeStore.flush): [outcome]
      *  is the wire string of the app's `CallOutcome` — the seven server values, or
      *  the two client-side ones (`outside_hours` / `voice_failed`) which are folded
      *  by [normalizeOutcome]. Never throws:
-     *   - success → `Result.success(Unit)`;
+     *   - success → `Result.success(receipt)` — `receipt.retry` says whether the
+     *     server is about to ring again (the app then keeps its local "I called
+     *     about X" quiet — CallOutcomeStore);
      *   - a PERMANENT refusal (4xx other than 401/408/429, or an outcome string the
      *     server can never accept) → `Result.failure(CallOutcomeRejected)` — drop it;
      *   - anything else (offline, 5xx, 401 refresh, 429) → `Result.failure(other)` — retry. */
-    suspend fun reportOutcome(callId: String, outcome: String, snoozeMin: Int? = null, outcomeNotes: List<String>? = null): Result<Unit> {
+    suspend fun reportOutcome(callId: String, outcome: String, snoozeMin: Int? = null, outcomeNotes: List<String>? = null): Result<CallOutcomeReceipt> {
         val (wire, folded) = normalizeOutcome(outcome)
             ?: return Result.failure(CallOutcomeRejected(400, "unknown outcome \"$outcome\""))
         val notes = (folded.orEmpty() + outcomeNotes.orEmpty()).takeIf { it.isNotEmpty() }
         return try {
-            postOutcome(outcomeBody(callId, wire, if (wire == "snoozed") snoozeMin else null, notes))
-            Result.success(Unit)
+            Result.success(postOutcome(outcomeBody(callId, wire, if (wire == "snoozed") snoozeMin else null, notes)))
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Throwable) {
@@ -252,13 +264,18 @@ class CallsClient(private val client: SupabaseClient, private val mirror: CallRe
         }
     }
 
-    private suspend fun postOutcome(body: JsonObject) {
+    /** POST + decode the reply. A 2xx whose body doesn't parse still counts
+     *  as delivered (the defaults: `retry = false`) — the report landed, and
+     *  a pre-072 server answers no `retry` at all. */
+    private suspend fun postOutcome(body: JsonObject): CallOutcomeReceipt {
         try {
-            client.functions.invoke("call-outcome") {
+            val res = client.functions.invoke("call-outcome") {
                 method = HttpMethod.Post
                 contentType(ContentType.Application.Json)
                 setBody(body)
             }
+            val text = runCatching { res.bodyAsText() }.getOrNull()
+            return CallOutcomeReceipt.fromJson(text)
         } catch (e: io.github.jan.supabase.exceptions.RestException) {
             val code = e.statusCode
             if (CallOutcomeRejected.isPermanent(code)) throw CallOutcomeRejected(code, e.message)
@@ -302,20 +319,22 @@ class CallsClient(private val client: SupabaseClient, private val mirror: CallRe
 
     // ── writes ──────────────────────────────────────────────────────────────
 
-    /** Book a call (upsert on id). Returns the row as stored. */
+    /** Book a call (upsert on id). Returns the row as stored. [kind] is
+     *  `requested` (default) or `test` — never a proactive kind. */
     suspend fun create(
         id: String, userId: String, taskId: String? = null, blockId: String? = null,
         callAtMs: Long, leadMin: Int? = null, label: String, notes: List<String>,
         nowMs: Long = System.currentTimeMillis(),
+        kind: String = tech.csalliance.unstuck.core.model.CallKind.REQUESTED.wire,
     ): CallRequest {
-        val row = createRow(id, userId, taskId, blockId, callAtMs, leadMin, label, notes, nowMs)
+        val row = createRow(id, userId, taskId, blockId, callAtMs, leadMin, label, notes, nowMs, kind)
         val rows: List<CallRequest> = client.from(TABLE).upsert(row) {
             onConflict = "id"
             select()
         }.decodeList()
         val stored = rows.firstOrNull() ?: CallRequest(
             id = id, userId = userId, taskId = taskId, blockId = blockId, callAt = iso(callAtMs),
-            leadMin = leadMin, label = label, notes = notes, updatedAt = iso(nowMs),
+            leadMin = leadMin, label = label, notes = notes, kind = kind, updatedAt = iso(nowMs),
         )
         mirror?.absorb(stored)
         return stored

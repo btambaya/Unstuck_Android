@@ -88,8 +88,9 @@ class InterviewVoiceHostTest {
         assertEquals(0, spec["parameters"]!!.jsonObject["required"]!!.jsonArray.size)
         assertTrue(spec["parameters"]!!.jsonObject["properties"]!!.jsonObject.isEmpty())
         assertFalse("the surfaces marker never reaches the session", spec.containsKey("_surfaces"))
-        // A call from Unstuck never advertises it (CallScript.callTools is the list).
-        assertTrue(callVoiceTools(CallScript.callTools()).none { it.name == FinishInterviewTool.NAME })
+        // A call from Unstuck is the full assistant (calls build-out 2026-09-20):
+        // it carries the whole voice surface, this tool included.
+        assertTrue(callVoiceTools(callToolNames()).any { it.name == FinishInterviewTool.NAME })
         assertTrue(FinishInterviewTool.OK.startsWith("ok"))
         assertTrue(FinishInterviewTool.ALREADY.startsWith("error"))
     }

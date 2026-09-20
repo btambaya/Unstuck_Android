@@ -3,6 +3,7 @@ package tech.csalliance.unstuck.ui.settings
 import org.junit.Assert.assertEquals
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.CallSettings
+import tech.csalliance.unstuck.ui.TEST_CALL_CALLS_OFF
 import tech.csalliance.unstuck.ui.TEST_CALL_LABEL
 import tech.csalliance.unstuck.ui.TEST_CALL_NOTE
 import tech.csalliance.unstuck.ui.TEST_CALL_OUTSIDE_HOURS
@@ -27,6 +28,22 @@ class CallsSettingsCopyTest {
             TestCallState.Failed("23:10 is outside your allowed hours (08:00–21:00) — the phone would decline it quietly. Widen the hours above to try it now."),
             testCallStateFrom(TEST_CALL_OUTSIDE_HOURS("23:10", s)),
         )
+        assertEquals(TestCallState.Failed("Calls are off on this phone — switch them on above to try it."), testCallStateFrom(TEST_CALL_CALLS_OFF))
+    }
+
+    @Test fun `the proactive calls and the ring nudge copy match iOS`() {
+        assertEquals("Calls Unstuck can make on its own", CALLS_PROACTIVE_SECTION)
+        assertEquals("Morning planning call", CALLS_PROACTIVE_MORNING)
+        assertEquals("Rings to walk through the day and plan it with you.", CALLS_PROACTIVE_MORNING_SUB)
+        assertEquals("Evening wrap-up call", CALLS_PROACTIVE_EVENING)
+        assertEquals("Rings to go over what got done and what moves to tomorrow.", CALLS_PROACTIVE_EVENING_SUB)
+        assertEquals("Check in after a block", CALLS_PROACTIVE_AFTER_BLOCK)
+        assertEquals("Rings when a block ends without its task marked done — how did it go?", CALLS_PROACTIVE_AFTER_BLOCK_SUB)
+        assertEquals("All off unless you switch them on. They ring within your allowed hours, on every phone where calls are on.", CALLS_PROACTIVE_HINT)
+        assertEquals("At", CALLS_PROACTIVE_AT)
+        assertEquals("Calls need the full-screen permission on this phone — without it a call arrives as a notification you tap instead of a ring.", CALLS_FULL_SCREEN_NUDGE)
+        assertEquals("Not now", CALLS_FULL_SCREEN_DISMISS)
+        assertEquals("Allow full-screen calls", CALLS_FULL_SCREEN_ROW)
     }
 
     @Test fun `copy matches iOS`() {

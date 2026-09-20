@@ -25,6 +25,7 @@ import android.widget.TextView
 import android.widget.Toast
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowCompat
+import tech.csalliance.unstuck.core.logic.CallNotificationKind
 import tech.csalliance.unstuck.core.logic.CallOutcome
 import tech.csalliance.unstuck.core.logic.IncomingCallPayload
 import tech.csalliance.unstuck.surface.NotificationChannels
@@ -174,7 +175,9 @@ class IncomingCallActivity : Activity() {
 
     private fun onRingTimedOut() {
         val p = payload ?: return
-        if (CallRinger.settle(this, p.callId, CallOutcome.MISSED)) CallNotifications.missed(this, p)
+        // The "I called about …" notice is deferred with the report: posted by
+        // CallOutcomeStore once the server answers without a retry ring.
+        CallRinger.settle(this, p.callId, CallOutcome.MISSED, notifyUnlessRetry = CallNotificationKind.MISSED)
         finish()
     }
 

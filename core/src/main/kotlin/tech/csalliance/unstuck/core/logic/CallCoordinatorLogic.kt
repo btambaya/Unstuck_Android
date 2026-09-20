@@ -18,7 +18,12 @@ import kotlinx.serialization.json.Json
 //                  │              outcome declined + "outside your call hours" notice
 //                  ├─ Busy      — a focus session is live: outcome busy + notice
 //                  ├─ Stale     — the anchor task/block is gone: outcome stale, silent
-//                  └─ Ring      — ring; 30 s unanswered → missed + notice
+//                  └─ Ring      — ring; 30 s unanswered → missed; the "I called
+//                                 about X" notice rides WITH the queued report
+//                                 and is posted only once call-outcome answers
+//                                 `retry: false` (a first miss is re-rung by
+//                                 the server 5 min later — `retry: true` — and
+//                                 must stay quiet; CallOutcomeReceipt.shouldNotify)
 //   Answer tap ──▶ outcome answered → CallVoiceService (opening = CallScript.opening)
 //   End        ──▶ endOutcome(reason): hung up → done, snoozed(n) → snoozed+n,
 //                  failed(why) → done + outcomeNotes ["voice failed: why"] + notice
@@ -238,7 +243,9 @@ object CallCoordinatorLogic {
         CallDecision.Stale -> OutcomeReport(CallOutcome.STALE)
     }
 
-    /** The ring timed out (30 s) or the notification could not be shown. */
+    /** The ring timed out (30 s) or the notification could not be shown. The
+     *  notice is DEFERRED: it goes into the persisted queue with the report and
+     *  is posted only when the server answers without `retry` (072). */
     fun missedReport(): OutcomeReport = OutcomeReport(CallOutcome.MISSED, notify = CallNotificationKind.MISSED)
 
     /** Declined from the ring UI. Logged; no notification — they saw it. */

@@ -67,6 +67,23 @@ class CallsClientTest {
         val anchored = CallsClient.createRow("c2", "u", "t1", "b1", 0L, 15, "Board prep", emptyList(), 0L)
         assertEquals("t1", anchored["task_id"]!!.jsonPrimitive.content)
         assertEquals(15, anchored["lead_min"]!!.jsonPrimitive.content.toInt())
+        // 072: the kind is written explicitly — `requested` by default, `test` for Settings' button.
+        assertEquals("requested", row["kind"]!!.jsonPrimitive.content)
+        assertEquals("requested", anchored["kind"]!!.jsonPrimitive.content)
+        val test = CallsClient.createRow("c3", "u", null, null, 0L, null, "Test call", listOf("x"), 0L, kind = "test")
+        assertEquals("test", test["kind"]!!.jsonPrimitive.content)
+    }
+
+    @Test fun `a 072 row decodes kind and retries, a pre-072 row is a requested call`() {
+        val row = json.decodeFromString<CallRequest>(
+            """{"id":"c1","call_at":"2026-09-02T14:45:00+00:00","label":"Morning plan","status":"snoozed","kind":"morning","retries":1}""",
+        )
+        assertEquals("morning", row.kind)
+        assertEquals(1, row.retries)
+        assertEquals(tech.csalliance.unstuck.core.model.CallKind.MORNING, row.kindEnum)
+        val old = json.decodeFromString<CallRequest>("""{"id":"c0","call_at":"2026-09-02T14:45:00+00:00","label":"x"}""")
+        assertEquals("requested", old.kind)
+        assertNull(old.retries)
     }
 
     @Test fun `the update patch touches only what changed and re-arms a moved call`() {

@@ -8,6 +8,7 @@ import org.junit.Test
 import tech.csalliance.unstuck.core.logic.CallScript
 import tech.csalliance.unstuck.core.logic.CallScript.LabelShape
 import tech.csalliance.unstuck.core.logic.IncomingCallPayload
+import tech.csalliance.unstuck.core.model.CallKind
 import java.time.Instant
 import java.time.ZoneId
 
@@ -22,10 +23,12 @@ class CallScriptTest {
         name: String? = "Ahmad", label: String = "speak to James",
         notes: List<String> = listOf("Ask about the invoice", "Confirm Friday", "Send the deck"),
         taskId: String? = "t1", startTime: String? = null, firstAction: String? = null, captures: List<String> = emptyList(),
+        callKind: String? = null, endTime: String? = null, taskName: String? = "Speak to James",
     ) = IncomingCallPayload(
         callId = "0f1e2d3c-4b5a-4697-8877-665544332211", label = label, notes = notes,
-        taskId = taskId, blockId = taskId?.let { "b1" }, taskName = "Speak to James",
+        taskId = taskId, blockId = taskId?.let { "b1" }, taskName = taskName,
         startTime = startTime, firstAction = firstAction, captures = captures, name = name,
+        callKind = callKind, endTime = endTime,
     )
 
     private fun opening(p: IncomingCallPayload) = CallScript.opening(p, nowMs = now, zone = utc)
@@ -133,6 +136,8 @@ class CallScriptTest {
         for (t in listOf("complete_task", "add_capture", "schedule_task", "start_focus", "update_call", "snooze_call")) {
             assertTrue(t, i.contains(t))
         }
+        assertTrue("the call is the full assistant", i.contains("You have every tool you have in Talk"))
+        assertTrue(i.contains("- kind: requested"))
         assertTrue(i.contains("- task: Speak to James [id=t1]"))
         assertTrue(i.contains("- block: b1"))
         assertTrue(i.contains("- starts at: 2026-09-02 14:45"))
@@ -146,11 +151,104 @@ class CallScriptTest {
         assertFalse(bare.contains("recent captures"))
     }
 
-    @Test fun `callTools list`() {
+    @Test fun `callToolNames is voice then call, de-duplicated, with the extras guaranteed`() {
+        // iOS CallScriptTests: voice names first in order, every call name present, no duplicates.
         assertEquals(
-            listOf("complete_task", "add_capture", "schedule_task", "start_focus", "update_call", "snooze_call"),
-            CallScript.callTools(),
+            listOf("a", "b", "snooze_call", "update_call"),
+            CallScript.callToolNames(voice = listOf("a", "b", "", "a"), call = listOf("snooze_call", "b")),
         )
-        assertEquals(CallScript.CALL_TOOLS, CallScript.callTools())
+        assertEquals(listOf("update_call", "snooze_call"), CallScript.callToolNames(emptyList(), emptyList()))
+        // A registry that already carries update_call on the voice surface keeps its position.
+        assertEquals(
+            listOf("get_tasks", "update_call", "complete_task", "snooze_call"),
+            CallScript.callToolNames(voice = listOf("get_tasks", "update_call", "complete_task"), call = listOf("snooze_call")),
+        )
+        assertEquals(listOf("update_call", "snooze_call"), CallScript.CALL_EXTRAS)
+    }
+
+    // ── per kind (calls build-out 2026-09-20; iOS CallScriptTests testOpeningPerKind) ──
+
+    @Test fun `test call opening and instructions`() {
+        val p = payload(callKind = "test", label = "Test call", notes = listOf("This is what a call from Unstuck sounds like"), taskId = null)
+        assertEquals(CallKind.TEST, p.resolvedKind)
+        assertEquals("Hi Ahmad — this is your test call from Unstuck. Everything works. Want to try something — ask me what's on today?", opening(p))
+        assertEquals("Hi — this is your test call from Unstuck. Everything works. Want to try something — ask me what's on today?", opening(p.copy(name = null)))
+        val i = CallScript.instructions(p, nowMs = now, zone = utc)
+        assertTrue(i.startsWith("THIS IS A TEST CALL the user booked from Settings"))
+        assertTrue(i.contains("then wait for their answer:\n\"" + opening(p) + "\""))
+        assertTrue(i.contains("this call proves the ring works"))
+        assertTrue(i.contains("- kind: test"))
+        assertFalse("a test call does not read notes word for word", i.contains("read the notes word for word"))
+    }
+
+    @Test fun `morning call opening and instructions`() {
+        val p = payload(callKind = "morning", label = "Morning plan", notes = emptyList(), taskId = null)
+        assertEquals("Morning, Ahmad. Want to walk through today?", opening(p))
+        assertEquals("Morning. Want to walk through today?", opening(p.copy(name = "  ")))
+        val i = CallScript.instructions(p, nowMs = now, zone = utc)
+        assertTrue(i.startsWith("THIS IS THE MORNING PLANNING CALL the user opted into"))
+        assertTrue(i.contains("call get_schedule and read today back briefly"))
+        assertTrue(i.contains("schedule_task / block_time"))
+        assertTrue(i.contains("create_task"))
+        assertTrue(i.contains("set_task_later or carry_to_tomorrow"))
+        assertTrue(i.contains("- kind: morning"))
+    }
+
+    @Test fun `evening call opening and instructions`() {
+        val p = payload(callKind = "evening", label = "Evening wrap-up", notes = emptyList(), taskId = null)
+        assertEquals("Evening, Ahmad. Quick wrap-up?", opening(p))
+        assertEquals("Evening. Quick wrap-up?", opening(p.copy(name = null)))
+        val i = CallScript.instructions(p, nowMs = now, zone = utc)
+        assertTrue(i.startsWith("THIS IS THE EVENING WRAP-UP CALL the user opted into"))
+        assertTrue(i.contains("get_tasks(view: completed)"))
+        assertTrue(i.contains("carry_to_tomorrow ONLY when they ask for it"))
+        assertTrue(i.contains("- kind: evening"))
+    }
+
+    @Test fun `after-block call opening says the task and the spoken end`() {
+        val p = payload(callKind = "after_block", label = "Board prep", taskName = "Board prep", notes = emptyList(), endTime = "11:30")
+        assertEquals("Hi Ahmad — Board prep was on till 11:30am. How did it go?", opening(p))
+        assertEquals("Hi — Board prep was on till 11:30am. How did it go?", opening(p.copy(name = null)))
+        assertEquals("Hi Ahmad — Board prep was on till 2pm. How did it go?", opening(p.copy(endTime = "14:00")))
+        // No usable end → "just finished"; no task name → the label.
+        assertEquals("Hi Ahmad — Board prep just finished. How did it go?", opening(p.copy(endTime = null)))
+        assertEquals("Hi Ahmad — the board deck just finished. How did it go?", opening(p.copy(endTime = "soon", taskName = null, label = "the board deck")))
+        // An ISO end is spoken in the given zone.
+        assertEquals("Hi Ahmad — Board prep was on till 3:15pm. How did it go?", opening(p.copy(endTime = "2026-09-02T15:15:00Z")))
+        val i = CallScript.instructions(p, nowMs = now, zone = utc)
+        assertTrue(i.startsWith("THIS IS THE CHECK-IN AFTER A BLOCK the user opted into: the block ended and its task isn't marked done"))
+        assertTrue(i.contains("done → complete_task (or complete_occurrence for a recurring one)"))
+        assertTrue(i.contains("skip_occurrence / set_task_later"))
+        assertTrue(i.contains("schedule_task or block_time for a new slot"))
+        assertTrue(i.contains("- kind: after_block"))
+        val iso = CallScript.instructions(p.copy(endTime = "2026-09-02T15:15:00Z"), nowMs = now, zone = utc)
+        assertTrue(iso, iso.contains("- block ended at: 2026-09-02 15:15"))
+    }
+
+    @Test fun `an unknown or absent callKind is a requested call, and the requested opening is unchanged`() {
+        val plain = payload()
+        assertEquals(CallKind.REQUESTED, plain.resolvedKind)
+        assertEquals(opening(plain), opening(plain.copy(callKind = "banana")))
+        assertTrue(opening(plain).startsWith("Hi Ahmad — you asked me to ring so you'd speak to James."))
+        // A server that wrote the row's kind into the push's `kind` slot is honoured too.
+        assertEquals(CallKind.MORNING, plain.copy(kind = "morning", callKind = null).resolvedKind)
+        // …but callKind wins when both are set.
+        assertEquals(CallKind.EVENING, plain.copy(kind = "morning", callKind = "evening").resolvedKind)
+    }
+
+    @Test fun `every kind keeps the verbatim opening and the never-claim rule, and the name is used once`() {
+        for (k in CallKind.entries) {
+            val p = payload(callKind = k.wire, endTime = "11:30")
+            val i = CallScript.instructions(p, nowMs = now, zone = utc)
+            assertTrue(k.wire, i.contains("\"" + opening(p) + "\""))
+            assertTrue(k.wire, i.contains("Open by saying EXACTLY this, verbatim, before anything else"))
+            assertTrue(k.wire, i.contains("Never claim an action happened without its tool result; if a tool errors, say so plainly."))
+            assertTrue(k.wire, i.contains("update_call") && i.contains("snooze_call"))
+            assertTrue(k.wire, i.contains(CallScript.NAME_ONCE_RULE))
+            assertTrue(k.wire, i.contains("say bye"))
+            // The opening itself says the name exactly once.
+            assertEquals(k.wire, 1, Regex("\\bAhmad\\b").findAll(opening(p)).count())
+        }
+        assertEquals("Their name is in the opening — say it there once and not again during the call.", CallScript.NAME_ONCE_RULE)
     }
 }

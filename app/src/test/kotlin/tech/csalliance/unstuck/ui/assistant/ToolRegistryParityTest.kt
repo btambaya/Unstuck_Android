@@ -114,9 +114,13 @@ class ToolRegistryParityTest {
         assertEquals(talkVoiceToolsJson(), tools)
     }
 
-    @Test fun `the call schema is the registry filtered to CallScript callTools, snooze_call included`() {
-        val core = CallScript.callTools()
-        assertEquals("every call tool resolves", core, callVoiceTools(core).map { it.name })
+    @Test fun `the call schema is every voice tool plus the call surface, snooze_call included`() {
+        val names = callToolNames()
+        assertEquals("every call tool resolves", names, callVoiceTools(names).map { it.name })
+        assertEquals("the default is the full list", names, callVoiceTools().map { it.name })
+        assertEquals(RegistryTools.forSurface("voice").map { it.name } + listOf("snooze_call"), names)
+        assertEquals(names, CallScript.callToolNames(RegistryTools.forSurface("voice").map { it.name }, RegistryTools.forSurface("call").map { it.name }))
+        assertEquals(names.size, callVoiceToolsJson().size)
         val json = callVoiceToolsJson(listOf("snooze_call", "complete_task", "no_such_tool"))
         assertEquals(listOf("snooze_call", "complete_task"), json.map { it.jsonObject["name"]!!.jsonPrimitive.content })
         val snooze = json[0].jsonObject

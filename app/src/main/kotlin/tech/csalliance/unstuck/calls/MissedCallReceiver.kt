@@ -3,14 +3,17 @@ package tech.csalliance.unstuck.calls
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import tech.csalliance.unstuck.core.logic.CallNotificationKind
 import tech.csalliance.unstuck.core.logic.CallOutcome
 import tech.csalliance.unstuck.surface.NotificationChannels
 
 /**
  * The ring's background outcomes — the ones that need no screen:
  *  - [ACTION_MISSED]  the 30 s alarm CallRinger armed (fires through Doze; also
- *                     fires if our process was killed mid-ring) → `missed` once
- *                     + the "I called about …" notification.
+ *                     fires if our process was killed mid-ring) → `missed` once;
+ *                     the "I called about …" notification rides with the queued
+ *                     report and is posted only when call-outcome answers
+ *                     `retry: false` (a first miss is re-rung 5 min later).
  *  - [ACTION_DECLINE] the shade's Decline → `declined`, no notification (they saw it).
  *  - [ACTION_SNOOZE]  the shade's "Snooze 10" → `snoozed` (10 min; the server
  *                     re-rings when due) + a brief confirmation.
@@ -27,11 +30,7 @@ class MissedCallReceiver : BroadcastReceiver() {
         // Read the payload BEFORE settling (settle clears the ring's "ringing" view).
         val payload = CallRinger.ringing(context)?.takeIf { it.callId == callId }
         when (intent.action) {
-            ACTION_MISSED -> {
-                if (CallRinger.settle(context, callId, CallOutcome.MISSED) && payload != null) {
-                    CallNotifications.missed(context, payload)
-                }
-            }
+            ACTION_MISSED -> CallRinger.settle(context, callId, CallOutcome.MISSED, notifyUnlessRetry = CallNotificationKind.MISSED)
             ACTION_DECLINE -> CallRinger.settle(context, callId, CallOutcome.DECLINED)
             ACTION_SNOOZE -> {
                 if (CallRinger.settle(context, callId, CallOutcome.SNOOZED, snoozeMin = SNOOZE_MIN) && payload != null) {

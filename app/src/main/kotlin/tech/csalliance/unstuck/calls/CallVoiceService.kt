@@ -62,8 +62,10 @@ import tech.csalliance.unstuck.ui.assistant.VoiceState
 //
 //   Answer ──▶ start(): startForeground FIRST (the 5 s contract), then
 //              compose the session (base voice instructions + CallScript.
-//              instructions; opening = CallScript.opening carried by the hidden
-//              primer, exactly like Talk; tools = the call tools + snooze_call)
+//              instructions, which vary by the ring's callKind; opening =
+//              CallScript.opening carried by the hidden primer, exactly like
+//              Talk; tools = EVERY voice tool + update_call + snooze_call — the
+//              call is the full assistant, calls build-out 2026-09-20)
 //              and dial once the app-side seams (Deps) are bound — a cold-start
 //              Answer waits up to LAUNCHER_GRACE_MS for AppViewModel to bind
 //              them (iOS launcherGrace), and brings MainActivity up meanwhile.
@@ -95,7 +97,8 @@ class CallVoiceService : Service() {
         val model: String
         /** The assistant's voice instructions — scope guardrail + live app state. */
         suspend fun voiceInstructions(): String
-        /** VOICE_TOOLS (the full registry; filtered to the call tools here). */
+        /** The Talk session's tools (the registry's voice surface) — the call
+         *  adds update_call / snooze_call on top (callToolSchemas). */
         fun voiceTools(): JsonArray
         /** The Talk executor. */
         suspend fun runAppTool(name: String, args: JsonObject): String
@@ -440,7 +443,7 @@ class CallVoiceService : Service() {
         val opening: String,
         /** The hidden primer carrying [opening] — sent exactly like Talk's opening. */
         val primer: String,
-        /** Call tools only (+ snooze_call), realtime function shape. */
+        /** Every voice tool + update_call + snooze_call, realtime function shape. */
         val tools: JsonArray,
     ) {
         val toolNames: List<String> get() = tools.mapNotNull { it.jsonObject["name"]?.jsonPrimitive?.contentOrNull }
@@ -552,9 +555,9 @@ class CallVoiceService : Service() {
             return IncomingCallPayload.fromData(data)
         }
 
-        /** instructions = base + call script; opening = CallScript.opening; primer
-         *  wraps the opening; tools = call tools only (+ snooze_call). Port of iOS
-         *  RealtimeCallVoiceLauncher.compose. */
+        /** instructions = base + call script (per kind); opening = CallScript.opening;
+         *  primer wraps the opening; tools = every voice tool + update_call +
+         *  snooze_call. Port of iOS RealtimeCallVoiceLauncher.compose. */
         fun compose(p: IncomingCallPayload, baseInstructions: String, voiceTools: JsonArray, nowMs: Long = System.currentTimeMillis()): Composition {
             val opening = CallScript.opening(p, nowMs = nowMs)
             return Composition(
@@ -569,9 +572,12 @@ class CallVoiceService : Service() {
         fun primer(opening: String): String =
             "(The call just connected — YOU rang them, this is not the user speaking. Say EXACTLY this now, word for word, before anything else, then listen: \"$opening\" This opening happens ONCE — after any interruption continue the conversation naturally; never repeat it.)"
 
-        /** The VOICE_TOOLS schemas filtered to CallScript.callTools (in that
-         *  order), snooze_call always from [snoozeCallSchema], update_call from
-         *  [updateCallSchema] when the registry doesn't carry one. */
+        /** The call's tool schemas: EVERY schema in [voiceTools] (the Talk
+         *  session's voice surface, in that order) plus the call extras —
+         *  `snooze_call` ALWAYS from [snoozeCallSchema] (the launcher answers it
+         *  locally; the registry's stub is never advertised), `update_call` from
+         *  [updateCallSchema] when the registry doesn't carry one. The order and
+         *  the guaranteed extras are core `CallScript.callToolNames`. */
         fun callToolSchemas(voiceTools: JsonArray): JsonArray {
             val byName = LinkedHashMap<String, JsonObject>()
             for (t in voiceTools) {
@@ -580,7 +586,7 @@ class CallVoiceService : Service() {
                 if (n !in byName) byName[n] = o
             }
             return buildJsonArray {
-                for (name in CallScript.callTools()) {
+                for (name in CallScript.callToolNames(voice = byName.keys.toList(), call = listOf(CallMode.SNOOZE_TOOL))) {
                     val schema = when {
                         name == CallMode.SNOOZE_TOOL -> snoozeCallSchema
                         byName[name] != null -> byName[name]!!

@@ -253,12 +253,26 @@ internal const val CALLS_DEVICE_READY = "This phone can take calls."
 internal const val CALLS_FULL_SCREEN_OFF = "Full-screen calls are off for Unstuck — a call shows as a notification until you allow them."
 internal const val CALLS_FULL_SCREEN_ROW = "Allow full-screen calls"
 internal const val CALLS_FULL_SCREEN_ROW_SUB = "Lets a call take over the lock screen, like the phone app"
+/** The one-time nudge's explainer (Android's twin of the iOS VoIP-registration
+ *  nudge): without the grant a call arrives as a notification you tap. */
+internal const val CALLS_FULL_SCREEN_NUDGE = "Calls need the full-screen permission on this phone — without it a call arrives as a notification you tap instead of a ring."
+internal const val CALLS_FULL_SCREEN_DISMISS = "Not now"
 internal const val CALLS_ENABLED_ROW = "Calls from Unstuck"
 internal const val CALLS_ENABLED_OFF_HINT = "Calls are declined quietly — you get the notes as a notification instead."
 internal const val CALLS_ASSISTANT_OFF_HINT = "Calls are part of the AI Assistant — turn it on under Settings → Interface to receive them."
 internal const val CALLS_HOURS_HINT_SUFFIX = "A call outside these hours is declined quietly and you get the notes as a notification instead."
 internal const val CALLS_LEAD_HINT = "\"Call me about this\" on a scheduled task rings this many minutes before it starts."
 internal const val CALLS_TEST_BODY = "Book a test call for one minute from now. Lock your phone — it rings through the real path (server → push → call screen)."
+// The three OPT-IN proactive calls (calls build-out 2026-09-20; iOS CallSettingsView.proactiveCard, copy verbatim).
+internal const val CALLS_PROACTIVE_SECTION = "Calls Unstuck can make on its own"
+internal const val CALLS_PROACTIVE_MORNING = "Morning planning call"
+internal const val CALLS_PROACTIVE_MORNING_SUB = "Rings to walk through the day and plan it with you."
+internal const val CALLS_PROACTIVE_EVENING = "Evening wrap-up call"
+internal const val CALLS_PROACTIVE_EVENING_SUB = "Rings to go over what got done and what moves to tomorrow."
+internal const val CALLS_PROACTIVE_AFTER_BLOCK = "Check in after a block"
+internal const val CALLS_PROACTIVE_AFTER_BLOCK_SUB = "Rings when a block ends without its task marked done — how did it go?"
+internal const val CALLS_PROACTIVE_AT = "At"
+internal const val CALLS_PROACTIVE_HINT = "All off unless you switch them on. They ring within your allowed hours, on every phone where calls are on."
 internal const val CALLS_TEST_BUTTON = "Test call now"
 internal const val CALLS_TEST_BOOKING = "Booking…"
 internal const val CALLS_DND_HINT = "Under Do Not Disturb, a call only rings if Unstuck's Calls notifications are allowed to interrupt."
@@ -307,7 +321,11 @@ private fun CallsContent(vm: AppViewModel) {
     val scope = rememberCoroutineScope()
     val s by vm.settings.collectAsStateWithLifecycle()
     val cs by vm.callSettings.collectAsStateWithLifecycle()
+    val proactive by vm.callProactivePrefs.collectAsStateWithLifecycle()
+    val nudgeDismissed by vm.ringNudgeDismissed.collectAsStateWithLifecycle()
     var testState by remember { mutableStateOf<TestCallState>(TestCallState.Idle) }
+    // The account's proactive calls: a toggle made on the web / iPhone reaches this screen.
+    androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshCallProactivePrefs() }
     // Re-check the full-screen grant whenever we come back from the system page.
     var fullScreenOk by remember { mutableStateOf(canUseFullScreenIntent(context)) }
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
@@ -344,11 +362,14 @@ private fun CallsContent(vm: AppViewModel) {
 
     // Risk 1: on API 34 USE_FULL_SCREEN_INTENT is pre-granted only to apps Play
     // classifies as calling/alarm; otherwise the ring degrades to a heads-up.
-    // Deep-link the per-app system page.
-    if (!fullScreenOk) {
+    // The ONE-TIME nudge (iOS's VoIP-registration nudge, Android's shape): shown
+    // until the grant lands or the user says "Not now" — the status line above
+    // keeps saying calls degrade either way. Deep-links the per-app system page.
+    if (tech.csalliance.unstuck.core.logic.CallRingNudge.shouldShow(canRing = fullScreenOk, dismissed = nudgeDismissed)) {
         SectionLabel("Permission", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
         SettingsCard {
-            SettingRow(CALLS_FULL_SCREEN_ROW, CALLS_FULL_SCREEN_ROW_SUB, last = true) {
+            Text(CALLS_FULL_SCREEN_NUDGE, style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp))
+            SettingRow(CALLS_FULL_SCREEN_ROW, CALLS_FULL_SCREEN_ROW_SUB) {
                 runCatching {
                     val i = android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT)
                         .setData(android.net.Uri.parse("package:${context.packageName}"))
@@ -362,6 +383,7 @@ private fun CallsContent(vm: AppViewModel) {
                     }
                 }
             }
+            SettingRow(CALLS_FULL_SCREEN_DISMISS, null, last = true) { vm.dismissRingNudge() }
         }
     }
 
@@ -396,6 +418,34 @@ private fun CallsContent(vm: AppViewModel) {
         }
     }
     Text(CALLS_LEAD_HINT, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
+
+    // Calls Unstuck can make on its own — ACCOUNT-wide, off by default
+    // (notification_preferences.call_*; AppViewModel.setCallProactivePrefs).
+    SectionLabel(CALLS_PROACTIVE_SECTION, color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
+    SettingsCard {
+        ToggleRow(CALLS_PROACTIVE_MORNING, proactive.morningEnabled, sub = CALLS_PROACTIVE_MORNING_SUB, last = !proactive.morningEnabled) { v ->
+            vm.setCallProactivePrefs(proactive.copy(morningEnabled = v))
+        }
+        if (proactive.morningEnabled) {
+            SettingRow(CALLS_PROACTIVE_AT, proactive.morningTime, last = true) {
+                pickHour(proactive.morningTime) { hm -> vm.setCallProactivePrefs(vm.callProactivePrefs.value.copy(morningTime = hm)) }
+            }
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
+        ToggleRow(CALLS_PROACTIVE_EVENING, proactive.eveningEnabled, sub = CALLS_PROACTIVE_EVENING_SUB, last = !proactive.eveningEnabled) { v ->
+            vm.setCallProactivePrefs(proactive.copy(eveningEnabled = v))
+        }
+        if (proactive.eveningEnabled) {
+            SettingRow(CALLS_PROACTIVE_AT, proactive.eveningTime, last = true) {
+                pickHour(proactive.eveningTime) { hm -> vm.setCallProactivePrefs(vm.callProactivePrefs.value.copy(eveningTime = hm)) }
+            }
+        }
+        Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
+        ToggleRow(CALLS_PROACTIVE_AFTER_BLOCK, proactive.afterBlockEnabled, sub = CALLS_PROACTIVE_AFTER_BLOCK_SUB, last = true) { v ->
+            vm.setCallProactivePrefs(proactive.copy(afterBlockEnabled = v))
+        }
+    }
+    Text(CALLS_PROACTIVE_HINT, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
 
     // Try it
     SectionLabel("Try it", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
@@ -821,7 +871,7 @@ private fun SettingRow(label: String, sub: String?, last: Boolean = false, enabl
 internal const val TOUR_LOCKED_ROW_SUB = "Paused while the guided tour is running"
 
 @Composable
-private fun ToggleRow(label: String, value: Boolean, last: Boolean = false, onChange: (Boolean) -> Unit) {
+private fun ToggleRow(label: String, value: Boolean, last: Boolean = false, sub: String? = null, onChange: (Boolean) -> Unit) {
     val c = UTheme.colors
     // The whole row is the switch for TalkBack ("<label>, switch, on") — the inner
     // pill is decorative so it doesn't surface as a second nameless toggle.
@@ -831,7 +881,10 @@ private fun ToggleRow(label: String, value: Boolean, last: Boolean = false, onCh
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink, modifier = Modifier.weight(1f))
+        Column(Modifier.weight(1f)) {
+            Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
+            if (sub != null) Text(sub, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 4.dp))
+        }
         MdToggle(value, onChange, Modifier.clearAndSetSemantics {})
     }
     if (!last) Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))

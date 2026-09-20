@@ -5,8 +5,13 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tech.csalliance.unstuck.core.logic.CallProactivePrefs
+import tech.csalliance.unstuck.core.logic.CallProactiveSync
+import tech.csalliance.unstuck.core.logic.CallRingNudge
 import tech.csalliance.unstuck.core.logic.CallSettings
 import tech.csalliance.unstuck.core.logic.CallSettingsLogic
+import tech.csalliance.unstuck.core.logic.TestCallLogic
+import tech.csalliance.unstuck.core.model.CallRequest
 import java.time.LocalDateTime
 import java.time.ZoneId
 
@@ -85,4 +90,78 @@ class CallSettingsTest {
 
     private fun assertTrue(v: Boolean, message: String) = assertTrue(message, v)
     private fun assertFalse(v: Boolean, message: String) = assertFalse(message, v)
+
+    // ── calls build-out 2026-09-20 ──
+
+    @Test fun `spokenTime is the way people say it`() {
+        assertEquals("2:05pm", CallSettingsLogic.spokenTime("14:05"))
+        assertEquals("9am", CallSettingsLogic.spokenTime("09:00"))
+        assertEquals("12:30pm", CallSettingsLogic.spokenTime("12:30"))
+        assertEquals("12:15am", CallSettingsLogic.spokenTime("00:15"))
+        assertEquals("12am", CallSettingsLogic.spokenTime("00:00"))
+        assertEquals("11:59pm", CallSettingsLogic.spokenTime("23:59"))
+        assertEquals("soon", CallSettingsLogic.spokenTime("soon"))
+    }
+
+    @Test fun `proactive prefs default to all off at 08-30 and 18-00, and survive JSON`() {
+        val d = CallProactivePrefs.DEFAULTS
+        assertFalse(d.morningEnabled); assertFalse(d.eveningEnabled); assertFalse(d.afterBlockEnabled)
+        assertEquals("08:30", d.morningTime)
+        assertEquals("18:00", d.eveningTime)
+        val on = CallProactivePrefs(morningEnabled = true, morningTime = "07:15", eveningEnabled = true, eveningTime = "21:00", afterBlockEnabled = true)
+        assertEquals(on, CallProactivePrefs.fromJson(on.toJson()))
+        assertEquals(d, CallProactivePrefs.fromJson(null))
+        assertEquals(d, CallProactivePrefs.fromJson(""))
+        assertEquals(d, CallProactivePrefs.fromJson("{nope"))
+        // A stored time that doesn't parse falls back to its default, field by field.
+        val bad = CallProactivePrefs.fromJson("""{"morningEnabled":true,"morningTime":"25:00","eveningTime":"garbage","future":1}""")
+        assertTrue(bad.morningEnabled)
+        assertEquals("08:30", bad.morningTime)
+        assertEquals("18:00", bad.eveningTime)
+    }
+
+    @Test fun `hhmm normalises a Postgres time`() {
+        assertEquals("08:30", CallProactivePrefs.hhmm("08:30:00"))
+        assertEquals("08:30", CallProactivePrefs.hhmm("08:30:00.000"))
+        assertEquals("08:30", CallProactivePrefs.hhmm("08:30"))
+        assertEquals("18:05", CallProactivePrefs.hhmm(" 18:05 "))
+        assertNull(CallProactivePrefs.hhmm("8:30"))
+        assertNull(CallProactivePrefs.hhmm("24:00"))
+        assertNull(CallProactivePrefs.hhmm(null))
+        assertNull(CallProactivePrefs.hhmm(""))
+    }
+
+    @Test fun `a pending local toggle is never pulled over by the server, otherwise the server wins`() {
+        val local = CallProactivePrefs(morningEnabled = true)
+        val server = CallProactivePrefs(eveningEnabled = true, eveningTime = "19:00")
+        assertEquals(local, CallProactiveSync.resolve(local, server, pendingPush = true))
+        assertEquals(server, CallProactiveSync.resolve(local, server, pendingPush = false))
+        assertEquals("no server row yet keeps the cache", local, CallProactiveSync.resolve(local, null, pendingPush = false))
+        assertTrue(CallProactiveSync.shouldPush(true))
+        assertFalse(CallProactiveSync.shouldPush(false))
+    }
+
+    @Test fun `the ring nudge shows only while the phone cannot ring and it wasn't dismissed`() {
+        assertTrue(CallRingNudge.shouldShow(canRing = false, dismissed = false))
+        assertFalse(CallRingNudge.shouldShow(canRing = true, dismissed = false))
+        assertFalse(CallRingNudge.shouldShow(canRing = false, dismissed = true))
+        assertFalse(CallRingNudge.shouldShow(canRing = true, dismissed = true))
+    }
+
+    @Test fun `a new test call replaces every live test row - by kind, or by the old label`() {
+        fun r(id: String, status: String = "scheduled", kind: String = "requested", label: String = "speak to James") =
+            CallRequest(id = id, callAt = "2026-09-02T14:45:00.000Z", label = label, status = status, kind = kind)
+        val live = listOf(
+            r("k", kind = "test", label = "whatever"),
+            r("l", label = "Test call"),
+            r("lc", label = " test CALL "),
+            r("done", status = "done", kind = "test"),
+            r("other"),
+            r("m", kind = "morning", label = "Morning plan"),
+        )
+        assertEquals(listOf("k", "l", "lc"), TestCallLogic.previousTestCalls(live).map { it.id })
+        assertEquals("Test call", TestCallLogic.LABEL)
+        assertEquals("This is what a call from Unstuck sounds like", TestCallLogic.NOTE)
+        assertEquals("test", TestCallLogic.KIND)
+    }
 }

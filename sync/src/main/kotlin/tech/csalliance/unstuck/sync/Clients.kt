@@ -19,6 +19,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import tech.csalliance.unstuck.core.logic.PAPrefsLogic
 import tech.csalliance.unstuck.core.logic.RitualPrefs
+import tech.csalliance.unstuck.core.logic.CallProactivePrefs
 import java.util.TimeZone
 
 // PushClient (FCM register) + NotificationsClient (recap / paused-checkin) +
@@ -240,6 +241,64 @@ class PreferencesClient(private val client: SupabaseClient) {
         client.from("notification_preferences")
             .select(Columns.list("notification_level", "reminder_lead_min")) { filter { eq("user_id", userId) } }
             .decodeSingleOrNull<ServerNotificationPrefs>()
+
+    // ── proactive calls (migration 072, calls build-out 2026-09-20) ──────────────
+    // The three opt-in calls Unstuck can make on its own — morning plan / evening
+    // wrap-up / check-in after a block — are ACCOUNT-wide: `dispatch_proactive_calls`
+    // reads these columns every 5 min. Same read/write path as the level + lead.
+
+    @Serializable private data class CallProactiveRow(
+        val call_morning_enabled: Boolean? = null,
+        /** A Postgres `time` — PostgREST emits "08:30:00". */
+        val call_morning_time: String? = null,
+        val call_evening_enabled: Boolean? = null,
+        val call_evening_time: String? = null,
+        val call_after_block_enabled: Boolean? = null,
+    )
+
+    @Serializable private data class CallProactiveWrite(
+        val user_id: String,
+        val call_morning_enabled: Boolean,
+        val call_morning_time: String,
+        val call_evening_enabled: Boolean,
+        val call_evening_time: String,
+        val call_after_block_enabled: Boolean,
+    )
+
+    /** The account's proactive-call toggles + times. Null = no row yet OR a
+     *  transport error (callers keep their cached copy); a null column reads as
+     *  its default (off / 08:30 / 18:00). Throws on a pre-072 server (PGRST204)
+     *  like the other best-effort reads — the caller swallows it. */
+    suspend fun fetchCallProactivePrefs(userId: String): CallProactivePrefs? {
+        val r = client.from("notification_preferences")
+            .select(Columns.list("call_morning_enabled", "call_morning_time", "call_evening_enabled", "call_evening_time", "call_after_block_enabled")) {
+                filter { eq("user_id", userId) }
+            }
+            .decodeSingleOrNull<CallProactiveRow>() ?: return null
+        return CallProactivePrefs(
+            morningEnabled = r.call_morning_enabled ?: false,
+            morningTime = CallProactivePrefs.hhmm(r.call_morning_time) ?: CallProactivePrefs.DEFAULT_MORNING_TIME,
+            eveningEnabled = r.call_evening_enabled ?: false,
+            eveningTime = CallProactivePrefs.hhmm(r.call_evening_time) ?: CallProactivePrefs.DEFAULT_EVENING_TIME,
+            afterBlockEnabled = r.call_after_block_enabled ?: false,
+        )
+    }
+
+    /** Persist the proactive-call toggles + times (upsert on user_id like the
+     *  other prefs writers — a bare UPDATE on a missing row is a silent no-op).
+     *  Every column is sent explicitly (no defaults — kotlinx would omit them);
+     *  times go up as "HH:MM", which Postgres `time` accepts. Throws on failure
+     *  so the caller keeps the write pending. */
+    suspend fun setCallProactivePrefs(userId: String, prefs: CallProactivePrefs) {
+        client.from("notification_preferences").upsert(
+            CallProactiveWrite(
+                user_id = userId,
+                call_morning_enabled = prefs.morningEnabled, call_morning_time = prefs.morningTime,
+                call_evening_enabled = prefs.eveningEnabled, call_evening_time = prefs.eveningTime,
+                call_after_block_enabled = prefs.afterBlockEnabled,
+            ),
+        ) { onConflict = "user_id" }
+    }
 }
 
 /** The inbox archive (migration 053 `captures.archived_at`): archive = set now(),

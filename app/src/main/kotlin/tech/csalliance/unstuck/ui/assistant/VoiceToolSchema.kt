@@ -19,8 +19,10 @@ import kotlinx.serialization.json.jsonPrimitive
 // parsed at first use and sliced by surface:
 //
 //  • a TALK session gets every tool whose `_surfaces` names "voice";
-//  • a CALL session gets those plus the "call"-only tools (snooze_call),
-//    filtered to core `CallScript.callTools()` in that order;
+//  • a CALL session gets EVERY voice tool plus the "call"-only tools
+//    (snooze_call) — a call is the full assistant on the phone (calls
+//    build-out 2026-09-20); the order + the guaranteed extras are core
+//    `CallScript.callToolNames`;
 //  • the text path takes the server's schema (generated from the same registry).
 //
 // The executor (AssistantTools.kt) implements every name in ToolRegistry.NAMES —
@@ -72,17 +74,25 @@ fun voiceToolsJson(): JsonArray = JsonArray(RegistryTools.forSurface("voice").ma
  *  nothing is appended here. */
 fun talkVoiceToolsJson(): JsonArray = voiceToolsJson()
 
-/** The registry filtered to the tools live during a call — `callTools` is core
- *  `CallScript.callTools()` (iOS CallScript.callTools), in that order — drawn
- *  from the voice AND call surfaces (snooze_call is call-only). Unknown names
- *  are dropped (voice can never advertise a tool the executor lacks). */
-fun callVoiceTools(callTools: List<String>): List<RegistryTool> {
+/** The tool NAMES live during a call — iOS `CallScript.callTools`: every
+ *  registry tool on the voice surface (registry order), then the call surface
+ *  (`snooze_call`), then `update_call` / `snooze_call` if a registry lacked
+ *  them (core `CallScript.callToolNames`). */
+fun callToolNames(): List<String> = tech.csalliance.unstuck.core.logic.CallScript.callToolNames(
+    voice = RegistryTools.forSurface("voice").map { it.name },
+    call = RegistryTools.forSurface("call").map { it.name },
+)
+
+/** The registry filtered to [callTools] (default: [callToolNames]), in that
+ *  order — drawn from the voice AND call surfaces (snooze_call is call-only).
+ *  Unknown names are dropped (voice can never advertise a tool the executor lacks). */
+fun callVoiceTools(callTools: List<String> = callToolNames()): List<RegistryTool> {
     val live = (RegistryTools.forSurface("voice") + RegistryTools.forSurface("call")).associateBy { it.name }
     return callTools.mapNotNull { live[it] }
 }
 
 /** Tool schemas for a CALL session (realtime function shape). */
-fun callVoiceToolsJson(callTools: List<String>): JsonArray = JsonArray(callVoiceTools(callTools).map { it.schema })
+fun callVoiceToolsJson(callTools: List<String> = callToolNames()): JsonArray = JsonArray(callVoiceTools(callTools).map { it.schema })
 
 // ── finish_interview — the talk-level tool (2026-09-17) ──
 // The opening primer runs the get-to-know-you intro aloud while the account's

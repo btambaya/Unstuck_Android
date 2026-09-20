@@ -14,6 +14,7 @@ import kotlinx.serialization.builtins.serializer
 import kotlinx.serialization.json.Json
 import tech.csalliance.unstuck.R
 import tech.csalliance.unstuck.core.logic.CallCoordinatorLogic
+import tech.csalliance.unstuck.core.logic.CallNotificationKind
 import tech.csalliance.unstuck.core.logic.CallOutcome
 import tech.csalliance.unstuck.core.logic.IncomingCallPayload
 import tech.csalliance.unstuck.surface.NotifIds
@@ -34,6 +35,11 @@ import tech.csalliance.unstuck.surface.NotificationLog
 //   no-ops (iOS CallCoordinator's one-end-per-call rule), and the winner is
 //   what clears the ring. The ring state lives in SharedPreferences so a
 //   process killed mid-ring still reports `missed` when the alarm fires.
+//   A `missed` settle hands the "I called about X" notice to the OUTCOME
+//   QUEUE (settle(notifyUnlessRetry)) rather than posting it: call-outcome
+//   answers `retry: true` on a first miss (the server re-rings in 5 min) and
+//   the notice must stay quiet then — CallOutcomeStore posts it only on
+//   `retry: false` (calls build-out 2026-09-20 §5).
 //
 //   That persisted record is also BOUNDED (recover / staleOutcome): a reboot
 //   drops the 30 s alarm with every other alarm, and a process kill mid-call
@@ -189,13 +195,12 @@ object CallRinger {
             p.edit().putBoolean(K_SETTLED, true).putString(K_PHASE, PHASE_RINGING).commit()
         }
         dismissRing(context, callId)
-        CallOutcomeStore.enqueue(context, callId, outcome, nowMs = nowMs)
         // The user was rung and never answered: they still get the notes, exactly
-        // as the missed alarm would have posted them. An abandoned ACTIVE call
-        // already had its conversation — nothing to say.
-        if (outcome == CallOutcome.MISSED && payload != null) {
-            runCatching { CallNotifications.missed(context, payload) }
-        }
+        // as the missed alarm would have — deferred with the report, posted once
+        // the server says no re-ring is coming. An abandoned ACTIVE call already
+        // had its conversation — nothing to say.
+        val notify = if (outcome == CallOutcome.MISSED && payload != null) CallNotificationKind.MISSED else null
+        CallOutcomeStore.enqueue(context, callId, outcome, nowMs = nowMs, notify = notify, payload = notify?.let { payload?.toData() })
         return outcome
     }
 
@@ -349,14 +354,21 @@ object CallRinger {
      * `answered` keeps the call ACTIVE (activeCallId stays set, so a second
      * ring meanwhile ends as busy) until the voice service settles it as
      * `done` / `snoozed`; every other outcome ends it.
+     *
+     * [notifyUnlessRetry]: a local notification to post for this outcome ONCE
+     * the server has settled the report without a retry (the persisted ring
+     * payload renders it) — the missed path's "I called about X". Null = nothing.
      */
     fun settle(context: Context, callId: String, outcome: CallOutcome, snoozeMin: Int? = null,
-               outcomeNotes: List<String>? = null, nowMs: Long = System.currentTimeMillis()): Boolean {
+               outcomeNotes: List<String>? = null, nowMs: Long = System.currentTimeMillis(),
+               notifyUnlessRetry: CallNotificationKind? = null): Boolean {
+        val payloadData: Map<String, String>?
         synchronized(lock) {
             val p = prefs(context)
             if (p.getString(K_CALL_ID, null) != callId) return false
             val phase = p.getString(K_PHASE, PHASE_RINGING)
             if (p.getBoolean(K_SETTLED, true)) return false
+            payloadData = notifyUnlessRetry?.let { decodePayload(p.getString(K_PAYLOAD, null))?.toData() }
             when (outcome) {
                 CallOutcome.ANSWERED -> {
                     if (phase != PHASE_RINGING) return false
@@ -375,7 +387,10 @@ object CallRinger {
         }
         dismissRing(context, callId)
         // Durable + flushed now and on every foreground / reconnect (CallOutcomeStore).
-        CallOutcomeStore.enqueue(context, callId, outcome, snoozeMin, outcomeNotes, nowMs)
+        CallOutcomeStore.enqueue(
+            context, callId, outcome, snoozeMin, outcomeNotes, nowMs,
+            notify = payloadData?.let { notifyUnlessRetry }, payload = payloadData,
+        )
         return true
     }
 

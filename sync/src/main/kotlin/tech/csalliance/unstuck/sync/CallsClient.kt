@@ -17,6 +17,7 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.coroutines.flow.Flow
 import tech.csalliance.unstuck.core.logic.CallOutcomeReceipt
+import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.Tables
 import java.time.Instant
@@ -99,6 +100,25 @@ class CallRequestsMirror(private val store: LocalStore) {
      *  copy is strictly newer — a realtime echo may have overtaken the response). */
     suspend fun absorb(row: CallRequest) {
         store.upsertIfNewer(Tables.CALL_REQUESTS, row, CallRequest.serializer(), row.id, row.updatedAt)
+    }
+
+    companion object {
+        /** The hydrate merge (iOS CallRequestsMirror.mergeHydrated, build 72): the
+         *  server rows, plus any LOCAL-ONLY row stamped newer than the newest
+         *  server row — a booking absorbed after the fetch started, whose echo
+         *  the fetch predated (the next catch-up / realtime event confirms it).
+         *  Everything else the server doesn't have is gone (the 30-day prune, or
+         *  a row from another account's session). */
+        fun mergeHydrated(remote: List<CallRequest>, local: List<CallRequest>): List<CallRequest> {
+            val remoteIds = remote.mapTo(HashSet()) { it.id }
+            val newestServer = remote.mapNotNull { r -> r.updatedAt?.let { Time.parseMillis(it) } }.maxOrNull()
+            val keep = local.filter { row ->
+                if (row.id in remoteIds) return@filter false
+                val ms = row.updatedAt?.let { Time.parseMillis(it) } ?: return@filter false
+                newestServer == null || ms > newestServer
+            }
+            return remote + keep
+        }
     }
 }
 

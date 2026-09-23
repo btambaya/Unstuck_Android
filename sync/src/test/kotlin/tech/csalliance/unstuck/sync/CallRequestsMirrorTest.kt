@@ -93,6 +93,30 @@ class CallRequestsMirrorTest {
         assertEquals(emptyList<String>(), mirror.get("c1")!!.outcomeNotes)
     }
 
+    /** A booking absorbed after the hydrate's fetch started must not vanish
+     *  when that fetch lands (parity with iOS build 72, mergeHydrated). */
+    @Test fun `hydrate keeps a local-only booking newer than every server row, drops an older one`() = runTest {
+        mirror.absorb(CallRequest(id = "just-booked", callAt = "2026-09-02T18:00:00.000Z", label = "call mum", updatedAt = "2026-09-01T12:00:00.000Z"))
+        mirror.absorb(CallRequest(id = "pruned", callAt = "2026-08-01T18:00:00.000Z", label = "old", updatedAt = "2026-08-01T12:00:00.000Z"))
+        remote.rows[Tables.CALL_REQUESTS] = listOf(row("c1", updatedAt = "2026-09-01T11:00:00+00:00"))
+        hydrator.hydrate("u")
+        assertEquals(setOf("c1", "just-booked"), mirror.all().map { it.id }.toSet())
+        // The next pull that has it confirms it; one that is newer still and
+        // lacks it drops it (it was cancelled / pruned server-side).
+        remote.rows[Tables.CALL_REQUESTS] = listOf(row("c1", updatedAt = "2026-09-01T13:00:00+00:00"))
+        hydrator.hydrate("u")
+        assertEquals(setOf("c1"), mirror.all().map { it.id }.toSet())
+    }
+
+    @Test fun `mergeHydrated is server rows plus newer local-only rows`() {
+        fun r(id: String, at: String?) = CallRequest(id = id, callAt = "2026-09-02T18:00:00.000Z", updatedAt = at)
+        val remote = listOf(r("a", "2026-09-01T10:00:00Z"), r("b", "2026-09-01T11:00:00Z"))
+        val local = listOf(r("a", "2026-09-01T09:00:00Z"), r("new", "2026-09-01T11:00:01Z"), r("old", "2026-09-01T10:30:00Z"), r("unstamped", null))
+        assertEquals(listOf("a", "b", "new"), CallRequestsMirror.mergeHydrated(remote, local).map { it.id })
+        assertEquals("the server row wins on a shared id", "2026-09-01T10:00:00Z", CallRequestsMirror.mergeHydrated(remote, local)[0].updatedAt)
+        assertEquals("an empty server keeps every stamped local row", listOf("a", "new", "old"), CallRequestsMirror.mergeHydrated(emptyList(), local).map { it.id })
+    }
+
     @Test fun `a realtime echo older than the local row is skipped, a newer one lands, a delete removes`() = runTest {
         val newer = DbRowCodec.decodeCallRequest(row("c1", status = "snoozed", updatedAt = "2026-09-01T12:00:00+00:00", snoozeUntil = "2026-09-02T15:05:00+00:00"))
         store.upsertIfNewer(Tables.CALL_REQUESTS, newer, CallRequest.serializer(), newer.id, newer.updatedAt)
@@ -155,5 +179,20 @@ class CallRequestsMirrorTest {
         hydrator.hydrate("u")
         assertEquals("Asia/Tokyo", hydrator.timezoneSent)
         assertEquals(3, remote.rpcs.size)
+    }
+
+    /** The routine catch-up pull re-pushes a changed zone too, not only the
+     *  rare full hydrate — the retry for a TIMEZONE_CHANGED push that failed
+     *  offline (parity with iOS build 78). */
+    @Test fun `a catch-up pass pushes a changed zone, once`() = runTest {
+        hydrator.hydrate("u")
+        assertEquals(1, remote.rpcs.size)
+        hydrator.hydrateNonCursorTables()
+        assertEquals("unchanged zone: no RPC", 1, remote.rpcs.size)
+        hydrator.zoneId = { "Asia/Dubai" }
+        hydrator.hydrateNonCursorTables()
+        hydrator.hydrateNonCursorTables()
+        assertEquals(2, remote.rpcs.size)
+        assertEquals("Asia/Dubai", remote.rpcs[1].second[Hydrator.SET_TIMEZONE_PARAM]!!.jsonPrimitive.content)
     }
 }

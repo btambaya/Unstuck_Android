@@ -536,6 +536,38 @@ object CallMeLogic {
 
     fun isOk(result: String): Boolean = result.startsWith("ok")
 
+    /** The amber line under Book / Update when THIS phone would decline the
+     *  ring (its Calls switch or hours) — or null. The booking used to succeed
+     *  and the call was declined quietly at ring time (parity with iOS build
+     *  81, audit 2026-09-22 C12). */
+    fun hoursHint(callAtMs: Long?, s: tech.csalliance.unstuck.core.logic.CallSettings): String? {
+        val at = callAtMs ?: return null
+        if (tech.csalliance.unstuck.core.logic.CallSettingsLogic.deviceGuard(at, s) == null) return null
+        if (!s.enabled) return "Calls are off on this phone, so it would decline this call. Switch them on in Settings › Calls."
+        val hm = CallToolLogic.hhmm(at)
+        val hours = tech.csalliance.unstuck.core.logic.CallSettingsLogic.hoursLabel(
+            s.hoursStart, s.hoursEnd, tech.csalliance.unstuck.core.logic.CallSettingsLogic.minutesOfDay(hm) ?: -1,
+        )
+        return "$hm is outside this phone's call hours ($hours), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Calls."
+    }
+
+    /** Booking, or changing the ring time (lead / slot), meets the hint; a
+     *  notes-only edit of an existing row doesn't — update_call's rule. */
+    fun changesTime(row: CallRequest?, leadMin: Int, nextBlockId: String?): Boolean =
+        row == null || row.leadMin != leadMin || row.blockId != nextBlockId
+
+    /** The live call anchored to [taskId] in the mirror (soonest first) — what
+     *  the section follows (parity with iOS build 72, observeMirror). */
+    fun liveForTask(rows: List<CallRequest>, taskId: String): CallRequest? =
+        rows.filter { it.isLive && it.taskId == taskId }.minByOrNull { it.effectiveAtMs ?: Long.MAX_VALUE }
+
+    /** Did the mirror's row move away from what the section shows? A call that
+     *  rang / was cancelled elsewhere drops the toggle; one booked from the web
+     *  or the assistant raises it. */
+    fun mirrorChanged(live: CallRequest?, shown: CallRequest?): Boolean =
+        live?.id != shown?.id || live?.status != shown?.status || live?.notes != shown?.notes ||
+            live?.leadMin != shown?.leadMin || live?.blockId != shown?.blockId
+
     /** cancel_call / update_call on a row that already rang / was cancelled
      *  elsewhere ("error: that call is already <status>…") — gone either way. */
     fun isAlreadyGone(result: String): Boolean = result.startsWith("error: that call is already ")
@@ -581,17 +613,33 @@ internal fun CallMeSection(vm: AppViewModel, task: TaskItem, taskBlocks: List<Ca
     val notes = CallMeLogic.notes(notesText)
     val callAt = CallMeLogic.callAtMs(blockStart, lead)
 
-    suspend fun load() {
-        val existing = vm.callForTask(task.id)
+    fun apply(existing: CallRequest?) {
         row = existing
         if (existing != null) {
             enabled = true
             lead = existing.leadMin ?: callSettings.defaultLeadMin
             notesText = existing.notes.joinToString("\n")
         }
+    }
+    suspend fun load() {
+        apply(vm.callForTask(task.id))
         loaded = true
     }
     LaunchedEffect(task.id) { load() }
+    // Follow the mirror while the editor is open: a call that rang or was
+    // cancelled elsewhere turns the toggle off; one booked from the web or the
+    // assistant turns it on. Never over a local edit in flight (parity with
+    // iOS build 72, CallMeSection.observeMirror).
+    LaunchedEffect(task.id) {
+        vm.observeCallForTask(task.id).collect { live ->
+            if (!loaded || busy || !CallMeLogic.mirrorChanged(live, row)) return@collect
+            apply(live)
+            if (live == null) enabled = false
+        }
+    }
+    // This phone's switch + hours, live (C12).
+    val hoursHint = CallMeLogic.hoursHint(callAt, callSettings)
+    val changesTime = CallMeLogic.changesTime(row, lead, nextBlock?.id)
 
     fun toggle(on: Boolean) {
         error = null
@@ -611,6 +659,9 @@ internal fun CallMeSection(vm: AppViewModel, task: TaskItem, taskBlocks: List<Ca
     fun save() {
         val at = callAt ?: return
         val block = nextBlock ?: return
+        // The button is disabled while the hint applies, but check again before
+        // anything is written — the render can be a frame stale (C12).
+        if (changesTime && hoursHint != null) { error = hoursHint; return }
         error = null
         busy = true
         val leadNow = lead
@@ -669,9 +720,10 @@ internal fun CallMeSection(vm: AppViewModel, task: TaskItem, taskBlocks: List<Ca
                         Box(Modifier.weight(1f))
                         UButton(
                             if (row == null) CallMeLogic.BOOK else CallMeLogic.UPDATE, kind = ButtonKind.DARK, fill = false,
-                            enabled = !busy && CallMeLogic.dirty(row, notes, lead, nextBlock?.id),
+                            enabled = !busy && CallMeLogic.dirty(row, notes, lead, nextBlock?.id) && !(hoursHint != null && changesTime),
                         ) { save() }
                     }
+                    hoursHint?.let { Text(it, style = UFont.sans(12), color = c.amberInk) }
                 }
                 loaded -> Text(CallMeLogic.OFF_HINT, style = UFont.sans(12), color = c.ink3)
             }

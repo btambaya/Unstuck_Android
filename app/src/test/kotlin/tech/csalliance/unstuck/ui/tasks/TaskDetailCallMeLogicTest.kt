@@ -78,4 +78,54 @@ class TaskDetailCallMeLogicTest {
         assertEquals("Couldn't cancel the call — try again.", CallMeLogic.CANCEL_FAILED)
         assertEquals("That call changed underneath you — reloaded.", CallMeLogic.CHANGED_UNDERNEATH)
     }
+
+    // ── this phone's switch + hours (parity with iOS build 81, audit 2026-09-22 C12) ──
+
+    private fun localMs(hm: String): Long =
+        java.time.LocalDate.now().plusDays(1).atTime(java.time.LocalTime.parse(hm)).atZone(java.time.ZoneId.systemDefault()).toInstant().toEpochMilli()
+
+    @Test fun `the hours hint names why this phone would decline, and is null when it rings`() {
+        val narrow = tech.csalliance.unstuck.core.logic.CallSettings(hoursStart = "08:00", hoursEnd = "21:00")
+        assertNull(CallMeLogic.hoursHint(localMs("20:00"), narrow))
+        assertNull(CallMeLogic.hoursHint(null, narrow))
+        assertEquals(
+            "21:00 is outside this phone's call hours (08:00–21:00; the latest it rings is 20:59), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Calls.",
+            CallMeLogic.hoursHint(localMs("21:00"), narrow),
+        )
+        assertEquals(
+            "07:45 is outside this phone's call hours (08:00–21:00), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Calls.",
+            CallMeLogic.hoursHint(localMs("07:45"), narrow),
+        )
+        assertEquals(
+            "Calls are off on this phone, so it would decline this call. Switch them on in Settings › Calls.",
+            CallMeLogic.hoursHint(localMs("12:00"), tech.csalliance.unstuck.core.logic.CallSettings(enabled = false)),
+        )
+    }
+
+    @Test fun `booking or a new ring time meets the hint, a notes-only edit does not`() {
+        assertTrue("a booking", CallMeLogic.changesTime(null, 15, "b1"))
+        assertFalse("notes only", CallMeLogic.changesTime(row(), 15, "b1"))
+        assertTrue("another lead", CallMeLogic.changesTime(row(), 30, "b1"))
+        assertTrue("the task moved to another slot", CallMeLogic.changesTime(row(), 15, "b2"))
+    }
+
+    // ── following the mirror (parity with iOS build 72, observeMirror) ──
+
+    @Test fun `the section follows the task's live row in the mirror`() {
+        val a = row(id = "a").copy(callAt = CallsClient.iso(2_000L))
+        val b = row(id = "b").copy(callAt = CallsClient.iso(1_000L))
+        val gone = row(id = "g").copy(status = "cancelled")
+        val other = row(id = "o").copy(taskId = "t2")
+        assertEquals("soonest live row for the task", "b", CallMeLogic.liveForTask(listOf(a, b, gone, other), "t1")?.id)
+        assertNull(CallMeLogic.liveForTask(listOf(gone, other), "t1"))
+        // Changes that move the toggle / the fields, and the ones that don't.
+        assertFalse(CallMeLogic.mirrorChanged(null, null))
+        assertFalse(CallMeLogic.mirrorChanged(row(), row()))
+        assertTrue("rang or cancelled elsewhere", CallMeLogic.mirrorChanged(null, row()))
+        assertTrue("booked from the web / the assistant", CallMeLogic.mirrorChanged(row(), null))
+        assertTrue(CallMeLogic.mirrorChanged(row(notes = listOf("new")), row()))
+        assertTrue(CallMeLogic.mirrorChanged(row(lead = 30), row()))
+        assertTrue(CallMeLogic.mirrorChanged(row(blockId = "b2"), row()))
+        assertTrue(CallMeLogic.mirrorChanged(row().copy(status = "snoozed"), row()))
+    }
 }

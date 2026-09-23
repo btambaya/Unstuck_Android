@@ -3726,6 +3726,15 @@ class AppViewModel(
         return runCatching { CallsClient(client, CallRequestsMirror(store)).forTask(taskId) }.getOrNull()
     }
 
+    /** The live call anchored to [taskId] as the local `call_requests` mirror
+     *  changes (hydrate, realtime, catch-up, a booking's own row) — what the
+     *  task editor's "Call me about this" follows while it is open (parity with
+     *  iOS build 72). */
+    fun observeCallForTask(taskId: String): kotlinx.coroutines.flow.Flow<CallRequest?> =
+        CallRequestsMirror(store).observe()
+            .map { rows -> tech.csalliance.unstuck.ui.tasks.CallMeLogic.liveForTask(rows, taskId) }
+            .distinctUntilChanged()
+
     /** One call row by id (after a book, to show what the server stored). */
     suspend fun callRequest(callId: String): CallRequest? =
         runCatching { assistantApi.callStore()?.call(callId) }.getOrNull()
@@ -3996,7 +4005,10 @@ const val TEST_CALL_LABEL = TestCallLogic.LABEL
 const val TEST_CALL_NOTE = TestCallLogic.NOTE
 /** Calls are switched off on this phone — the test would be declined quietly (iOS wording). */
 const val TEST_CALL_CALLS_OFF = "error: calls are off on this phone — switch them on above to try it"
-/** The user's own hours refuse the test — widen them (iOS wording). */
+/** The user's own hours refuse the test — widen them (iOS wording). The end
+ *  minute itself names the last one that rings (hoursLabel, audit 2026-09-22 C12). */
 @Suppress("FunctionName")
-fun TEST_CALL_OUTSIDE_HOURS(hm: String, s: CallSettings): String =
-    "error: $hm is outside your allowed hours (${s.hoursStart}–${s.hoursEnd}) — the phone would decline it quietly. Widen the hours above to try it now."
+fun TEST_CALL_OUTSIDE_HOURS(hm: String, s: CallSettings): String {
+    val hours = CallSettingsLogic.hoursLabel(s.hoursStart, s.hoursEnd, CallSettingsLogic.minutesOfDay(hm) ?: -1)
+    return "error: $hm is outside your allowed hours ($hours) — the phone would decline it quietly. Widen the hours above to try it now."
+}

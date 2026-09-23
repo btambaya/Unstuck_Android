@@ -55,6 +55,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.SettingsStore
+import tech.csalliance.unstuck.core.logic.CallSettingsLogic
 import tech.csalliance.unstuck.core.logic.newUuid
 import tech.csalliance.unstuck.core.model.Density
 import tech.csalliance.unstuck.core.model.LifeArea
@@ -272,7 +273,19 @@ internal const val CALLS_PROACTIVE_EVENING_SUB = "Rings to go over what got done
 internal const val CALLS_PROACTIVE_AFTER_BLOCK = "Check in after a block"
 internal const val CALLS_PROACTIVE_AFTER_BLOCK_SUB = "Rings when a block ends without its task marked done — how did it go?"
 internal const val CALLS_PROACTIVE_AT = "At"
-internal const val CALLS_PROACTIVE_HINT = "All off unless you switch them on. They ring within your allowed hours, on every phone where calls are on."
+/** The old line ("They ring within your allowed hours, on every phone where
+ *  calls are on") was false: the dispatcher books 06:00–23:00 whatever the
+ *  phone's hours, and the phone then declines (parity with iOS build 81,
+ *  audit 2026-09-22 C12). */
+internal val CALLS_PROACTIVE_HINT = "All off unless you switch them on. Unstuck books them between " +
+    "${tech.csalliance.unstuck.core.logic.CallSettingsLogic.SERVER_WINDOW.start} and ${tech.csalliance.unstuck.core.logic.CallSettingsLogic.SERVER_WINDOW.endInclusive}; " +
+    "this phone still declines one outside the allowed hours above, or while Calls is off."
+/** Under the Calls switch when the microphone was refused (iOS build 78): the
+ *  phone rings, but the call can't hear them. Tapping it opens the app's
+ *  system page — after a second refusal Android won't show the prompt again. */
+internal const val CALLS_MIC_DENIED_HINT = "Calls need microphone access — turn it on in Android Settings, or you'll ring but can't be heard."
+/** "Test call now" without the microphone (iOS build 78). */
+internal const val CALLS_TEST_MIC_REFUSED = "Calls need microphone access — turn it on for Unstuck in Android Settings."
 internal const val CALLS_TEST_BUTTON = "Test call now"
 internal const val CALLS_TEST_BOOKING = "Booking…"
 internal const val CALLS_DND_HINT = "Under Do Not Disturb, a call only rings if Unstuck's Calls notifications are allowed to interrupt."
@@ -324,6 +337,25 @@ private fun CallsContent(vm: AppViewModel) {
     val proactive by vm.callProactivePrefs.collectAsStateWithLifecycle()
     val nudgeDismissed by vm.ringNudgeDismissed.collectAsStateWithLifecycle()
     var testState by remember { mutableStateOf<TestCallState>(TestCallState.Idle) }
+    // Ask for the microphone while they're looking at this screen: the first
+    // prompt otherwise lands mid-ring, over the lock screen (parity with iOS
+    // build 78, 0f24908; the Answer-time request stays as the backstop).
+    fun micGranted() = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) ==
+        android.content.pm.PackageManager.PERMISSION_GRANTED
+    var micDenied by remember { mutableStateOf(false) }
+    var testAfterMic by remember { mutableStateOf(false) }
+    fun bookTest() {
+        testState = TestCallState.Booking
+        scope.launch { testState = testCallStateFrom(vm.bookTestCall()) }
+    }
+    val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+        micDenied = !granted
+        if (testAfterMic) {
+            testAfterMic = false
+            if (granted) bookTest() else testState = TestCallState.Failed(CALLS_TEST_MIC_REFUSED)
+        }
+    }
+    fun ensureMicrophone() { if (!micGranted()) runCatching { micLauncher.launch(android.Manifest.permission.RECORD_AUDIO) } }
     // The account's proactive calls: a toggle made on the web / iPhone reaches this screen.
     androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshCallProactivePrefs() }
     // Re-check the full-screen grant whenever we come back from the system page.
@@ -331,7 +363,11 @@ private fun CallsContent(vm: AppViewModel) {
     val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
         val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
-            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) fullScreenOk = canUseFullScreenIntent(context)
+            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
+                fullScreenOk = canUseFullScreenIntent(context)
+                // Back from the app's system page with the mic turned on.
+                if (micGranted()) micDenied = false
+            }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
         onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
@@ -391,13 +427,28 @@ private fun CallsContent(vm: AppViewModel) {
     SectionLabel("Calls", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
     SettingsCard {
         if (s.assistantEnabled) {
-            ToggleRow(CALLS_ENABLED_ROW, cs.enabled, last = true) { v -> vm.updateCallSettings { it.copy(enabled = v) } }
+            ToggleRow(CALLS_ENABLED_ROW, cs.enabled, last = true) { v ->
+                vm.updateCallSettings { it.copy(enabled = v) }
+                if (v) ensureMicrophone()
+            }
         } else {
             Text(CALLS_ASSISTANT_OFF_HINT, style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(16.dp))
         }
     }
     if (s.assistantEnabled && !cs.enabled) {
         Text(CALLS_ENABLED_OFF_HINT, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
+    }
+    if (s.assistantEnabled && cs.enabled && micDenied) {
+        Text(
+            CALLS_MIC_DENIED_HINT, style = UFont.sans(12), color = c.red,
+            modifier = Modifier.padding(top = 10.dp).clickable {
+                runCatching {
+                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                        .setData(android.net.Uri.parse("package:${context.packageName}"))
+                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
+                }
+            },
+        )
     }
 
     // Allowed hours
@@ -422,28 +473,38 @@ private fun CallsContent(vm: AppViewModel) {
     // Calls Unstuck can make on its own — ACCOUNT-wide, off by default
     // (notification_preferences.call_*; AppViewModel.setCallProactivePrefs).
     SectionLabel(CALLS_PROACTIVE_SECTION, color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
+    // Will it ring HERE? The amber line under each proactive call, read live
+    // from this screen's switch + hours: the pickers used to accept times the
+    // dispatcher never books or this phone declines every day (parity with iOS
+    // build 81, audit 2026-09-22 C12). A proactive call switched on also asks
+    // for the microphone — the master switch's prompt never ran on a phone
+    // where Calls was on by default.
+    fun proactiveOn(v: Boolean) { if (v && cs.enabled) ensureMicrophone() }
     SettingsCard {
         ToggleRow(CALLS_PROACTIVE_MORNING, proactive.morningEnabled, sub = CALLS_PROACTIVE_MORNING_SUB, last = !proactive.morningEnabled) { v ->
-            vm.setCallProactivePrefs(proactive.copy(morningEnabled = v))
+            vm.setCallProactivePrefs(proactive.copy(morningEnabled = v)); proactiveOn(v)
         }
         if (proactive.morningEnabled) {
             SettingRow(CALLS_PROACTIVE_AT, proactive.morningTime, last = true) {
                 pickHour(proactive.morningTime) { hm -> vm.setCallProactivePrefs(vm.callProactivePrefs.value.copy(morningTime = hm)) }
             }
+            CallSettingsLogic.proactiveTimeWarning(proactive.morningTime, cs.enabled, cs.hoursStart, cs.hoursEnd)?.let { ProactiveWarning(it) }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
         ToggleRow(CALLS_PROACTIVE_EVENING, proactive.eveningEnabled, sub = CALLS_PROACTIVE_EVENING_SUB, last = !proactive.eveningEnabled) { v ->
-            vm.setCallProactivePrefs(proactive.copy(eveningEnabled = v))
+            vm.setCallProactivePrefs(proactive.copy(eveningEnabled = v)); proactiveOn(v)
         }
         if (proactive.eveningEnabled) {
             SettingRow(CALLS_PROACTIVE_AT, proactive.eveningTime, last = true) {
                 pickHour(proactive.eveningTime) { hm -> vm.setCallProactivePrefs(vm.callProactivePrefs.value.copy(eveningTime = hm)) }
             }
+            CallSettingsLogic.proactiveTimeWarning(proactive.eveningTime, cs.enabled, cs.hoursStart, cs.hoursEnd)?.let { ProactiveWarning(it) }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
         ToggleRow(CALLS_PROACTIVE_AFTER_BLOCK, proactive.afterBlockEnabled, sub = CALLS_PROACTIVE_AFTER_BLOCK_SUB, last = true) { v ->
-            vm.setCallProactivePrefs(proactive.copy(afterBlockEnabled = v))
+            vm.setCallProactivePrefs(proactive.copy(afterBlockEnabled = v)); proactiveOn(v)
         }
+        if (proactive.afterBlockEnabled) CallSettingsLogic.afterBlockWarning(cs.enabled, cs.hoursStart, cs.hoursEnd)?.let { ProactiveWarning(it) }
     }
     Text(CALLS_PROACTIVE_HINT, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
 
@@ -459,8 +520,13 @@ private fun CallsContent(vm: AppViewModel) {
             if (booking) CALLS_TEST_BOOKING else CALLS_TEST_BUTTON, kind = ButtonKind.PRIMARY, leadingIcon = Icons.Filled.Call,
             enabled = !booking && vm.callsAvailable(),
         ) {
-            testState = TestCallState.Booking
-            scope.launch { testState = testCallStateFrom(vm.bookTestCall()) }
+            // A test call that rings and then can't hear them is worse than none:
+            // ask first, while the app is in front of them (iOS build 78).
+            if (!micGranted()) {
+                testAfterMic = true
+                runCatching { micLauncher.launch(android.Manifest.permission.RECORD_AUDIO) }
+                    .onFailure { testAfterMic = false; testState = TestCallState.Failed(CALLS_TEST_MIC_REFUSED) }
+            } else bookTest()
         }
         when (val t = testState) {
             is TestCallState.Booked -> Text(testCallBookedLine(t.at), style = UFont.sans(12), color = c.green)
@@ -482,6 +548,12 @@ private fun CallsContent(vm: AppViewModel) {
         }
     }
     Text(CALLS_DND_HINT, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
+}
+
+/** The amber "will it ring here?" line under a proactive call (C12). */
+@Composable
+private fun ProactiveWarning(warning: String) {
+    Text(warning, style = UFont.sans(12), color = UTheme.colors.amberInk, modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp))
 }
 
 @Composable

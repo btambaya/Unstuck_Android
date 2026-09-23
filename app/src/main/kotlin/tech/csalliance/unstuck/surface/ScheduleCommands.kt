@@ -1,5 +1,6 @@
 package tech.csalliance.unstuck.surface
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -44,12 +45,23 @@ object ScheduleCommands {
                 // web / iPhone and the server's calls kept the old slot (Android audit
                 // 2026-09-23, A2). The drain establishes the session itself; bounded
                 // inside the broadcast window.
-                runCatching { withTimeoutOrNull(FLUSH_TIMEOUT_MS) { app.graph.coordinator?.flushOutbox() } }
+                runCatching {
+                    withTimeoutOrNull(FLUSH_TIMEOUT_MS) {
+                        runCatching { app.graph.coordinator?.flushOutbox() }.onFailure { if (it is CancellationException) throw it }
+                        // The Google PATCH of the move runs on the coordinator's Google
+                        // worker since stage 2, no longer inside upsertCalBlock: wait for
+                        // it in the same window, or a process frozen once the receiver
+                        // lets go left the event at the old slot (stage 2 review, Ahmad
+                        // 2026-09-23).
+                        write.awaitGoogleIdle()
+                    }
+                }
             } finally { onComplete() }
         }
     }
 
-    /** The in-receiver drain (session + push), inside the ~10 s goAsync window. */
+    /** The in-receiver drain (session + push) and the Google push, together inside
+     *  the ~10 s goAsync window. */
     private const val FLUSH_TIMEOUT_MS = 8_000L
 
     /** HH:MM + 60 min, clamped to the end of the day. */

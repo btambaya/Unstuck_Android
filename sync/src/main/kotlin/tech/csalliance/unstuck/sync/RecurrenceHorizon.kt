@@ -31,7 +31,11 @@ import tech.csalliance.unstuck.data.db.Tables
 // When it runs — RecurrenceTopUpGate's rules:
 //  • only after a pull whose cal_blocks read SUCCEEDED (Hydrator.calBlocksPull;
 //    the generic "pull finished" signal fires even when that read failed), and
-//    one that moved since the last run;
+//    one that moved since the last run. The app asks after EVERY pull, so that
+//    pull itself must have moved the stamp (iOS's `pulledAfter`,
+//    Hydrator.seqBeforeLatestPull): an earlier good read, say at 23:59, would
+//    otherwise stand in for the first pull of a new day whose read failed
+//    (stage 2 review, Ahmad 2026-09-23);
 //  • never when that read hit PostgREST's row cap: a truncated store would keep
 //    re-minting rows it can't see (§f; paginating the pull is the real fix);
 //  • once per local day per user, and again when the time zone changes (a day
@@ -57,7 +61,8 @@ class RecurrenceTopUpGate {
         NO_PULL,
         /** The read hit the row cap: the store may be missing rows. */
         TRUNCATED,
-        /** No new successful read since the last run. */
+        /** No new successful read since the last run, or the latest pull's own
+         *  read failed ([verdict]'s pulledAfter). */
         PULL_NOT_ADVANCED,
         /** Already ran for this user today, in this time zone. */
         ALREADY_RAN_TODAY,
@@ -68,8 +73,12 @@ class RecurrenceTopUpGate {
     var lastRun: Run? = null
         private set
 
-    fun verdict(pull: Hydrator.CalBlocksPull?, userId: String, today: String, timeZone: String): Verdict {
+    /** [pulledAfter]: the stamp's seq just BEFORE the latest pull began (0 when
+     *  there was none yet); that pull must have moved past it. Null skips the
+     *  check (as iOS's hydrate hook, which has just pulled). */
+    fun verdict(pull: Hydrator.CalBlocksPull?, userId: String, today: String, timeZone: String, pulledAfter: Long? = null): Verdict {
         if (pull == null) return Verdict.NO_PULL
+        if (pulledAfter != null && pull.seq <= pulledAfter) return Verdict.PULL_NOT_ADVANCED
         if (pull.mayBeTruncated) return Verdict.TRUNCATED
         val last = lastRun
         if (last == null || last.userId != userId) return Verdict.RUN
@@ -92,6 +101,9 @@ class RecurrenceHorizonTopUp(
     private val remote: SyncRemote,
     /** The last successful cal_blocks read (Hydrator.calBlocksPull). */
     private val pull: () -> Hydrator.CalBlocksPull?,
+    /** Its seq just before the latest pull began (Hydrator.seqBeforeLatestPull):
+     *  the run needs THAT pull's read to have succeeded. Null = no such check. */
+    private val pulledAfter: () -> Long? = { null },
     private val currentUserId: () -> String?,
     private val today: () -> String,
     private val timeZone: () -> String,
@@ -138,10 +150,13 @@ class RecurrenceHorizonTopUp(
 
     private suspend fun runOnce(userId: String) {
         if (currentUserId() != userId) return
+        // The stamp first: a pull starting in between then reads as not advanced
+        // (its own completion asks again), never as an advance it hasn't made.
         val pull = pull()
+        val before = pulledAfter()
         val day = today()
         val zone = timeZone()
-        val verdict = gate.verdict(pull, userId, day, zone)
+        val verdict = gate.verdict(pull, userId, day, zone, before)
         if (verdict != RecurrenceTopUpGate.Verdict.RUN || pull == null) {
             if (verdict == RecurrenceTopUpGate.Verdict.TRUNCATED) log("[recurrence] horizon top-up skipped: the cal_blocks read hit the row cap")
             return

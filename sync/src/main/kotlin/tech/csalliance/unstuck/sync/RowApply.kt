@@ -52,8 +52,18 @@ internal object RowApply {
         Tables.SESSIONS -> DbRowCodec.decodeSession(row).let {
             store.upsertIfNewer(table, it, Session.serializer(), it.id, it.completedAt)
         }
+        // A block this device deleted, whose DELETE is still queued, stays gone —
+        // the rule the catch-up and the hydrate already follow. A stale realtime
+        // echo (a Google stamp's UPDATE in flight when the user tapped "Never")
+        // put the row back until the delete's own echo; with deterministic ids a
+        // re-mint of that day ("Daily" again) then found it, queued nothing, and
+        // the delete took the day off every device (stage 2 review, Ahmad
+        // 2026-09-23). Checked and written in one transaction, as tasks are.
         Tables.CAL_BLOCKS -> DbRowCodec.decodeCalBlock(row).let {
-            store.upsert(table, it, CalBlock.serializer(), it.id); true
+            store.transaction {
+                if (hasPendingDelete(table, it.id)) false
+                else { upsert(table, it, CalBlock.serializer(), it.id); true }
+            }
         }
         Tables.CAPTURES -> DbRowCodec.decodeCapture(row).let {
             store.upsertIfNewer(table, it, Capture.serializer(), it.id, it.at)

@@ -12,6 +12,7 @@ import androidx.work.WorkManager
 import androidx.work.WorkRequest
 import androidx.glance.appwidget.updateAll
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.withTimeoutOrNull
 import tech.csalliance.unstuck.UnstuckApp
 import tech.csalliance.unstuck.sync.liveUserId
 import java.util.concurrent.TimeUnit
@@ -29,6 +30,11 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         // failure (the pull swallows them) nor a worker process whose session was still
         // loading (Android audit 2026-09-23, A2). No sync engine configured → nothing to do.
         val synced = runCatching { app.graph.coordinator?.syncNow() ?: true }.getOrDefault(false)
+        // That pull's flush can confirm minted days, whose Google pushes then run on
+        // the coordinator's Google worker (stage 2, rule G — Ahmad 2026-09-23 "every
+        // day, everywhere"). Give them this worker's window rather than a process
+        // that may be frozen or reclaimed the moment doWork returns.
+        runCatching { withTimeoutOrNull(GOOGLE_DRAIN_MS) { app.graph.coordinator?.write?.awaitGoogleIdle() } }
         // A rotated FCM token that couldn't be registered when it arrived (offline, no
         // session yet) goes now, as the live user (Android audit 2026-09-23, A2).
         app.graph.coordinator?.let { c ->
@@ -63,6 +69,9 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
 
     companion object {
         private const val NAME = "unstuck_periodic_sync"
+
+        /** How long the worker waits for the Google pushes its pull confirmed. */
+        private const val GOOGLE_DRAIN_MS = 30_000L
 
         fun schedule(context: Context) {
             // Only run when there's a network — a sync with no connection just wakes

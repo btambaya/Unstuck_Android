@@ -1,9 +1,11 @@
 package tech.csalliance.unstuck.sync
 
 import io.github.jan.supabase.SupabaseClient
+import io.github.jan.supabase.exceptions.RestException
 import io.github.jan.supabase.functions.functions
 import io.ktor.client.call.body
 import io.ktor.client.plugins.ResponseException
+import io.ktor.client.statement.bodyAsText
 import io.ktor.client.request.parameter
 import io.ktor.client.request.setBody
 import io.ktor.http.ContentType
@@ -130,29 +132,30 @@ class CalendarClient(private val client: SupabaseClient) {
                 parameter("from", from); parameter("to", to)
                 connectionId?.let { parameter("connectionId", it) }
             }.body<EventsResponse>()
-        } catch (e: ResponseException) {
-            if (e.response.status.value == 429) throw CalendarRateLimited() else throw e
+        } catch (e: Exception) {
+            throw classified(e)
         }
 
+    /** Throws [CalendarRateLimited] on a 429 (the caller backs off). */
     suspend fun insertEvent(connectionId: String, calendarId: String, summary: String, start: String, end: String): String =
-        client.functions.invoke("calendar-sync/events") {
-            method = HttpMethod.Post; contentType(ContentType.Application.Json); setBody(InsertBody(connectionId, calendarId, summary, start, end))
-        }.body<InsertResponse>().id
+        try {
+            client.functions.invoke("calendar-sync/events") {
+                method = HttpMethod.Post; contentType(ContentType.Application.Json); setBody(InsertBody(connectionId, calendarId, summary, start, end))
+            }.body<InsertResponse>().id
+        } catch (e: Exception) {
+            throw classified(e)
+        }
 
     /** Throws [CalendarEventGone] when the server reports the event no longer exists
-     *  (404 — the user deleted it in Google, or it was removed at disconnect):
-     *  the caller re-INSERTs instead of patching a ghost forever. */
+     *  (404 `event_gone` — the user deleted it in Google, or it was removed at
+     *  disconnect): the caller re-INSERTs instead of patching a ghost forever. */
     suspend fun patchEvent(eventId: String, connectionId: String, calendarId: String, summary: String?, start: String?, end: String?) {
         try {
             client.functions.invoke("calendar-sync/events/$eventId") {
                 method = HttpMethod.Patch; contentType(ContentType.Application.Json); setBody(PatchBody(connectionId, calendarId, summary, start, end))
             }
-        } catch (e: ResponseException) {
-            when (e.response.status.value) {
-                404 -> throw CalendarEventGone()
-                429 -> throw CalendarRateLimited()
-                else -> throw e
-            }
+        } catch (e: Exception) {
+            throw classified(e)
         }
     }
 
@@ -160,6 +163,33 @@ class CalendarClient(private val client: SupabaseClient) {
         client.functions.invoke("calendar-sync/events/$eventId") {
             method = HttpMethod.Delete
             parameter("connectionId", connectionId); parameter("calendarId", calendarId)
+        }
+    }
+
+    companion object {
+        /** An edge-function failure as the sync-relevant verdict, or [e] itself.
+         *  supabase-kt 3.0.3 reports a non-2xx answer as a RestException carrying the
+         *  status and the body (Functions.parseErrorResponse: a 404 is a
+         *  NotFoundRestException, a 429 an UnauthorizedRestException), never as
+         *  ktor's ResponseException — so the 404 → re-insert and 429 → back-off
+         *  branches never ran. A series edit now rewrites its days in place with
+         *  their mapping (stage 2), so a day whose event was deleted in Google was
+         *  PATCHed and failed on every push instead of getting a fresh event (stage 2
+         *  review, Ahmad 2026-09-23). The ResponseException branch stays in case the
+         *  client is ever built with expectSuccess. */
+        internal suspend fun classified(e: Exception): Exception = when (e) {
+            is RestException -> classify(e.statusCode, e.error) ?: e
+            is ResponseException -> classify(e.response.status.value, runCatching { e.response.bodyAsText() }.getOrDefault("")) ?: e
+            else -> e
+        }
+
+        /** Pure: status + body → verdict (parity with iOS CalendarClient.classify).
+         *  Only a 404 whose body says `event_gone` is a deleted event: any other 404
+         *  (a missing route) re-inserting would leave the old event beside the new. */
+        internal fun classify(status: Int, body: String): Exception? = when {
+            status == 404 && body.contains("event_gone", ignoreCase = true) -> CalendarEventGone()
+            status == 429 -> CalendarRateLimited()
+            else -> null
         }
     }
 }

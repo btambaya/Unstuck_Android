@@ -267,6 +267,8 @@ class SyncCoordinator(
             engineMutex.withLock {
                 // A failed drain (offline) must not block the pull: the pending
                 // rows survive the replace regardless (Hydrator keeps them).
+                // The top-up judges whether THIS pull's cal_blocks read succeeded.
+                hydrator.notePullStart()
                 runCatching { flushUnlocked(uid) }
                     .onFailure { if (it is CancellationException) throw it; Log.w(TAG, "pre-pull flush failed; pulling anyway", it) }
                 val maxima = hydrator.hydrate(uid)
@@ -288,6 +290,7 @@ class SyncCoordinator(
         var outcome: CatchUpOutcome? = null
         hydrateMutex.withLock {
             engineMutex.withLock {
+                hydrator.notePullStart()
                 runCatching { flushUnlocked(uid) }
                     .onFailure { if (it is CancellationException) throw it; Log.w(TAG, "pre-pull flush failed; pulling anyway", it) }
                 val pulled = catchUp.catchUp(uid)
@@ -617,6 +620,7 @@ class SyncCoordinator(
         write = write,
         remote = gateway,
         pull = { hydrator.calBlocksPull },
+        pulledAfter = { hydrator.seqBeforeLatestPull },
         currentUserId = { auth.currentUserId },
         today = { tech.csalliance.unstuck.core.time.Clock.todayIso() },
         timeZone = { java.util.TimeZone.getDefault().id },
@@ -726,8 +730,17 @@ class SyncCoordinator(
                 Log.w(TAG, "calendar push patch failed", e); return null
             }
         }
-        val id = runCatching { calendar.insertEvent(conn.id, calId, block.taskName, start, end) }
-            .onFailure { Log.w(TAG, "calendar push insert failed", it) }.getOrNull() ?: return null
+        // A 429 backs off like the PATCH's: a confirmed series (stage 2 mirrors every
+        // day) is a burst of INSERTs, and hammering on only lengthened the limit.
+        val id = try {
+            calendar.insertEvent(conn.id, calId, block.taskName, start, end)
+        } catch (e: CalendarRateLimited) {
+            calendarPull.backOff(); return null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(TAG, "calendar push insert failed", e); return null
+        }
         return block.copy(externalEventId = id, externalConnectionId = conn.id)
     }
 

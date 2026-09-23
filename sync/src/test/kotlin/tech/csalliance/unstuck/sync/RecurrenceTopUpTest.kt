@@ -61,12 +61,14 @@ class RecurrenceTopUpTest {
         val hydrator = Hydrator(server, store).apply { zoneId = { "Europe/London" } }
         var signedIn: String? = uid
         val topUp = RecurrenceHorizonTopUp(
-            store, write, server, pull = { hydrator.calBlocksPull }, currentUserId = { signedIn },
-            today = { day }, timeZone = { "Europe/London" }, log = {},
+            store, write, server, pull = { hydrator.calBlocksPull }, pulledAfter = { hydrator.seqBeforeLatestPull },
+            currentUserId = { signedIn }, today = { day }, timeZone = { "Europe/London" }, log = {},
         )
 
-        /** What the device's pull does: flush, then take the server's cal_blocks. */
+        /** What the device's pull does (as SyncCoordinator's): note the start,
+         *  flush, then take the server's cal_blocks. */
         suspend fun pull() {
+            hydrator.notePullStart()
             flusher.flush(uid)
             val t = server.table(Tables.TASKS).values.map { DbRowCodec.decodeTask(it) }
             store.replace(Tables.TASKS, t, TaskItem.serializer(), { it.id }, { it.updatedAt }, keepPendingUpserts = true)
@@ -110,6 +112,41 @@ class RecurrenceTopUpTest {
         assertEquals("another account", Verdict.RUN, g.verdict(p1, "user-2", today, "Europe/London"))
         g.reset()
         assertNull(g.lastRun)
+    }
+
+    /** iOS's `pulledAfter`: the pull the app asks after must have moved the stamp
+     *  itself — an earlier good read never stands in for one that failed. */
+    @Test fun theGateNeedsTheLatestPullToHaveMovedTheStamp() {
+        val g = RecurrenceTopUpGate()
+        val p1 = Hydrator.CalBlocksPull(1, 10)
+        assertEquals(Verdict.PULL_NOT_ADVANCED, g.verdict(p1, uid, today, "Europe/London", pulledAfter = 1))
+        assertEquals(Verdict.RUN, g.verdict(p1, uid, today, "Europe/London", pulledAfter = 0))
+        g.recordRun(p1, uid, today, "Europe/London")
+        val p2 = Hydrator.CalBlocksPull(2, 10)
+        assertEquals("a new day, but the latest read failed", Verdict.PULL_NOT_ADVANCED, g.verdict(p2, uid, day(1), "Europe/London", pulledAfter = 2))
+        assertEquals(Verdict.RUN, g.verdict(p2, uid, day(1), "Europe/London", pulledAfter = 1))
+    }
+
+    /** The reviewer's midnight case: yesterday's run, a good read late in the day,
+     *  then the new day's first pull whose cal_blocks read fails — no top-up from
+     *  that older store; the next good pull runs it. */
+    @Test fun aNewDaysFirstPullWhoseReadFailedDoesNotTopUp() = runTest {
+        seedServerSeries()
+        val a = Device(this, day = day(-1))
+        a.pull()
+        a.topUp.request(uid)
+        assertEquals("yesterday's run minted to its horizon", 2, a.topUp.lastMinted)
+        a.flusher.flush(uid)
+        a.pull()                                  // a good read late in the day
+        a.day = today
+        server.failReadOnce += Tables.CAL_BLOCKS
+        a.pull()                                  // today's first pull: that read fails
+        a.topUp.request(uid)
+        assertTrue("nothing minted from the older store", a.store.pending().isEmpty())
+        a.pull()
+        a.topUp.request(uid)
+        assertEquals(1, a.topUp.lastMinted)
+        assertEquals(listOf(occurrenceId(taskId, day(55))), a.store.pending().map { it.recordId })
     }
 
     // ── the run ──────────────────────────────────────────────────────────────
@@ -168,7 +205,10 @@ class RecurrenceTopUpTest {
             override suspend fun fetchByIds(table: String, ids: Collection<String>): List<JsonObject> =
                 if (offline) throw java.io.IOException("offline") else server.fetchByIds(table, ids)
         }
-        val topUp = RecurrenceHorizonTopUp(a.store, a.write, flaky, { a.hydrator.calBlocksPull }, { uid }, { today }, { "Europe/London" }, log = {})
+        val topUp = RecurrenceHorizonTopUp(
+            a.store, a.write, flaky, pull = { a.hydrator.calBlocksPull }, pulledAfter = { a.hydrator.seqBeforeLatestPull },
+            currentUserId = { uid }, today = { today }, timeZone = { "Europe/London" }, log = {},
+        )
         topUp.request(uid)
         assertTrue(a.store.pending().isEmpty())
         // The same pull, the same day: the failed check did not use the day up.

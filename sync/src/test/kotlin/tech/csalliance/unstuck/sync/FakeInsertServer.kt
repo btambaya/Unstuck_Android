@@ -28,6 +28,8 @@ internal class FakeInsertServer : SyncRemote {
     val failOnce = mutableSetOf<String>()
     /** Runs as a write starts — lets a test land something mid-request. */
     var beforeWrite: (suspend (verb: String, id: String) -> Unit)? = null
+    /** Tables whose next full read fails ONCE with a transient error (offline). */
+    val failReadOnce = mutableSetOf<String>()
 
     fun table(t: String): LinkedHashMap<String, JsonObject> = tables.getOrPut(t) { LinkedHashMap() }
     fun put(t: String, row: JsonObject) { table(t)[idOf(row)!!] = row }
@@ -40,7 +42,10 @@ internal class FakeInsertServer : SyncRemote {
         if (failOnce.remove("$verb $id")) throw java.io.IOException("simulated offline ($verb $id)")
     }
 
-    override suspend fun fetchAll(table: String): List<JsonObject> = table(table).values.toList()
+    override suspend fun fetchAll(table: String): List<JsonObject> {
+        if (failReadOnce.remove(table)) throw java.io.IOException("simulated offline (read $table)")
+        return table(table).values.toList()
+    }
 
     override suspend fun upsert(table: String, row: JsonObject, userId: String) {
         val id = idOf(row)!!

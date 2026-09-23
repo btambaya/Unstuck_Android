@@ -104,7 +104,9 @@ class GoogleBlockMirror(
     /** Sign-out: nothing queued for the previous account goes out. */
     fun reset() = synchronized(lock) { deletes.clear(); pushes.clear() }
 
-    /** Test seam: every queued call has run. */
+    /** Every queued call has run. A caller whose process may be frozen as soon as
+     *  it returns (a notification action's goAsync window, the background sync
+     *  worker) waits here, bounded, as it used to wait on the inline push. */
     suspend fun awaitIdle() {
         while (true) {
             val w = synchronized(lock) { worker } ?: return

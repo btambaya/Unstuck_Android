@@ -2,11 +2,18 @@ package tech.csalliance.unstuck.sync
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import java.util.concurrent.CyclicBarrier
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
@@ -25,6 +32,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import tech.csalliance.unstuck.core.logic.IsoDate
 import tech.csalliance.unstuck.core.logic.occurrenceId
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
@@ -136,15 +144,34 @@ class InsertPathTest {
         assertTrue(ops().isEmpty())
     }
 
-    /** Two top-ups that read the store before either wrote: one row, one op. */
-    @Test fun twoConcurrentMintsOfOneIdQueueOneOp() = runTest {
-        val w = write()
-        val a = async { w.insertCalBlockIfAbsent(occ("2026-09-24"), retimeIfTaken = false) }
-        val b = async { w.insertCalBlockIfAbsent(occ("2026-09-24"), retimeIfTaken = false) }
-        val outcomes = listOf(a.await(), b.await())
-        assertEquals(1, outcomes.count { it == MintOutcome.INSERTED })
-        assertEquals(1, outcomes.count { it == MintOutcome.HELD })
-        assertEquals(1, ops().size)
+    /** Two top-ups minting one id at the same moment: one row, one op. They race
+     *  on real threads over a Room with its real executors, released together by a
+     *  barrier — the other tests' synchronous executors would run them one after
+     *  the other and prove nothing. What makes it hold is that the check, the write
+     *  and the op are ONE withTransaction, and Room runs one write transaction at a
+     *  time (a check outside the transaction lets both through; verified). */
+    @Test fun twoConcurrentMintsOfOneIdQueueOneOp() = runBlocking {
+        val threaded = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext(), UnstuckDatabase::class.java).build()
+        val workers = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+        try {
+            val s = LocalStore(threaded)
+            val w = WriteThrough(s, workers)
+            val days = (0 until 40).map { IsoDate.addDays("2026-09-24", it) }
+            for (date in days) {
+                val barrier = CyclicBarrier(2)
+                val outcomes = (1..2).map {
+                    async(Dispatchers.IO) { barrier.await(); w.insertCalBlockIfAbsent(occ(date), retimeIfTaken = false) }
+                }.awaitAll()
+                assertEquals("$date: $outcomes", 1, outcomes.count { it == MintOutcome.INSERTED })
+                assertEquals("$date: $outcomes", 1, outcomes.count { it == MintOutcome.HELD })
+            }
+            val queued = s.pending()
+            assertEquals(days.size, queued.size)
+            assertEquals(days.map { occurrenceId(taskId, it) }.toSet(), queued.map { it.recordId }.toSet())
+        } finally {
+            workers.cancel()
+            threaded.close()
+        }
     }
 
     @Test fun aDeleteCancelsAQueuedMint() = runTest {
@@ -169,6 +196,91 @@ class InsertPathTest {
         flusher(w).flush(uid)
         assertEquals(listOf("delete ${x.id}", "insert ${x.id} inserted"), server.log)
         assertEquals("09:00", server.block(x.id)!!.startTime)
+    }
+
+    /** "Never" then "Daily" while a stale echo of the old row is in flight (the
+     *  stage 2 review): the echo of a row whose delete is queued is not applied, and
+     *  a ghost that got back some other way holds nothing — the re-mint queues its
+     *  insert after the delete, and the day survives on the server. */
+    @Test fun aStaleEchoNeverBringsBackARowWhoseDeleteIsQueued() = runTest {
+        seedTask()
+        val w = write()
+        val x = occ("2026-09-24", event = "evt-old")
+        store.upsert(Tables.CAL_BLOCKS, x, CalBlock.serializer(), x.id)
+        server.putBlock(x)
+        w.deleteCalBlock(x.id)
+        // The Google stamp's UPDATE echo, sent before the delete.
+        assertFalse(RowApply.apply(Tables.CAL_BLOCKS, DbRowCodec.encodeCalBlock(x), store, uid))
+        assertNull(local(x.id))
+        assertEquals(MintOutcome.INSERTED, w.insertCalBlockIfAbsent(occ("2026-09-24"), retimeIfTaken = true))
+        // Still refused while the delete is queued, even behind the re-mint: it is
+        // the OLD incarnation, and would put its dead event id on the new one.
+        assertFalse(RowApply.apply(Tables.CAL_BLOCKS, DbRowCodec.encodeCalBlock(x), store, uid))
+        assertNull(local(x.id)!!.externalEventId)
+        flusher(w).flush(uid)
+        assertEquals(listOf("delete ${x.id}", "insert ${x.id} inserted"), server.log)
+        assertNotNull(server.block(x.id))
+        // No delete queued any more: echoes apply again.
+        assertTrue(RowApply.apply(Tables.CAL_BLOCKS, DbRowCodec.encodeCalBlock(x.copy(startTime = "08:00")), store, uid))
+        assertEquals("08:00", local(x.id)!!.startTime)
+    }
+
+    @Test fun aReMintOverAGhostOfARowBeingDeletedQueuesItsInsertAfterTheDelete() = runTest {
+        seedTask()
+        val w = write()
+        val x = occ("2026-09-24", event = "evt-old")
+        store.upsert(Tables.CAL_BLOCKS, x, CalBlock.serializer(), x.id)
+        server.putBlock(x)
+        w.deleteCalBlock(x.id)
+        store.upsert(Tables.CAL_BLOCKS, x, CalBlock.serializer(), x.id)   // the ghost
+        assertEquals(MintOutcome.INSERTED, w.insertCalBlockIfAbsent(occ("2026-09-24"), retimeIfTaken = true))
+        assertEquals(listOf("delete", OutboxFlusher.OP_INSERT_OR_RETIME), ops().map { it.op })
+        assertNull("the ghost's mapping is gone with it", local(x.id)!!.externalEventId)
+        flusher(w).flush(uid)
+        assertEquals(listOf("delete ${x.id}", "insert ${x.id} inserted"), server.log)
+        assertNotNull(server.block(x.id))
+    }
+
+    /** A drain cancelled once the server has applied a mint (sign-out's bounded
+     *  drain, WorkManager stopping the worker) still dequeues it and resolves it:
+     *  the gate never keeps the row "in flight", and the owed push still goes out. */
+    @Test fun aDrainCancelledAfterTheServerAppliedAMintStillResolvesIt() = runTest {
+        seedTask()
+        val w = write()
+        val id = occurrenceId(taskId, "2026-09-24")
+        lateinit var drain: Job
+        val cutting = object : SyncRemote by server {
+            override suspend fun insertIfAbsent(table: String, row: JsonObject, userId: String): Boolean =
+                server.insertIfAbsent(table, row, userId).also { drain.cancel() }
+        }
+        val f = OutboxFlusher(cutting, store, w.mirrorGate)
+        val resolved = mutableListOf<InsertResolution>()
+        f.onInsertResolved = { resolved += it }
+        w.insertCalBlockIfAbsent(occ("2026-09-24"), retimeIfTaken = true)
+        drain = launch { f.flush(uid) }
+        drain.join()
+        assertTrue(drain.isCancelled)
+        assertEquals(listOf("insert $id inserted"), server.log)
+        assertTrue("dequeued", ops().isEmpty())
+        assertFalse("not held in flight", w.mirrorGate.isUnresolved(id))
+        assertEquals(listOf(InsertOutcome.INSERTED), resolved.map { it.outcome })
+        assertTrue("the owed push is released", resolved.single().mirrorWanted)
+    }
+
+    /** A caller that must finish the Google call before letting go (the shade's
+     *  Reschedule in its goAsync window) can wait for the worker. */
+    @Test fun awaitGoogleIdleReturnsOnceTheQueuedPushHasRun() = runTest {
+        val w = write(); val g = Google()
+        w.pushCalBlock = { g.push(it) }
+        g.gate = CompletableDeferred()
+        w.upsertCalBlock(occ("2026-09-24").copy(id = "b1"))
+        val waiter = async { w.awaitGoogleIdle() }
+        advanceUntilIdle()
+        assertFalse(waiter.isCompleted)
+        g.gate!!.complete(Unit)
+        waiter.await()
+        assertEquals(listOf("insert evt-1 07:00"), g.calls)
+        assertEquals("evt-1", local("b1")!!.externalEventId)
     }
 
     // ── pending semantics ────────────────────────────────────────────────────

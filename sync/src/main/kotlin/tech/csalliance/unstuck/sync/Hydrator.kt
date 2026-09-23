@@ -524,6 +524,17 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
      *  pushes that waited for a row this read brought back). */
     internal var onCalBlocksPulled: (suspend () -> Unit)? = null
 
+    /** [calBlocksPull]'s seq when the latest pull began ([notePullStart]; 0 when
+     *  there was none). The top-up asks after every pull, so it needs THAT pull
+     *  to have moved the stamp — iOS's `pulledAfter` (stage 2 review, Ahmad
+     *  2026-09-23). */
+    @Volatile var seqBeforeLatestPull: Long = 0L
+        private set
+
+    /** A pull is starting (the coordinator's full hydrate and catch-up, under
+     *  their locks). */
+    fun notePullStart() { seqBeforeLatestPull = calBlocksPull?.seq ?: 0L }
+
     /** Sign-out / user switch: the next account's top-up waits for its own read. */
     fun resetCalBlocksPull() { calBlocksPull = null }
 

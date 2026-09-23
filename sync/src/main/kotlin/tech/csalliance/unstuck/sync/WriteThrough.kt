@@ -198,7 +198,13 @@ class WriteThrough(
         // an insert the server ignored (rule G; the iOS build 85 fix).
         val expected = isTaskBlock(b) && mirrorGate.expectMirror(b.id)
         val outcome = store.transaction {
+            // A row whose newest queued op is its DELETE is going, whatever put it
+            // back (a stale realtime echo): it holds nothing. The mint writes over
+            // it and queues its insert AFTER the delete, which the flusher sends
+            // first — else "Never" then "Daily" found the ghost, queued nothing, and
+            // the delete took the day off every device (stage 2 review).
             val held = getOne(Tables.CAL_BLOCKS, b.id, CalBlock.serializer())
+                ?.takeUnless { isBeingDeleted(Tables.CAL_BLOCKS, b.id) }
             if (held != null) {
                 if (!retimeIfTaken || held.date != b.date || held.done || held.skipped) return@transaction MintOutcome.HELD
                 if (held.startTime == b.startTime && held.durationMinutes == b.durationMinutes) return@transaction MintOutcome.ALREADY_THERE
@@ -251,6 +257,13 @@ class WriteThrough(
     /** The server confirmed a mint whose Google push waited on it (rule G): push it
      *  once, from the row as it is then. */
     fun queueConfirmedMirror(id: String) = googleMirror.queueConfirmed(id)
+
+    /** Returns once every queued Google call has run. The push used to run inside
+     *  [upsertCalBlock]; since stage 2 it runs on the Google worker after the write
+     *  returns, so a caller that must finish it before letting go (a shade action in
+     *  its goAsync window, the background sync worker) waits here — bounded by the
+     *  caller (stage 2 review, Ahmad 2026-09-23). */
+    suspend fun awaitGoogleIdle() = googleMirror.awaitIdle()
 
     /** Sign-out: no mirror is owed to the previous account, and nothing queued for
      *  it goes to Google. */

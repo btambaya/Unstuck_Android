@@ -180,9 +180,18 @@ class OutboxFlusher(
                     false
                 }
                 if (ok) {
-                    if (op.recordTable == Tables.TASKS && op.op == "upsert") landTaskUpsert(op) else store.dequeue(op.seq)
-                    failCounts.remove(op.seq); progressed = true
-                    answer?.let { a ->
+                    val a = answer
+                    if (a == null) {
+                        if (op.recordTable == Tables.TASKS && op.op == "upsert") landTaskUpsert(op) else store.dequeue(op.seq)
+                    } else withContext(NonCancellable) {
+                        // The server has applied this mint: its bookkeeping finishes
+                        // even when the drain is cancelled here (sign-out's bounded
+                        // drain, WorkManager stopping the worker). Cut short after the
+                        // dequeue, the gate kept the row "in flight" for the life of
+                        // the process and no push of it ever went out again; before
+                        // it, the re-sent insert read as ignored and the confirmed day
+                        // was never mirrored (stage 2 review, Ahmad 2026-09-23).
+                        store.dequeue(op.seq)
                         // Rule H's answer is shown at once, like a realtime echo of that
                         // UPDATE: the other device's occurrence, now at this device's
                         // time, with ITS Google mapping — so a push that waited on this
@@ -191,6 +200,7 @@ class OutboxFlusher(
                         val wanted = gate?.resolve(op.recordId, a.outcome) ?: false
                         resolved += InsertResolution(op.recordTable, op.recordId, a.outcome, wanted)
                     }
+                    failCounts.remove(op.seq); progressed = true
                 } else {
                     blockedRows.add(rowKey)
                     val n = (failCounts[op.seq] ?: 0) + 1

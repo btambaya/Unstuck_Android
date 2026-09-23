@@ -27,7 +27,8 @@ import kotlin.math.roundToLong
 // scripted events / synthetic PCM. The cases 1–24d are the iOS
 // Tests/UnstuckAppTests/BargeInTests.swift (64 cases, each replaying a phone
 // test from 2026-09-17…20) ported 1:1 on 2026-09-20, so the two platforms
-// stay in lock-step; the Android-only cases (RMS gate at the Android floor,
+// stay in lock-step; 26–28 are iOS 25a–c, 26a–b and 27a (builds 75–77,
+// ported 2026-09-23); the Android-only cases (RMS gate at the Android floor,
 // the "noisy room?" chip, the hold-to-talk buffer error) follow at the end.
 // Times are the iOS seconds, as ms on the fake clock.
 class BargeInControllerTest {
@@ -184,8 +185,9 @@ class BargeInControllerTest {
         assertTrue(c.pendingCreate)
         assertEquals("settled, but the hold is not up", cmds(timer(500)), c.h(done("r1", "cancelled"), 2.7))
         assertEquals(cmds(create, thinking), c.h(tick, 3.0))
-        assertFalse(c.pendingCreate)
+        assertTrue("asked for; pending until the server creates (iOS build 75)", c.pendingCreate)
         c.h(BargeInEvent.ResponseCreated("r2"), 3.2)
+        assertFalse(c.pendingCreate)
         assertTrue(c.shouldEnqueueAudio("r2"))
     }
 
@@ -612,8 +614,9 @@ class BargeInControllerTest {
         c.h(done("r1", "cancelled"), 1.9)
         assertTrue("settled, but held", c.pendingCreate)
         assertEquals(cmds(create, thinking), c.h(tick, 2.2))
-        assertFalse(c.pendingCreate)
+        assertTrue("asked for; pending until the server creates", c.pendingCreate)
         c.h(BargeInEvent.ResponseCreated("r3"), 2.2)
+        assertFalse(c.pendingCreate)
         assertTrue(c.shouldEnqueueAudio("r3"))
     }
 
@@ -845,7 +848,7 @@ class BargeInControllerTest {
         assertTrue(c.pendingCreate)
         assertEquals("settled 300 ms in: held", cmds(timer(500)), c.h(done("r1", "cancelled"), 2.2))
         assertEquals(cmds(create, thinking), c.h(tick, 2.5))
-        assertFalse(c.pendingCreate)
+        assertTrue("asked for; pending until the server creates", c.pendingCreate)
         assertFalse(c.responseActive)
         c.h(BargeInEvent.ResponseCreated("r2"), 2.7)
         assertTrue(c.shouldEnqueueAudio("r2"))
@@ -861,7 +864,7 @@ class BargeInControllerTest {
         assertEquals("not yet", emptyList<BargeInCommand>(), c.h(tick, 2.5))
         assertEquals("1.5 s: a done took 1.9 s once, with a tool call in flight", emptyList<BargeInCommand>(), c.h(tick, 3.4))
         assertEquals(cmds(create, thinking), c.h(tick, 4.4))
-        assertFalse(c.pendingCreate)
+        assertTrue("asked for; pending until the server creates", c.pendingCreate)
         assertFalse(c.responseActive)
         // "no active response" to our cancel = it had already finished: ask now.
         val e = speaking(speaker)
@@ -870,7 +873,7 @@ class BargeInControllerTest {
         e.h(tr("no, book the dentist instead", "u", final = true), 1.9)
         assertEquals("nothing to wait for but the hold", cmds(timer(500)), e.h(BargeInEvent.Error("Conversation has no active response"), 2.0))
         assertEquals(cmds(create, thinking), e.h(tick, 2.5))
-        assertFalse(e.pendingCreate)
+        assertTrue("asked for; pending until the server creates", e.pendingCreate)
         // Interrupt pressed while an ask is pending: the user wants silence.
         val i = speaking(speaker)
         i.h(started("u"), 1.0)
@@ -893,7 +896,7 @@ class BargeInControllerTest {
         assertTrue("no done to wait for — only the hold", out.contains(timer(500)))
         assertFalse(out.contains(timer(2500)))
         assertEquals(cmds(create, thinking), c.h(tick, 2.5))
-        assertFalse(c.pendingCreate)
+        assertTrue("asked for; pending until the server creates", c.pendingCreate)
         assertEquals("late audio for the flushed tail stays dropped", "r1", c.cancelledResponseId)
     }
 
@@ -1253,8 +1256,8 @@ class BargeInControllerTest {
         assertEquals(cmds(turn("you know, that I normally do in a week."), timer(500), thinking), rest)
         assertEquals("300 ms after the second piece", emptyList<BargeInCommand>(), c.h(tick, 3.5))
         assertEquals("one ask, for both pieces", cmds(create, thinking), c.h(tick, 3.7))
-        assertFalse(c.pendingCreate)
-        assertEquals("never twice", emptyList<BargeInCommand>(), c.h(tick, 4.0))
+        assertTrue("asked for; pending until the server creates", c.pendingCreate)
+        assertFalse("never twice — in flight, only the grace timer", c.h(tick, 4.0).contains(create))
         // A segment that ends WITHOUT a transcript still lets the ask through.
         val d = controller(speaker)
         d.h(started("g1"), 0.0)
@@ -1375,6 +1378,138 @@ class BargeInControllerTest {
         assertTrue("a content word it never said: theirs", out.contains(turn("Coming up on Sunday")))
         assertEquals(1, count(out, cancel))
         assertEquals("nothing deleted", emptyList<String>(), d.pendingDeletes)
+    }
+
+    // ── 26: a create the server swallowed (iOS BargeInTests 25a–c, build 75 —
+    // Zubair's call, 2026-09-20 18:02: a cancel went unanswered, the fallback
+    // create produced nothing, the muted reply completed, his "Yes." was never
+    // answered — 20 s of silence). The turn now stays pending until
+    // response.created. ──
+
+    @Test fun `26a the turn stays pending until the server creates`() {
+        val c = controller(speaker)
+        c.h(started("u"), 0.0)
+        c.h(stopped, 1.0)
+        c.h(tr("what's on today", "u", final = true), 1.2)
+        assertEquals(cmds(create, thinking), c.h(tick, 1.8))
+        assertTrue("asked for, not yet created", c.pendingCreate)
+        assertEquals(1800L, c.createSentAt)
+        assertEquals("in flight: no second create, a timer for the rest of the grace", cmds(timer(2301)), c.h(tick, 2.5))
+        c.h(BargeInEvent.ResponseCreated("r1"), 2.6)
+        assertFalse(c.pendingCreate)
+        assertNull(c.createSentAt)
+        assertEquals("nothing pending once created", emptyList<BargeInCommand>(), c.h(tick, 5.0))
+    }
+
+    @Test fun `26b a swallowed fallback create is re-asked when the active reply finishes`() {
+        val c = controller(speaker)
+        c.h(BargeInEvent.ResponseCreated("r1"), 0.0)   // the results reply: thinking, no audio yet
+        c.h(started("y"), 0.4)
+        c.h(stopped, 0.9)
+        val turn = c.h(tr("Yes.", "y", final = true), 1.0)
+        assertEquals(1, count(turn, cancel))
+        assertTrue(c.pendingCreate)
+        assertEquals("waiting for the cancelled done", emptyList<BargeInCommand>(), c.h(tick, 1.5))
+        assertEquals("no done, no error: the 2.5 s fallback asks", cmds(create, thinking), c.h(tick, 3.6))
+        assertTrue("still pending: nothing was created", c.pendingCreate)
+        // The server swallowed the create AND the cancel: the reply completes, muted.
+        assertEquals("re-asked at once — hold long up, server quiet", cmds(create, thinking), c.h(done("r1"), 4.0))
+        c.h(BargeInEvent.ResponseCreated("r2"), 4.5)
+        assertFalse(c.pendingCreate)
+        assertTrue("the answer to \"Yes.\" plays", c.shouldEnqueueAudio("r2"))
+    }
+
+    @Test fun `26c a create swallowed while idle is resent after the grace`() {
+        val c = controller(speaker)
+        c.h(started("u"), 0.0)
+        c.h(stopped, 1.0)
+        c.h(tr("what's on today", "u", final = true), 1.2)
+        assertEquals(cmds(create, thinking), c.h(tick, 1.8))
+        assertEquals(cmds(timer(2801)), c.h(tick, 2.0))
+        assertEquals("nothing came in 3 s: ask again", cmds(create, thinking), c.h(tick, 4.9))
+        // "Already has an active response" to that re-send: the mark clears and
+        // the turn is asked for again once the hold is up.
+        val complaint = c.h(BargeInEvent.Error("Conversation already has an active response"), 5.0)
+        assertTrue("re-asked at once: $complaint", complaint.contains(create))
+        assertEquals("a fresh create in flight", 5000L, c.createSentAt)
+    }
+
+    // ── 27: a rate-limited reply (iOS BargeInTests 26a–b, build 76 — OpenAI:
+    // the token bucket ran dry; Ahmad's 2026-09-20 23:48 session went silent)
+    // is asked for again after the bucket's reset, three times at most. The
+    // retry-delay parsing is the client's (VoiceRealtimeClientTest). ──
+
+    @Test fun `27a a rate-limited reply is re-asked after the reset`() {
+        val c = controller(speaker)
+        c.h(started("u"), 0.0)
+        c.h(stopped, 1.0)
+        c.h(tr("what's on today", "u", final = true), 1.2)
+        assertEquals(cmds(create, thinking), c.h(tick, 1.8))
+        c.h(BargeInEvent.ResponseCreated("r1"), 2.0)
+        assertFalse(c.pendingCreate)
+        val out = c.h(BargeInEvent.ResponseRateLimited(7000), 2.3)
+        assertEquals("the turn is pending again; the tick after the reset asks", cmds(timer(7000), thinking), out)
+        assertTrue(c.pendingCreate)
+        assertFalse(c.responseActive)
+        assertEquals(1, c.rateLimitRetries)
+        assertEquals(cmds(create, thinking), c.h(tick, 9.4))
+        c.h(BargeInEvent.ResponseCreated("r2"), 9.6)
+        c.h(BargeInEvent.AudioDelta("r2"), 9.7)
+        assertTrue("the retried reply plays", c.shouldEnqueueAudio("r2"))
+        c.h(done("r2"), 12.0)
+        assertEquals("a completed reply clears the count", 0, c.rateLimitRetries)
+    }
+
+    @Test fun `27b after three rate-limited retries the turn is dropped`() {
+        val c = controller(speaker)
+        c.h(started("u"), 0.0)
+        c.h(stopped, 1.0)
+        c.h(tr("what's on today", "u", final = true), 1.2)
+        c.h(tick, 1.8)
+        var t = 2.0
+        for (i in 1..3) {
+            c.h(BargeInEvent.ResponseCreated("r$i"), t)
+            assertEquals("retry $i", cmds(timer(2000), thinking), c.h(BargeInEvent.ResponseRateLimited(2000), t + 0.3))
+            assertEquals(cmds(create, thinking), c.h(tick, t + 2.4))
+            t += 3
+        }
+        c.h(BargeInEvent.ResponseCreated("r4"), t)
+        assertEquals("fourth failure: give up (the client says so out loud)", cmds(listening), c.h(BargeInEvent.ResponseRateLimited(2000), t + 0.3))
+        assertFalse(c.pendingCreate)
+        // A new turn starts the count afresh.
+        c.h(started("v"), t + 5)
+        c.h(stopped, t + 6)
+        c.h(tr("hello?", "v", final = true), t + 6.2)
+        assertEquals(0, c.rateLimitRetries)
+    }
+
+    // ── 28: one word is the user (iOS BargeInTests 27a, build 77 — Zubair's
+    // morning call, 2026-09-21 07:01: "Morning." answering "Morning. Want to
+    // walk through today?" was deleted as echo of the greeting; nothing
+    // happened until "Hello?"). ──
+
+    @Test fun `28a a one-word answer that shares the greeting's word is a turn`() {
+        val c = speaking(speaker)
+        said(c, "Morning. Want to walk through today?")
+        c.h(started("m"), 1.0)                          // on air, as the greeting's last words play
+        c.h(stopped, 1.6)
+        val out = c.h(tr("Morning.", "m", final = true), 1.8)
+        assertTrue("$out", out.contains(turn("Morning.")))
+        assertEquals("their word ends the greeting's tail", 1, count(out, cancel))
+        assertEquals(emptyList<String>(), c.pendingDeletes)
+        // Two words that are the reply's are still judged (a garble is echo).
+        val d = speaking(speaker)
+        said(d, "Saturday's clear.")
+        d.h(started("b"), 1.0)
+        assertEquals(emptyList<BargeInCommand>(), d.h(tr("Saturday's players.", "b", final = true), 1.9))
+        assertEquals(listOf("b"), d.pendingDeletes)
+        // A one-word later piece of an echo-judged segment stays echo.
+        val e = speaking(speaker)
+        said(e, "Looks pretty solid. You've got a few tasks wrapped up, and Friday coming up.")
+        e.h(started("p"), 1.0)
+        assertEquals(emptyList<BargeInCommand>(), e.h(tr("Coming up on.", "p", final = true), 1.9))
+        assertEquals(emptyList<BargeInCommand>(), e.h(tr("Day.", "p", final = true), 2.5))
+        assertEquals(listOf("p"), e.pendingDeletes)
     }
 
     // ── Android-only: the RMS gate at the Android floor, the noisy-room chip,

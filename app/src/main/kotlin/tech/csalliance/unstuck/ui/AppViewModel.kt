@@ -26,6 +26,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.runningFold
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -312,12 +313,22 @@ class AppViewModel(
     private val sharedWithMeHold = tech.csalliance.unstuck.ui.sharing.LastGoodRead<List<SharedWithMe>>(emptyList())
     private val shareBadgesHold = tech.csalliance.unstuck.ui.sharing.LastGoodRead<Map<String, List<ShareBadge>>>(emptyMap())
 
+    /** The session's account the holds key on: the signed-in user, kept through a
+     *  failed token refresh, where currentUid() reads null although [authed] still
+     *  says signed in (see sessionAccount). Eager, so it has seen the last
+     *  Authenticated before any refresh fails. */
+    private val heldAccount: StateFlow<String?> =
+        graph.provider?.client?.auth?.sessionStatus
+            ?.runningFold(null as String?) { prev, status -> tech.csalliance.unstuck.ui.sharing.sessionAccount(status, prev) }
+            ?.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+            ?: MutableStateFlow(null)
+
     /** Tasks other people have shared WITH me — the "Shared with you" group. Read via
      *  the tasks_shared_with_me projection (raw task rows are RLS-forbidden). */
     val sharedWithMe: StateFlow<List<SharedWithMe>> =
         merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
             .onStart { emit(Unit) }
-            .mapNotNull { sharedWithMeHold.next(currentUid(), graph.coordinator?.circle?.tasksSharedWithMe()) }
+            .mapNotNull { sharedWithMeHold.refresh(currentUid(), heldAccount.value) { graph.coordinator?.circle?.tasksSharedWithMe() } }
             .combine(_sharedCompletedAt) { rows, stamps ->
                 if (stamps.isEmpty()) rows else rows.map { s ->
                     if (s.done && s.completedAt == null) s.copy(completedAt = stamps[s.taskId]) else s
@@ -330,7 +341,7 @@ class AppViewModel(
     val shareBadges: StateFlow<Map<String, List<ShareBadge>>> =
         merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
             .onStart { emit(Unit) }
-            .mapNotNull { shareBadgesHold.next(currentUid(), graph.coordinator?.circle?.myTaskShareBadges()) }
+            .mapNotNull { shareBadgesHold.refresh(currentUid(), heldAccount.value) { graph.coordinator?.circle?.myTaskShareBadges() } }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     /** taskId → assignee name for tasks I've assigned away ('assign' level). These
@@ -2321,7 +2332,7 @@ class AppViewModel(
     val circle: StateFlow<List<CircleMember>> =
         merge(_circleRefresh, flow { collab?.circleChanged?.let { emitAll(it) } })
             .onStart { emit(Unit) }
-            .mapNotNull { circleHold.next(currentUid(), circleClient?.circleList()) }
+            .mapNotNull { circleHold.refresh(currentUid(), heldAccount.value) { circleClient?.circleList() } }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Force a roster refetch now (after a write). */

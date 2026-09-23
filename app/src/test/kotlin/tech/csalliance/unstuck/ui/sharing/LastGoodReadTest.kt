@@ -1,5 +1,10 @@
 package tech.csalliance.unstuck.ui.sharing
 
+import io.github.jan.supabase.auth.status.RefreshFailureCause
+import io.github.jan.supabase.auth.status.SessionStatus
+import io.github.jan.supabase.auth.user.UserInfo
+import io.github.jan.supabase.auth.user.UserSession
+import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -37,4 +42,63 @@ class LastGoodReadTest {
         assertEquals(mapOf("t2" to 2), hold.next("b", mapOf("t2" to 2)))
         assertNull(hold.next("b", null))
     }
+
+    // supabase-kt reads the current user as null while a token refresh is failing
+    // (offline with an expired access token) — still signed in per AppViewModel.authed.
+    // The holds key on the session's account instead (review of the C11 port).
+
+    @Test fun `a failed token refresh keeps the account's rows and never reads without the session`() = runBlocking {
+        val hold = LastGoodRead<List<String>>(emptyList())
+        var account = sessionAccount(signedIn("me"), null)
+        assertEquals(listOf("Maya"), hold.refresh("me", account) { listOf("Maya") })
+
+        account = sessionAccount(refreshFailed(), account)
+        assertEquals("still my session", "me", account)
+        var reads = 0
+        assertNull("offline with an expired token: keep, never 'No one yet'",
+            hold.refresh(null, account) { reads++; emptyList() })
+        assertNull(hold.refresh(null, account) { reads++; null })
+        assertEquals("no read goes out without my token (an anon call can answer empty)", 0, reads)
+
+        account = sessionAccount(signedIn("me"), account)
+        assertEquals("the refresh lands: a fresh answer shows", listOf("Maya", "Sam"),
+            hold.refresh("me", account) { listOf("Maya", "Sam") })
+    }
+
+    @Test fun `a sign-out ends the session and the next account never inherits through a failed refresh`() = runBlocking {
+        val hold = LastGoodRead<Map<String, Int>>(emptyMap())
+        var account = sessionAccount(signedIn("a"), null)
+        hold.refresh("a", account) { mapOf("t1" to 1) }
+
+        // Signed out and back in as B with no read in between (the flow never
+        // restarted), then B's token expires offline.
+        account = sessionAccount(SessionStatus.NotAuthenticated(isSignOut = true), account)
+        assertNull("a sign-out ends the session", account)
+        account = sessionAccount(signedIn("b"), account)
+        account = sessionAccount(refreshFailed(), account)
+        assertEquals("b", account)
+        assertEquals("B must not see A's rows", emptyMap<String, Int>(), hold.refresh(null, account) { null })
+
+        assertEquals("signed out: empty, and nothing is read", emptyMap<String, Int>(),
+            hold.refresh(null, null) { mapOf("t1" to 1) })
+    }
+
+    @Test fun `a cold start whose first refresh fails has nothing to keep`() = runBlocking {
+        val hold = LastGoodRead<List<String>>(emptyList())
+        var account = sessionAccount(SessionStatus.Initializing, null)
+        assertNull(account)
+        account = sessionAccount(refreshFailed(), account)
+        assertNull("never authenticated in this process", account)
+        assertEquals(emptyList<String>(), hold.refresh(null, account) { listOf("Maya") })
+    }
+
+    private fun signedIn(uid: String) = SessionStatus.Authenticated(
+        UserSession(
+            accessToken = "t", refreshToken = "r", expiresIn = 3600, tokenType = "bearer",
+            user = UserInfo(aud = "authenticated", id = uid),
+        ),
+    )
+
+    private fun refreshFailed() =
+        SessionStatus.RefreshFailure(RefreshFailureCause.NetworkError(java.io.IOException("offline")))
 }

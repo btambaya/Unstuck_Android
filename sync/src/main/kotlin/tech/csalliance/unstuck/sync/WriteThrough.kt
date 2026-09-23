@@ -13,6 +13,7 @@ import tech.csalliance.unstuck.core.model.ReasonLog
 import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.time.WireTime
 import kotlinx.coroutines.flow.first
 import kotlinx.serialization.json.JsonObject
 import tech.csalliance.unstuck.data.LocalStore
@@ -86,7 +87,11 @@ class WriteThrough(private val store: LocalStore) {
         // agree; a refused block was quarantined and lived on this phone only. A
         // Google mirror keeps its real length (parity with iOS build 81, audit
         // 2026-09-22 C4).
-        val b = if (external) block else block.copy(durationMinutes = clampDurationMin(block.durationMinutes))
+        val clamped = if (external) block else block.copy(durationMinutes = clampDurationMin(block.durationMinutes))
+        // Date and start time in ASCII digits whatever wrote them: in the phone's own
+        // digits the block never matched a day here and the server refused it, so it
+        // lived on this phone only (Android audit 2026-09-23, A12).
+        val b = clamped.copy(date = WireTime.asciiDigits(clamped.date), startTime = WireTime.asciiDigits(clamped.startTime))
         store.upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id)
         if (external) return
         val dependsOn = b.taskId?.let { if (isUuid(it)) it else null } // wait for parent task op

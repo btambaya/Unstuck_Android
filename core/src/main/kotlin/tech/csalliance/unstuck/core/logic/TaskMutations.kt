@@ -47,3 +47,23 @@ fun clearLaterOnSchedule(task: TaskItem, nowISO: String): TaskItem? {
     if (task.recurrence != null) return null
     return task.copy(later = false, updatedAt = nowISO)
 }
+
+/**
+ * The server CHECK is `estimate_min between 1 and 1440` (migration 001). An
+ * out-of-range value is accepted locally, refused by PostgREST on flush,
+ * retried five times and then quarantined — the row lives on that one phone
+ * for ever, holds every block of the task back behind it, and the user is
+ * never told. The ONE rule for the estimate range: WriteThrough and the
+ * outbox flush clamp with it too, so a writer that forgets can no longer
+ * strand a row (parity with iOS build 81, audit 2026-09-22 C4).
+ */
+fun clampEstimateMin(raw: Int?): Int = (raw ?: 25).coerceIn(1, 1440)
+
+/**
+ * `duration_minutes between 5 and 1440` (migration 001), so a 2-minute task
+ * would otherwise mint a block the server refuses. A task keeps a 1-4 minute
+ * estimate; its block floors at 5. The ONE rule for a block's length:
+ * recurrence minting, WriteThrough and the outbox flush all use it (parity
+ * with iOS build 81, audit 2026-09-22 C4).
+ */
+fun clampDurationMin(raw: Int?, fallback: Int = 25): Int = (raw ?: fallback).coerceIn(5, 1440)

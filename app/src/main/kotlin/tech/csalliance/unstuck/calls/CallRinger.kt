@@ -380,6 +380,25 @@ object CallRinger {
         return true
     }
 
+    /**
+     * Silence the RINGING [callId] without answering it: the power / volume key
+     * on the ring screen, the phone's own "not now" (CallKit's side button on
+     * iOS). Once the ring loops for the whole 30 s (A4) there was otherwise no
+     * way to quieten it short of deciding (Android audit 2026-09-23, A4 review).
+     * Only the notification goes, as in [holdForPermission] — the record stays
+     * RINGING, so the screen's buttons and the 30 s alarm still settle the call.
+     * True when this call was ringing.
+     */
+    fun silence(context: Context, callId: String): Boolean {
+        synchronized(lock) {
+            val p = prefs(context)
+            if (p.getString(K_CALL_ID, null) != callId || p.getBoolean(K_SETTLED, true)) return false
+            if (p.getString(K_PHASE, PHASE_RINGING) != PHASE_RINGING) return false
+        }
+        NotificationManagerCompat.from(context).cancel(NotifIds.CALL)
+        return true
+    }
+
     private fun disarmMissedAlarm(context: Context, callId: String) {
         val am = context.getSystemService(AlarmManager::class.java) ?: return
         am.cancel(missedPendingIntent(context, callId))

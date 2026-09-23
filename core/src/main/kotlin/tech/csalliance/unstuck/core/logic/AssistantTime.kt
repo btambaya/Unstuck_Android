@@ -2,6 +2,7 @@ package tech.csalliance.unstuck.core.logic
 
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.time.Time
+import tech.csalliance.unstuck.core.time.WireTime
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -30,8 +31,9 @@ object IsoDate {
      *  impossible ("2026-02-30") — never a throw (see [parseYmdOrNull]). */
     fun parse(iso: String): LocalDate? = parseYmdOrNull(iso)
 
-    /** Field-by-field 'YYYY-MM-DD' (never a UTC round-trip). */
-    fun format(d: LocalDate): String = "%04d-%02d-%02d".format(d.year, d.monthValue, d.dayOfMonth)
+    /** Field-by-field 'YYYY-MM-DD' (never a UTC round-trip), ASCII digits in
+     *  every locale (Android audit 2026-09-23, A12). */
+    fun format(d: LocalDate): String = WireTime.ymd(d)
 
     /** `iso` advanced by `n` whole days (DST-safe). Malformed input is
      *  returned unchanged — no comparison ever matches it, like the web's NaN date. */
@@ -80,7 +82,7 @@ fun doneWhenLabel(stamp: String?, today: String, zone: ZoneId = ZoneId.systemDef
 
 // ---- HH:MM helpers
 
-internal fun hmPad2(n: Int): String = "%02d".format(n)
+internal fun hmPad2(n: Int): String = WireTime.pad2(n)
 
 /** `hmToMin`: 'HH:MM' → minutes since midnight (a missing/invalid part reads 0). */
 fun hmToMin(hm: String): Int {

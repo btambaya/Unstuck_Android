@@ -5,6 +5,7 @@ import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.ExternalEvent
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.time.Time
+import tech.csalliance.unstuck.core.time.WireTime
 import java.time.Instant
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -30,7 +31,7 @@ fun isoToLocalYmd(iso: String): String {
 /** HH:MM (local, zero-padded) for an ISO timestamp. */
 fun isoToLocalHHMM(iso: String): String {
     val ms = Time.parseMillis(iso) ?: return "00:00"
-    return "%02d:%02d".format(Time.hourOf(ms), Time.minuteOf(ms))
+    return WireTime.hm(Time.hourOf(ms), Time.minuteOf(ms))
 }
 
 /** Whole-minute duration between two ISO timestamps, floored at 15 (so

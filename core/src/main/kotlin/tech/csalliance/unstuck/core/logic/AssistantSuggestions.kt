@@ -52,8 +52,7 @@ internal fun nextWeekend(todayIso: String): Pair<String, String>? {
     val offset = if (jsDow == 6) 0L else ((6 - jsDow + 7) % 7).toLong()
     val sat = base.plusDays(offset)
     val sun = sat.plusDays(1)
-    fun iso(d: LocalDate) = "%04d-%02d-%02d".format(d.year, d.monthValue, d.dayOfMonth)
-    return iso(sat) to iso(sun)
+    return IsoDate.format(sat) to IsoDate.format(sun)
 }
 
 fun buildSuggestions(

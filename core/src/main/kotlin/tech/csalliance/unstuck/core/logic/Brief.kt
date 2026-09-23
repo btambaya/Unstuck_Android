@@ -3,6 +3,7 @@ package tech.csalliance.unstuck.core.logic
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Time
+import tech.csalliance.unstuck.core.time.WireTime
 import java.time.LocalDate
 
 // The deterministic brief for the AI gateway card — zero-LLM, so it renders
@@ -32,8 +33,9 @@ internal fun countWord(n: Int): String = if (n >= 0 && n < COUNT_WORDS.size) COU
 /** JS `Math.round`: halves round toward +∞ (−2.5 → −2), unlike Kotlin's `roundToInt` (half away from zero). */
 internal fun jsRound(x: Double): Int = Math.floor(x + 0.5).toInt()
 
-/** Local wall clock of an epoch-ms instant as 'HH:MM' (the brief/moment gates compare it lexicographically). */
-internal fun hmOfMillis(now: Long): String = "%02d:%02d".format(Time.hourOf(now), Time.minuteOf(now))
+/** Local wall clock of an epoch-ms instant as 'HH:MM' (the brief/moment gates compare it lexicographically,
+ *  so ASCII digits in every locale — Android audit 2026-09-23, A12). */
+internal fun hmOfMillis(now: Long): String = WireTime.hm(Time.hourOf(now), Time.minuteOf(now))
 
 /**
  * Today's live blocks (not done, not skipped) in start-time order — untimed

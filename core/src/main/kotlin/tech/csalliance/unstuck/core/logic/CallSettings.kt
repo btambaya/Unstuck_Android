@@ -3,6 +3,7 @@ package tech.csalliance.unstuck.core.logic
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import tech.csalliance.unstuck.core.model.CallRequest
+import tech.csalliance.unstuck.core.time.WireTime
 import java.time.Instant
 import java.time.ZoneId
 
@@ -181,7 +182,7 @@ object CallSettingsLogic {
     /** Local "HH:MM" for an epoch-ms instant. */
     fun hhmm(epochMs: Long, zone: ZoneId = ZoneId.systemDefault()): String {
         val t = Instant.ofEpochMilli(epochMs).atZone(zone)
-        return "%02d:%02d".format(t.hour, t.minute)
+        return WireTime.hm(t.hour, t.minute)
     }
 
     /** A stored "HH:MM" that parses, else null (the caller falls back to the default). */
@@ -248,7 +249,10 @@ data class CallProactivePrefs(
             val h = p[0].toIntOrNull() ?: return null
             val m = p[1].toIntOrNull() ?: return null
             if (h !in 0..23 || m !in 0..59) return null
-            return "%02d:%02d".format(h, m)
+            // ASCII digits: this is what call_morning_time / call_evening_time are
+            // pushed as, and Postgres `time` refuses the phone's own digits. It also
+            // heals a time an older build stored that way (Android audit 2026-09-23, A12).
+            return WireTime.hm(h, m)
         }
     }
 }

@@ -3,6 +3,7 @@ package tech.csalliance.unstuck.core.logic
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.time.Time
+import tech.csalliance.unstuck.core.time.WireTime
 import kotlin.math.ceil
 import kotlin.math.max
 import kotlin.math.min
@@ -28,7 +29,8 @@ private fun parseHhmm(hhmm: String): Int {
     return h * 60 + m
 }
 
-private fun pad2(n: Int): String = "%02d".format(n)
+// ASCII digits: Slot.startTime is written into cal_blocks (Android audit 2026-09-23, A12).
+private fun pad2(n: Int): String = WireTime.pad2(n)
 
 private fun hhmmFromMin(totalMin: Int): String = "${pad2(totalMin / 60)}:${pad2(totalMin % 60)}"
 

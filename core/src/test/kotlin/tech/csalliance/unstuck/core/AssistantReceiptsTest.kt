@@ -180,9 +180,10 @@ class AssistantReceiptsTest {
 
     @Test fun `capture tools`() {
         assertEquals(Receipt(ReceiptIcon.PLUS, "Captured: ask Sam", ReceiptUndo.deleteCapture("c1")), r("add_capture", "ok: captured id=c1 [idea] \"ask Sam\""))
+        // Its own undo (Android audit 2026-09-23, A17): DELETE_TASK stranded the capture.
         assertEquals(
-            Receipt(ReceiptIcon.PLUS, "Task from capture: ask Sam", ReceiptUndo.deleteTask("t9")),
-            r("promote_capture", "ok: promoted capture to task id=t9 name=\"ask Sam\""),
+            Receipt(ReceiptIcon.PLUS, "Task from capture: ask Sam", ReceiptUndo.unpromoteCapture("t9", "c1")),
+            r("promote_capture", "ok: promoted capture to task id=t9 name=\"ask Sam\"", ReceiptArgs(captureId = "c1")),
         )
         assertEquals("Resolved: ask Sam", r("resolve_capture", "ok: resolved capture \"ask Sam\"")!!.label)
         assertEquals(Receipt(ReceiptIcon.PENCIL, "Deleted capture"), r("delete_capture", "ok: deleted capture \"ask Sam\""))

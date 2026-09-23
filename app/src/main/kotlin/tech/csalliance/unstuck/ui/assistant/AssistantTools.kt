@@ -121,7 +121,10 @@ class ToolArgs(val raw: JsonObject = JsonObject(emptyMap())) {
 
     /** The slice the receipt derivation reads. */
     val receiptArgs: ReceiptArgs
-        get() = ReceiptArgs(taskId = str("taskId"), date = str("date"), startTime = str("startTime"), later = bool("later"), kind = str("kind"))
+        get() = ReceiptArgs(
+            taskId = str("taskId"), date = str("date"), startTime = str("startTime"), later = bool("later"), kind = str("kind"),
+            captureId = str("captureId"),
+        )
 }
 
 fun parseToolArgs(s: String): JsonObject =

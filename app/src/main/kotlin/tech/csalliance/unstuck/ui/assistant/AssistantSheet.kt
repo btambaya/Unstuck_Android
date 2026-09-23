@@ -147,6 +147,8 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     // Receipts whose undo is a NETWORK round trip (cancel_call): the control reads
     // "cancelling…" while it's in flight instead of inviting a second tap.
     val undosInFlight by vm.receiptUndosInFlight.collectAsStateWithLifecycle()
+    // Undos that were refused (a row changed since its turn): the card says why.
+    val undoNotes by vm.receiptUndoNotes.collectAsStateWithLifecycle()
 
     // Coarse clock for the day dividers + the context strip: a sheet left open
     // across midnight must roll "Today" over rather than freeze.
@@ -217,10 +219,13 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
         }
     }
 
-    // One-tap revert of the LAST turn's changes (only while still undoable —
-    // receipts flip to `undone` as they're used).
-    val lastUndoable = display.lastOrNull { m -> m.receipts?.any { it.undo != null && !it.undone } == true }
-    val undoAllCount = lastUndoable?.receipts?.count { it.undo != null && !it.undone } ?: 0
+    // Revert of the turn that JUST finished, named and confirmed first. It used
+    // to reach back to the last turn with any unused Undo, however old — one tap
+    // on Thursday deleted Monday's tasks (Android audit 2026-09-23, A17).
+    val undoAllTurn = undoAllTarget(display, nowMs, undoNotes.keys)
+    val undoAllCount = undoAllTurn?.let { undoAllReceipts(it, undoNotes.keys).size } ?: 0
+    // The turn the confirmation was opened for — pinned (UndoAllConfirmDialog).
+    var confirmUndoAllFor by remember { mutableStateOf<String?>(null) }
 
     // Daily check-in: once per day, and ONLY when the sheet opens onto an
     // existing conversation (a fresh account gets the full hero instead). A send
@@ -306,6 +311,12 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     var voiceOpen by rememberSaveable { mutableStateOf(false) }
     if (voiceOpen) VoiceModeScreen(vm) { voiceOpen = false }
 
+    // Names every change it will revert before anything is deleted (A17).
+    UndoAllConfirmDialog(
+        openFor = confirmUndoAllFor, target = undoAllTurn, refused = undoNotes.keys,
+        onDismiss = { confirmUndoAllFor = null },
+    ) { id, indices -> confirmUndoAllFor = null; vm.undoAllAssistantReceipts(id, indices) }
+
     Column(Modifier.fillMaxWidth().fillMaxHeight(0.86f).imePadding()) {
         // ── Header: title + eyebrow, Talk, ⋯ ─────────────────────────────────
         Row(
@@ -359,7 +370,7 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                     AssistantHome(
                         ctx, onAsk = ::ask,
                         undoAllCount = undoAllCount,
-                        onUndoAll = { undoAll(vm, lastUndoable) },
+                        onUndoAll = { confirmUndoAllFor = undoAllTurn?.id },
                     )
                 }
             }
@@ -391,6 +402,7 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                             is ThreadRow.ReceiptItem -> ReceiptCard(
                                 r,
                                 inFlight = receiptUndoKey(r.messageId, r.index) in undosInFlight,
+                                note = undoNotes[receiptUndoKey(r.messageId, r.index)],
                             ) { vm.undoAssistantReceipt(r.messageId, r.index) }
                             ThreadRow.InterviewPrompt -> InterviewPromptRow(
                                 interview,
@@ -415,7 +427,7 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                             AssistantHome(
                                 ctx, onAsk = ::ask, compact = true,
                                 undoAllCount = undoAllCount,
-                                onUndoAll = { undoAll(vm, lastUndoable) },
+                                onUndoAll = { confirmUndoAllFor = undoAllTurn?.id },
                                 // At least a full viewport tall, so opening the
                                 // sheet parks this card at the top with the whole
                                 // conversation above the fold.
@@ -508,15 +520,72 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     }
 }
 
-/** Revert every still-undoable receipt on the last turn that made changes.
- *  Walks BACKWARDS so earlier indices stay valid as receipts flip to `undone`. */
-private fun undoAll(vm: AppViewModel, msg: ChatMessage?) {
-    val id = msg?.id ?: return
-    val receipts = msg.receipts ?: return
-    for (i in receipts.indices.reversed()) {
-        val r = receipts[i]
-        if (r.undo != null && !r.undone) vm.undoAssistantReceipt(id, i)
-    }
+/** How long "Undo all" stays on offer after its turn lands. */
+internal const val UNDO_ALL_WINDOW_MS = 15 * 60_000L
+
+/** The turn "Undo all" reverts: the one that JUST finished — the newest turn
+ *  with receipts, with no request of the user's after it, landed within
+ *  [UNDO_ALL_WINDOW_MS] — while it still has an Undo that wasn't refused
+ *  ([refused]: receiptUndoKey). Never an older turn: the chip reached back
+ *  days to any unused Undo (Android audit 2026-09-23, A17). */
+internal fun undoAllTarget(display: List<ChatMessage>, nowMs: Long, refused: Set<String>): ChatMessage? {
+    val i = display.indexOfLast { !it.receipts.isNullOrEmpty() }
+    if (i < 0) return null
+    val turn = display[i]
+    if (display.drop(i + 1).any { it.role == "user" }) return null
+    val at = turn.at ?: return null
+    // Only an upper bound: the sheet's clock ticks once a minute, so a turn
+    // that just landed can read as slightly in the future.
+    if (nowMs - at > UNDO_ALL_WINDOW_MS) return null
+    return turn.takeIf { undoAllReceipts(it, refused).isNotEmpty() }
+}
+
+/** The receipts "Undo all" on [turn] would revert, by index (what its
+ *  confirmation names, and all that its Undo then runs). */
+internal fun undoAllReceipts(turn: ChatMessage, refused: Set<String>): List<IndexedValue<Receipt>> =
+    turn.receipts.orEmpty().withIndex().filter { (i, r) -> r.isUndoable && receiptUndoKey(turn.id.orEmpty(), i) !in refused }
+
+/** "Undo all"'s confirmation: names every change it will revert, and [onConfirm]
+ *  gets exactly those. PINNED to the turn it was opened for ([openFor]):
+ *  [target] is the turn Undo all would revert now, and when that lapses (the
+ *  15-minute window) or becomes another turn (a call ending in the background
+ *  lands its receipts) while this is open, it closes through [onDismiss]. A
+ *  plain open flag re-targeted the list under the user's finger, or popped up
+ *  later for a turn they never asked about (Android audit 2026-09-23, A17). */
+@Composable
+internal fun UndoAllConfirmDialog(
+    openFor: String?, target: ChatMessage?, refused: Set<String>,
+    onDismiss: () -> Unit, onConfirm: (messageId: String, indices: List<Int>) -> Unit,
+) {
+    val targetId = target?.id
+    LaunchedEffect(openFor, targetId) { if (openFor != null && openFor != targetId) onDismiss() }
+    if (openFor == null || target == null || openFor != targetId) return
+    val items = undoAllReceipts(target, refused)
+    if (items.isEmpty()) return
+    val c = UTheme.colors
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                if (items.size == 1) "Undo this change?" else "Undo these ${items.size} changes?",
+                style = UFont.sans(16, FontWeight.SemiBold), color = c.ink,
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                items.forEach { Text("• ${it.value.label}", style = UFont.sans(13), color = c.ink2) }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = { onConfirm(openFor, items.map { it.index }) }) {
+                Text("Undo", color = c.red)
+            }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Keep", color = c.ink2) }
+        },
+        containerColor = c.surface,
+    )
 }
 
 @Composable
@@ -552,33 +621,46 @@ private fun MessageBubble(m: ChatMessage) {
     }
 }
 
-/** A deterministic ✓ card for one thing the agent actually did. */
+/** A deterministic ✓ card for one thing the agent actually did. [note] says
+ *  why its Undo was refused, in place of the control (A17). */
 @Composable
-private fun ReceiptCard(row: ThreadRow.ReceiptItem, inFlight: Boolean = false, onUndo: () -> Unit) {
+private fun ReceiptCard(row: ThreadRow.ReceiptItem, inFlight: Boolean = false, note: String? = null, onUndo: () -> Unit) {
     val c = UTheme.colors
     val r = row.receipt
-    Row(
+    Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface)
             .border(1.dp, c.line, RoundedCornerShape(12.dp))
             .padding(horizontal = 11.dp, vertical = 7.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
-        Icon(Icons.Filled.Check, contentDescription = null, tint = c.green, modifier = Modifier.size(14.dp))
-        Text(
-            r.label, style = UFont.sans(12), color = c.ink2, modifier = Modifier.weight(1f),
-            textDecoration = if (r.undone) TextDecoration.LineThrough else null,
-        )
-        when {
-            r.undone -> Text("undone", style = UFont.sans(11), color = c.ink3)
-            r.undo != null -> Text(
-                receiptUndoLabel(r.undo!!.kind, inFlight),
-                style = UFont.sans(12, FontWeight.SemiBold),
-                color = if (inFlight) c.ink3 else c.coral,
-                modifier = Modifier.clip(RoundedCornerShape(999.dp))
-                    // In flight the tap is a no-op (the VM ignores a repeat for the
-                    // same key anyway) — no second cancel round trip, no lie.
-                    .clickable(role = Role.Button, enabled = !inFlight, onClick = onUndo)
-                    .minimumInteractiveComponentSize().padding(horizontal = 6.dp, vertical = 2.dp),
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Icon(Icons.Filled.Check, contentDescription = null, tint = c.green, modifier = Modifier.size(14.dp))
+            Text(
+                r.label, style = UFont.sans(12), color = c.ink2, modifier = Modifier.weight(1f),
+                textDecoration = if (r.undone) TextDecoration.LineThrough else null,
+            )
+            when {
+                r.undone -> Text("undone", style = UFont.sans(11), color = c.ink3)
+                note != null -> {}
+                r.undo != null -> Text(
+                    receiptUndoLabel(r.undo!!.kind, inFlight),
+                    style = UFont.sans(12, FontWeight.SemiBold),
+                    color = if (inFlight) c.ink3 else c.coral,
+                    modifier = Modifier.clip(RoundedCornerShape(999.dp))
+                        // In flight the tap is a no-op (the VM ignores a repeat for the
+                        // same key anyway) — no second cancel round trip, no lie.
+                        .clickable(role = Role.Button, enabled = !inFlight, onClick = onUndo)
+                        .minimumInteractiveComponentSize().padding(horizontal = 6.dp, vertical = 2.dp),
+                )
+            }
+        }
+        if (note != null && !r.undone) {
+            // Polite live region: TalkBack reads why nothing changed.
+            Text(
+                note, style = UFont.sans(11), color = c.ink3,
+                modifier = Modifier.padding(start = 22.dp, top = 2.dp).semantics { liveRegion = LiveRegionMode.Polite },
             )
         }
     }

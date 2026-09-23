@@ -127,8 +127,23 @@ fun CalendarScreen(
     }
 }
 
-/** Connect / sync / disconnect Google Calendar. Opens consent in a Custom Tab;
- *  the `unstuck://calendar-callback` return is handled in MainActivity. */
+/** What connecting Google Calendar does, said BEFORE Google's consent opens.
+ *  Every task block is mirrored to the PRIMARY calendar with the task's name
+ *  as the event title (SyncCoordinator.pushBlockUpsert), and nothing on
+ *  Android said so — a work account's colleagues could read "therapy prep"
+ *  (Android audit 2026-09-23, A19). Web's words (sync-flow.tsx, W14). */
+internal const val GOOGLE_CONNECT_DISCLOSURE =
+    "Unstuck shows your Google events here, so your plans fit around them.\n\n" +
+        "Each task you schedule becomes an event on your main Google Calendar, and moves or disappears " +
+        "when you change it here. Anyone who can see that calendar sees the task's name."
+
+/** The disclosure's title for a first connect or a [reconnect]. */
+internal fun googleConnectDisclosureTitle(reconnect: Boolean): String =
+    if (reconnect) "Reconnect Google Calendar?" else "Connect Google Calendar?"
+
+/** Connect / sync / disconnect Google Calendar. Opens consent in a Custom Tab
+ *  — only after [GOOGLE_CONNECT_DISCLOSURE] was shown and accepted; the
+ *  `unstuck://calendar-callback` return is handled in MainActivity. */
 @Composable
 private fun CalendarSyncBar(vm: AppViewModel) {
     val c = UTheme.colors
@@ -138,6 +153,20 @@ private fun CalendarSyncBar(vm: AppViewModel) {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmDisconnect by remember { mutableStateOf(false) }
+    // Connect / Reconnect asked for: the disclosure is up (true = a reconnect).
+    var disclose by remember { mutableStateOf<Boolean?>(null) }
+    fun openConsent() {
+        scope.launch {
+            busy = true; error = null
+            val url = vm.beginGoogleConnect()
+            busy = false
+            // Surface failures: a null URL means the authorize call failed
+            // (no more silent no-ops). Otherwise open the consent tab.
+            if (url == null) error = "Couldn't reach Google. Check your connection and try again."
+            else runCatching { CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url)) }
+                .onFailure { error = "No browser available to open Google sign-in." }
+        }
+    }
     // How the Google consent ended (MainActivity finishes it from the deep link): held
     // until shown here, since the bar is often off screen when the callback lands.
     val connectOutcome by vm.calendarConnectOutcome.collectAsStateWithLifecycle()
@@ -149,16 +178,7 @@ private fun CalendarSyncBar(vm: AppViewModel) {
             if (conns.isEmpty()) {
                 Box(
                     Modifier.clip(RoundedCornerShape(999.dp)).background(c.bg2).clickable(enabled = !busy) {
-                        scope.launch {
-                            busy = true; error = null
-                            val url = vm.beginGoogleConnect()
-                            busy = false
-                            // Surface failures: a null URL means the authorize call failed
-                            // (no more silent no-ops). Otherwise open the consent tab.
-                            if (url == null) error = "Couldn't reach Google. Check your connection and try again."
-                            else runCatching { CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url)) }
-                                .onFailure { error = "No browser available to open Google sign-in." }
-                        }
+                        disclose = false
                     }.padding(horizontal = 12.dp, vertical = 8.dp),
                 ) { Text(if (busy) "Connecting…" else "＋ Connect Google Calendar", style = UFont.sans(12, FontWeight.Medium), color = c.ink2) }
             } else {
@@ -174,14 +194,7 @@ private fun CalendarSyncBar(vm: AppViewModel) {
                 )
                 if (needsReauth) {
                     Text("Reconnect Google", style = UFont.sans(12, FontWeight.Medium), color = if (busy) c.ink3 else c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(enabled = !busy) {
-                        scope.launch {
-                            busy = true; error = null
-                            val url = vm.beginGoogleConnect()
-                            busy = false
-                            if (url == null) error = "Couldn't reach Google. Check your connection and try again."
-                            else runCatching { CustomTabsIntent.Builder().build().launchUrl(context, Uri.parse(url)) }
-                                .onFailure { error = "No browser available to open Google sign-in." }
-                        }
+                        disclose = true
                     }.padding(horizontal = 8.dp, vertical = 4.dp))
                 } else {
                     Text("Sync now", style = UFont.sans(12, FontWeight.Medium), color = if (busy) c.ink3 else c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(enabled = !busy) {
@@ -194,6 +207,16 @@ private fun CalendarSyncBar(vm: AppViewModel) {
             }
         }
         error?.let { Text(it, style = UFont.sans(11), color = c.red, modifier = Modifier.padding(horizontal = 18.dp).padding(bottom = 6.dp)) }
+    }
+    disclose?.let { reconnect ->
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { disclose = null },
+            title = { Text(googleConnectDisclosureTitle(reconnect), style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+            text = { Text(GOOGLE_CONNECT_DISCLOSURE, style = UFont.sans(13), color = c.ink2) },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { disclose = null; openConsent() }) { Text("Continue to Google", color = c.primaryDeep) } },
+            dismissButton = { androidx.compose.material3.TextButton(onClick = { disclose = null }) { Text("Not now", color = c.ink2) } },
+            containerColor = c.surface,
+        )
     }
     if (confirmDisconnect) androidx.compose.material3.AlertDialog(
         onDismissRequest = { confirmDisconnect = false },

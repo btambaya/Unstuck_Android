@@ -64,8 +64,22 @@ fun materializeOccurrences(
 
 /** Diff to align a task's existing cal_blocks with `recurrence`: keep past
  *  occurrences, delete mismatched future ones, add missing ones. `todayIso`
- *  is injected so the boundary is testable. */
-data class RegenPlan(val toUpsert: List<CalBlock>, val toDelete: List<String>)
+ *  is injected so the boundary is testable.
+ *
+ *  The three lists are DISJOINT by id (rule B, deterministic-occurrence-ids.md
+ *  §3b — stage 2, "same id for same day", Ahmad 2026-09-23), so callers may
+ *  write them in any order:
+ *   • [toUpsert] — NEW occurrences, each with its deterministic id: MINTS,
+ *     written insert-if-absent (`insert_or_retime`);
+ *   • [toRetime] — existing rows rewritten in place: an occurrence whose
+ *     deterministic id the plan would otherwise delete and mint again (a time
+ *     change). A plain upsert; the row keeps its Google mapping;
+ *   • [toDelete] — ids to delete. */
+data class RegenPlan(
+    val toUpsert: List<CalBlock>,
+    val toDelete: List<String>,
+    val toRetime: List<CalBlock> = emptyList(),
+)
 
 /**
  * THE anchor a recurrence change regenerates from: the task's earliest LIVE
@@ -89,6 +103,24 @@ fun recurrenceAnchor(taskId: String, blocks: List<CalBlock>, todayIso: String): 
     return mine.maxByOrNull { it.date + it.startTime }
 }
 
+/**
+ * [keepIds] are rows the edit must keep where they are ([RecurrenceStart.keepId]):
+ * never deleted, never rewritten, and they count as HELD, so the day whose id
+ * they carry is not minted again. They go INTO the plan, not around it: a caller
+ * filtering `toDelete` afterwards could not stop rule B from moving a kept row
+ * (deterministic-occurrence-ids.md §3b).
+ *
+ * Deterministic ids (stage 2 — "same id for same day", Ahmad 2026-09-23; parity
+ * with iOS build 85 and web) add two rules:
+ *  • rule A — a desired occurrence whose id a KEPT row already holds (moved,
+ *    done, skipped, kept, history) is not minted: the day's occurrence lives on
+ *    elsewhere, and a mint would twin it;
+ *  • rule B — a desired occurrence whose id is a row in the delete set (a time
+ *    change: the 07:00 row is deleted and the 09:00 one minted with the SAME id)
+ *    becomes that row rewritten in place ([RegenPlan.toRetime]). Emitted as
+ *    delete + mint, the assistant's set_task_recurrence (mints, then deletes)
+ *    cancelled the mint with the delete and the day was lost.
+ */
 fun regenerateForTask(
     task: TaskItem,
     recurrence: Recurrence?,
@@ -97,14 +129,15 @@ fun regenerateForTask(
     startTime: String,
     startDate: Long,
     horizonDays: Int = RECURRENCE_HORIZON_DAYS,
+    keepIds: Set<String> = emptySet(),
 ): RegenPlan {
     val existing = existingBlocks.filter { it.taskId == task.id && isTaskBlock(it) }
     val futureExisting = existing.filter { it.date > todayIso }
 
     if (recurrence == null) {
         // Clearing recurrence — delete future occurrences but keep any the user
-        // already completed/skipped (history), same as web.
-        return RegenPlan(emptyList(), futureExisting.filter { !it.done && !it.skipped }.map { it.id })
+        // already completed/skipped (history), and any the edit keeps, same as web.
+        return RegenPlan(emptyList(), futureExisting.filter { !it.done && !it.skipped && it.id !in keepIds }.map { it.id })
     }
 
     // A weekly recurrence with NO valid days (empty, or all out-of-range so they
@@ -124,16 +157,45 @@ fun regenerateForTask(
     // Never delete an occurrence already completed/skipped — that would erase
     // history (and resurrect a done day as undone on retime).
     val toDelete = futureExisting.filter { !it.done && !it.skipped && "${it.date}|${it.startTime}" !in desiredKeys }.map { it.id }
-    val toUpsert = desired.filter { "${it.date}|${it.startTime}" !in existingFutureKeys }.map { occurrenceBlock(task, it) }
-    return RegenPlan(toUpsert, toDelete)
+    // A kept row is HELD: never deleted, never rewritten.
+    val deleteSet = toDelete.filterTo(HashSet()) { it !in keepIds }
+    val existingById = LinkedHashMap<String, CalBlock>()
+    for (b in existing) existingById.putIfAbsent(b.id, b)
+
+    val toUpsert = ArrayList<CalBlock>()
+    val toRetime = ArrayList<CalBlock>()
+    for (o in desired) {
+        if ("${o.date}|${o.startTime}" in existingFutureKeys) continue
+        val id = occurrenceId(task.id, o.date)
+        val row = existingById[id]
+        if (row != null && id in deleteSet) {
+            // Rule B: the same id deleted + minted → rewrite it in place, from the
+            // EXISTING row (it keeps its Google mapping). The net effect of the old
+            // delete + fresh mint: the new date/time, open again.
+            deleteSet.remove(id)
+            toRetime += row.copy(
+                date = o.date, startTime = o.startTime, taskName = task.name,
+                durationMinutes = clampDurationMin(task.estimateMin),
+                done = false, skipped = false, completedAt = null,
+            )
+        } else if (row != null) {
+            continue   // rule A: held by a kept row (moved, done, skipped, kept, history)
+        } else {
+            toUpsert += occurrenceBlock(task, o)
+        }
+    }
+    return RegenPlan(toUpsert, toDelete.filter { it in deleteSet }, toRetime)
 }
 
 /** A new occurrence block for [task] — the one place a series mints a block.
- *  The server's CHECK is `duration_minutes between 5 and 1440`, so a 2-minute
- *  task minted occurrences it refused on flush, which then lived on this one
- *  phone for ever (parity with iOS build 81, audit 2026-09-22 C4). */
+ *  Its id is the DETERMINISTIC [occurrenceId] (stage 2, "same id for same day",
+ *  Ahmad 2026-09-23): two devices minting the same day land on one row instead
+ *  of twins. Written insert-if-absent, never over a row. The server's CHECK is
+ *  `duration_minutes between 5 and 1440`, so a 2-minute task minted occurrences
+ *  it refused on flush, which then lived on this one phone for ever (parity with
+ *  iOS build 81, audit 2026-09-22 C4). */
 private fun occurrenceBlock(task: TaskItem, o: MaterializedOccurrence): CalBlock = CalBlock(
-    id = newUuid(), taskId = task.id, taskName = task.name,
+    id = occurrenceId(task.id, o.date), taskId = task.id, taskName = task.name,
     startTime = o.startTime, durationMinutes = clampDurationMin(task.estimateMin),
     date = o.date, kind = CalBlockKind.TASK,
 )
@@ -277,6 +339,78 @@ fun recurrenceEditStart(
     return RecurrenceStart(date, time, horizonDays + back, keepId = if (ownsPassedDay) anchor.id else null)
 }
 
+/**
+ * The occurrences the horizon top-up adds for one repeating task: the TAIL only —
+ * dates after both its latest block (the frontier) and today, up to today +
+ * [horizonDays] - 1, at the series' own time ([recurrenceSeriesTime], or
+ * [seriesTime] when the caller has just placed the series explicitly — the
+ * placed occurrence is then the frontier, and a monthly series keeps its day).
+ * Port of iOS build 85's recurrenceTopUp (audit 2026-09-22 C1 + C21); Android
+ * had no top-up, so a series last edited here ran out 8 weeks later unless an
+ * iOS device of the same user extended it.
+ *
+ * Why the tail only: a top-up that rebuilt the whole 8 weeks from the next open
+ * occurrence brought back every occurrence the user deleted, unscheduled or
+ * moved at its old slot, and a moved next occurrence copied the whole series at
+ * its new time. Extending only past the frontier never fills a date the series
+ * already covered.
+ *  - Blocks after the horizon don't count toward the frontier, so one
+ *    occurrence moved months ahead can't stop the series extending; a series
+ *    with nothing in the horizon but blocks beyond it was re-planned to start
+ *    later on purpose and is left alone.
+ *  - The span starts at the frontier, so a series idle for more than 8 weeks
+ *    comes back from tomorrow.
+ *  - A monthly series keeps its day of month (recurrenceSeriesDay), not the
+ *    frontier's, which may be a moved or clamped one. The vote reads blocks up
+ *    to a month past the horizon, so a re-plan to a later day wins.
+ *  - A date with one of the task's blocks within reach (occurrenceReach; any
+ *    state, past the horizon too) already has its occurrence, moved.
+ *  - Today is never minted, matching [regenerateForTask].
+ *  - Rule A (stage 2): a date whose deterministic occurrence id one of the
+ *    task's blocks already holds (any date, any state, past the horizon too) is
+ *    never minted — that occurrence was moved further than occurrenceReach, and
+ *    it lives on there.
+ * Every block it returns carries [occurrenceId]: two devices topping up the same
+ * tail mint the same ids, and the server keeps one row per day.
+ */
+fun recurrenceTopUp(
+    task: TaskItem,
+    existingBlocks: List<CalBlock>,
+    todayIso: String,
+    seriesTime: String? = null,
+    horizonDays: Int = RECURRENCE_HORIZON_DAYS,
+): List<CalBlock> {
+    val recurrence = task.recurrence ?: return emptyList()
+    // An unrecognised kind decodes to an inert sentinel: nothing to extend.
+    if (RecurrenceSerializer.isUnknown(recurrence)) return emptyList()
+    val mine = existingBlocks.filter { it.taskId == task.id && isTaskBlock(it) }
+    val lastIso = IsoDate.addDays(todayIso, horizonDays - 1)
+    val inHorizon = mine.filter { it.date <= lastIso }
+    if (inHorizon.none { it.date > todayIso } && mine.any { it.date > lastIso }) return emptyList()
+    val frontier = inHorizon.maxOfOrNull { it.date } ?: return emptyList()
+    if (IsoDate.parse(frontier) == null) return emptyList()
+    val time = seriesTime ?: recurrenceSeriesTime(task.id, inHorizon, frontier, horizonDays) ?: return emptyList()
+    val floor = maxOf(frontier, todayIso)
+    if (floor >= lastIso) return emptyList()
+    var start = frontier
+    val voters = mine.filter { it.date <= IsoDate.addDays(lastIso, 31) }
+    if (seriesTime == null && recurrence is Recurrence.Monthly) {
+        recurrenceSeriesDay(voters)?.let { start = monthlyStart(it.day, onOrBefore = frontier) }
+    }
+    val startMs = IsoDate.parse(start)?.let { Time.civil(it.year, it.monthValue, it.dayOfMonth) } ?: return emptyList()
+    val reach = occurrenceReach(recurrence)
+    val held = mine.mapTo(HashSet()) { it.id }
+    return materializeOccurrences(recurrence, startMs, time, IsoDate.daysUntil(start, lastIso) + 1)
+        .filter { it.date > floor }
+        .filter { o ->
+            val lo = IsoDate.addDays(o.date, -reach)
+            val hi = IsoDate.addDays(o.date, reach)
+            mine.none { it.date >= lo && it.date <= hi }
+        }
+        .filter { occurrenceId(task.id, it.date) !in held }
+        .map { occurrenceBlock(task, it) }
+}
+
 /** What scheduling a series onto a day at a time must do on that day once a
  *  [RegenPlan] is applied. */
 sealed class ChosenDateAction {
@@ -303,15 +437,81 @@ sealed class ChosenDateAction {
  * appears. Retiming rather than minting keeps one block per task per day.
  */
 fun recurrenceChosenDateAction(existing: List<CalBlock>, plan: RegenPlan, iso: String, startTime: String): ChosenDateAction {
-    if (plan.toUpsert.any { it.date == iso }) return ChosenDateAction.Covered
-    val deleting = plan.toDelete.toSet()
-    val onDay = existing.filter { it.date == iso && isTaskBlock(it) && it.id !in deleting }
+    // Rule B′ (stage 2): a row the plan rewrites (toRetime) is treated exactly like
+    // one it deletes — it is moving to its own date, so it can't be the chosen
+    // day's occurrence (counted, the day the user picked could end up empty, or
+    // the row got two writes). A planned block covers the day only by its NEW date.
+    if ((plan.toUpsert + plan.toRetime).any { it.date == iso }) return ChosenDateAction.Covered
+    val moving = plan.toDelete.toSet() + plan.toRetime.map { it.id }
+    val onDay = existing.filter { it.date == iso && isTaskBlock(it) && it.id !in moving }
     val live = onDay.filter { !it.done && !it.skipped }
     if (live.any { it.startTime == startTime }) return ChosenDateAction.Covered
     live.minByOrNull { it.startTime }?.let { return ChosenDateAction.Retime(it) }
     if (onDay.any { it.done }) return ChosenDateAction.Covered
     onDay.firstOrNull { it.skipped }?.let { return ChosenDateAction.Retime(it) }
     return ChosenDateAction.Mint
+}
+
+/** The chosen day's write ([recurrenceChosenDateWrite]). */
+sealed class ChosenDateWrite {
+    /** The day already has its occurrence. */
+    data object None : ChosenDateWrite()
+    /** A plain upsert: a retime, an in-place rewrite of the day's own row, or a
+     *  random-id block. */
+    data class Upsert(val block: CalBlock) : ChosenDateWrite()
+    /** A deterministic mint: written insert-if-absent (`insert_or_retime`). */
+    data class Insert(val block: CalBlock) : ChosenDateWrite()
+}
+
+/**
+ * §3b′ of deterministic-occurrence-ids.md (stage 2, Ahmad 2026-09-23; parity
+ * with iOS build 85 and web): what guaranteeing the chosen day writes, computed
+ * AFTER regenerate and applied before any of the plan's writes are dispatched
+ * (Schedule on a series, "Start repeating", the create sheet, and — with an
+ * empty plan — a series' first placement). Returns the plan (possibly minus one
+ * delete) and the write; the plan's three lists and the write are disjoint.
+ *  • Covered → None; Retime(b) → b at [startTime], un-skipped.
+ *  • Mint, with id = occurrenceId(task, iso):
+ *    1. id is in plan.toDelete → that row is taken OUT of the delete and
+ *       rewritten in place onto the day (from the existing row, so its Google
+ *       mapping survives — a fresh block would null it);
+ *    2. a block with id survives elsewhere (moved, done early, kept) → a block
+ *       with a RANDOM id: the user asked for this day explicitly, and the
+ *       surviving row is never taken over;
+ *    3. otherwise → the deterministic mint.
+ */
+fun recurrenceChosenDateWrite(
+    task: TaskItem,
+    existing: List<CalBlock>,
+    plan: RegenPlan,
+    iso: String,
+    startTime: String,
+): Pair<RegenPlan, ChosenDateWrite> {
+    return when (val action = recurrenceChosenDateAction(existing, plan, iso, startTime)) {
+        ChosenDateAction.Covered -> plan to ChosenDateWrite.None
+        is ChosenDateAction.Retime -> plan to ChosenDateWrite.Upsert(action.block.copy(startTime = startTime, skipped = false))
+        ChosenDateAction.Mint -> {
+            val id = occurrenceId(task.id, iso)
+            val duration = clampDurationMin(task.estimateMin)
+            val row = existing.firstOrNull { it.id == id && it.taskId == task.id && isTaskBlock(it) }
+            when {
+                row != null && id in plan.toDelete -> plan.copy(toDelete = plan.toDelete - id) to ChosenDateWrite.Upsert(
+                    row.copy(
+                        date = iso, startTime = startTime, taskName = task.name, durationMinutes = duration,
+                        done = false, skipped = false, completedAt = null,
+                    ),
+                )
+                row != null -> plan to ChosenDateWrite.Upsert(
+                    CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = startTime,
+                        durationMinutes = duration, date = iso, kind = CalBlockKind.TASK),
+                )
+                else -> plan to ChosenDateWrite.Insert(
+                    CalBlock(id = id, taskId = task.id, taskName = task.name, startTime = startTime,
+                        durationMinutes = duration, date = iso, kind = CalBlockKind.TASK),
+                )
+            }
+        }
+    }
 }
 
 /**

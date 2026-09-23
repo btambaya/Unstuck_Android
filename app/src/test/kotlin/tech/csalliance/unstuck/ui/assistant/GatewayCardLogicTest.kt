@@ -107,6 +107,25 @@ class GatewayCardLogicTest {
         assertEquals("Blocked — Gym, 2026-09-11 18:30.", w.confirmation)
     }
 
+    /** Stage 2 (same id for same day, Ahmad 2026-09-23): a series' first placement
+     *  from a moment mints the day's deterministic occurrence — written
+     *  insert-if-absent, never a random-id twin of another device's day. */
+    @Test fun schedule_aSeriesFirstPlacementMintsTheDaysOccurrence() {
+        val series = task("a", "Gym").copy(recurrence = tech.csalliance.unstuck.core.model.Recurrence.Daily())
+        val w = GatewayActions.schedule("a", "2026-09-11", "07:30", listOf(series), emptyList(), today, "new")
+        val minted = w.inserts.single()
+        assertEquals(tech.csalliance.unstuck.core.logic.occurrenceId("a", "2026-09-11"), minted.id)
+        assertEquals("07:30", minted.startTime)
+        assertTrue(w.blocks.isEmpty())
+        assertEquals("Blocked — Gym, 2026-09-11 07:30.", w.confirmation)
+        // The day's id lives on elsewhere (moved): a block of its own, the moved row untouched.
+        val moved = block(tech.csalliance.unstuck.core.logic.occurrenceId("a", "2026-09-11"), "a", "2026-09-01", done = true)
+        val again = GatewayActions.schedule("a", "2026-09-11", "07:30", listOf(series), listOf(moved), today, "new")
+        assertTrue(again.inserts.isEmpty())
+        assertTrue(again.blocks.single().id != moved.id)
+        assertEquals("2026-09-11", again.blocks.single().date)
+    }
+
     @Test fun schedule_vanishedTaskWritesNothing() {
         val w = GatewayActions.schedule("ghost", "2026-09-11", null, listOf(task("a")), listOf(block("b1", "ghost", tomorrow)), today, "new")
         assertNull(w.confirmation)

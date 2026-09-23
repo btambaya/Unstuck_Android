@@ -203,6 +203,7 @@ class SoakAppPerfTest {
         override suspend fun notifyTaskReopenedIfShared(t: TaskItem) = Unit
         override suspend fun notifyTaskCompletedIfShared(t: TaskItem) = Unit
         override suspend fun upsertBlock(b: CalBlock) = Unit
+        override suspend fun insertBlockIfAbsent(b: CalBlock, retimeIfTaken: Boolean) = false
         override suspend fun deleteBlock(id: String) = Unit
         override fun getTaskReminder(taskId: String): Int? = null
         override fun setTaskReminder(taskId: String, minutes: Int?) = false

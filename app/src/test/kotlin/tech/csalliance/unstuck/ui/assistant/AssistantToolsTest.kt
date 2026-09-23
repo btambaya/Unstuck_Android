@@ -120,6 +120,10 @@ class AssistantToolsTest {
         val reopenedShared = ArrayList<String>()
         /** taskId → why a shared finish did NOT tick the owner's task (unset = it did). */
         val sharedFinishRefusal = HashMap<String, String>()
+        /** Every mint asked for, as "id:insert" / "id:insert_or_retime" (stage 2). */
+        val inserts = ArrayList<String>()
+        /** Every block delete, in order (stage 2's rule B asserts none of a retime). */
+        val deletedBlocks = ArrayList<String>()
     }
 
     inner class FakeApi(val state: FakeState = FakeState()) : AssistantApi {
@@ -145,7 +149,18 @@ class AssistantToolsTest {
         }
         override fun sharedFinishRefusal(taskId: String): String? = state.sharedFinishRefusal[taskId]
         override suspend fun upsertBlock(b: CalBlock) { val i = state.blocks.indexOfFirst { it.id == b.id }; if (i >= 0) state.blocks[i] = b else state.blocks += b }
-        override suspend fun deleteBlock(id: String) { state.blocks.removeAll { it.id == id } }
+        /** WriteThrough.insertCalBlockIfAbsent's local semantics (stage 2): never over
+         *  a row with the id; rule H moves that day's open occurrence for a user's mint. */
+        override suspend fun insertBlockIfAbsent(b: CalBlock, retimeIfTaken: Boolean): Boolean {
+            state.inserts += "${b.id}:${if (retimeIfTaken) "insert_or_retime" else "insert"}"
+            val i = state.blocks.indexOfFirst { it.id == b.id }
+            if (i < 0) { state.blocks += b; return true }
+            val held = state.blocks[i]
+            if (!retimeIfTaken || held.date != b.date || held.done || held.skipped) return false
+            state.blocks[i] = held.copy(startTime = b.startTime, durationMinutes = b.durationMinutes)
+            return true
+        }
+        override suspend fun deleteBlock(id: String) { state.deletedBlocks += id; state.blocks.removeAll { it.id == id } }
         override fun getTaskReminder(taskId: String): Int? = state.reminders[taskId]
         override fun setTaskReminder(taskId: String, minutes: Int?): Boolean {
             if (!state.reminderSaveOk) return false
@@ -558,6 +573,64 @@ class AssistantToolsTest {
         h.state.blocks[i] = h.state.blocks[i].copy(startTime = "18:00")
         assertEquals("ok: \"Office\" now repeats weekly on Mon at 11:00",
             runAssistantTool("set_task_recurrence", ToolArgs(json("taskId" to "o", "kind" to "weekly", "daysOfWeek" to listOf(1))), h.api, TurnScratch()))
+    }
+
+    // ── stage 2: same id for same day (Ahmad 2026-09-23) ─────────────────────
+
+    /** Rule B through the executor: re-timing a series of deterministic occurrences
+     *  (schedule_task, then set_task_recurrence) moves each row in place — no delete
+     *  of a retimed id. It used to mint first and delete after, and the delete
+     *  cancelled the mint: the days were lost. */
+    @Test fun `set_task_recurrence re-times deterministic occurrences in place`() = runTest {
+        val mondays = (0..55).map { addDaysIso(TODAY, it) }.filter { jsDayOfWeek(it) == 1 }
+        val h = makeApi {
+            tasks += task("o", "Office", recurrence = Recurrence.Weekly(listOf(1)))
+            blocks += mondays.map { block(tech.csalliance.unstuck.core.logic.occurrenceId("o", it), "o", it, "09:15") }
+        }
+        val next = mondays.first { it > TODAY }
+        h.run("schedule_task", "taskId" to "o", "date" to next, "startTime" to "11:00")
+        assertEquals("ok: \"Office\" now repeats weekly on Mon at 11:00", h.run("set_task_recurrence", "taskId" to "o", "kind" to "weekly", "daysOfWeek" to listOf(1)))
+        val upcoming = h.state.blocks.filter { it.date > TODAY }
+        assertTrue(upcoming.all { it.startTime == "11:00" })
+        assertTrue("every row kept its deterministic id", upcoming.all { it.id == tech.csalliance.unstuck.core.logic.occurrenceId("o", it.date) })
+        assertTrue("no retimed id was deleted", h.state.deletedBlocks.isEmpty())
+    }
+
+    /** A series' first placement mints the day's deterministic occurrence (rule H),
+     *  and the tail fill mints the rest insert-if-absent WITHOUT rule H. */
+    @Test fun `schedule_task places a series' first occurrence with its deterministic id`() = runTest {
+        val h = makeApi { tasks += task("r", "Walk", recurrence = Recurrence.Daily()) }
+        assertEquals("ok: scheduled \"Walk\" $TOMORROW 08:00", h.run("schedule_task", "taskId" to "r", "date" to TOMORROW, "startTime" to "08:00"))
+        val first = tech.csalliance.unstuck.core.logic.occurrenceId("r", TOMORROW)
+        assertEquals("$first:insert_or_retime", h.state.inserts.first())
+        assertTrue(h.state.inserts.drop(1).isNotEmpty())
+        assertTrue("the tail is maintenance: no rule H", h.state.inserts.drop(1).all { it.endsWith(":insert") })
+        assertTrue(h.state.blocks.all { it.id == tech.csalliance.unstuck.core.logic.occurrenceId("r", it.date) && it.startTime == "08:00" })
+        assertEquals(addDaysIso(TODAY, 55), h.state.blocks.maxOf { it.date })
+    }
+
+    /** The day's id was taken after the executor read the blocks (a top-up, another
+     *  device) and moved elsewhere: the placement is decided again from the store —
+     *  a block of its own on that day, the moved row left alone (iOS build 85). */
+    @Test fun `schedule_task re-decides a first placement whose id was taken mid-turn`() = runTest {
+        val fake = makeApi { tasks += task("r", "Walk", recurrence = Recurrence.Daily()) }
+        val first = tech.csalliance.unstuck.core.logic.occurrenceId("r", TOMORROW)
+        var raced = false
+        val api = object : AssistantApi by fake.api {
+            override suspend fun insertBlockIfAbsent(b: CalBlock, retimeIfTaken: Boolean): Boolean {
+                if (!raced && b.id == first) {
+                    raced = true
+                    fake.state.blocks += block(first, "r", addDaysIso(TODAY, 3), "18:00")
+                }
+                return fake.api.insertBlockIfAbsent(b, retimeIfTaken)
+            }
+        }
+        assertEquals("ok: scheduled \"Walk\" $TOMORROW 08:00",
+            runAssistantTool("schedule_task", ToolArgs(json("taskId" to "r", "date" to TOMORROW, "startTime" to "08:00")), api, TurnScratch()))
+        val onDay = fake.state.blocks.filter { it.date == TOMORROW }
+        assertEquals(1, onDay.size)
+        assertTrue("a block of its own", onDay.single().id != first)
+        assertEquals("the moved row stays", addDaysIso(TODAY, 3), fake.state.blocks.single { it.id == first }.date)
     }
 
     /** October's rent pushed from the 15th to the 20th, then only the end date

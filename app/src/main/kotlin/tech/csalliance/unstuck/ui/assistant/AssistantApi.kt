@@ -132,6 +132,14 @@ interface AssistantApi {
      *  never waits on the network. */
     suspend fun notifyTaskCompletedIfShared(t: TaskItem)
     suspend fun upsertBlock(b: CalBlock)
+    /** A repeating task's occurrence MINTED with its deterministic id (stage 2,
+     *  "same id for same day", Ahmad 2026-09-23): insert-if-absent, committed
+     *  before returning like [upsertBlock]. [retimeIfTaken] = the user asked for
+     *  this day (rule H): an id already on that day's OPEN occurrence moves it to
+     *  [b]'s time. True = the day now has that occurrence at [b]'s time (inserted,
+     *  retimed, or already there). False = the id lives on as a row that is not
+     *  that day's open occurrence (moved, done or skipped): nothing was written. */
+    suspend fun insertBlockIfAbsent(b: CalBlock, retimeIfTaken: Boolean): Boolean
     suspend fun deleteBlock(id: String)
     /** Per-task reminder lead override (minutes; 0 = off), null = the default. */
     fun getTaskReminder(taskId: String): Int?

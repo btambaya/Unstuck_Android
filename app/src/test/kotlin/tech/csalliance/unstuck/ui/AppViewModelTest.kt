@@ -1035,6 +1035,76 @@ class AppViewModelTest {
         assertNull("recurrence cleared on the task", awaitTask("tpl") { it.recurrence == null }.recurrence)
     }
 
+    // ── stage 2: same id for same day (Ahmad 2026-09-23, deterministic occurrence ids) ──
+
+    @Test fun startRepeating_mintsEachDayWithItsDeterministicId() = runTest(dispatcher) {
+        // Every occurrence a series mints carries occurrenceId(task, date) and goes
+        // out insert-if-absent with rule H, so another device minting the same day
+        // lands on the same row instead of a twin.
+        val t = task("s2-series", name = "Stretch")
+        seedTask(t)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        val today = Clock.todayIso()
+
+        vm.startRepeating(t, Recurrence.Daily(), today, "19:00")
+        advanceUntilIdle()
+
+        val mine = awaitBlocks { l -> l.count { it.taskId == "s2-series" } == 56 }.filter { it.taskId == "s2-series" }
+        assertTrue(mine.all { it.id == tech.csalliance.unstuck.core.logic.occurrenceId("s2-series", it.date) })
+        val ops = store.pending().filter { it.recordTable == Tables.CAL_BLOCKS }
+        assertEquals(56, ops.size)
+        assertTrue("every day is a mint", ops.all { it.op == tech.csalliance.unstuck.sync.OutboxFlusher.OP_INSERT_OR_RETIME })
+    }
+
+    @Test fun scheduleTask_aNewSeriesTimeRewritesEachDayInPlace() = runTest(dispatcher) {
+        // Rule B: re-timing the series moves each day's row where it is — never a
+        // delete plus a mint of the same id (which cancelled each other).
+        val today = Clock.todayIso()
+        val t = task("tpl", name = "Gym", recurrence = Recurrence.Daily())
+        seedTask(t)
+        (1..55).forEach { val d = addDaysIso(today, it); seedBlock(occ(tech.csalliance.unstuck.core.logic.occurrenceId("tpl", d), "tpl", d, "07:00")) }
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.scheduleTask(t, addDaysIso(today, 1), "09:00")
+        advanceUntilIdle()
+
+        val mine = awaitBlocks { l -> l.count { it.taskId == "tpl" && it.startTime == "09:00" } == 56 }.filter { it.taskId == "tpl" }
+        assertEquals(56, mine.size)
+        assertTrue(mine.all { it.id == tech.csalliance.unstuck.core.logic.occurrenceId("tpl", it.date) })
+        val ops = store.pending().filter { it.recordTable == Tables.CAL_BLOCKS }
+        assertTrue("nothing is deleted", ops.none { it.op == "delete" })
+        assertEquals("each day rewritten in place", 55, ops.count { it.op == "upsert" })
+        assertEquals(listOf(tech.csalliance.unstuck.core.logic.occurrenceId("tpl", addDaysIso(today, 56))),
+            ops.filter { it.op == tech.csalliance.unstuck.sync.OutboxFlusher.OP_INSERT_OR_RETIME }.map { it.recordId })
+    }
+
+    @Test fun scheduleTask_aChosenDayWhoseIdLivesOnElsewhereGetsABlockOfItsOwn() = runTest(dispatcher) {
+        // §3b′: the day's own occurrence was moved to another day and survives the
+        // re-plan (done there early — history is never deleted or rewritten) — the
+        // user asked for THIS day, so it gets a random-id block and the moved row is
+        // never taken over. (An open one off the new pattern is the plan's to move
+        // home instead: rule B.)
+        val today = Clock.todayIso()
+        val d = addDaysIso(today, 3)
+        val t = task("tpl", name = "Walk", recurrence = Recurrence.Weekly(listOf(tech.csalliance.unstuck.core.logic.jsDayOfWeek(d))))
+        seedTask(t)
+        val movedId = tech.csalliance.unstuck.core.logic.occurrenceId("tpl", d)
+        seedBlock(occ(movedId, "tpl", addDaysIso(today, 5), "07:00", done = true))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.scheduleTask(t, d, "07:00")
+        advanceUntilIdle()
+
+        val mine = awaitBlocks { l -> l.any { it.taskId == "tpl" && it.date == d } }.filter { it.taskId == "tpl" }
+        val onDay = mine.single { it.date == d }
+        assertTrue(onDay.id != movedId)
+        assertEquals("the moved row stays where it is", addDaysIso(today, 5), mine.single { it.id == movedId }.date)
+        assertTrue(mine.single { it.id == movedId }.done)
+    }
+
     // ── repeat edits and the chosen day (audit 2026-09-22, B79.1 / C1 / C7) ──
 
     private fun occ(id: String, taskId: String, date: String, startTime: String, done: Boolean = false, skipped: Boolean = false) =

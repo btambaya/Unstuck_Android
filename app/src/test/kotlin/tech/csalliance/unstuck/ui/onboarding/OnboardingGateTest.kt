@@ -63,6 +63,13 @@ class OnboardingGateTest {
         assertEquals(listOf("new-0", "new-1"), seed.map { it.id })
     }
 
+    @Test fun `after the pull, a seeded area the account deleted can be picked back`() {
+        val withoutHealth = serverSeed.filter { it.name != "Health" }
+        val seed = OnboardingGate.areasToSeed(listOf("Work", "Health"), withoutHealth, ids())
+        assertEquals(listOf("Health"), seed.map { it.name })
+        assertEquals(listOf(5), seed.map { it.sortOrder })
+    }
+
     @Test fun `a name the account has is skipped ignoring case, and a pick is never added twice`() {
         val existing = serverSeed + LifeArea("x", "side project", "red", 9)
         val seed = OnboardingGate.areasToSeed(listOf("Side project", " Family ", "family", "", "WORK"), existing, ids())

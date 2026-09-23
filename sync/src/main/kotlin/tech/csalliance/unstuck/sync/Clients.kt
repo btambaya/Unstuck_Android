@@ -6,6 +6,7 @@ import io.github.jan.supabase.postgrest.from
 import io.github.jan.supabase.postgrest.postgrest
 import io.github.jan.supabase.postgrest.rpc
 import io.github.jan.supabase.postgrest.query.Columns
+import io.github.jan.supabase.postgrest.query.Count
 import io.github.jan.supabase.postgrest.query.filter.FilterOperator
 import io.ktor.client.call.body
 import io.ktor.client.request.setBody
@@ -162,6 +163,18 @@ class PreferencesClient(private val client: SupabaseClient) {
         client.from("user_preferences")
             .select(Columns.list("adhd_struggles", "assistant_interview_done_at", PAPrefsLogic.RITUALS_COLUMN)) { filter { eq("user_id", userId) } }
             .decodeSingleOrNull<ServerUserPrefs>()
+
+    /** How many tasks the account owns on the server — a head count, no rows cross the
+     *  wire. With [fetchUserPrefs] it answers "onboarded on another platform?" before
+     *  the first full pull lands, as web's FirstRunGate does (Android audit 2026-09-23,
+     *  A9). Null when the response carries no count; throws on transport / auth
+     *  failure — callers treat both as "unknown". */
+    suspend fun countOwnTasks(userId: String): Long? =
+        client.from("tasks").select(Columns.list("id")) {
+            head = true
+            count(Count.EXACT)
+            filter { eq("user_id", userId) }
+        }.countOrNull()
 
     // ── PA rituals (migration 053: `user_preferences.pa_rituals jsonb`) ─────────
     // Rows below are built as JsonObjects on purpose: the supabase-kt Json omits

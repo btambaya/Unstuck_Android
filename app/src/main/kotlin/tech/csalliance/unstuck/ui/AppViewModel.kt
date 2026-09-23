@@ -2809,8 +2809,9 @@ class AppViewModel(
     // session was authed — before the first pull on a new phone (a web / iOS account was
     // walked through setup again) and with no uid during an offline RefreshFailure (a
     // long-time user got the steps). An account not onboarded here now waits on a splash
-    // until the server has answered after the first pull, or the deadline passed — then
-    // the local flag decides, like iOS's onboardingResolved (Android audit 2026-09-23, A9).
+    // until the server has answered (the early read, or the reconcile after the first
+    // pull), or the deadline passed — then the local flag decides, like iOS's
+    // onboardingResolved (Android audit 2026-09-23, A9).
     private val onboardingUid = MutableStateFlow(graph.onboardedUid)
     private val onboardingResolvedFor = MutableStateFlow<String?>(null)
     private val onboardedChanged = MutableStateFlow(0)
@@ -2830,8 +2831,8 @@ class AppViewModel(
     }
 
     /** The session changed: key the gate on its account, and start resolving one this
-     *  device doesn't know as onboarded — an early single-row read (an account onboarded
-     *  elsewhere skips the splash before the full first pull lands) plus the deadline. */
+     *  device doesn't know as onboarded — an early read of its prefs row and task count
+     *  (the gate resolves before the full first pull lands) plus the deadline. */
     private fun followOnboardingAccount() {
         val uid = graph.onboardedUid
         onboardingUid.value = uid
@@ -2852,30 +2853,44 @@ class AppViewModel(
 
     /** Ask the SERVER whether this account onboarded on another platform, and pin the
      *  local flag if it did — without re-arming the tour or touching its struggles.
-     *  [afterPull]: the store holds the server's rows, so a "no" is an answer and the
-     *  gate resolves to the steps; the early read before the pull can only pin. A read
-     *  that fails changes nothing (the deadline lets the local flag decide). */
+     *  [afterPull]: the store holds the server's rows. Before the pull, a head count of
+     *  the account's tasks goes out beside the prefs read (web's FirstRunGate), so that
+     *  early read is a whole answer too: it used to be able only to pin, and every new
+     *  sign-up — or, on a slow link, a web account with tasks but no struggles — waited
+     *  on the splash for the full first pull and the reconciles queued ahead of this one
+     *  (Android audit 2026-09-23, A9). Either way a "no" is an answer and the gate
+     *  resolves to the steps. A read that fails changes nothing (the deadline lets the
+     *  local flag decide). */
     private suspend fun reconcileOnboarded(uid: String, afterPull: Boolean) {
         if (graph.isOnboarded(uid)) return
         val prefs = graph.coordinator?.preferences ?: return
-        val server = try {
-            prefs.fetchUserPrefs(uid)
+        val (server, serverTasks) = try {
+            kotlinx.coroutines.coroutineScope {
+                val tasks = if (afterPull) null else async { prefs.countOwnTasks(uid) }
+                prefs.fetchUserPrefs(uid) to tasks?.await()
+            }
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {
             return
         }
-        applyOnboardingAnswer(uid, server?.adhd_struggles, server?.assistant_interview_done_at, afterPull)
+        applyOnboardingAnswer(uid, server?.adhd_struggles, server?.assistant_interview_done_at, afterPull, serverTasks?.let { it > 0 })
     }
 
-    /** The server's answer for [uid] (null fields: no row, or nothing saved). Life areas
-     *  are no signal — the server seeds them for every new account, so they marked a
-     *  brand-new user onboarded after one pull and a rotation mid-setup skipped it. */
-    internal suspend fun applyOnboardingAnswer(uid: String, serverStruggles: List<String>?, interviewDoneAt: String?, afterPull: Boolean) {
-        val hasTasks = store.snapshot(Tables.TASKS, TaskItem.serializer()).isNotEmpty()
+    /** The server's answer for [uid] (null fields: no row, or nothing saved).
+     *  [serverHasTasks]: the early read's head count (null = not asked, or no count came
+     *  back — then the early read can only pin). Life areas are no signal — the server
+     *  seeds them for every new account, so they marked a brand-new user onboarded after
+     *  one pull and a rotation mid-setup skipped it. */
+    internal suspend fun applyOnboardingAnswer(
+        uid: String, serverStruggles: List<String>?, interviewDoneAt: String?, afterPull: Boolean, serverHasTasks: Boolean? = null,
+    ) {
+        // A raw row count, not a decode: this only asks "any task?", and decoding every
+        // task on the main thread stalled the splash for a large account (A9).
+        val hasTasks = serverHasTasks == true || store.countRows(Tables.TASKS) > 0
         if (graph.onboardedUid != uid) return   // the account changed while we asked
         if (!graph.isOnboarded(uid) && OnboardingGate.onboardedElsewhere(serverStruggles, interviewDoneAt, hasTasks)) markOnboarded()
-        if (afterPull) onboardingResolvedFor.value = uid
+        if (afterPull || serverHasTasks != null) onboardingResolvedFor.value = uid
     }
 
     fun completeOnboarding(struggles: List<String>, areas: List<String> = emptyList()) {
@@ -4351,6 +4366,9 @@ class AppViewModel(
                 // open phone at all).
                 merge(c.hydrated, c.preferencesChanged).collect {
                     val uid = auth?.currentUserId ?: return@collect
+                    // Duplicate Work / Personal / Home rows (and their refused writes)
+                    // that onboarding on builds up to vc100 left behind (A8).
+                    runCatching { tech.csalliance.unstuck.sync.RefusedLifeAreas.heal(store) }
                     runCatching { reconcileNotificationPrefs(uid) }
                     runCatching { reconcileCallProactivePrefs(uid) }
                     runCatching { reconcileCaptureArchive(uid) }
@@ -4367,8 +4385,9 @@ class AppViewModel(
 
     companion object {
         /** How long a not-yet-onboarded account waits on the splash for the server's
-         *  answer after its first pull before the local flag decides (a whole pull, not
-         *  iOS's single-row read — hence longer than its 6 s). */
+         *  answer before the local flag decides. The early read normally answers in one
+         *  round trip; this bounds the wait when it failed and the first pull is the next
+         *  chance (a whole pull — hence longer than iOS's 6 s). */
         internal const val ONBOARDING_RESOLVE_DEADLINE_MS = 10_000L
         private const val NOTIF_PREF_LEVEL = "level"
         private const val NOTIF_PREF_LEAD = "lead"

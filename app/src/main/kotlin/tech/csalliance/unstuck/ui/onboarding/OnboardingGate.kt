@@ -40,12 +40,14 @@ internal object OnboardingGate {
     fun onboardedElsewhere(serverStruggles: List<String>?, interviewDoneAt: String?, hasTasks: Boolean): Boolean =
         serverStruggles?.isNotEmpty() == true || interviewDoneAt != null || hasTasks
 
-    /** The picked areas the account doesn't have yet, as new rows. The server already
-     *  created [SERVER_SEEDED_AREAS] (a local copy with a fresh id breaks its
-     *  unique(user_id, name) on every flush and shows twice in every picker — Android
-     *  audit 2026-09-23, A8), and a name already in [existing] is skipped ignoring case. */
+    /** The picked areas the account doesn't have yet, as new rows. A name already in
+     *  [existing] is skipped ignoring case. With nothing pulled yet, [existing] is empty
+     *  and the server's signup seed is assumed: it already created [SERVER_SEEDED_AREAS]
+     *  (a local copy with a fresh id breaks its unique(user_id, name) on every flush and
+     *  shows twice in every picker — Android audit 2026-09-23, A8). Once pulled, the
+     *  account's own rows decide, so a seeded area it deleted can be picked back. */
     fun areasToSeed(picked: List<String>, existing: List<LifeArea>, newId: () -> String): List<LifeArea> {
-        val taken = (SERVER_SEEDED_AREAS + existing.map { it.name }).toMutableList()
+        val taken = ((if (existing.isEmpty()) SERVER_SEEDED_AREAS else emptyList()) + existing.map { it.name }).toMutableList()
         var order = maxOf(SERVER_SEEDED_AREAS.size, (existing.maxOfOrNull { it.sortOrder } ?: -1) + 1)
         val out = mutableListOf<LifeArea>()
         for (raw in picked) {

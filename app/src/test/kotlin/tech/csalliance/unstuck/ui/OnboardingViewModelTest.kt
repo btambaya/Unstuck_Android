@@ -52,7 +52,14 @@ class OnboardingViewModelTest {
     @Before fun setup() {
         Dispatchers.setMain(dispatcher)
         val ctx = ApplicationProvider.getApplicationContext<android.app.Application>()
-        val db = Room.inMemoryDatabaseBuilder(ctx, UnstuckDatabase::class.java).allowMainThreadQueries().build()
+        // Synchronous Room executors (CatchUpConvergenceTest's setup): a store read
+        // completes on the calling thread, so the gate runs on the test clock alone.
+        // On Room's own executor the test body suspended, runTest skipped virtual time
+        // ahead, and the resolve deadline fired mid-read — deciding for the gate.
+        val db = Room.inMemoryDatabaseBuilder(ctx, UnstuckDatabase::class.java).allowMainThreadQueries()
+            .setQueryExecutor(java.util.concurrent.Executor { it.run() })
+            .setTransactionExecutor(java.util.concurrent.Executor { it.run() })
+            .build()
         store = LocalStore(db)
         graph = AppGraph(ctx, configured = false, storeOverride = store, uidOverride = { UID })
         runCatching { androidx.work.WorkManager.initialize(ctx, androidx.work.Configuration.Builder().build()) }
@@ -108,6 +115,35 @@ class OnboardingViewModelTest {
         runCurrent()
         assertEquals("the same gate flips — no recomposition-time read", false, vm.showOnboarding.value)
         assertTrue(graph.onboarded)
+    }
+
+    @Test fun newAccount_theEarlyReadShowsTheSteps_withoutWaitingForThePull() = runTest(dispatcher) {
+        val vm = vm()
+        runCurrent()
+        assertNull(vm.showOnboarding.value)
+        // Prefs row with nothing saved + a head count of 0 tasks, before any pull.
+        vm.applyOnboardingAnswer(UID, serverStruggles = emptyList(), interviewDoneAt = null, afterPull = false, serverHasTasks = false)
+        runCurrent()
+        assertEquals("a whole answer: no splash until the pull and its reconciles finish", true, vm.showOnboarding.value)
+        assertFalse(graph.onboarded)
+        assertTrue("the answer decided, not the deadline", testScheduler.currentTime < AppViewModel.ONBOARDING_RESOLVE_DEADLINE_MS)
+    }
+
+    @Test fun webAccountWithTasksButNoStruggles_theEarlyHeadCountSkipsTheSplash_beforeThePull() = runTest(dispatcher) {
+        val vm = vm()
+        runCurrent()
+        vm.applyOnboardingAnswer(UID, serverStruggles = emptyList(), interviewDoneAt = null, afterPull = false, serverHasTasks = true)
+        runCurrent()
+        assertEquals(false, vm.showOnboarding.value)
+        assertTrue(graph.onboarded)
+    }
+
+    @Test fun anEarlyReadWithNoCount_canOnlyPin_andTheSplashWaits() = runTest(dispatcher) {
+        val vm = vm()
+        runCurrent()
+        vm.applyOnboardingAnswer(UID, serverStruggles = emptyList(), interviewDoneAt = null, afterPull = false, serverHasTasks = null)
+        runCurrent()
+        assertNull("no task count: 'no struggles' alone isn't an answer", vm.showOnboarding.value)
     }
 
     @Test fun webAccountWithTasksButNoStruggles_isNotOnboardedAgain() = runTest(dispatcher) {

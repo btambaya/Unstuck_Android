@@ -34,7 +34,11 @@ object ReminderScheduler {
     private const val HORIZON_MS = 2L * 86_400_000 // schedule 48h ahead
     private const val DRIFT_MS = 10L * 60_000      // A4 fires 10 min after start
 
-    private enum class Kind(val tag: String) { LEAD("lead"), ATSTART("atstart"), DRIFTED("drifted") }
+    internal enum class Kind(val tag: String) { LEAD("lead"), ATSTART("atstart"), DRIFTED("drifted") }
+
+    /** One alarm [sync] arms: the block, which of the three, when it fires, and
+     *  the lead the "Coming up" copy announces. */
+    internal data class Plan(val block: CalBlock, val kind: Kind, val fireAt: Long, val lead: Int)
 
     /** Re-sync reminders whenever the blocks or tasks change while the app is alive.
      *  Debounced + de-duped on an alarm-relevant projection so a burst of unrelated
@@ -56,14 +60,17 @@ object ReminderScheduler {
 
     /** Stable signature of everything [sync] reads from the store, so identical
      *  re-emissions (or changes to unrelated fields like a task's name) don't trigger
-     *  a full alarm rebuild. */
-    private fun alarmSignature(
+     *  a full alarm rebuild. The block's own done / skipped are in it: ticking or
+     *  skipping one day of a series changes only the BLOCK, and without them the
+     *  emission was dropped here and that day's armed alarms were never cancelled
+     *  (parity with iOS build 81, audit 2026-09-22 C2). */
+    internal fun alarmSignature(
         blocks: List<CalBlock>,
         tasks: List<tech.csalliance.unstuck.core.model.TaskItem>,
     ): List<String> {
         val doneTaskIds = tasks.asSequence().filter { it.done }.map { it.id }.toSet()
         return blocks.map { b ->
-            "${b.id}|${b.date}|${b.startTime}|${b.durationMinutes}|${b.kind}|${b.taskId}|${b.taskId in doneTaskIds}"
+            "${b.id}|${b.date}|${b.startTime}|${b.durationMinutes}|${b.kind}|${b.taskId}|${b.taskId in doneTaskIds}|${b.done}|${b.skipped}"
         }
     }
 
@@ -81,17 +88,33 @@ object ReminderScheduler {
         val am = ctx.getSystemService(AlarmManager::class.java) ?: return
         val settingsStore = app.graph.settings
         val s = settingsStore.load()
-        val globalLead = s.reminderLeadMin
-        val level = s.notificationLevel
-        val now = System.currentTimeMillis()
         val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val prev = prefs.getString(KEY_SCHEDULED, "").orEmpty().split(",").filter { it.isNotBlank() }.toSet()
         val nowSet = mutableSetOf<String>()
+        val plans = planReminders(blocks, tasks, s.notificationLevel, s.reminderLeadMin, settingsStore::reminderOverride, System.currentTimeMillis())
+        for (p in plans) {
+            setAlarm(ctx, am, p.block, p.kind, p.lead, p.fireAt)
+            nowSet += key(p.block.id, p.kind)
+        }
+        (prev - nowSet).forEach { cancelKey(ctx, am, it) }
+        prefs.edit().putString(KEY_SCHEDULED, nowSet.joinToString(",")).apply()
+    }
 
+    /** The alarms that should exist right now — the decision half of [sync], pure
+     *  so it is unit-tested (iOS `planReminders` is the port of this loop). Only
+     *  fire times in (now, now + 48h] are planned. */
+    internal fun planReminders(
+        blocks: List<CalBlock>,
+        tasks: List<tech.csalliance.unstuck.core.model.TaskItem>,
+        level: tech.csalliance.unstuck.NotificationLevel,
+        globalLead: Int,
+        leadOverride: (taskId: String) -> Int?,
+        now: Long,
+    ): List<Plan> {
+        val out = ArrayList<Plan>()
         fun arm(b: CalBlock, kind: Kind, fireAt: Long, lead: Int) {
             if (fireAt <= now || fireAt > now + HORIZON_MS) return
-            setAlarm(ctx, am, b, kind, lead, fireAt)
-            nowSet += key(b.id, kind)
+            out += Plan(b, kind, fireAt, lead)
         }
 
         for (b in blocks) {
@@ -100,18 +123,24 @@ object ReminderScheduler {
             if (!isTask && !isExternal) continue
             val startMs = blockStartMs(b) ?: continue
             if (isTask && tasks.firstOrNull { it.id == b.taskId }?.done == true) continue
+            // A repeating task keeps each day's tick and "Skip this day" on the
+            // BLOCK (migration 033) — the template's `done` never flips — so a day
+            // already handled must not ring "Coming up" / "Time to start" /
+            // "Didn't get to it?". The server dispatcher's predicate (054, kept in
+            // 070); it also covers a one-off block skipped by skip_occurrence or
+            // carry_to_tomorrow (parity with iOS build 81, audit 2026-09-22 C2).
+            if (isTask && (b.done || b.skipped)) continue
             val taskId = b.taskId.orEmpty()
 
             // A1 pre-task — every level. External events use the global lead; tasks the override.
-            val lead = if (isExternal) globalLead else (taskId.takeIf { it.isNotBlank() }?.let { settingsStore.reminderOverride(it) } ?: globalLead)
+            val lead = if (isExternal) globalLead else (taskId.takeIf { it.isNotBlank() }?.let(leadOverride) ?: globalLead)
             if (lead > 0) arm(b, Kind.LEAD, startMs - lead * 60_000L, lead)
             // A2 starts-now (Start / Reschedule) — task blocks, Balanced+.
             if (isTask && level.atStart) arm(b, Kind.ATSTART, startMs, 0)
             // A4 didn't-start follow-up — task blocks, Coach.
             if (isTask && level.drifted) arm(b, Kind.DRIFTED, startMs + DRIFT_MS, 0)
         }
-        (prev - nowSet).forEach { cancelKey(ctx, am, it) }
-        prefs.edit().putString(KEY_SCHEDULED, nowSet.joinToString(",")).apply()
+        return out
     }
 
     private fun key(blockId: String, kind: Kind) = "${kind.tag}:$blockId"

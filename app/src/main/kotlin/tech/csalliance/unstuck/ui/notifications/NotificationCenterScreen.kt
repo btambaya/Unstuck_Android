@@ -30,6 +30,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.model.CalBlock
+import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.design.component.AppBar
 import tech.csalliance.unstuck.design.component.Leading
 import tech.csalliance.unstuck.design.component.SectionLabel
@@ -39,7 +40,25 @@ import tech.csalliance.unstuck.ui.AppViewModel
 import java.time.LocalDate
 import java.time.ZoneId
 
-private data class Upcoming(val taskId: String, val name: String, val at: Long)
+internal data class Upcoming(val taskId: String, val name: String, val at: Long)
+
+/** Scheduled task reminders in the next 2 days, computed live from the blocks:
+ *  task blocks starting within [now, now + 48h] whose task isn't done and whose
+ *  block (a repeating task's day) isn't done or skipped, de-duped by (task, time),
+ *  soonest first, at most 20. The block check runs BEFORE the de-dupe so a skipped
+ *  twin at the same (task, time) can't hide the live one (parity with iOS build 81,
+ *  audit 2026-09-22 C2). */
+internal fun upcomingReminders(blocks: List<CalBlock>, tasks: List<TaskItem>, now: Long): List<Upcoming> =
+    blocks.asSequence()
+        .filter { isTaskBlock(it) && !it.done && !it.skipped }
+        .mapNotNull { b ->
+            val ms = blockStartMs(b) ?: return@mapNotNull null
+            val t = tasks.firstOrNull { it.id == b.taskId }
+            if (ms in now..(now + 2L * 86_400_000) && t?.done != true) Upcoming(b.taskId ?: "", b.taskName, ms) else null
+        }
+        // De-dupe so identical (task, time) blocks don't collide as LazyColumn keys.
+        .distinctBy { it.taskId to it.at }
+        .sortedBy { it.at }.take(20).toList()
 
 /**
  * In-app notification center — the bell next to the avatar. Two sections:
@@ -57,18 +76,7 @@ fun NotificationCenterScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (
     var now by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(vm.nowMs()) }
     androidx.compose.runtime.LaunchedEffect(Unit) { while (true) { now = vm.nowMs(); kotlinx.coroutines.delay(30_000) } }
 
-    val upcoming = remember(blocks, tasks) {
-        blocks.asSequence()
-            .filter { isTaskBlock(it) }
-            .mapNotNull { b ->
-                val ms = blockStartMs(b) ?: return@mapNotNull null
-                val t = tasks.firstOrNull { it.id == b.taskId }
-                if (ms in now..(now + 2L * 86_400_000) && t?.done != true) Upcoming(b.taskId ?: "", b.taskName, ms) else null
-            }
-            // De-dupe so identical (task, time) blocks don't collide as LazyColumn keys.
-            .distinctBy { it.taskId to it.at }
-            .sortedBy { it.at }.take(20).toList()
-    }
+    val upcoming = remember(blocks, tasks) { upcomingReminders(blocks, tasks, now) }
 
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(title = "Notifications", leading = Leading.BACK, trailingSearch = false, onLeading = onBack)

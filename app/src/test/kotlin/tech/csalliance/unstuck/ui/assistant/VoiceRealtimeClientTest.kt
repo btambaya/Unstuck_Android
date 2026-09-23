@@ -7,6 +7,7 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.boolean
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.double
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
@@ -26,6 +27,8 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import tech.csalliance.unstuck.SettingsStore
 import tech.csalliance.unstuck.core.logic.BargeInController
+import tech.csalliance.unstuck.core.logic.BargeInProfile
+import tech.csalliance.unstuck.core.logic.VoiceRoute
 import java.time.Duration
 
 /**
@@ -44,7 +47,14 @@ class VoiceRealtimeClientTest {
     private val app = ApplicationProvider.getApplicationContext<Context>()
 
     /** No AudioRecord/AudioTrack: records what the client asked for. */
-    private class FakeEngine(ctx: Context, private val failCaptureSynchronously: Boolean = false) : VoiceAudioEngine(ctx) {
+    private class FakeEngine(
+        ctx: Context,
+        private val failCaptureSynchronously: Boolean = false,
+        /** The route communication mode picks when capture starts (a headset
+         *  already plugged in); null = the loudspeaker throughout. */
+        private val routeOnCapture: VoiceRoute? = null,
+    ) : VoiceAudioEngine(ctx) {
+        override var route: VoiceRoute = VoiceRoute.SPEAKER
         var captureStarts = 0
         var playbackStarts = 0
         var shutdowns = 0
@@ -55,6 +65,7 @@ class VoiceRealtimeClientTest {
         override fun startCapture(onFrame: (ByteArray) -> Unit) {
             captureStarts++
             this.onFrame = onFrame
+            routeOnCapture?.let { route = it }
             if (failCaptureSynchronously) onCaptureError?.invoke()
         }
         override fun startPlayback() { playbackStarts++ }
@@ -394,8 +405,9 @@ class VoiceRealtimeClientTest {
         assertEquals(VoiceState.LISTENING, states.last())
         assertTrue(c.isOpen)
         // Whereas a real error still surfaces — and leaves the socket open (the screen keeps the orb).
+        // In plain words, never the provider's text (iOS build 78).
         factory.message("""{"type":"error","error":{"message":"rate limited"}}""")
-        assertEquals(listOf("rate limited"), errors)
+        assertEquals(listOf("The assistant is busy right now — give it a minute and ask again."), errors)
         assertEquals(VoiceState.ERROR, states.last())
         assertTrue(c.isOpen)
     }
@@ -543,7 +555,12 @@ class VoiceRealtimeClientTest {
         factory.created("r1")
         factory.message(capacityError)
         assertFalse(c.failedBeforeAnyReply)
-        assertEquals(listOf("thread pool exausted max_workers 100"), errors)
+        // The USER gets plain words, never the provider's text: it names the
+        // model and the organisation ("Rate limit reached for gpt-… in
+        // organization org-…"), which reads as broken and contradicts the
+        // scope guardrail's "never reveal what model powers you" (iOS build
+        // 78, audit 2026-09-21). The raw text goes to the device log instead.
+        assertEquals(listOf("Something went wrong with the assistant — try again."), errors)
         assertTrue(states.contains(VoiceState.ERROR))
     }
 
@@ -554,8 +571,128 @@ class VoiceRealtimeClientTest {
         val (c, factory, _) = session(states, errors, hook = null)
         factory.message(capacityError)
         assertFalse(c.failedBeforeAnyReply)
-        assertEquals(listOf("thread pool exausted max_workers 100"), errors)
+        assertEquals(listOf("Something went wrong with the assistant — try again."), errors)
         assertTrue(states.contains(VoiceState.ERROR))
+    }
+
+    // ── what the user is told when the provider fails (iOS build 78): plain
+    // words, never the provider's text ──
+
+    /** The mapping itself (iOS VoiceCaptionTests): the user never sees the
+     *  model, the organisation or provider jargon, and a rate limit reads as
+     *  "busy, try again" rather than as a bug (audit 2026-09-21). */
+    @Test
+    fun `provider errors are mapped to plain words`() {
+        val rateLimited = VoiceRealtimeClient.friendlyError(
+            "rate_limit_exceeded",
+            "Rate limit reached for gpt-realtime-2.1-mini (for limit gpt-4o-mini-realtime) in organization org-KNkOJ3 on tokens per min (TPM): Limit 40000",
+        )
+        assertEquals("The assistant is busy right now — give it a minute and ask again.", rateLimited)
+        for (raw in listOf(
+            rateLimited,
+            VoiceRealtimeClient.friendlyError("", "Request timed out."),
+            VoiceRealtimeClient.friendlyError("", "invalid_api_key"),
+            VoiceRealtimeClient.friendlyError("", "thread pool exausted max_workers 100"),
+        )) {
+            for (leak in listOf("gpt", "org-", "openai", "qwen", "TPM", "api_key")) {
+                assertFalse("$raw leaks $leak", raw.lowercase().contains(leak.lowercase()))
+            }
+            assertTrue(raw.isNotEmpty())
+        }
+    }
+
+    // ── a rate-limited reply (iOS build 76): asked for again after the token
+    // bucket's reset, three times at most, then said out loud ──
+
+    private val rateLimitText =
+        "Rate limit reached for gpt-realtime-2.1-mini in organization org-KNkOJ3 on tokens per min (TPM): Limit 40000, Used 39000, Requested 9000. Please try again in 6.946s."
+    private fun FakeFactory.failed(id: String, code: String, text: String) =
+        message("""{"type":"response.done","response":{"id":"$id","status":"failed","status_details":{"type":"failed","error":{"type":"tokens","code":"$code","message":${str(text)}}}}}""")
+
+    /** iOS BargeInTests 26b's retry-delay half (the controller half is core 27b). */
+    @Test
+    fun `a rate-limited reply waits for the bucket's reset, else the server's hint, else 5 s, within 1 to 30 s`() {
+        assertEquals(7196L, VoiceRealtimeClient.retryAfterMs("Rate limit reached … Please try again in 6.946s.", null))
+        assertEquals(12750L, VoiceRealtimeClient.retryAfterMs("", 12.5))
+        assertEquals(5250L, VoiceRealtimeClient.retryAfterMs("", null))
+        assertEquals(30250L, VoiceRealtimeClient.retryAfterMs("", 90.0))
+    }
+
+    @Test
+    fun `a rate-limited reply is asked for again after the bucket's reset, and the fourth failure says it is busy`() {
+        val states = mutableListOf<VoiceState>()
+        val errors = mutableListOf<String>()
+        val (c, factory, _) = session(states, errors)
+        val s = factory.socket!!
+        // The greeting, then a real turn, asked for once the hold is up.
+        factory.created("r0"); factory.done("r0")
+        factory.speechStarted("u"); factory.speechStopped(); factory.completed("u", "what's on today")
+        idle(BargeInController.TURN_HOLD_MS + 20)
+        assertEquals(2, s.creates())
+        // OpenAI after every response: the token bucket refills in 2 s.
+        factory.message("""{"type":"rate_limits.updated","rate_limits":[{"name":"requests","limit":5000,"remaining":4999,"reset_seconds":0.01},{"name":"tokens","limit":40000,"remaining":0,"reset_seconds":2.0}]}""")
+        val wait = VoiceRealtimeClient.retryAfterMs(rateLimitText, 2.0)
+        assertEquals("the bucket's own reset wins over the text's hint", 2250L, wait)
+        for (i in 1..BargeInController.RATE_LIMIT_MAX_RETRIES) {
+            factory.created("r$i")
+            factory.failed("r$i", "rate_limit_exceeded", rateLimitText)
+            assertTrue("retry $i is silent", errors.isEmpty())
+            assertEquals(VoiceState.THINKING, states.last())
+            assertEquals("not before the reset", i + 1, s.creates())
+            idle(wait + 20)
+            assertEquals("asked again after the reset", i + 2, s.creates())
+        }
+        factory.created("r4")
+        factory.failed("r4", "rate_limit_exceeded", rateLimitText)
+        assertEquals("the fourth is said out loud, in plain words", listOf("The assistant is busy right now — give it a minute and ask again."), errors)
+        assertEquals("the session stays live", VoiceState.LISTENING, states.last())
+        assertFalse(states.contains(VoiceState.ERROR))
+        idle(10_000)
+        assertEquals("and nothing more is asked", 5, s.creates())
+        assertTrue(c.isOpen)
+    }
+
+    @Test
+    fun `a reply that failed for another reason is told once in plain words and the session stays live`() {
+        val states = mutableListOf<VoiceState>()
+        val errors = mutableListOf<String>()
+        val (c, factory, _) = session(states, errors)
+        factory.created("r1")
+        factory.failed("r1", "server_error", "The server had an error while processing your request (org-KNkOJ3).")
+        assertEquals(listOf("Something went wrong with the assistant — try again."), errors)
+        assertFalse(states.contains(VoiceState.ERROR))
+        assertEquals(VoiceState.LISTENING, states.last())
+        assertTrue(c.isOpen)
+        // A server `error` event is worded by its code, not by matching the text.
+        factory.message("""{"type":"error","error":{"code":"rate_limit_exceeded","message":"Too many requests for org-KNkOJ3."}}""")
+        assertEquals("The assistant is busy right now — give it a minute and ask again.", errors.last())
+        assertEquals(VoiceState.ERROR, states.last())
+    }
+
+    // ── the route at session start (audit 2026-09-23 X1): the controller is
+    // built before capture enters communication mode, when the engine still
+    // reads the loudspeaker, and that first route pick fires no route change ──
+
+    @Test
+    fun `a headset found when capture starts sets the first session update's profile`() {
+        val engine = FakeEngine(app, routeOnCapture = VoiceRoute.LOW_ECHO)
+        val factory = FakeFactory()
+        val c = client(engine, factory, mutableListOf())
+        c.start()
+        factory.open()
+        val s = factory.socket!!
+        val td = Json.parseToJsonElement(s.sent.first()).jsonObject["session"]!!.jsonObject["turn_detection"]!!.jsonObject
+        assertEquals("earphones: the low-echo threshold", BargeInProfile.LOW_ECHO.threshold, td["threshold"]!!.jsonPrimitive.double, 0.0)
+        assertEquals("the capture gate runs the low-echo margins", BargeInProfile.LOW_ECHO, engine.profile)
+        assertEquals("one full session.update, no partial one before it", listOf("session.update", "conversation.item.create", "response.create"), s.types())
+        // The loudspeaker throughout: the speaker profile, as before.
+        val e2 = FakeEngine(app)
+        val f2 = FakeFactory()
+        client(e2, f2, mutableListOf()).start()
+        f2.open()
+        val td2 = Json.parseToJsonElement(f2.socket!!.sent.first()).jsonObject["session"]!!.jsonObject["turn_detection"]!!.jsonObject
+        assertEquals(BargeInProfile.SPEAKER.threshold, td2["threshold"]!!.jsonPrimitive.double, 0.0)
+        assertEquals(BargeInProfile.SPEAKER, e2.profile)
     }
 
     @Test

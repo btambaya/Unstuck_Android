@@ -143,7 +143,8 @@ open class VoiceAudioEngine(private val context: Context) {
     // true ⇒ output is the built-in speaker (echo risk).
     @Volatile var echoProne = true
         private set
-    val route: VoiceRoute get() = if (echoProne) VoiceRoute.SPEAKER else VoiceRoute.LOW_ECHO
+    /** `open` only so the client's tests can play a headset found at capture start. */
+    open val route: VoiceRoute get() = if (echoProne) VoiceRoute.SPEAKER else VoiceRoute.LOW_ECHO
 
     private val focusListener = AudioManager.OnAudioFocusChangeListener { change ->
         // The KIND of loss is what the owner needs: a permanent one is never

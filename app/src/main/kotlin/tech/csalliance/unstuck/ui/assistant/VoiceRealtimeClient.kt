@@ -13,10 +13,12 @@ import kotlinx.coroutines.launch
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.add
 import kotlinx.serialization.json.addJsonObject
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
@@ -54,7 +56,8 @@ import kotlin.concurrent.thread
 //   server → response.created {response:{id}}
 //          → response.audio.delta {response_id, delta: base64}  (24k speech)
 //          → response.audio_transcript.delta {response_id, delta}  (captions + echo reference)
-//          → response.done {response:{id,status,status_details:{reason}}}
+//          → response.done {response:{id,status,status_details:{reason,error:{code,message}}}}
+//          → rate_limits.updated {rate_limits:[{name:"tokens",reset_seconds}]}  (OpenAI; a rate-limited reply's retry delay)
 //          → input_audio_buffer.speech_started {item_id} / speech_stopped
 //          → conversation.item.input_audio_transcription.delta {item_id, text, stash}
 //          → conversation.item.input_audio_transcription.completed {item_id, transcript}
@@ -245,6 +248,38 @@ class VoiceRealtimeClient(
          *  the same code had greeted in 2 s the session before). Ask again,
          *  once, if nothing has started this long after the first ask. */
         const val OPENING_WATCHDOG_MS = 2500L
+
+        private val TRY_AGAIN_IN = Regex("""try again in ([0-9.]+)\s*s""")
+
+        /** How long to wait before re-asking a rate-limited reply: the token
+         *  bucket's own reset when known (`rate_limits.updated`), else the
+         *  server's "try again in 6.9s", else 5 s; clamped to 1–30 s, plus
+         *  250 ms (parity with iOS build 76). */
+        fun retryAfterMs(message: String, tokenResetSec: Double?): Long {
+            var sec = tokenResetSec ?: 0.0
+            if (sec <= 0) sec = TRY_AGAIN_IN.find(message)?.groupValues?.get(1)?.toDoubleOrNull() ?: 0.0
+            if (sec <= 0) sec = 5.0
+            return Math.round(sec.coerceIn(1.0, 30.0) * 1000) + 250
+        }
+
+        /** What the USER is told when the provider fails. The raw text names the
+         *  model and the organisation ("Rate limit reached for gpt-… in
+         *  organization org-…"), which both reads as broken and contradicts the
+         *  scope guardrail's "never reveal what model powers you" (audit
+         *  2026-09-21). The raw text stays in the device log only (parity with
+         *  iOS build 78). */
+        fun friendlyError(code: String, message: String): String {
+            val m = message.lowercase()
+            if (code == "rate_limit_exceeded" || m.contains("rate limit") || m.contains("quota")) {
+                return "The assistant is busy right now — give it a minute and ask again."
+            }
+            if (m.contains("timeout") || m.contains("timed out")) return "That took too long — try again."
+            if (m.contains("unauthorized") || m.contains("invalid_api_key") || m.contains("401")) {
+                return "Voice isn't available right now — we're on it."
+            }
+            if (m.contains("safety") || m.contains("content")) return "I can't help with that one."
+            return "Something went wrong with the assistant — try again."
+        }
     }
 
     @Volatile private var primerDeleted = false
@@ -307,6 +342,8 @@ class VoiceRealtimeClient(
     private var openedOnce = false
     private var openingCreates = 0
     private var earlyFailure = false
+    /** The token bucket's reset, from the last `rate_limits.updated` (under ctlLock). */
+    private var tokenResetSec: Double? = null
 
     /** The server failed the session before ANY reply (its capacity error, or
      *  a drop after the handshake). Not an error state: the owner reconnects
@@ -510,7 +547,12 @@ class VoiceRealtimeClient(
                 },
             )
             is BargeInCommand.SessionUpdate -> send(turnDetectionUpdate(cmd.turnDetection))
-            is BargeInCommand.ReportError -> { onError(cmd.message.take(160)); onState(VoiceState.ERROR) }
+            // The provider's text goes to the device log only; the user gets
+            // plain words (parity with iOS build 78).
+            is BargeInCommand.ReportError -> {
+                Log.w(TAG, "voice server error: ${cmd.message.take(200)}")
+                onError(friendlyError(cmd.code ?: "", cmd.message)); onState(VoiceState.ERROR)
+            }
             BargeInCommand.SuggestHoldToTalk -> mainHandler.post { onSuggestHoldToTalk() }
         }
     }
@@ -527,7 +569,19 @@ class VoiceRealtimeClient(
             // session nobody owns — close it here instead of greeting into the void.
             if (stopped) { runCatching { webSocket.close(1000, "bye") }; return }
             open = true
-            synchronized(ctlLock) { openedOnce = true }
+            // Profile for the route we're actually on BEFORE the first
+            // session.update. The controller was built before capture entered
+            // communication mode, when the engine still read the loudspeaker,
+            // and that first route pick never fires onRouteChanged — so a
+            // session started with earphones or Bluetooth already connected
+            // ran the SPEAKER profile (parity with iOS onOpen, audit 2026-09-23
+            // X1). Its commands are dropped: the session.update carries the
+            // turn_detection.
+            synchronized(ctlLock) {
+                openedOnce = true
+                ctl.handle(BargeInEvent.RouteChanged(profileFor(audio.route)))
+                audio.profile = ctl.profile
+            }
             webSocket.send(sessionUpdate())
             audio.startPlayback()
             // Personal-assistant opening (web parity): the assistant speaks FIRST —
@@ -620,7 +674,37 @@ class VoiceRealtimeClient(
                     // never score it, and never inject a corrective mid-utterance.
                     if (status == null || status == "completed") checkFabrication()
                     else synchronized(ctlLock) { guard.responseCancelled() }
+                    // A reply the server could not produce. Rate limit → the turn
+                    // is asked for again after the bucket's reset (the app used to
+                    // fall silent, iOS 2026-09-20 23:48); after the last retry, and
+                    // for anything else, the user is told once, in plain words
+                    // (parity with iOS builds 76 and 78).
+                    if (status == "failed") {
+                        val err = (r?.get("status_details") as? JsonObject)?.get("error") as? JsonObject
+                        val code = (err?.get("code") as? JsonPrimitive)?.contentOrNull ?: ""
+                        val message = (err?.get("message") as? JsonPrimitive)?.contentOrNull ?: ""
+                        if (code == "rate_limit_exceeded" || message.lowercase().contains("rate limit")) {
+                            val (ms, retries) = synchronized(ctlLock) { retryAfterMs(message, tokenResetSec) to ctl.rateLimitRetries }
+                            Log.i(TAG, "voice rate-limited: retry in $ms ms (retry #${retries + 1})")
+                            if (retries + 1 > BargeInController.RATE_LIMIT_MAX_RETRIES) onError(friendlyError(code, message))
+                            dispatch(BargeInEvent.ResponseRateLimited(ms))
+                            return
+                        }
+                        if (message.isNotEmpty()) {
+                            Log.w(TAG, "voice reply failed: code=$code ${message.take(200)}")
+                            onError(friendlyError(code, message))
+                        }
+                    }
                     dispatch(BargeInEvent.ResponseDone(id, status))
+                }
+                "rate_limits.updated" -> {
+                    // OpenAI, after every response: what is left of the token bucket
+                    // and when it refills — the retry delay for a rate-limited reply.
+                    val tokens = (ev["rate_limits"] as? JsonArray)?.firstOrNull {
+                        ((it as? JsonObject)?.get("name") as? JsonPrimitive)?.contentOrNull == "tokens"
+                    } as? JsonObject
+                    val reset = (tokens?.get("reset_seconds") as? JsonPrimitive)?.doubleOrNull
+                    if (reset != null) synchronized(ctlLock) { tokenResetSec = reset }
                 }
                 // Audio finished streaming but the reply may still be playing/thinking
                 // (tool call) — the controller decides from response.done + drain.
@@ -663,7 +747,7 @@ class VoiceRealtimeClient(
                     // response" are benign (guarded cancel raced the server) — the
                     // controller resyncs; a hold-to-talk buffer error keeps the
                     // session; anything else surfaces as ERROR.
-                    dispatch(BargeInEvent.Error(m))
+                    dispatch(BargeInEvent.Error(m, (errObj?.get("code") as? JsonPrimitive)?.contentOrNull))
                 }
             }
         }

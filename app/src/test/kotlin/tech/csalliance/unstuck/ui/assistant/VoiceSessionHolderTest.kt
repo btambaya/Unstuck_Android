@@ -52,4 +52,27 @@ class VoiceSessionHolderTest {
         live = false   // the call ended; the next mic tap may start Talk
         assertFalse(h.refuseWhileOnCall())
     }
+
+    // A note written while the session stays LIVE — a rate-limited reply's
+    // "busy" — used to render only in the ERROR state, so the one message
+    // written for it was never shown and the orb just kept pulsing: "it just
+    // went quiet" (iOS build 78, audit 2026-09-21).
+    @Test fun `a note written while the session stays live shows under the status line until the assistant speaks`() {
+        val busy = "The assistant is busy right now — give it a minute and ask again."
+        val h = holder(callActive = false)
+        h.clientState(VoiceState.LISTENING)
+        h.clientError(busy)
+        assertEquals("the session stays live", VoiceState.LISTENING, h.state)
+        assertEquals(busy, VoiceSessionHolder.liveNote(h.state, h.note))
+        h.clientState(VoiceState.THINKING)
+        assertEquals("still shown while it thinks", busy, VoiceSessionHolder.liveNote(h.state, h.note))
+        h.clientState(VoiceState.SPEAKING)
+        assertNull("a reply is coming: whatever went wrong is over", h.note)
+        assertNull(VoiceSessionHolder.liveNote(h.state, h.note))
+        // In the ERROR state the note IS the status line — never repeated under it.
+        h.fail("Microphone access is needed for voice.")
+        assertEquals(VoiceState.ERROR, h.state)
+        assertNull(VoiceSessionHolder.liveNote(h.state, h.note))
+        assertNull(VoiceSessionHolder.liveNote(VoiceState.LISTENING, ""))
+    }
 }

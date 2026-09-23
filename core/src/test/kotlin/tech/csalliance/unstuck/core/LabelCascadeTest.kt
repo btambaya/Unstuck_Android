@@ -6,6 +6,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tech.csalliance.unstuck.core.logic.UNASSIGNED_AREA
 import tech.csalliance.unstuck.core.logic.areaFilterFollowing
 import tech.csalliance.unstuck.core.logic.labelNameTaken
 import tech.csalliance.unstuck.core.logic.relabelingArea
@@ -76,5 +77,17 @@ class LabelCascadeTest {
         // vm.lifeAreas starts as [] before the store's first emission: a filter that
         // names a real area survives that first load.
         assertEquals("Work", areaFilterFollowing("Work", emptyList(), listOf(work, personal)))
+    }
+
+    @Test fun theUnassignedPickIsNoRowSoNoAreaChangeMovesIt() {
+        val work = LifeArea("a1", "Work", "indigo", 0)
+        val personal = LifeArea("a2", "Personal", "green", 1)
+        assertEquals("an added area", UNASSIGNED_AREA, areaFilterFollowing(UNASSIGNED_AREA, listOf(work), listOf(work, personal)))
+        assertEquals("a renamed area", UNASSIGNED_AREA, areaFilterFollowing(UNASSIGNED_AREA, listOf(work, personal), listOf(work, personal.copy(name = "Life"))))
+        assertEquals("a deleted area", UNASSIGNED_AREA, areaFilterFollowing(UNASSIGNED_AREA, listOf(work, personal), listOf(work)))
+        assertEquals("the first load", UNASSIGNED_AREA, areaFilterFollowing(UNASSIGNED_AREA, emptyList(), listOf(work)))
+        // A real area that happens to be called "Unassigned" is followed like any other.
+        val named = LifeArea("a3", UNASSIGNED_AREA, "grey", 2)
+        assertEquals("Loose ends", areaFilterFollowing(UNASSIGNED_AREA, listOf(work, named), listOf(work, named.copy(name = "Loose ends"))))
     }
 }

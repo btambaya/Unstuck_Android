@@ -45,9 +45,12 @@ fun labelNameTaken(name: String, others: List<String>): Boolean =
  *  rows change from [old] to [new]: unchanged while an area still has that name, the
  *  same row's new name after a rename, null (All) after a delete. Once the cascade
  *  moved every task off the old name, a filter left on it matched nothing: no pill
- *  lit and "Nothing in Personal right now." */
+ *  lit and "Nothing in Personal right now." The Tasks tab's [UNASSIGNED_AREA] pick (the
+ *  Areas menu) is no row, so no area change moves it: it used to snap to All on any
+ *  change to the area list (an add, a recolour, another device's edit). */
 fun areaFilterFollowing(filter: String?, old: List<LifeArea>, new: List<LifeArea>): String? {
     if (filter == null || new.any { it.name == filter }) return filter
     val ids = old.filter { it.name == filter }.map { it.id }.toSet()
+    if (ids.isEmpty() && filter == UNASSIGNED_AREA) return filter
     return new.firstOrNull { it.id in ids }?.name
 }

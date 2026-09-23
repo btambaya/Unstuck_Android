@@ -13,6 +13,7 @@ import androidx.work.WorkRequest
 import androidx.glance.appwidget.updateAll
 import kotlinx.coroutines.flow.first
 import tech.csalliance.unstuck.UnstuckApp
+import tech.csalliance.unstuck.sync.liveUserId
 import java.util.concurrent.TimeUnit
 
 // Periodic best-effort sync (flush outbox + hydrate) while the app is
@@ -24,7 +25,19 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         // worker always reported success, so WorkManager never retried — the device
         // just sat un-synced until the next 30-min tick. Surface it as Result.retry()
         // so WorkManager applies the exponential backoff configured on the request.
-        val synced = runCatching { app.graph.coordinator?.syncNow() }.isSuccess
+        // syncNow reports the outcome itself: a thrown-or-not check could never see a
+        // failure (the pull swallows them) nor a worker process whose session was still
+        // loading (Android audit 2026-09-23, A2). No sync engine configured → nothing to do.
+        val synced = runCatching { app.graph.coordinator?.syncNow() ?: true }.getOrDefault(false)
+        // A rotated FCM token that couldn't be registered when it arrived (offline, no
+        // session yet) goes now, as the live user (Android audit 2026-09-23, A2).
+        app.graph.coordinator?.let { c ->
+            PendingPushToken.get(applicationContext)?.let { token ->
+                PendingPushToken.register(applicationContext, token, liveUser = { c.session.ensure().liveUserId }) {
+                    c.push.register(deviceId = deviceId(applicationContext), fcmToken = it)
+                }
+            }
+        }
         // Refresh the Start-Next widget from the latest local store regardless. The
         // in-app updater only runs while AppViewModel is alive, so without this the
         // widget goes stale across process death.

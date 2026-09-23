@@ -59,6 +59,19 @@ class SyncCoordinator(
     private val gateway = SyncGateway(client)
 
     val auth = AuthService(client)
+    /** Who is signed in, for work that runs without the UI. `auth.currentUserId`
+     *  reads null whenever the app is in the background (supabase-kt resets the
+     *  session to Initializing at every ON_STOP) and while a cold-started process
+     *  is still loading it, so background entry points ask this instead (Android
+     *  audit 2026-09-23, A1/A2/A3). See [SessionGate]. */
+    val session = SessionGate(
+        SupabaseSessionPort(client.auth), scope,
+        isForeground = { foreground },
+        knownUserId = { prefs.getString(KEY_PREV_USER, null) },
+        log = { Log.i(TAG, it) },
+    )
+    /** ProcessLifecycle STARTED (set by resumeRealtime / pauseRealtime). */
+    @Volatile private var foreground = false
     val write = WriteThrough(store)
     val calendar = CalendarClient(client)
     val push = PushClient(client)
@@ -143,7 +156,14 @@ class SyncCoordinator(
      *  says the socket is deaf. */
     val freshness: FreshnessOwner = FreshnessOwner(
         scope = scope,
-        currentUserId = { auth.currentUserId },
+        // In the background the pull establishes the session first: the live status reads
+        // null there after the ON_STOP reset, and in a just-started process until its load
+        // lands (Android audit 2026-09-23, A2). In the foreground the SDK's own ON_START
+        // reload is followed by INITIAL_SESSION's pull, so the live read stays (no second
+        // pull per return) — minus an expired token: a background restore leaves one
+        // behind with no refresh timer, and pulling (plus the pre-pull drain) with it was
+        // a round of 401s; the SDK's refresh emission pulls instead (A2 — second pass).
+        currentUserId = { if (foreground) session.liveNow() else session.ensure().liveUserId },
         runFullHydrate = { uid -> fullHydrate(uid) },
         runCatchUp = { uid, sweep -> catchUpPull(uid, sweep) },
         needsFullHydrate = { uid -> !catchUp.hasCursors(uid) },
@@ -203,10 +223,20 @@ class SyncCoordinator(
     }
 
     /** Reconcile stale task ops against the server, then drain the outbox. The one
-     *  drain primitive every path uses. No-op when signed out. */
+     *  drain primitive every path uses. No-op when signed out. The session comes
+     *  from [session], not the live status: a drain armed just before the app left
+     *  the screen (tick a task, press Home) or by a shade action ("Reschedule") runs
+     *  after the ON_STOP reset and used to return here with the write still queued
+     *  (Android audit 2026-09-23, A2). */
     private suspend fun flushNow() {
-        val uid = auth.currentUserId ?: return
-        engineMutex.withLock { flushUnlocked(uid) }
+        val uid = session.ensure().liveUserId ?: return
+        drainAcrossReset(
+            uid,
+            drain = { engineMutex.withLock { flushUnlocked(uid) } },
+            liveUser = { auth.currentUserId },
+            hasPending = { store.pending().isNotEmpty() },
+            ensure = { session.ensure().liveUserId },
+        )
     }
 
     private suspend fun flushUnlocked(uid: String) {
@@ -413,6 +443,7 @@ class SyncCoordinator(
      *  observer keeps running; a missed change is caught by the next hydrate on
      *  resume / the periodic SyncWorker. Also stops the foreground safety nets. */
     fun pauseRealtime() {
+        foreground = false
         freshness.onHidden()
         stopForegroundNets()
         realtimeLifecycle.pause()
@@ -424,6 +455,7 @@ class SyncCoordinator(
      *  can't settle unsubscribed with no refresh — and (re)arm the socket watch +
      *  the connectivity watch. */
     fun resumeRealtime() {
+        foreground = true
         freshness.onVisible()
         realtimeLifecycle.resume()
         startForegroundNets()
@@ -495,12 +527,19 @@ class SyncCoordinator(
 
     /** Manual best-effort sync (flush outbox → hydrate) for the periodic
      *  WorkManager job. Goes through the same serialized push-then-pull as every
-     *  other hydrate path (waits for an in-flight pull rather than racing it). No-op
-     *  when signed out. */
-    suspend fun syncNow() {
-        auth.currentUserId ?: return
-        freshness.requestAndWait(FreshnessTrigger.WORKER)
+     *  other hydrate path (waits for an in-flight pull rather than racing it).
+     *  Returns false when it could not sync — no live session in time, or the pull
+     *  failed — so the worker retries with backoff; true when it synced or nobody
+     *  is signed in. It used to gate on the live status (null in a backgrounded or
+     *  just-started worker process, Android audit 2026-09-23 A2) and could only ever
+     *  report success. */
+    suspend fun syncNow(): Boolean {
+        val check = session.ensure()
+        if (check == SessionCheck.SignedOut) return true
+        if (check.liveUserId == null) return false
+        val pulled = freshness.requestAndWait(FreshnessTrigger.WORKER)
         runCatching { pullCalendar() }
+        return pulled
     }
 
     // --- Google Calendar (consent + pull). Push of local blocks is a later step. ---
@@ -753,6 +792,27 @@ class SyncCoordinator(
         // must be registered as an Authorized redirect URI on the Google Web OAuth client.
         private const val CAL_REDIRECT = "https://unstuck-602.pages.dev/calendar-callback"
     }
+}
+
+/**
+ * One outbox drain as [uid] — and one more when supabase-kt's ON_STOP reset landed
+ * during it (the live user reads null afterwards). OutboxFlusher stops at its next
+ * pass once the live user is gone, and an op sent after the reset went out without
+ * the JWT and failed, so the rest of the queue sat until the next write or SyncWorker
+ * run: tick a task, press Home a second later, and part of it stayed on the phone.
+ * [ensure] restores the session in the background; a sign-out or another account
+ * ends it there (Android audit 2026-09-23, A2 — second pass).
+ */
+internal suspend fun drainAcrossReset(
+    uid: String,
+    drain: suspend () -> Unit,
+    liveUser: () -> String?,
+    hasPending: suspend () -> Boolean,
+    ensure: suspend () -> String?,
+) {
+    drain()
+    if (liveUser() != null || !hasPending()) return
+    if (ensure() == uid) drain()
 }
 
 /**

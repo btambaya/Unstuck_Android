@@ -5,7 +5,9 @@ import android.content.Context
 import android.content.Intent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import tech.csalliance.unstuck.UnstuckApp
+import tech.csalliance.unstuck.sync.liveUserId
 import java.util.TimeZone
 
 /**
@@ -34,7 +36,13 @@ class TimezoneReceiver : BroadcastReceiver() {
         val pending: PendingResult? = goAsync()
         scope.launch {
             try {
-                runCatching { push(context.applicationContext, tz) }
+                // The WHOLE push — session wait AND the RPC — inside the broadcast
+                // window: only the session wait was bounded, so a restore that had to
+                // refresh followed by a slow set_timezone could outlive goAsync, and the
+                // system ANRs the receiver (killing a backgrounded process). A cut push
+                // is re-sent by the next pull (Hydrator.pushTimezone) (Android audit
+                // 2026-09-23, A2 — second pass).
+                runCatching { withTimeoutOrNull(PUSH_TIMEOUT_MS) { push(context.applicationContext, tz) } }
             } finally {
                 pending?.finish()
             }
@@ -47,11 +55,24 @@ class TimezoneReceiver : BroadcastReceiver() {
             (context as? UnstuckApp)?.let { app -> runCatching { app.graph.scope }.getOrNull() }
         }
 
+        /** The session wait, inside [PUSH_TIMEOUT_MS]. */
+        const val SESSION_TIMEOUT_MS = 6_000L
+        /** The whole push, inside the broadcast's ~10 s goAsync window (a process the
+         *  broadcast cold-starts has already spent some of it starting up). */
+        const val PUSH_TIMEOUT_MS = 8_000L
+
         /** The push itself — a seam so the receiver is testable without a
-         *  server. Default: `set_timezone` through the signed-in coordinator. */
+         *  server. Default: `set_timezone` through the signed-in coordinator.
+         *  The session comes from the gate, not `auth.currentUserId`: the zone
+         *  changes while the app is in the background (a flight), when the live
+         *  status reads null after supabase-kt's ON_STOP reset — or in a process
+         *  the broadcast just started, still loading it — so the push was skipped
+         *  every time it mattered (Android audit 2026-09-23, A2). */
         @Volatile internal var push: suspend (Context, String) -> Unit = { context, tz ->
             val coordinator = (context as? UnstuckApp)?.graph?.coordinator
-            if (coordinator?.auth?.currentUserId != null) coordinator.preferences.setTimezone(tz)
+            if (coordinator != null && coordinator.session.ensure(SESSION_TIMEOUT_MS).liveUserId != null) {
+                coordinator.preferences.setTimezone(tz)
+            }
         }
     }
 }

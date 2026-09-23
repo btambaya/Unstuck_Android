@@ -5,6 +5,7 @@ import android.provider.Settings
 import com.google.firebase.messaging.FirebaseMessaging
 import com.google.firebase.messaging.FirebaseMessagingService
 import com.google.firebase.messaging.RemoteMessage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.UnstuckApp
 import tech.csalliance.unstuck.calls.AppCallEnvironment
@@ -16,6 +17,7 @@ import tech.csalliance.unstuck.core.logic.CallDecision
 import tech.csalliance.unstuck.core.logic.CallEnv
 import tech.csalliance.unstuck.core.logic.CallOutcome
 import tech.csalliance.unstuck.core.logic.IncomingCallPayload
+import tech.csalliance.unstuck.sync.liveUserId
 
 // FCM receive + token registration. Dormant until google-services.json is
 // added + the google-services plugin applied (a manual prerequisite, the
@@ -34,8 +36,54 @@ fun registerFcmToken(app: UnstuckApp) {
         FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
             app.graph.scope.launch {
                 runCatching { push.register(deviceId = deviceId(app), fcmToken = token) }
+                    .onSuccess { PendingPushToken.clearIf(app, token) }
             }
         }
+    }
+}
+
+/**
+ * A rotated FCM token that is not registered yet. onNewToken runs while the app
+ * is in the background — where supabase-kt's session reads null after its
+ * ON_STOP reset, or is still loading in a process FCM just started — so the
+ * register went out with the anon key, got a 401 and was swallowed: the server
+ * kept the dead token and calls / briefs stopped reaching the phone until the
+ * app was next opened (Android audit 2026-09-23, A2). The token is kept here
+ * until a register as a live user succeeds; the SyncWorker retries it.
+ */
+internal object PendingPushToken {
+    const val PREFS = "unstuck.push"
+    const val KEY = "pendingFcmToken"
+
+    private fun prefs(context: Context) = context.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+
+    fun get(context: Context): String? = prefs(context).getString(KEY, null)
+
+    fun set(context: Context, token: String) {
+        synchronized(this) { prefs(context).edit().putString(KEY, token).commit() }
+    }
+
+    /** Forget [token] once it is registered — never a newer one that arrived meanwhile. */
+    fun clearIf(context: Context, token: String) {
+        synchronized(this) {
+            if (get(context) == token) prefs(context).edit().remove(KEY).commit()
+        }
+    }
+
+    /** Register [token] once [liveUser] answers with a live session, clearing it
+     *  from pending when the server took it (true). */
+    suspend fun register(context: Context, token: String, liveUser: suspend () -> String?, send: suspend (String) -> Unit): Boolean {
+        if (liveUser() == null) return false
+        try {
+            send(token)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            println("[push] token register failed, kept for the next background sync: $e")
+            return false
+        }
+        clearIf(context, token)
+        return true
     }
 }
 
@@ -138,9 +186,12 @@ class UnstuckMessagingService : FirebaseMessagingService() {
 
     override fun onNewToken(token: String) {
         val app = application as? UnstuckApp ?: return
-        val push = app.graph.coordinator?.push ?: return
+        val coordinator = app.graph.coordinator ?: return
+        PendingPushToken.set(app, token)
         app.graph.scope.launch {
-            runCatching { push.register(deviceId = deviceId(this@UnstuckMessagingService), fcmToken = token) }
+            PendingPushToken.register(app, token, liveUser = { coordinator.session.ensure().liveUserId }) {
+                coordinator.push.register(deviceId = deviceId(app), fcmToken = it)
+            }
         }
     }
 

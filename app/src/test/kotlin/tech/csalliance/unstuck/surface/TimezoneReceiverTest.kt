@@ -5,8 +5,16 @@ import android.content.Intent
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
+import kotlinx.coroutines.test.runTest
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -63,5 +71,22 @@ class TimezoneReceiverTest {
         TimezoneReceiver.scopeFor = savedScope
         TimezoneReceiver().onReceive(context, Intent(Intent.ACTION_TIMEZONE_CHANGED))
         assertEquals(emptyList<String>(), pushed.toList())
+    }
+
+    // Second pass (R4): only the session wait was bounded. A restore that had to refresh
+    // (a phone landing on a weak network) then a slow set_timezone outlived goAsync's
+    // ~10 s window, and the system ANRs the receiver — killing a backgrounded process.
+    @OptIn(ExperimentalCoroutinesApi::class)
+    @Test fun `a push that never returns is cut inside the broadcast window`() = runTest {
+        var cancelled = false
+        val job = Job()
+        TimezoneReceiver.scopeFor = { CoroutineScope(StandardTestDispatcher(testScheduler) + job) }
+        TimezoneReceiver.push = { _, _ -> try { awaitCancellation() } finally { cancelled = true } }
+        TimezoneReceiver().onReceive(context, Intent(Intent.ACTION_TIMEZONE_CHANGED))
+        advanceTimeBy(TimezoneReceiver.PUSH_TIMEOUT_MS - 1)
+        assertFalse(cancelled)
+        advanceTimeBy(2)
+        assertTrue("the push is cut at the budget", cancelled)
+        assertTrue("and the broadcast released", job.children.none { it.isActive })
     }
 }

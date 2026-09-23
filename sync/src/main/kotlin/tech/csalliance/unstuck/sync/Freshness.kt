@@ -76,6 +76,9 @@ data class FreshnessState(
 )
 
 /**
+ * @param currentUserId     the user to pull for, null = nobody (no pull). Suspends:
+ *                          a backgrounded process establishes the session first
+ *                          (SessionGate — Android audit 2026-09-23, A2).
  * @param runFullHydrate    the existing full server-canonical pull; returns true
  *                          when it completed. Used on first run / no cursor.
  * @param runCatchUp        the cursor pull; `reconcileDeletions` asks it to also
@@ -85,7 +88,7 @@ data class FreshnessState(
  */
 class FreshnessOwner(
     private val scope: CoroutineScope,
-    private val currentUserId: () -> String?,
+    private val currentUserId: suspend () -> String?,
     private val runFullHydrate: suspend (String) -> Boolean,
     private val runCatchUp: suspend (String, Boolean) -> CatchUpOutcome?,
     private val needsFullHydrate: (String) -> Boolean,
@@ -151,9 +154,12 @@ class FreshnessOwner(
         floorJob = null
     }
 
-    /** Sign-out: forget everything (the next user starts cold). */
+    /** Sign-out: forget everything (the next user starts cold). Stops the floor but
+     *  leaves [visible] alone: a sign-out on screen is still on screen, and the DEAF
+     *  rule reads it for the next account's session. */
     fun reset() {
-        onHidden()
+        floorJob?.cancel()
+        floorJob = null
         lastEventAtMs = 0L
         lastReconcileAtMs = 0L
         silenceSinceMs = 0L
@@ -168,22 +174,24 @@ class FreshnessOwner(
     }
 
     /** For callers whose next step assumes a pull has actually happened (sign-in,
-     *  the worker, connecting a calendar). Queues behind a running pull. */
-    suspend fun requestAndWait(trigger: FreshnessTrigger) = pull(trigger, waitIfBusy = true)
+     *  the worker, connecting a calendar). Queues behind a running pull. True when
+     *  this pull completed cleanly; false when nobody was signed in or it failed
+     *  (the SyncWorker's Result.retry() — it could never fire while every failure
+     *  was swallowed here, Android audit 2026-09-23 A2). */
+    suspend fun requestAndWait(trigger: FreshnessTrigger): Boolean = pull(trigger, waitIfBusy = true)
 
-    private suspend fun pull(trigger: FreshnessTrigger, waitIfBusy: Boolean) {
+    private suspend fun pull(trigger: FreshnessTrigger, waitIfBusy: Boolean): Boolean {
         val claimed = inFlight.compareAndSet(false, true)
         if (!claimed) {
             if (!waitIfBusy) {
                 followUpTrigger = trigger
                 followUp.set(true)
-                return
+                return false
             }
-            mutex.withLock { runOnce(trigger) }
-            return
+            return mutex.withLock { runOnce(trigger) }
         }
         try {
-            mutex.withLock { runOnce(trigger) }
+            val ok = mutex.withLock { runOnce(trigger) }
             // Whatever asked while we were busy gets exactly one more pass — a
             // snapshot taken before their trigger cannot be an answer to it.
             var extra = 0
@@ -191,13 +199,15 @@ class FreshnessOwner(
                 extra++
                 mutex.withLock { runOnce(followUpTrigger ?: FreshnessTrigger.FLOOR) }
             }
+            return ok
         } finally {
             inFlight.set(false)
         }
     }
 
-    private suspend fun runOnce(trigger: FreshnessTrigger) {
-        val uid = currentUserId() ?: return
+    /** One pull. True when it completed with every table read. */
+    private suspend fun runOnce(trigger: FreshnessTrigger): Boolean {
+        val uid = currentUserId() ?: return false
         val startedAt = now()
         _state.update { it.copy(pulling = true, lastPullStartedAt = startedAt, lastTrigger = trigger) }
         try {
@@ -208,7 +218,7 @@ class FreshnessOwner(
                     if (ok) it.copy(pulling = false, lastSuccessAt = now(), fullHydrates = it.fullHydrates + 1)
                     else it.copy(pulling = false, lastFailureAt = now())
                 }
-                return
+                return ok
             }
             val sweep = trigger == FreshnessTrigger.COLD_START ||
                 trigger == FreshnessTrigger.DEAF ||
@@ -218,7 +228,7 @@ class FreshnessOwner(
             if (sweep) lastReconcileAtMs = now()
             if (outcome == null) {
                 _state.update { it.copy(pulling = false, lastFailureAt = now()) }
-                return
+                return false
             }
             _state.update {
                 it.copy(
@@ -236,19 +246,26 @@ class FreshnessOwner(
             // DEAFNESS, PROVEN: the pull brought changes this device did not have,
             // old enough that the socket should have delivered them, and the socket
             // delivered nothing while we pulled. Rebuild rather than trust status.
+            // Only on screen: in the background the socket is closed on purpose
+            // (pauseRealtime), so every remote change arrives only by pull — and now
+            // that a backgrounded worker's pull runs (the session gate), a rebuild
+            // there opened the websocket and left it up until the next foreground
+            // (Android audit 2026-09-23, A2 — second pass). resume() re-subscribes.
             val heardDuringPull = lastEventAtMs >= startedAt
-            if (outcome.provenMissed > 0 && !heardDuringPull && trigger != FreshnessTrigger.COLD_START) {
+            if (visible && outcome.provenMissed > 0 && !heardDuringPull && trigger != FreshnessTrigger.COLD_START) {
                 _state.update { it.copy(deafConfirmed = it.deafConfirmed + 1) }
                 log("[freshness] DEAF channel: ${outcome.provenMissed} change(s) arrived only by pull — rebuilding subscriptions (${_state.value.deafConfirmed} so far)")
                 rebuildSubscriptions()
                 silenceSinceMs = now()
             }
+            return outcome.failed.isEmpty()
         } catch (t: CancellationException) {
             _state.update { it.copy(pulling = false) }
             throw t
         } catch (t: Throwable) {
             _state.update { it.copy(pulling = false, lastFailureAt = now()) }
             log("[freshness] pull ($trigger) failed: $t")
+            return false
         }
     }
 

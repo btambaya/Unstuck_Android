@@ -50,6 +50,12 @@ enum class ShareOutcome {
     RATE_LIMITED,
     /** 400 bad_request (no / malformed email, or a userId an older deployment can't resolve). */
     INVALID,
+    /** An add by user id for someone who is no longer (or never was) a connection
+     *  or member — `share-collection` answers `not_in_circle` since migration 075
+     *  (a stale People row after the other side removed or blocked you). Named so
+     *  the Share screen says "not connected" instead of "try again" (parity with
+     *  iOS build 79, audit 2026-09-22 SC-5). */
+    NOT_CONNECTED,
     ERROR;
 
     /** The server reason code this outcome corresponds to (for the shared
@@ -61,6 +67,7 @@ enum class ShareOutcome {
         BLOCKED -> "blocked"
         RATE_LIMITED -> "rate_limited"
         INVALID -> "bad_request"
+        NOT_CONNECTED -> "not_in_circle"
         ERROR -> "network"
     }
 
@@ -263,6 +270,7 @@ class CollectionShareClient(private val client: SupabaseClient) {
                     "blocked" -> ShareOutcome.BLOCKED
                     "rate_limited", "rate_limit", "too_many_requests" -> ShareOutcome.RATE_LIMITED
                     "bad_request", "invalid_email" -> ShareOutcome.INVALID
+                    "not_in_circle" -> ShareOutcome.NOT_CONNECTED
                     else -> ShareOutcome.ERROR
                 }
                 return ShareResult(outcome, members)

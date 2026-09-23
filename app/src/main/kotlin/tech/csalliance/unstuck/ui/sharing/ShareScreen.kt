@@ -96,7 +96,8 @@ import tech.csalliance.unstuck.ui.AppViewModel
 //
 //   Share · <item name>            [Can edit | Can view]   (default Can edit)
 //   PEOPLE        ONLY the people who already have the item, each a row with
-//                 its access menu (Can edit / Can view / Report / Remove), plus
+//                 its access menu (Can edit / Can view / Report / Block /
+//                 Remove), plus
 //                 one "Choose someone · N" row that opens a SEARCHABLE picker
 //                 of everyone else. The whole roster is never listed inline
 //                 (Ahmad, 2026-09-17: "ten people is a wall").
@@ -142,6 +143,8 @@ fun ShareScreen(vm: AppViewModel, target: ShareTarget, mode: ShareMode = ShareMo
 
     var showPicker by remember { mutableStateOf(false) }
     var reportTarget by remember { mutableStateOf<SharePersonRow?>(null) }
+    /** The row whose "Block…" is awaiting its confirm. */
+    var blockTarget by remember { mutableStateOf<SharePersonRow?>(null) }
     val handOver = mode == ShareMode.HAND_OVER
     val split = remember(s.people, s.pinnedIds, handOver) { sharePeopleSplit(s.people, s.pinnedIds, handOver) }
     val anyBusy = s.busyId != null
@@ -226,6 +229,7 @@ fun ShareScreen(vm: AppViewModel, target: ShareTarget, mode: ShareMode = ShareMo
                                 onTap = { scope.launch { model.tap(row) } },
                                 onSetAccess = { next -> scope.launch { model.setAccess(row, next) } },
                                 onReport = { reportTarget = row },
+                                onBlock = { blockTarget = row },
                             )
                         }
                         if (split.candidates.isNotEmpty()) {
@@ -320,6 +324,24 @@ fun ShareScreen(vm: AppViewModel, target: ShareTarget, mode: ShareMode = ShareMo
             containerColor = c.surface,
         )
     }
+
+    // A block is server-side (migration 075) and cuts everything between you, so
+    // it confirms first (parity with iOS build 79, audit 2026-09-22 C10).
+    blockTarget?.let { row ->
+        AlertDialog(
+            onDismissRequest = { blockTarget = null },
+            title = { Text("Block ${row.name}?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+            text = {
+                Text(
+                    "They won't be able to share tasks or lists with you, and everything shared between you stops. You can unblock them in Settings › People.",
+                    style = UFont.sans(13), color = c.ink2,
+                )
+            },
+            confirmButton = { TextButton(onClick = { blockTarget = null; scope.launch { model.block(row) } }) { Text("Block", color = c.red) } },
+            dismissButton = { TextButton(onClick = { blockTarget = null }) { Text("Cancel", color = c.ink2) } },
+            containerColor = c.surface,
+        )
+    }
 }
 
 @Composable
@@ -341,6 +363,7 @@ private fun PersonRow(
     onTap: () -> Unit,
     onSetAccess: (ShareAccess?) -> Unit,
     onReport: () -> Unit,
+    onBlock: () -> Unit,
 ) {
     val c = UTheme.colors
     val on = if (handOver) row.handedOver else row.isShared
@@ -376,7 +399,7 @@ private fun PersonRow(
             }
         }
         // The picker for someone who already has the item: Can edit ✓ / Can
-        // view / Report… / Remove (or "Take it back" for a hand-over).
+        // view / Report… / Block… / Remove (or "Take it back" for a hand-over).
         DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
             ShareAccess.entries.forEach { a ->
                 DropdownMenuItem(
@@ -387,6 +410,7 @@ private fun PersonRow(
             }
             CardDivider()
             DropdownMenuItem(text = { Text("Report…", style = UFont.sans(14), color = c.ink) }, onClick = { menu = false; onReport() })
+            DropdownMenuItem(text = { Text("Block ${row.name}…", style = UFont.sans(14), color = c.red) }, onClick = { menu = false; onBlock() })
             DropdownMenuItem(
                 text = { Text(if (row.handedOver) "Take it back" else "Remove", style = UFont.sans(14), color = c.red) },
                 onClick = { menu = false; onSetAccess(null) },

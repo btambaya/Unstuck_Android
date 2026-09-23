@@ -7,6 +7,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tech.csalliance.unstuck.core.logic.ShareFailure
 import tech.csalliance.unstuck.core.model.PendingInviteKind
 import tech.csalliance.unstuck.core.model.ShareLevel
 
@@ -125,6 +126,22 @@ class TaskShareClientTest {
         assertEquals(ShareOutcome.ERROR, coll("""{}""").outcome)
         assertEquals("bad_request", ShareOutcome.INVALID.failureReason)
         assertEquals("network", ShareOutcome.ERROR.failureReason)
+    }
+
+    /** An add by user id for a stale People row (the other side removed or
+     *  blocked me) answers `not_in_circle` since migration 075 — the Share screen
+     *  must say "not connected", not "Couldn't share — try again" (audit
+     *  2026-09-22 SC-5; iOS TaskShareClientTests). */
+    @Test fun `collection add by a stale connection is NOT_CONNECTED`() {
+        assertEquals(ShareOutcome.NOT_CONNECTED, coll("""{"ok":false,"reason":"not_in_circle"}""").outcome)
+        assertEquals(ShareOutcome.NOT_CONNECTED, coll("""{"error":"not_in_circle"}""").outcome)
+        assertFalse(ShareOutcome.NOT_CONNECTED.isSuccess)
+        assertEquals("not_in_circle", ShareOutcome.NOT_CONNECTED.failureReason)
+        assertEquals(ShareFailure.NotConnected, ShareFailure.fromReason(ShareOutcome.NOT_CONNECTED.failureReason))
+        assertEquals(
+            "You're not connected yet — share by email or a link below.",
+            ShareFailure.fromReason(ShareOutcome.NOT_CONNECTED.failureReason).message,
+        )
     }
 
     // ── circle_list invitee_email + pending-invite RPCs ─────────────────────

@@ -89,6 +89,9 @@ interface ShareScreenTransport {
     suspend fun cancelCollectionInvite(collectionId: String, email: String): Boolean
     /** `share-collection link`. */
     suspend fun collectionLink(collectionId: String, role: String): ShareLinkOutcome
+    /** `block_user(p_user)` (migration 075) — true only when the server blocked
+     *  them. Android had no Block at all before (audit 2026-09-22 C10). */
+    suspend fun block(userId: String): Boolean
 }
 
 /** The live seam — the AppViewModel's coordinator clients. An unconfigured
@@ -110,6 +113,7 @@ class LiveShareTransport(private val vm: AppViewModel) : ShareScreenTransport {
     override suspend fun unshareCollection(collectionId: String, userId: String): Boolean = vm.unshareCollection(collectionId, userId)
     override suspend fun cancelCollectionInvite(collectionId: String, email: String): Boolean = vm.cancelCollectionInvite(collectionId, email)
     override suspend fun collectionLink(collectionId: String, role: String): ShareLinkOutcome = vm.collectionShareLink(collectionId, role)
+    override suspend fun block(userId: String): Boolean = vm.blockUser(userId)
 }
 
 /** Everything the screen renders. */
@@ -255,6 +259,20 @@ class ShareScreenModel(
                 if (!transport.unshareCollection(target.itemId, row.userId)) throw ShareActionException(ShareFailure.Network)
                 ShareResult.Removed(row.name)
             }
+        }
+    }
+
+    /** Block someone who has this item (task OR list). Server-side the block cuts
+     *  everything between you — the connection, task shares and list memberships
+     *  both ways — and refuses anything they share with you until you unblock them
+     *  in Settings › People. The reload follows the server's answer, and a refusal
+     *  says the BLOCK didn't land, not that a share failed (parity with iOS build
+     *  79, audit 2026-09-22 C10). */
+    suspend fun block(row: SharePersonRow) {
+        if (_state.value.busyId != null) return
+        perform(row.id) {
+            if (!transport.block(row.userId)) throw ShareActionException(ShareFailure.BlockFailed(row.name))
+            ShareResult.Blocked(row.name)
         }
     }
 

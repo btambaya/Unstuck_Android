@@ -45,8 +45,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import tech.csalliance.unstuck.core.logic.circleInviteErrorMessage
 import tech.csalliance.unstuck.core.logic.composePeopleSections
 import tech.csalliance.unstuck.core.logic.pendingInviteLabel
+import tech.csalliance.unstuck.core.logic.removeConnectionMessage
+import tech.csalliance.unstuck.core.model.BlockedUser
 import tech.csalliance.unstuck.core.model.CircleMember
 import tech.csalliance.unstuck.core.model.CircleStatus
 import tech.csalliance.unstuck.core.model.PendingInvite
@@ -75,6 +78,10 @@ import tech.csalliance.unstuck.ui.AppViewModel
 // RPC (`my_pending_invites()`), each with a Cancel (`cancel_pending_invite`).
 // The pure composition (each invite once, the roster whole) is
 // composePeopleSections in :core; pending roster rows show the invitee's email.
+//
+// Blocks (migration 075, parity with iOS build 79, audit 2026-09-22 C10):
+// "Remove and block" on a connection, and a "Blocked" section listing everyone
+// I blocked (`my_blocked_users()`) with Unblock. The block lives on the server.
 
 /** Build the same join link the web copies for a pending invite's code. */
 private fun inviteLink(code: String): String = "https://unstucknow.io/circle/join?code=$code"
@@ -92,7 +99,17 @@ fun ConnectionsContent(vm: AppViewModel) {
     var pending by remember { mutableStateOf<List<PendingInvite>>(emptyList()) }
     var pendingLoaded by remember { mutableStateOf(false) }
     var waitingError by remember { mutableStateOf<String?>(null) }
-    LaunchedEffect(members) { pending = vm.myPendingInvites(); pendingLoaded = true; waitingError = null }
+    // Everyone I blocked, re-read with the roster (user_blocks is never mirrored).
+    // A failed read (null) keeps the list shown. A refresh is a fresh answer, so it
+    // also clears the lines a refused remove / block / unblock left.
+    var blocked by remember { mutableStateOf<List<BlockedUser>>(emptyList()) }
+    var blockError by remember { mutableStateOf<String?>(null) }
+    var rosterError by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(members) {
+        pending = vm.myPendingInvites(); pendingLoaded = true; waitingError = null
+        vm.blockedUsers()?.let { blocked = it }
+        blockError = null; rosterError = null
+    }
     val sections = remember(members, pending) { composePeopleSections(members, pending) }
 
     // Add-someone state (inline panel, mirrors the web CircleRoster).
@@ -124,11 +141,8 @@ fun ConnectionsContent(vm: AppViewModel) {
             val r = runCatching { vm.inviteToCircle(email) }.getOrNull()
             busy = false
             if (r == null || r.error != null) {
-                addErr = when (r?.error) {
-                    "circle_full" -> "Your circle is full."
-                    "not_configured" -> "Sign in to invite people."
-                    else -> "Could not create invite. Try again."
-                }
+                // A 403 `blocked` / 429 now reaches here with its code (audit SC-3).
+                addErr = circleInviteErrorMessage(r?.error) ?: "Could not create invite. Try again."
             } else {
                 result = r
                 email = ""
@@ -171,6 +185,39 @@ fun ConnectionsContent(vm: AppViewModel) {
         }
     }
 
+    /** Remove someone (or cancel a pending roster row). The server also ends the
+     *  task shares and list memberships between you, both ways (075). A refusal —
+     *  offline, say — leaves them in place and says so (audit 2026-09-22 C11). */
+    fun remove(m: CircleMember) {
+        rosterError = null
+        scope.launch { if (!vm.removeFromCircle(m)) rosterError = "Couldn't remove — try again." }
+    }
+
+    /** "Remove and block": block them server-side (`block_user`), which also cuts
+     *  the connection, task shares and list memberships both ways and stops them
+     *  sharing with me again. The roster re-reads on success; a refusal keeps the
+     *  row and says so under Blocked (audit 2026-09-22 C10). */
+    fun block(m: CircleMember) {
+        val userId = m.memberUserId ?: return
+        blockError = null
+        scope.launch {
+            if (vm.blockUser(userId)) vm.blockedUsers()?.let { blocked = it }
+            else blockError = "Couldn't block — try again."
+        }
+    }
+
+    /** Lift a block (`unblock_user`). Restores nothing the block removed. Optimistic
+     *  — the row leaves at once — then the re-read shows the server's truth. */
+    fun unblock(b: BlockedUser) {
+        blockError = null
+        blocked = blocked.filterNot { it.userId == b.userId }
+        scope.launch {
+            val ok = vm.unblockUser(b.userId)
+            vm.blockedUsers()?.let { blocked = it }
+            if (!ok) blockError = "Couldn't unblock — try again."
+        }
+    }
+
     val rosterCount = sections.roster.count { it.isActiveOrInvited }
 
     Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(14.dp)) {
@@ -204,6 +251,7 @@ fun ConnectionsContent(vm: AppViewModel) {
                 )
             }
         }
+        rosterError?.let { Text(it, style = UFont.sans(12), color = c.red) }
 
         // ── Waiting to join: every invite I sent, whichever screen sent it ──
         if (sections.waiting.isNotEmpty() || waitingError != null) {
@@ -223,6 +271,34 @@ fun ConnectionsContent(vm: AppViewModel) {
                                 onCopy = { p.inviteCode?.let { copy(inviteLink(it), p.id) } },
                                 onCancel = { cancelTarget = p },
                             )
+                        }
+                    }
+                }
+            }
+        }
+
+        // ── Blocked: everyone I blocked, each with Unblock (audit 2026-09-22 C10).
+        // Hidden while there is nothing to show. ──
+        if (blocked.isNotEmpty() || blockError != null) {
+            Column(Modifier.fillMaxWidth().padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SectionLabel("Blocked · ${blocked.size}")
+                Text("They can't share with you or add you to lists.", style = UFont.sans(12), color = c.ink3)
+                blockError?.let { Text(it, style = UFont.sans(12), color = c.red) }
+                if (blocked.isNotEmpty()) {
+                    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.bg2).border(1.dp, c.line, RoundedCornerShape(12.dp))) {
+                        blocked.forEachIndexed { idx, b ->
+                            if (idx > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
+                            Row(
+                                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp),
+                                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+                            ) {
+                                Text(b.name, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+                                Text(
+                                    "Unblock", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink,
+                                    modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { unblock(b) }.padding(horizontal = 8.dp, vertical = 6.dp)
+                                        .semantics { contentDescription = "Unblock ${b.name}" },
+                                )
+                            }
                         }
                     }
                 }
@@ -278,18 +354,23 @@ fun ConnectionsContent(vm: AppViewModel) {
 
     removeTarget?.let { m ->
         val pendingRow = m.status == CircleStatus.INVITED
+        // A block is server-side (075): they also can't share with you again until
+        // you unblock them under Blocked (audit 2026-09-22 C10).
+        val canBlock = !pendingRow && m.memberUserId != null
         AlertDialog(
             onDismissRequest = { removeTarget = null },
             title = { Text(if (pendingRow) "Cancel this invite?" else "Remove this connection?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
-            text = {
-                Text(
-                    if (pendingRow) "Cancels this pending invite${m.inviteeEmail?.let { " to $it" } ?: ""}."
-                    else "${m.memberName ?: "They"} will no longer see anything you've shared, and any tasks you shared with them are revoked.",
-                    style = UFont.sans(13), color = c.ink2,
-                )
+            // Names both directions, tasks AND lists (audit 2026-09-22 C11).
+            text = { Text(removeConnectionMessage(m), style = UFont.sans(13), color = c.ink2) },
+            // Three actions stack (end-aligned) so none clips at large font sizes.
+            confirmButton = {
+                Column(horizontalAlignment = Alignment.End) {
+                    TextButton(onClick = { removeTarget = null; remove(m) }) { Text(if (pendingRow) "Cancel invite" else "Remove", color = c.red) }
+                    if (canBlock) TextButton(onClick = { removeTarget = null; block(m) }) { Text("Remove and block", color = c.red) }
+                    if (canBlock) TextButton(onClick = { removeTarget = null }) { Text("Cancel", color = c.ink2) }
+                }
             },
-            confirmButton = { TextButton(onClick = { removeTarget = null; scope.launch { vm.removeFromCircle(m.id) } }) { Text(if (pendingRow) "Cancel invite" else "Remove", color = c.red) } },
-            dismissButton = { TextButton(onClick = { removeTarget = null }) { Text(if (pendingRow) "Keep it" else "Cancel", color = c.ink2) } },
+            dismissButton = if (canBlock) null else ({ TextButton(onClick = { removeTarget = null }) { Text(if (pendingRow) "Keep it" else "Cancel", color = c.ink2) } }),
             containerColor = c.surface,
         )
     }

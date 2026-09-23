@@ -64,6 +64,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import tech.csalliance.unstuck.core.logic.circleInviteErrorMessage
 import tech.csalliance.unstuck.core.logic.findConflicts
 import tech.csalliance.unstuck.core.logic.findFreeSlotsForDate
 import tech.csalliance.unstuck.core.logic.formatTime
@@ -189,7 +190,8 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
             val r = runCatching { vm.inviteToCircle(inviteEmail) }.getOrNull()
             inviteBusy = false
             if (r == null || r.error != null) {
-                inviteErr = "Could not create invite."
+                // A 403 `blocked` / 429 now reaches here with its code (audit 2026-09-22 SC-3).
+                inviteErr = circleInviteErrorMessage(r?.error) ?: "Could not create invite."
             } else {
                 inviteResult = r; inviteEmail = ""
                 r.link?.let { copyLink(it) }

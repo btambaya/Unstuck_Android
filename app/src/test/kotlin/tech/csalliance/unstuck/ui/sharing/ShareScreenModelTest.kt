@@ -38,6 +38,7 @@ private class FakeShareTransport : ShareScreenTransport {
     var collectionOutcome: ShareOutcome = ShareOutcome.OK
     var linkOutcome: ShareLinkOutcome = ShareLinkOutcome.Ok("https://unstucknow.io/circle/join?code=xyz")
     var unshareOk = true
+    var blockOk = true
 
     // Recorded calls.
     val sharedTask = mutableListOf<Triple<String, String, ShareLevel>>()
@@ -49,6 +50,9 @@ private class FakeShareTransport : ShareScreenTransport {
     val cancelledCollectionInvites = mutableListOf<String>()
     val linkLevels = mutableListOf<ShareLevel>()
     val linkRoles = mutableListOf<String>()
+    /** Each block call's user id + how many loads had happened before it (so a
+     *  test can prove the screen never reloads BEFORE the server answered). */
+    val blocks = mutableListOf<Pair<String, Int>>()
     var loads = 0
 
     override suspend fun listCircle(): List<CircleMember> { loads++; return circle }
@@ -100,6 +104,15 @@ private class FakeShareTransport : ShareScreenTransport {
         return true
     }
     override suspend fun collectionLink(collectionId: String, role: String): ShareLinkOutcome { linkRoles += role; return linkOutcome }
+    override suspend fun block(userId: String): Boolean {
+        blocks += userId to loads
+        if (!blockOk) return false
+        // block_user severs everything between the pair server-side (075).
+        circle = circle.filterNot { it.memberUserId == userId }
+        taskSharesById.values.forEach { rows -> rows.removeAll { it.recipientUserId == userId } }
+        members.removeAll { it.userId == userId }
+        return true
+    }
 }
 
 class ShareScreenModelTest {
@@ -280,6 +293,59 @@ class ShareScreenModelTest {
         assertEquals("old no longer has this.", m.state.value.result)
         m.cancelPending(m.state.value.pending[0])
         assertEquals(listOf("wait@x.com"), fake.cancelledCollectionInvites)
+    }
+
+    /** A People tap for someone who is no longer a connection (they removed or
+     *  blocked me) answers `not_in_circle` since 075 — say so, not "try again"
+     *  (audit 2026-09-22 SC-5). */
+    @Test fun `a list share to a stale connection says not connected`() = runTest {
+        fake.collectionOutcome = ShareOutcome.NOT_CONNECTED
+        val m = list()
+        m.load()
+        m.tap(m.state.value.people[0])
+        assertEquals("You're not connected yet — share by email or a link below.", m.state.value.error)
+        assertNull(m.state.value.result)
+    }
+
+    // ── Block (server-side, parity with iOS build 79, audit 2026-09-22 C10) ─
+
+    @Test fun `blocking someone on a task goes to the server then reloads`() = runTest {
+        fake.taskSharesById["t1"] = mutableListOf(ShareForTask("s1", "u1", "Maya Chen", ShareLevel.PARTNER))
+        val m = task()
+        m.load()
+        val loads = fake.loads
+        m.block(m.state.value.people.first { it.userId == "u1" })
+        assertEquals("block_user takes the person's user id", listOf("u1"), fake.blocks.map { it.first })
+        assertEquals("no reload BEFORE the server answered", loads, fake.blocks[0].second)
+        assertTrue("reloaded after the block", fake.loads > loads)
+        assertEquals("Blocked Maya — they can't share with you, and nothing is shared between you now.", m.state.value.result)
+        assertNull(m.state.value.error)
+        assertFalse("they are gone from the screen — the server cut them off", m.state.value.people.any { it.userId == "u1" })
+        assertNull(m.state.value.busyId)
+    }
+
+    @Test fun `blocking someone on a list blocks their account`() = runTest {
+        fake.members = mutableListOf(CollectionMemberInfo("u2", "z@x.com", "editor", pending = false))
+        val m = list()
+        m.load()
+        m.block(m.state.value.people.first { it.userId == "u2" })
+        assertEquals(listOf("u2"), fake.blocks.map { it.first })
+        assertEquals("Blocked Zubair — they can't share with you, and nothing is shared between you now.", m.state.value.result)
+        assertFalse(m.state.value.people.any { it.userId == "u2" })
+    }
+
+    @Test fun `a refused block is shown and never claims success`() = runTest {
+        fake.taskSharesById["t1"] = mutableListOf(ShareForTask("s1", "u1", "Maya Chen", ShareLevel.PARTNER))
+        fake.blockOk = false
+        val m = task()
+        m.load()
+        m.block(m.state.value.people.first { it.userId == "u1" })
+        // The refusal names the BLOCK — "Couldn't share" read as though a share
+        // had failed, on a safety action whose failure matters.
+        assertEquals("Couldn't block Maya — try again.", m.state.value.error)
+        assertNull(m.state.value.result)
+        assertEquals("they still have it", ShareAccess.EDIT, m.state.value.people.first { it.userId == "u1" }.access)
+        assertNull(m.state.value.busyId)
     }
 
     // ── hand-over mode ──────────────────────────────────────────────────────

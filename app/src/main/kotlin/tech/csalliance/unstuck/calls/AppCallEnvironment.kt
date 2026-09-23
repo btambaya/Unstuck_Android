@@ -62,16 +62,29 @@ object AppCallEnvironment {
         return bounded { g.store.getLiveSession()?.sessionStart != null } ?: false
     }
 
-    private fun anchorExists(graph: tech.csalliance.unstuck.AppGraph?, p: IncomingCallPayload): Boolean? {
+    /**
+     * A row this phone has not synced yet is UNKNOWN, not gone (Android audit
+     * 2026-09-23, A6): a backgrounded app has no realtime and syncs every 30 min
+     * at best, so a task or block made on the web or the iPhone just before its
+     * call is usually missing here — and reading that as `false` reported the
+     * call `stale` (terminal, silent: no ring, no retry, no notice). send-call
+     * already checked the anchor against the database before it rang, so a
+     * missing row rings with the payload's own label (null). Only what THIS
+     * device knows retires it: the row is here and done (task) / done or skipped
+     * (block), or its delete is still queued (removed here, not yet on the server).
+     */
+    internal fun anchorExists(graph: tech.csalliance.unstuck.AppGraph?, p: IncomingCallPayload): Boolean? {
         val taskId = p.taskId ?: return null
         val g = graph ?: return null
         return bounded {
-            val task = g.store.getOne(Tables.TASKS, taskId, TaskItem.serializer()) ?: return@bounded false
-            if (task.done) return@bounded false
-            val blockId = p.blockId ?: return@bounded true
-            val block = g.store.snapshot(Tables.CAL_BLOCKS, CalBlock.serializer()).firstOrNull { it.id == blockId }
-                ?: return@bounded false
-            !block.done && !block.skipped
+            val task = g.store.getOne(Tables.TASKS, taskId, TaskItem.serializer())
+            if (task == null && g.store.hasPendingDelete(Tables.TASKS, taskId)) return@bounded false
+            if (task?.done == true) return@bounded false
+            val blockId = p.blockId
+            val block = blockId?.let { g.store.getOne(Tables.CAL_BLOCKS, it, CalBlock.serializer()) }
+            if (blockId != null && block == null && g.store.hasPendingDelete(Tables.CAL_BLOCKS, blockId)) return@bounded false
+            if (block != null && (block.done || block.skipped)) return@bounded false
+            if (task == null || (blockId != null && block == null)) null else true
         }
     }
 

@@ -109,7 +109,7 @@ class PushTest {
         assertEquals("unstuck://call/$callId", entry.deepLink)
     }
 
-    @Test fun `a retried push for the ringing call updates in place and does not restart the clock`() {
+    @Test fun `a retried push for the ringing call leaves the ring alone and does not restart the clock`() {
         assertTrue(handle(at = now))
         assertTrue(handle(at = now + 12_000))
         assertEquals(1, shadowOf(nm).size())

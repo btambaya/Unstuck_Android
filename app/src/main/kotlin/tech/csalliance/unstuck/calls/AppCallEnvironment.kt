@@ -26,12 +26,13 @@ import java.time.ZoneId
  *  - withinHours     the user's Settings › Calls window (CallSettingsLogic:
  *                    start inclusive, end exclusive, overnight when end < start);
  *  - focusLive       a focus session is running (the live-session store);
- *  - anchorExists    for a task-anchored call: the task is still there and not
- *                    done, and the block (when anchored to one) is not done /
- *                    skipped. NULL when there is nothing to check (no task, no
- *                    graph, or the store read did not answer in time) — the
- *                    decision treats null as "ring rather than drop" (iOS: no
- *                    store yet → ring).
+ *  - anchorExists    for a task-anchored call: false only for what this phone
+ *                    KNOWS — the task is done or its delete is queued here, or
+ *                    the block (when anchored to one) is done / skipped / being
+ *                    deleted. NULL when there is nothing to check (no task, no
+ *                    graph, the store read did not answer in time) or the row
+ *                    isn't in this phone's store yet — the decision treats null
+ *                    as "ring rather than drop" (iOS: no store yet → ring).
  *
  * Called on the FCM thread inside the ~10 s onMessageReceived window, so the
  * store reads are bounded (READ_TIMEOUT_MS) and fall back to "unknown".

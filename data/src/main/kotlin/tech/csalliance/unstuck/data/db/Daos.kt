@@ -59,6 +59,11 @@ interface RecordDao {
     @Query("SELECT recordId FROM outbox WHERE recordTable = :table AND op = 'upsert'")
     suspend fun pendingUpsertIds(table: String): List<String>
 
+    /** Ids in [table] with a queued outbox DELETE: the server still has the row
+     *  until it lands, and taking the server's copy would resurrect it. */
+    @Query("SELECT recordId FROM outbox WHERE recordTable = :table AND op = 'delete'")
+    suspend fun pendingDeleteIds(table: String): List<String>
+
     /** DELETION RECONCILE — the catch-up pull's other half. A cursor pull by
      *  `updated_at` can never see a HARD delete, so the freshness owner
      *  periodically fetches just the server's ids for a table and calls this:
@@ -85,18 +90,30 @@ interface RecordDao {
      *  construction the newer state (the engine reconciles it against the server
      *  row BEFORE flushing, so a genuinely superseded op never reaches here), and
      *  the server's copy of such a row is skipped rather than clobbering the edit
-     *  the user just made. Pending ids are read in the same transaction. */
+     *  the user just made. A row whose local DELETE is still queued stays gone,
+     *  as the catch-up keeps it (Android audit 2026-09-23, A11: each launch now
+     *  starts with this replace, and a delete a flaky pre-pull flush couldn't land
+     *  brought the row back). Pending ids are read in the same transaction. */
     @Transaction
     suspend fun replaceTableKeepingPending(table: String, rows: List<RecordEntity>, preserveIdsPrefix: String? = null) {
         val pending = pendingUpsertIds(table).toSet()
-        if (pending.isEmpty()) {
+        val deleted = pendingDeleteIds(table).toSet()
+        if (pending.isEmpty() && deleted.isEmpty()) {
             replaceTable(table, rows, preserveIdsPrefix)
             return
         }
         val keep = get(table).filter { it.id in pending || (preserveIdsPrefix != null && it.id.startsWith(preserveIdsPrefix)) }
         clearTable(table)
         upsert(keep)
-        upsert(rows.filter { it.id !in pending })
+        upsert(rows.filter { it.id !in pending && it.id !in deleted })
+    }
+
+    /** [replaceTableKeepingPending] for rows that may be only PART of the table:
+     *  upsert them and drop nothing, under the same pending rules. */
+    @Transaction
+    suspend fun upsertKeepingPending(table: String, rows: List<RecordEntity>) {
+        val skip = pendingUpsertIds(table).toHashSet().apply { addAll(pendingDeleteIds(table)) }
+        upsert(rows.filter { it.id !in skip })
     }
 }
 

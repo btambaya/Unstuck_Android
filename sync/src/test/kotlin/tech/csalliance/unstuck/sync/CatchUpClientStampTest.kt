@@ -60,15 +60,19 @@ class CatchUpClientStampTest {
     private class Server : SyncRemote {
         val rows: MutableMap<String, MutableList<JsonObject>> = mutableMapOf()
         val fetchAllCalls = mutableListOf<String>()
+        /** PostgREST's max_rows: an unpaged select is cut here, silently. */
+        var fetchAllCap = Int.MAX_VALUE
+        /** Runs after a catch-up page is read — another device writing mid-pass. */
+        var afterFetchSince: ((String) -> Unit)? = null
         fun table(t: String) = rows.getOrPut(t) { mutableListOf() }
         fun put(t: String, row: JsonObject) {
             val id = (row["id"] as? JsonPrimitive)?.content
             table(t).removeAll { (it["id"] as? JsonPrimitive)?.content == id }
             table(t).add(row)
         }
-        override suspend fun fetchAll(table: String): List<JsonObject> { fetchAllCalls += table; return rows[table].orEmpty().toList() }
+        override suspend fun fetchAll(table: String): List<JsonObject> { fetchAllCalls += table; return rows[table].orEmpty().take(fetchAllCap) }
         override suspend fun fetchSince(table: String, column: String, since: String, limit: Int) =
-            FakeRemoteSupport.since(rows[table].orEmpty(), column, since, limit)
+            FakeRemoteSupport.since(rows[table].orEmpty(), column, since, limit).also { afterFetchSince?.invoke(table) }
         override suspend fun fetchTie(table: String, column: String, stamp: String, afterId: String, limit: Int) =
             FakeRemoteSupport.tie(rows[table].orEmpty(), column, stamp, afterId, limit)
         override suspend fun fetchIds(table: String, offset: Int, limit: Int) =
@@ -283,6 +287,112 @@ class CatchUpClientStampTest {
 
         relaunched.requestAndWait(FreshnessTrigger.FOREGROUND)
         assertEquals("then it catches up", reads + 1, remote.fetchAllCalls.count { it == Tables.TASKS })
+    }
+
+    // ── the second pass's review (A11-R1…R5) ────────────────────────────────
+
+    /** The row the mark sits on, with a write this device keeps queued (one the
+     *  server refuses: quarantined, or a 403 that stays transient), must not
+     *  freeze the table's mark: every pass re-reads that row. */
+    @Test fun aQueuedWriteOnTheMarksRow_doesNotFreezeTheTable() = runTest {
+        newOwner().requestAndWait(FreshnessTrigger.COLD_START)
+        serverTask("t", "2027-01-15T08:00:00.000Z", "T")
+        puller.catchUp(uid)
+        assertEquals("2027-01-15T08:00:00Z", cursors.get(uid, Tables.TASKS))
+
+        val edited = task("t", "2027-01-15T08:03:00.000Z", "T-edited")
+        store.upsert(Tables.TASKS, edited, TaskItem.serializer(), edited.id, edited.updatedAt)
+        store.enqueue(OutboxEntity(op = "upsert", recordTable = Tables.TASKS, recordId = "t", payload = DbRowCodec.encodeTask(edited).toString(), createdAt = 1L))
+        serverTask("u", "2027-01-15T08:05:00.000Z", "U")
+        val out = puller.catchUp(uid)
+
+        assertTrue(out.blocked.isEmpty())
+        assertEquals("2027-01-15T08:05:00Z", cursors.get(uid, Tables.TASKS))
+        assertEquals("T-edited", localTask("t")?.name)
+        assertEquals("U", localTask("u")?.name)
+    }
+
+    /** PostgREST cuts an unpaged select at max_rows with no error. The launch's
+     *  full hydrate must neither wipe the rows past the cut nor seed the mark
+     *  from the part it got. */
+    @Test fun aFetchCutAtTheServersRowCap_neitherWipesRowsNorSeedsTheMark() = runTest {
+        val n = Hydrator.SERVER_ROW_CAP + 100
+        val start = java.time.Instant.parse("2027-01-15T06:00:00Z")
+        for (i in 0 until n) serverTask("t%04d".format(i), start.plusSeconds(i.toLong()).toString())
+        remote.fetchAllCap = Hydrator.SERVER_ROW_CAP
+
+        // Sign-in: the hydrate gets only the first 1000, so the table gets no mark
+        // and the catch-up takes it from the start.
+        val o = newOwner()
+        o.requestAndWait(FreshnessTrigger.COLD_START)
+        assertEquals(Hydrator.SERVER_ROW_CAP, store.tasks().first().size)
+        assertNull("no mark from a cut fetch", cursors.get(uid, Tables.TASKS))
+        o.requestAndWait(FreshnessTrigger.FOREGROUND)
+        o.requestAndWait(FreshnessTrigger.FOREGROUND)
+        assertEquals(n, store.tasks().first().size)
+        val mark = cursors.get(uid, Tables.TASKS)
+        assertEquals(start.plusSeconds(n - 1L).toString(), mark)
+
+        newOwner().requestAndWait(FreshnessTrigger.COLD_START)   // relaunch
+
+        assertEquals("the launch's hydrate wipes nothing", n, store.tasks().first().size)
+        assertEquals(mark, cursors.get(uid, Tables.TASKS))
+    }
+
+    /** A delete a flaky pre-pull flush couldn't land is still on the server; the
+     *  launch's full hydrate must not bring the row back. */
+    @Test fun aDeleteStillQueuedAtLaunch_isNotUndoneByTheHydrate() = runTest {
+        serverTask("a", "2027-01-15T08:00:00.000Z")
+        serverTask("b", "2027-01-15T08:01:00.000Z")
+        newOwner().requestAndWait(FreshnessTrigger.COLD_START)
+        store.delete(Tables.TASKS, "a")
+        store.enqueue(OutboxEntity(op = "delete", recordTable = Tables.TASKS, recordId = "a", payload = null, createdAt = 1L))
+
+        newOwner().requestAndWait(FreshnessTrigger.COLD_START)   // relaunch
+
+        assertNull(localTask("a"))
+        assertNotNull(localTask("b"))
+    }
+
+    /** A row edited on the web while a long pass pages comes back on a later page
+     *  with a newer stamp. That version is news; the mark moves past it. Captures
+     *  keep `at` locally, so the sweep could not repair a skip. */
+    @Test fun aRowEditedWhileThePassPages_isTakenAtItsNewStamp() = runTest {
+        val start = java.time.Instant.parse("2027-01-15T07:00:00Z")
+        fun capture(i: Int, body: String = "note $i") = Capture(
+            id = "c%03d".format(i), tag = CaptureTag.IDEA, body = body, at = start.plusSeconds(i.toLong()).toString(),
+        )
+        val n = CatchUpPuller.PAGE_SIZE + 50
+        for (i in 0 until n) remote.put(Tables.CAPTURES, withUpdatedAt(DbRowCodec.encodeCapture(capture(i)), capture(i).at))
+        remote.afterFetchSince = { table ->
+            if (table == Tables.CAPTURES) {
+                remote.afterFetchSince = null
+                remote.put(Tables.CAPTURES, withUpdatedAt(DbRowCodec.encodeCapture(capture(0, "edited on the web")), "2027-01-15T08:00:00.000000+00:00"))
+            }
+        }
+
+        puller.catchUp(uid)
+
+        assertEquals("edited on the web", store.captures().first().first { it.id == "c000" }.body)
+        assertEquals("2027-01-15T08:00:00Z", cursors.get(uid, "captures.updated_at"))
+    }
+
+    /** One statement stamps more rows alike than a pass may read (a backfill):
+     *  the next pass carries on inside the run instead of restarting at its head,
+     *  so the run is finished and what follows it is read. */
+    @Test fun aRunLongerThanThePageCap_isFinishedOnTheNextPass() = runTest {
+        cursors.put(uid, Tables.TASKS, "2027-01-15T08:00:00Z")
+        val n = CatchUpPuller.PAGE_SIZE * CatchUpPuller.MAX_PAGES + 50
+        for (i in 0 until n) serverTask("bulk-%04d".format(i), "2027-01-15T08:01:00.000Z", "bulk")
+        serverTask("late", "2027-01-15T08:02:00.000Z", "Late")
+
+        puller.catchUp(uid)   // capped inside the run
+        puller.catchUp(uid)
+
+        assertEquals(n, store.tasks().first().count { it.name == "bulk" })
+        assertEquals("Late", localTask("late")?.name)
+        assertEquals("2027-01-15T08:02:00Z", cursors.get(uid, Tables.TASKS))
+        assertEquals("a pass after that is quiet", 0, puller.catchUp(uid).appliedCount)
     }
 
     /** The boundary row every pass re-reads is not news: a quiet tick applies

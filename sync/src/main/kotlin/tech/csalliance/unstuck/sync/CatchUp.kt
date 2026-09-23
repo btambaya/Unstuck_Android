@@ -91,6 +91,7 @@ data class CatchUpOutcome(
 interface SyncCursors {
     fun get(userId: String, table: String): String?
     fun put(userId: String, table: String, value: String)
+    fun remove(userId: String, table: String)
     fun clear(userId: String)
     /** True when this user has at least one cursor — i.e. a full hydrate has
      *  completed at least once and a cursor pull is meaningful. */
@@ -102,6 +103,7 @@ class InMemorySyncCursors : SyncCursors {
     private fun key(u: String, t: String) = "$u|$t"
     override fun get(userId: String, table: String): String? = map[key(userId, table)]
     override fun put(userId: String, table: String, value: String) { map[key(userId, table)] = value }
+    override fun remove(userId: String, table: String) { map.remove(key(userId, table)) }
     override fun clear(userId: String) { map.keys.removeAll { it.startsWith("$userId|") } }
     override fun hasAny(userId: String): Boolean = map.keys.any { it.startsWith("$userId|") }
 }
@@ -114,6 +116,9 @@ class PrefsSyncCursors(private val prefs: SharedPreferences) : SyncCursors {
     override fun get(userId: String, table: String): String? = prefs.getString(key(userId, table), null)
     override fun put(userId: String, table: String, value: String) {
         prefs.edit().putString(key(userId, table), value).apply()
+    }
+    override fun remove(userId: String, table: String) {
+        prefs.edit().remove(key(userId, table)).apply()
     }
     override fun clear(userId: String) {
         val e = prefs.edit()
@@ -155,13 +160,18 @@ class CatchUpPuller(
         var collectionsChanged = false
         for (spec in CURSOR_TABLES) {
             val since = cursors.get(userId, spec.cursorKey) ?: EPOCH
+            val tieKey = spec.cursorKey + TIE_SUFFIX
+            val storedTie = cursors.get(userId, tieKey)
             try {
-                val result = pullTable(userId, spec, since)
+                val result = pullTable(userId, spec, since, storedTie?.let { resumeIdFor(it, since) })
                 if (result.count > 0) applied[spec.table] = result.count
                 provenMissed += result.provenMissed
                 if (result.blocked) blocked += spec.table
                 if (spec.table == Tables.COLLECTIONS && result.seen) collectionsChanged = true
                 result.cursor?.let { cursors.put(userId, spec.cursorKey, it) }
+                val tie = result.resumeAfterId?.let { "${result.cursor ?: since}|$it" }
+                if (tie == null) { if (storedTie != null) cursors.remove(userId, tieKey) }
+                else if (tie != storedTie) cursors.put(userId, tieKey, tie)
             } catch (t: CancellationException) {
                 throw t
             } catch (t: Throwable) {
@@ -188,11 +198,18 @@ class CatchUpPuller(
     }
 
     /** [seen]: at least one row this device had not seen came back and was taken
-     *  or deliberately skipped (not one that failed to apply). */
-    private data class TablePull(val count: Int, val cursor: String?, val blocked: Boolean, val provenMissed: Int, val seen: Boolean)
+     *  or deliberately skipped (not one that failed to apply). [resumeAfterId]: the
+     *  id of the last row taken at the mark's stamp when that stamp is a run of rows
+     *  longer than a page — the next pass carries on after it (null = start AT the
+     *  mark). */
+    private data class TablePull(
+        val count: Int, val cursor: String?, val blocked: Boolean, val provenMissed: Int, val seen: Boolean,
+        val resumeAfterId: String?,
+    )
 
-    private suspend fun pullTable(userId: String, spec: CursorSpec, since: String): TablePull {
+    private suspend fun pullTable(userId: String, spec: CursorSpec, since: String, resumeAfterId: String?): TablePull {
         var cursor: String? = null
+        var cursorId: String? = null     // the id of the row `cursor` was taken from
         var applied = 0
         var provenMissed = 0
         var blocked = false
@@ -201,13 +218,23 @@ class CatchUpPuller(
         // mark's stamp that was held back last pass, or the tail of a tie the page
         // cap cut short, is still owed (Android audit 2026-09-23, A11). The row the
         // mark sits on therefore comes back every pass; that re-read is applied
-        // (RowApply is idempotent) but is not news. `taken` keeps a row that a tie
-        // page repeats from being handled twice.
+        // (RowApply is idempotent) but is not news. `taken` skips a row a page
+        // repeats; it is keyed by stamp too, because a row edited while the pass
+        // pages comes back later with a newer stamp, and that version is news
+        // (Android audit 2026-09-23, A11).
+        //
+        // A run of rows sharing the mark's stamp that outgrew a page resumes after
+        // the last id taken instead (Android audit 2026-09-23, A11): restarting at
+        // its head re-read the same MAX_PAGES pages every pass, and a run longer
+        // than that (a backfill, a bulk statement) was never finished, nor was
+        // anything newer read. Nothing at the mark is a re-read then.
         val sinceInstant = if (since == EPOCH) null else instantOf(since)
+        val reReadAt = if (resumeAfterId != null) null else sinceInstant
         val taken = HashSet<String>()
         var at = since
-        var inclusive = sinceInstant != null
-        var tieAfterId: String? = null   // set while finishing a run of rows stamped `at`, by id
+        var inclusive = sinceInstant != null && resumeAfterId == null
+        var tieAfterId: String? = resumeAfterId   // set while finishing a run of rows stamped `at`, by id
+        var tieStamp: String? = if (resumeAfterId != null) since else null   // the run last paged by id
         var pages = 0
         var capped = false
         while (true) {
@@ -222,15 +249,23 @@ class CatchUpPuller(
                 val stamp = stampOf(row, spec.column)
                 val id = (row["id"] as? JsonPrimitive)?.contentOrNull
                 if (id == null) { blocked = true; continue }
-                if (!taken.add(id)) continue
-                val reRead = sinceInstant != null && stamp != null && instantOf(stamp) == sinceInstant &&
+                if (!taken.add("$id|$stamp")) continue
+                val reRead = reReadAt != null && stamp != null && instantOf(stamp) == reReadAt &&
                     store.rowMeta(spec.table, id).exists
                 // A row this device has a queued write for must not be clobbered
                 // (the rule the hydrate already honours). Don't advance past it
                 // either: once the write lands, the server's copy is re-offered.
                 if (store.latestPendingUpsert(spec.table, id) != null) {
+                    // …except the row the mark sits on, re-read: nothing past it is
+                    // owed for it. Its write, once it lands, re-stamps it past the
+                    // mark, and a task op the prune drops as stale leaves the
+                    // server's newer stamp for the sweep to take. Blocking here froze
+                    // the table for as long as the write stayed queued, which for a
+                    // write the server keeps refusing is for good (Android audit
+                    // 2026-09-23, A11).
+                    if (reRead) continue
                     blocked = true
-                    if (!reRead) seen = true
+                    seen = true
                     continue
                 }
                 // …and a row we DELETED here whose delete hasn't landed yet is
@@ -269,7 +304,7 @@ class CatchUpPuller(
                     applied++
                     if (missed) provenMissed++
                 }
-                if (!blocked && stamp != null) cursor = stamp
+                if (!blocked && stamp != null) { cursor = stamp; cursorId = id }
             }
             // Past a row we could not take there is nothing to advance to; the next
             // pass starts again from the mark.
@@ -289,10 +324,19 @@ class CatchUpPuller(
             val last = rows.last()
             at = stampOf(last, spec.column) ?: break
             tieAfterId = (last["id"] as? JsonPrimitive)?.contentOrNull ?: break
+            tieStamp = at
             inclusive = false
         }
-        if (capped) log("[catchup] ${spec.table} hit the page cap — the next pass carries on from the mark")
-        return TablePull(applied, cursor, blocked, provenMissed, seen)
+        if (capped) log("[catchup] ${spec.table} hit the page cap — the next pass carries on from where this one stopped")
+        // Where the next pass resumes inside the mark's run. Nothing taken this
+        // pass: the stored position still holds. Otherwise only when the mark ends
+        // in a run that was paged by id; a short run is cheaper to re-read whole.
+        val resume = when {
+            cursor == null -> resumeAfterId
+            tieStamp != null && instantOf(cursor) == instantOf(tieStamp) -> cursorId
+            else -> null
+        }
+        return TablePull(applied, cursor, blocked, provenMissed, seen, resume)
     }
 
     /** True when the local store demonstrably did NOT have this row's change and
@@ -430,6 +474,8 @@ class CatchUpPuller(
         for (spec in CURSOR_TABLES) {
             val seed = serverMaxima[spec.table] ?: continue
             cursors.put(userId, spec.cursorKey, seed)
+            // A position inside the old mark's run means nothing at the new mark.
+            if (cursors.get(userId, spec.cursorKey + TIE_SUFFIX) != null) cursors.remove(userId, spec.cursorKey + TIE_SUFFIX)
         }
     }
 
@@ -448,6 +494,16 @@ class CatchUpPuller(
         internal const val REPAIR_CHUNK = 50
         internal const val MAX_REPAIR_ROWS = 1_000
         internal const val EXTERNAL_BLOCK_PREFIX = "g_"
+        /** Stored next to a table's mark (`<cursorKey>.tie` = "<stamp>|<id>"): where
+         *  a run of rows sharing that stamp, longer than a page, was left off. */
+        internal const val TIE_SUFFIX = ".tie"
+
+        /** The id to resume after, when [stored] is a position in the run at [since]. */
+        internal fun resumeIdFor(stored: String, since: String): String? {
+            val id = stored.substringAfter('|', "").takeIf { it.isNotEmpty() } ?: return null
+            val at = instantOf(stored.substringBefore('|')) ?: return null
+            return id.takeIf { at == instantOf(since) }
+        }
         /** How long the live mirror gets to deliver a change before a catch-up
          *  that finds it counts as evidence the channel is deaf. */
         internal const val REALTIME_GRACE_MS = 5_000L

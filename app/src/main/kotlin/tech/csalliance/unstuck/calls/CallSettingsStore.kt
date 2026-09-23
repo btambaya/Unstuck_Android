@@ -3,6 +3,7 @@ package tech.csalliance.unstuck.calls
 import android.content.Context
 import tech.csalliance.unstuck.core.logic.CallProactivePrefs
 import tech.csalliance.unstuck.core.logic.CallSettings
+import tech.csalliance.unstuck.core.time.WireTime
 
 // Device-local "Calls from Unstuck" preferences, PER ACCOUNT — the phone's own
 // guard applied ON RECEIPT (a ring outside the allowed hours is declined
@@ -113,10 +114,13 @@ object CallSettingsStore {
         e.apply()
     }
 
-    /** "HH:MM" with 0 ≤ H < 24, 0 ≤ M < 60 → itself; anything else → null. */
+    /** "HH:MM" with 0 ≤ H < 24, 0 ≤ M < 60 → itself; anything else → null. An
+     *  older build saved the picked hours in the phone's own digits ("٠٨:٠٠"); they
+     *  come back in ASCII, like every HH:MM the app compares and sends (Android
+     *  audit 2026-09-23, A12). */
     fun validHM(s: String?): String? {
         if (s == null) return null
-        val m = Regex("^(\\d{2}):(\\d{2})$").find(s.trim()) ?: return null
+        val m = Regex("^(\\d{2}):(\\d{2})$").find(WireTime.asciiDigits(s.trim())) ?: return null
         val h = m.groupValues[1].toInt()
         val min = m.groupValues[2].toInt()
         return if (h in 0..23 && min in 0..59) m.value else null

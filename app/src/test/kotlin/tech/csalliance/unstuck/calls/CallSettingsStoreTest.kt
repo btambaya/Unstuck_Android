@@ -87,6 +87,9 @@ class CallSettingsStoreTest {
         assertNull(CallSettingsStore.validHM("06:60"))
         assertNull(CallSettingsStore.validHM(""))
         assertNull(CallSettingsStore.validHM(null))
+        // Saved by an older build on an Arabic / Persian phone (Android audit 2026-09-23, A12).
+        assertEquals("08:00", CallSettingsStore.validHM("٠٨:٠٠"))
+        assertEquals("21:30", CallSettingsStore.validHM("۲۱:۳۰"))
     }
 
     @Test fun leadOptionsMatchIOS() {

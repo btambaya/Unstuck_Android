@@ -301,7 +301,8 @@ class AppViewModel(
     // (myTaskShareBadges → row chips + the Delegated group). Each refetches on the
     // CollabRealtime `sharesChanged` signal (a task_shares row I can see changed — my
     // outgoing OR incoming) AND after my own writes (the manual pulse), exactly like
-    // `circle` on the circleChanged signal. Declared HERE (above the widget init that
+    // `circle` on the circleChanged signal — and on session edges and completed pulls
+    // ([shareRereads], Android audit 2026-09-23, A16). Declared HERE (above the widget init that
     // reads assignedOut) so property init order is safe. circleClient/collab are
     // custom getters (no backing field) → safe to reference before their textual decl.
     private val _sharesRefresh = MutableSharedFlow<Unit>(
@@ -333,10 +334,24 @@ class AppViewModel(
             ?.stateIn(viewModelScope, SharingStarted.Eagerly, null)
             ?: MutableStateFlow(null)
 
+    /** Re-reads for the sharing projections beyond their realtime signal and my own
+     *  writes: every session edge ([sessionRereads]: sign-in, cold-start restore,
+     *  the return from the SDK's background reset, a token that works again,
+     *  sign-out → empty) and every completed pull, which also lands after each
+     *  resume. Without them the badges read once, before the session had loaded,
+     *  and stayed empty for the whole process (Android audit 2026-09-23, A16).
+     *  Declared above the flows that use it (property init order). */
+    private val shareRereads: kotlinx.coroutines.flow.Flow<Unit> = merge(
+        graph.provider?.client?.auth?.sessionStatus
+            ?.let { tech.csalliance.unstuck.ui.sharing.sessionRereads(it, heldAccount) }
+            ?: kotlinx.coroutines.flow.emptyFlow(),
+        graph.coordinator?.hydrated ?: kotlinx.coroutines.flow.emptyFlow(),
+    )
+
     /** Tasks other people have shared WITH me — the "Shared with you" group. Read via
      *  the tasks_shared_with_me projection (raw task rows are RLS-forbidden). */
     val sharedWithMe: StateFlow<List<SharedWithMe>> =
-        merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
+        merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } }, shareRereads)
             .onStart { emit(Unit) }
             .mapNotNull { sharedWithMeHold.refresh(currentUid(), heldAccount.value) { graph.coordinator?.circle?.tasksSharedWithMe() } }
             .combine(_sharedCompletedAt) { rows, stamps ->
@@ -349,7 +364,7 @@ class AppViewModel(
     /** My outgoing shares grouped by taskId → the row badges (mirrors the web
      *  useShareBadges().byTask). Drives the on-row "shared" chips + the Delegated group. */
     val shareBadges: StateFlow<Map<String, List<ShareBadge>>> =
-        merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
+        merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } }, shareRereads)
             .onStart { emit(Unit) }
             .mapNotNull { shareBadgesHold.refresh(currentUid(), heldAccount.value) { graph.coordinator?.circle?.myTaskShareBadges() } }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
@@ -382,7 +397,7 @@ class AppViewModel(
     val sharedBlocks: StateFlow<List<SharedBlock>> =
         combine(
             _sharedBlockRange,
-            merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
+            merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } }, shareRereads)
                 .onStart { emit(Unit) }
                 .map { sharedBlockCache.clear(); System.nanoTime() },   // a distinct value per tick → combine re-emits
         ) { range, _ -> range }
@@ -2469,7 +2484,7 @@ class AppViewModel(
      *  code, so the link can be re-copied). Empty until first collected — the
      *  Connections screen drives it (WhileSubscribed, so it stops when off-screen). */
     val circle: StateFlow<List<CircleMember>> =
-        merge(_circleRefresh, flow { collab?.circleChanged?.let { emitAll(it) } })
+        merge(_circleRefresh, flow { collab?.circleChanged?.let { emitAll(it) } }, shareRereads)
             .onStart { emit(Unit) }
             .mapNotNull { circleHold.refresh(currentUid(), heldAccount.value) { circleClient?.circleList() } }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())

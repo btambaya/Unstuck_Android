@@ -22,6 +22,7 @@ import tech.csalliance.unstuck.surface.ExactAlarms
 import tech.csalliance.unstuck.surface.ReminderScheduler
 import tech.csalliance.unstuck.ui.tour.TourEntryPhase
 import tech.csalliance.unstuck.ui.tour.TourEvents
+import tech.csalliance.unstuck.ui.tour.TourState
 import tech.csalliance.unstuck.ui.tour.TourStateStore
 import tech.csalliance.unstuck.ui.tour.initialPhase
 
@@ -29,6 +30,14 @@ internal const val EXACT_ALARM_ASK_TITLE = "Get reminders on time"
 internal const val EXACT_ALARM_ASK_BODY =
     "Android holds reminders back until Unstuck may set alarms. Turn on “Alarms & reminders” so " +
         "“Coming up” and “Time to start” arrive when they should. You can do this later in Settings › Focus."
+
+/** Whether the one-time ask still waits on the guided tour: only for its welcome
+ *  card, which can land a beat after onboarding. A PAUSED run stays paused until
+ *  the user resumes or ends it, often never, so waiting on it meant a user who
+ *  paused the tour was never asked (Android audit 2026-09-23, A15). The resume
+ *  card, while up, locks the content (TourEvents.contentLocked), which already
+ *  holds the ask. */
+internal fun exactAlarmAskWaitsForTour(tour: TourState): Boolean = initialPhase(tour) == TourEntryPhase.WELCOME
 
 /**
  * The one-time ask for exact alarms, from Today once the user is signed in and
@@ -57,8 +66,7 @@ fun ExactAlarmPrompt(vm: AppViewModel, screenFree: Boolean) {
         // Let Today settle: the tour's welcome card can land a beat later, and a card
         // coming up re-keys this effect, which cancels the ask.
         delay(1_500)
-        val tourWaiting = initialPhase(TourStateStore(context).load()) != TourEntryPhase.HIDDEN
-        if (!tourWaiting && ExactAlarms.shouldAsk(ExactAlarms.granted(context), wanted, ExactAlarms.asked(context), screenFree = true)) show = true
+        if (!exactAlarmAskWaitsForTour(TourStateStore(context).load()) && ExactAlarms.shouldAsk(ExactAlarms.granted(context), wanted, ExactAlarms.asked(context), screenFree = true)) show = true
     }
     if (show) {
         fun close() { show = false; ExactAlarms.markAsked(context) }

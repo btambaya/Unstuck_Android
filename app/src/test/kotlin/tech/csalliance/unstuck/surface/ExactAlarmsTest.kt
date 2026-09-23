@@ -18,6 +18,9 @@ import org.robolectric.annotation.Config
 import org.robolectric.shadows.ShadowAlarmManager
 import tech.csalliance.unstuck.NotificationLevel
 import tech.csalliance.unstuck.SettingsState
+import tech.csalliance.unstuck.ui.exactAlarmAskWaitsForTour
+import tech.csalliance.unstuck.ui.tour.TourMode
+import tech.csalliance.unstuck.ui.tour.TourState
 
 /**
  * Reminders on a new Android 14+ install, where SCHEDULE_EXACT_ALARM is denied by
@@ -87,6 +90,17 @@ class ExactAlarmsTest {
         assertTrue(ExactAlarms.wanted(SettingsState(reminderLeadMin = 0, notificationLevel = NotificationLevel.BALANCED)))
         assertTrue(ExactAlarms.wanted(SettingsState(reminderLeadMin = 10, notificationLevel = NotificationLevel.CALM)))
         assertFalse(ExactAlarms.wanted(SettingsState(reminderLeadMin = 0, notificationLevel = NotificationLevel.CALM)))
+    }
+
+    // Waiting on the tour meant waiting on any PAUSED run, which lasts until the user
+    // resumes or ends it: a user who paused the tour was never asked (A15). Only the
+    // welcome card holds the ask; a resume card on screen already locks the content.
+    @Test fun theAskWaitsForTheTourWelcomeOnly_neverForAPausedRun() {
+        assertTrue("the welcome card can land a beat after onboarding", exactAlarmAskWaitsForTour(TourState(eligible = true)))
+        assertFalse("paused mid-run", exactAlarmAskWaitsForTour(TourState(started = true, paused = true, mode = TourMode.ESSENTIAL, index = 3)))
+        assertFalse("paused, resume chip dismissed", exactAlarmAskWaitsForTour(TourState(started = true, paused = true, mode = TourMode.ESSENTIAL, chipDismissed = true)))
+        assertFalse("tour finished", exactAlarmAskWaitsForTour(TourState(started = true, done = true, eligible = true)))
+        assertFalse("existing account, no tour", exactAlarmAskWaitsForTour(TourState()))
     }
 
     private val start = 1_800_000_000_000L

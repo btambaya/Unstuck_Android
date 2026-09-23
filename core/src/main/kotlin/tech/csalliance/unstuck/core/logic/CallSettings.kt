@@ -11,9 +11,11 @@ import java.time.ZoneId
 // lives in :app calls/CallSettingsStore.kt, per-uid SharedPreferences).
 //
 // The allowed hours are applied ON RECEIPT (outside → the call ends as
-// `declined` silently + a notification). The SERVER window is 06:00–23:00
-// inclusive (request_call refuses outside it); this client window is the
-// user's own, narrower guard.
+// `declined` silently + a notification), and — since iOS build 81 (audit
+// 2026-09-22 C12) — also wherever this phone books a time ([deviceGuard],
+// [snoozeRefusal]) and under the proactive pickers. The SERVER window is
+// 06:00–23:00 inclusive (request_call refuses outside it); this client
+// window is the user's own guard and defaults to those same hours.
 //
 // The three PROACTIVE calls (morning plan / evening wrap-up / check-in after a
 // block — calls build-out 2026-09-20, migration 072) are ACCOUNT-wide:
@@ -55,11 +57,107 @@ object CallSettingsLogic {
 
     fun withinWindow(nowHM: String, start: String, end: String): Boolean {
         val t = minutesOfDay(nowHM) ?: return true
+        return withinWindow(t, start, end)
+    }
+
+    /** The same rule on minutes since midnight (the pickers' warnings). */
+    fun withinWindow(minuteOfDay: Int, start: String, end: String): Boolean {
+        val t = minuteOfDay
         val a = minutesOfDay(start) ?: return true
         val b = minutesOfDay(end) ?: return true
         if (a == b) return true
         if (a < b) return t >= a && t < b
         return t >= a || t < b
+    }
+
+    /** The allowed hours as a refusal names them, "08:00–21:00". The end is
+     *  exclusive, so refusing the end minute itself read as a contradiction
+     *  ("23:00 is outside this phone's call hours (06:00–23:00)" on untouched
+     *  defaults, where the server and the web take 23:00) — that one case
+     *  also says the last minute that rings (parity with iOS build 81,
+     *  audit 2026-09-22 C12). */
+    fun hoursLabel(start: String, end: String, refusingMin: Int): String {
+        val e = minutesOfDay(end)
+        if (e == null || refusingMin != e) return "$start–$end"
+        val last = (e + 24 * 60 - 1) % (24 * 60)
+        return "$start–$end; the latest it rings is %02d:%02d".format(last / 60, last % 60)
+    }
+
+    // ── will it ring here? (parity with iOS build 81, audit 2026-09-22 C12) ──
+    // Every booking path used to check only the server window, while the phone
+    // applies its switch and hours on receipt (CallCoordinatorLogic.decide) —
+    // so a call the app had confirmed was declined quietly at ring time, every
+    // day for a proactive time outside the hours. These say so where the time
+    // is picked.
+
+    /** The minute dispatch_proactive_calls (072) actually books a morning /
+     *  evening call picked for minute `t`: its cron runs every 5 minutes and
+     *  books at the first tick in [t, t+10) that is also inside 06:00–23:00
+     *  (inclusive). Null = no tick qualifies, so the call never happens. */
+    fun proactiveRingMinute(t: Int): Int? {
+        val s = minutesOfDay(SERVER_WINDOW.start) ?: return t
+        val e = minutesOfDay(SERVER_WINDOW.endInclusive) ?: return t
+        val first = (t + 4) / 5 * 5
+        return listOf(first, first + 5).firstOrNull { it in s..e }
+    }
+
+    /** The amber line under a proactive call's time picker, or null when it
+     *  will ring here. Judged at the minute the dispatcher really books it
+     *  ([proactiveRingMinute]) and the minute after — call-dispatch runs every
+     *  minute — against this phone's switch and hours. */
+    fun proactiveTimeWarning(hhmm: String, enabled: Boolean, start: String, end: String): String? {
+        val t = minutesOfDay(hhmm) ?: return null
+        val ring = proactiveRingMinute(t)
+            ?: return "Unstuck only calls between ${SERVER_WINDOW.start} and ${SERVER_WINDOW.endInclusive}, so a call at $hhmm never rings."
+        if (!enabled) return "Calls are off on this phone, so this call is declined here — switch them on above."
+        val outside = listOf(ring, ring + 1).firstOrNull { !withinWindow(it, start, end) } ?: return null
+        return "Unstuck rings this call at about %02d:%02d, outside this phone's allowed hours (%s), so it's declined here — widen the hours above or pick another time."
+            .format(outside / 60, outside % 60, hoursLabel(start, end, outside))
+    }
+
+    /** The amber line under "Check in after a block" (it rings at the tick
+     *  after a block ends, any time 06:00–23:00), or null when every such call
+     *  rings here. The 23:00 minute itself is left out: the default hours end
+     *  there (exclusive), and one edge minute is not worth a warning on every
+     *  untouched phone. */
+    fun afterBlockWarning(enabled: Boolean, start: String, end: String): String? {
+        if (!enabled) return "Calls are off on this phone, so these check-ins are declined here — switch them on above."
+        val s = minutesOfDay(SERVER_WINDOW.start) ?: return null
+        val e = minutesOfDay(SERVER_WINDOW.endInclusive) ?: return null
+        if ((s until e).all { withinWindow(it, start, end) }) return null
+        return "This phone only takes calls $start–$end, so a check-in after a block that ends outside those hours is declined here."
+    }
+
+    /** THIS phone's Calls switch and allowed hours → the error string, or null
+     *  when it would ring. Runs after the server-window guard wherever this
+     *  phone picks a ring time (request_call, update_call with a new time, the
+     *  task editor). Kept apart from that guard so the web-contract window
+     *  string stays as it is. The wording makes the model ASK for another
+     *  time, never pick one. iOS CallToolLogic.deviceGuard with "iPhone" →
+     *  "phone". */
+    fun deviceGuard(callAtMs: Long, s: CallSettings, zone: ZoneId = ZoneId.systemDefault()): String? {
+        if (!s.enabled) {
+            return "error: calls are off on this phone, so it would decline this call — tell them to switch Calls on in Settings › Calls first"
+        }
+        val hm = hhmm(callAtMs, zone)
+        val t = minutesOfDay(hm) ?: return null
+        if (!withinWindow(t, s.hoursStart, s.hoursEnd)) {
+            return "error: $hm is outside this phone's call hours (${hoursLabel(s.hoursStart, s.hoursEnd, t)}), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Calls"
+        }
+        return null
+    }
+
+    /** A call-back is a booking too: "call me back in two hours" at 20:30 was
+     *  answered ok, then declined on receipt at 22:30 by this phone's hours.
+     *  Refused here instead, with the call left up (iOS CallCoordinator.
+     *  snoozeRefusal). Only the hours: the call is live, so Calls is on. */
+    fun snoozeRefusal(minutes: Int, nowMs: Long, s: CallSettings, zone: ZoneId = ZoneId.systemDefault()): String? {
+        val m = minutes.coerceIn(1, 180)
+        val at = nowMs + m * 60_000L
+        val hm = hhmm(at, zone)
+        val t = minutesOfDay(hm) ?: return null
+        if (withinWindow(t, s.hoursStart, s.hoursEnd)) return null
+        return "error: a call-back in $m minutes would ring at $hm, outside this phone's call hours (${hoursLabel(s.hoursStart, s.hoursEnd, t)}), so it would be declined — ask them for a shorter wait, or for a time inside those hours to book with request_call"
     }
 
     /** Server booking window check (inclusive 06:00 … 23:00). */

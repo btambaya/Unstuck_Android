@@ -187,7 +187,8 @@ class CallScriptTest {
         assertEquals("Morning. Want to walk through today?", opening(p.copy(name = "  ")))
         val i = CallScript.instructions(p, nowMs = now, zone = utc)
         assertTrue(i.startsWith("THIS IS THE MORNING PLANNING CALL the user opted into"))
-        assertTrue(i.contains("call get_schedule and read today back briefly"))
+        assertTrue(i.contains("read today's plan from the call context below, briefly"))
+        assertTrue(i.contains("call get_schedule only if the context has no plan"))
         assertTrue(i.contains("schedule_task / block_time"))
         assertTrue(i.contains("create_task"))
         assertTrue(i.contains("set_task_later or carry_to_tomorrow"))
@@ -250,5 +251,64 @@ class CallScriptTest {
             assertEquals(k.wire, 1, Regex("\\bAhmad\\b").findAll(opening(p)).count())
         }
         assertEquals("Their name is in the opening — say it there once and not again during the call.", CallScript.NAME_ONCE_RULE)
+    }
+
+    // ── day context (parity with iOS build 75 — Zubair's evening call read
+    // nothing, then an undated all-time list as "today") ──
+
+    private val london: ZoneId = ZoneId.of("Europe/London")
+    private fun task(id: String, name: String, done: Boolean = false, completedAt: String? = null) =
+        tech.csalliance.unstuck.core.model.TaskItem(id = id, name = name, estimateMin = 25, done = done, completedAt = completedAt, createdAt = "x", updatedAt = "x")
+    private fun block(id: String, taskId: String, date: String, start: String) =
+        tech.csalliance.unstuck.core.model.CalBlock(id = id, taskId = taskId, taskName = "stale", startTime = start, durationMinutes = 30, date = date)
+    private fun dayStore() = listOf(
+        task("t-course", "Beginner course", done = true, completedAt = "2026-09-20T08:10:00.000Z"),
+        task("t-gym", "Gym"), task("t-mum", "Call mum"), task("t-dentist", "Dentist"),
+        task("t-sc200", "SC-200 revision", done = true, completedAt = "2026-09-19T10:00:00.000Z"),
+        task("t-late", "Late tick", done = true, completedAt = "2026-09-19T23:30:00.000Z"),   // 00:30 London on the 20th
+    ) to listOf(
+        block("b6", "t-course", "2026-09-20", "09:00"), block("b7", "t-gym", "2026-09-20", "15:00"),
+        block("b8", "t-mum", "2026-09-20", "17:30"), block("b9", "t-dentist", "2026-09-21", "10:00"),
+        block("b5", "t-sc200", "2026-09-19", "09:00"),
+    )
+
+    @Test fun `day context - evening reads done, open and tomorrow from the store`() {
+        val (tasks, blocks) = dayStore()
+        val lines = tech.csalliance.unstuck.core.logic.CallDayContext.lines(CallKind.EVENING, tasks, blocks, "2026-09-20", "19:01", london)
+        assertTrue(lines[0], lines[0].startsWith("today: 2026-09-20 (") && lines[0].endsWith("), now 19:01"))
+        assertEquals(
+            "by the LOCAL completion day — 23:30Z on the 19th is the 20th in London; SC-200 (the 19th) is not today",
+            "done today (2): Beginner course, Late tick", lines[1],
+        )
+        assertEquals("still open today (2): Gym (15:00), Call mum (17:30)", lines[2])
+        assertEquals("tomorrow starts with: Dentist at 10:00", lines[3])
+    }
+
+    @Test fun `day context - morning, after-block and an empty day`() {
+        val (tasks, blocks) = dayStore()
+        val ctx = tech.csalliance.unstuck.core.logic.CallDayContext
+        val morning = ctx.lines(CallKind.MORNING, tasks, blocks, "2026-09-20", "08:30", london)
+        assertEquals("today's plan (3): 09:00 Beginner course · done; 15:00 Gym; 17:30 Call mum", morning[1])
+        assertEquals("done today (2): Beginner course, Late tick", morning[2])
+        val after = ctx.lines(CallKind.AFTER_BLOCK, tasks, blocks, "2026-09-20", "15:50", london)
+        assertEquals("still open today (2): Gym (15:00), Call mum (17:30)", after[1])
+        val empty = ctx.lines(CallKind.EVENING, emptyList(), emptyList(), "2026-09-22", "19:00", london)
+        assertEquals(listOf("done today: nothing ticked off yet", "still open today: nothing", "tomorrow: nothing scheduled yet"), empty.drop(1))
+        assertEquals("2026-09-20", ctx.localDate("2026-09-19T23:30:00Z", london))
+        assertEquals("an offset timestamp", "2026-09-20", ctx.localDate("2026-09-20T01:30:00+02:00", london))
+        assertNull(ctx.localDate("nope", london))
+        assertNull(ctx.localDate(null, london))
+        // A requested / test call gets today's plan only.
+        assertEquals(2, ctx.lines(CallKind.REQUESTED, tasks, blocks, "2026-09-20", "12:00", london).size)
+    }
+
+    @Test fun `instructions carry the day context and the evening rule never asks what got done`() {
+        val p = payload(callKind = "evening", label = "Evening wrap-up", notes = emptyList(), taskId = null)
+        val i = CallScript.instructions(p, nowMs = now, zone = utc, dayContext = listOf("done today (1): Beginner course", "still open today: nothing"))
+        assertTrue(i, i.contains("- done today (1): Beginner course"))
+        assertTrue(i, i.contains("- still open today: nothing"))
+        assertTrue(i, i.contains("NEVER ask them what got done"))
+        assertTrue(i, i.contains("read from the app as the call connected"))
+        assertTrue(CallScript.instructions(payload(callKind = "morning"), nowMs = now, zone = utc).contains("read today's plan from the call context"))
     }
 }

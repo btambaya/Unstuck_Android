@@ -153,6 +153,19 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
 
     fun fail(message: String) { note = message; state = VoiceState.ERROR }
 
+    /** The client's state report (main thread). A reply is coming: whatever
+     *  went wrong before is over, so SPEAKING clears the note (parity with
+     *  iOS build 78). */
+    internal fun clientState(s: VoiceState) {
+        if (s == VoiceState.SPEAKING) note = null
+        state = s
+    }
+
+    /** The client's error report (main thread). Also sent while the session
+     *  stays LIVE — a rate-limited reply's "busy" — so the screen shows the
+     *  note under the status line then, not only in the ERROR state. */
+    internal fun clientError(message: String) { note = message }
+
     /** Is a call FROM Unstuck live right now? A seam so the gate below is
      *  unit-testable (CallVoiceService.activeCallId has a private setter). */
     internal var isCallActive: () -> Boolean = { CallVoiceService.activeCallId != null }
@@ -221,8 +234,8 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
             instructions = instructions, tools = vm.voiceTools(), opening = opening,
             audio = engine,
             runTool = { name, args -> vm.runVoiceTool(name, args) },
-            onState = { s -> main.post { if (current()) state = s } },
-            onError = { msg -> main.post { if (current()) note = msg } },
+            onState = { s -> main.post { if (current()) clientState(s) } },
+            onError = { msg -> main.post { if (current()) clientError(msg) } },
             onCaption = { role, text, done ->
                 main.post {
                     if (!current()) return@post
@@ -312,6 +325,14 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
         const val RECONNECT_DELAY_MS = 800L
         /** Shown only after the second quiet reconnect failed too. */
         const val DROPPED_TWICE = "The voice server dropped the session twice. Please try again in a moment."
+
+        /** The note shown UNDER the status line: any state but ERROR, which
+         *  already shows the note AS the status line. Without it the one
+         *  message written for a rate-limited reply was never rendered and the
+         *  orb just kept pulsing — "it just went quiet" (parity with iOS build
+         *  78, audit 2026-09-21). */
+        fun liveNote(state: VoiceState, note: String?): String? =
+            note?.takeIf { state != VoiceState.ERROR && it.isNotEmpty() }
     }
 }
 
@@ -452,6 +473,14 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                     modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
                     style = UFont.sans(15, FontWeight.Medium), color = c.ink2,
                 )
+                // A note while the session is still LIVE (the error state already
+                // shows it as the status line above) — a rate-limited reply's "busy".
+                VoiceSessionHolder.liveNote(state, note)?.let {
+                    Text(
+                        it, style = UFont.sans(14), color = c.ink3, textAlign = TextAlign.Center,
+                        modifier = Modifier.semantics { liveRegion = LiveRegionMode.Polite },
+                    )
+                }
                 if (caption.isNotBlank()) {
                     Text(caption, style = UFont.serifItalic(22), color = c.ink, textAlign = TextAlign.Center)
                 }

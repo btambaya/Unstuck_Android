@@ -25,6 +25,10 @@ import kotlinx.serialization.json.jsonPrimitive
 //    `CallScript.callToolNames`;
 //  • the text path takes the server's schema (generated from the same registry).
 //
+// Both spoken lists go out COMPACTED (VoiceToolCompaction: the same tools,
+// parameters, types and enums, shorter prose) — every realtime reply re-reads
+// them (parity with iOS build 80). The registry itself stays verbatim.
+//
 // The executor (AssistantTools.kt) implements every name in ToolRegistry.NAMES —
 // ToolRegistryParityTest pins both directions.
 
@@ -66,8 +70,9 @@ object RegistryTools {
 
 /** Tool schemas for a TALK session (realtime function shape): every registry
  *  tool with the "voice" surface — the same list the web's VOICE_TOOL_SCHEMAS
- *  and iOS `ToolRegistry.tools(for: "voice")` produce. */
-fun voiceToolsJson(): JsonArray = JsonArray(RegistryTools.forSurface("voice").map { it.schema })
+ *  and iOS `ToolRegistry.tools(for: "voice")` produce — compacted for speech
+ *  like iOS `voiceTools()` (VoiceToolCompaction). */
+fun voiceToolsJson(): JsonArray = JsonArray(RegistryTools.forSurface("voice").map { VoiceToolCompaction.compactTool(it.schema) })
 
 /** Alias kept for AppViewModel.voiceTools(): the Talk session's tools. The
  *  talk-level finish_interview is a registry tool now (voice surface), so
@@ -91,8 +96,10 @@ fun callVoiceTools(callTools: List<String> = callToolNames()): List<RegistryTool
     return callTools.mapNotNull { live[it] }
 }
 
-/** Tool schemas for a CALL session (realtime function shape). */
-fun callVoiceToolsJson(callTools: List<String> = callToolNames()): JsonArray = JsonArray(callVoiceTools(callTools).map { it.schema })
+/** Tool schemas for a CALL session (realtime function shape), compacted for
+ *  speech like iOS `callTools()` (VoiceToolCompaction). */
+fun callVoiceToolsJson(callTools: List<String> = callToolNames()): JsonArray =
+    JsonArray(callVoiceTools(callTools).map { VoiceToolCompaction.compactTool(it.schema) })
 
 // ── finish_interview — the talk-level tool (2026-09-17) ──
 // The opening primer runs the get-to-know-you intro aloud while the account's

@@ -178,6 +178,13 @@ sealed class BargeInEvent {
     /** A caption delta for the model's reply; answered with [BargeInCommand.ShowCaption] when accepted. */
     data class TranscriptDelta(val id: String?) : BargeInEvent()
     data class ResponseDone(val id: String?, val status: String? = null) : BargeInEvent()
+    /** `response.done` with status `failed` for want of rate limit (OpenAI:
+     *  the org's tokens-per-minute bucket ran dry — 40k TPM ≈ 4 replies a
+     *  minute with the tool schemas; Ahmad's session 2026-09-20 23:48 went
+     *  silent). The reply was for a turn already asked: ask again after the
+     *  bucket's reset, a few times, then give up out loud (parity with iOS
+     *  build 76). */
+    data class ResponseRateLimited(val retryAfterMs: Long) : BargeInEvent()
     object PlaybackDrained : BargeInEvent()
     /** The server VAD opened a segment; [itemId] is the conversation item it
      *  will commit that speech into (DashScope sends it), so a transcript can
@@ -197,8 +204,10 @@ sealed class BargeInEvent {
     data class RouteChanged(val profile: BargeInProfile) : BargeInEvent()
     object PttDown : BargeInEvent()
     object PttUp : BargeInEvent()
-    /** A protocol `error` event; "active response" ones are benign (iOS `benignActiveResponseError`). */
-    data class Error(val message: String?) : BargeInEvent()
+    /** A protocol `error` event; "active response" ones are benign (iOS `benignActiveResponseError`).
+     *  [code] is the server's `error.code`, carried so the client can word a
+     *  rate limit without matching the provider's text (iOS build 78). */
+    data class Error(val message: String?, val code: String? = null) : BargeInEvent()
 }
 
 sealed class BargeInCommand {
@@ -223,8 +232,10 @@ sealed class BargeInCommand {
     data class Ui(val state: BargeInUi) : BargeInCommand()
     /** Re-send session.update with this turn_detection (route profile changed / mode). */
     data class SessionUpdate(val turnDetection: TurnDetection?) : BargeInCommand()
-    /** Surface a real server error (anything NOT about an active response). */
-    data class ReportError(val message: String) : BargeInCommand()
+    /** Surface a real server error (anything NOT about an active response).
+     *  [message] is the server's raw text — for the device log only; the
+     *  client turns it into plain words before the user sees it (iOS build 78). */
+    data class ReportError(val message: String, val code: String? = null) : BargeInCommand()
     /** 3 duck→restore cycles within 2 min: offer "Noisy room? Switch to hold to talk". */
     object SuggestHoldToTalk : BargeInCommand()
     /** Arm a timer: deliver [BargeInEvent.Tick] after this many ms (the energy
@@ -280,6 +291,13 @@ class BargeInController(
         /** If a cancelled reply's done never comes (or the cancel found
          *  nothing), ask anyway. 2.5 s: a done took 1.9 s once (a tool call in flight). */
         const val PENDING_CREATE_FALLBACK_MS = 2500L
+        /** How long a `response.create` may go unanswered by response.created
+         *  before the pending turn is asked for again (see [createSentAt];
+         *  parity with iOS build 75). */
+        const val CREATE_GRACE_MS = 3_000L
+        /** Rate-limited replies re-asked for one turn before the user is told
+         *  the assistant is busy (parity with iOS build 76). */
+        const val RATE_LIMIT_MAX_RETRIES = 3
         /** Echo reference cap per reply. */
         const val SPOKEN_CAP = 400
         const val SEGMENT_HISTORY = 8
@@ -377,6 +395,24 @@ class BargeInController(
      *  breath as a `response.cancel` drops the connection (measured 2026-09-19). */
     private var pendingTurnSince: Long? = null
     val pendingCreate: Boolean get() = pendingTurnSince != null
+    /** When our last `response.create` for the pending turn went out, until
+     *  its response.created arrives. The turn stays PENDING meanwhile: a
+     *  create the server swallowed (Zubair's call, 2026-09-20 18:02 — a cancel
+     *  went unanswered, the 2.5 s fallback create produced nothing, the muted
+     *  reply completed, and his "Yes." was never answered: 20 s of silence)
+     *  is re-asked when the active reply finishes or after [CREATE_GRACE_MS];
+     *  a slow one is told apart from it only by time (parity with iOS build 75). */
+    var createSentAt: Long? = null; private set
+    /** Rate-limited replies re-asked for the current turn; reset by a new turn
+     *  or a reply that completed. */
+    var rateLimitRetries = 0; private set
+    /** A rate-limited turn is not asked again before this: the token bucket's
+     *  reset. Every timer posts the same tick and none is cancelled, so a
+     *  stale hold or fallback timer (or a VAD blip's 500 ms) re-asked into
+     *  the still-empty bucket and spent the three retries in seconds (review
+     *  of the 2026-09-23 parity port). Cleared when the server creates a
+     *  reply. A new turn keeps it: asked before the reset, it only fails again. */
+    var retryNotBefore: Long? = null; private set
 
     /** Echo reference: the words of the reply on air and of the one before
      *  it (a reply's tail echoes after the next response was created). Not a
@@ -465,7 +501,14 @@ class BargeInController(
                     responseActive = true
                     activeResponseId = id
                     muted = false
-                    pendingTurnSince = null
+                    // The turn this create was for is being answered. A turn taken
+                    // AFTER the create went out (they spoke again while it was in
+                    // flight) stays pending and is asked once this reply is done.
+                    val since = pendingTurnSince
+                    val sent = createSentAt
+                    if (since == null || sent == null || since <= sent) pendingTurnSince = null
+                    createSentAt = null
+                    retryNotBefore = null
                     // A new reply: the one before it is now the "previous" reference.
                     spokenPrevious = spokenCurrent
                     spokenCurrent = emptyList()
@@ -491,6 +534,11 @@ class BargeInController(
                 val id = event.id
                 if (id == null || activeResponseId == null || id == activeResponseId) {
                     responseActive = false
+                    rateLimitRetries = 0
+                    // Any create we sent while this reply was active is dead with it
+                    // (the server never queues one): re-ask below if a turn is pending —
+                    // also when the server ignored our cancel and the reply completed.
+                    createSentAt = null
                     if (pendingCreate) {
                         // The reply we cancelled is finished server-side: the user's
                         // turn can be asked for once its hold is up and they are quiet.
@@ -502,6 +550,24 @@ class BargeInController(
                     } else {
                         ui(BargeInUi.SPEAKING, out)
                     }
+                }
+            }
+            is BargeInEvent.ResponseRateLimited -> {
+                responseActive = false
+                createSentAt = null
+                muted = false
+                if (phase == BargeInPhase.SPEAKING && !playbackQueued) phase = BargeInPhase.IDLE
+                retryNotBefore = t + event.retryAfterMs
+                rateLimitRetries += 1
+                if (rateLimitRetries > RATE_LIMIT_MAX_RETRIES) {
+                    pendingTurnSince = null
+                    ui(BargeInUi.LISTENING, out)
+                } else {
+                    // The turn is pending again, its hold already up; the tick after
+                    // the reset asks for it.
+                    pendingTurnSince = t - TURN_HOLD_MS
+                    out += BargeInCommand.StartTimer(max(event.retryAfterMs, TURN_HOLD_MS))
+                    ui(BargeInUi.THINKING, out)
                 }
             }
             BargeInEvent.PlaybackDrained -> {
@@ -573,7 +639,7 @@ class BargeInController(
                 // of a dead ERROR screen. Only in hold mode — in open-mic mode a
                 // buffer error is a real protocol fault and is surfaced.
                 holdToTalk && isEmptyBufferError(event.message) -> ui(uiStateNow, out)
-                else -> out += BargeInCommand.ReportError(event.message?.takeIf { it.isNotBlank() } ?: "Voice error")
+                else -> out += BargeInCommand.ReportError(event.message?.takeIf { it.isNotBlank() } ?: "Voice error", event.code)
             }
             is BargeInEvent.RouteChanged -> {
                 if (event.profile != profile) {
@@ -695,6 +761,13 @@ class BargeInController(
         var notATurn = words.isEmpty()                              // a cough, "um", "…", an echo heard as Chinese
         if (!notATurn && segment.echoJudged && words.size < 3) {
             notATurn = true                                         // a later piece of the echo already judged
+        } else if (!notATurn && words.size == 1) {
+            // One word is the user: "Morning." answering "Morning. Want to
+            // walk through today?" was deleted as echo of the greeting
+            // (Zubair's morning call, 2026-09-21 07:01) and the call went
+            // nowhere until "Hello?". With echo cancellation on, a one-word
+            // echo that reaches the transcriber is rarer than a one-word
+            // answer that shares the reply's word (parity with iOS build 77).
         } else if (!notATurn && (segment.onAir || segment.echoJudged)) {
             // Judged by its words only when it began while the reply's
             // audio was ON AIR. After the drain the words are the user's:
@@ -718,6 +791,7 @@ class BargeInController(
         out += BargeInCommand.UserTurn(text)
         if (holdToTalk) return   // the release already committed + asked
         segments[index] = segments[index].copy(responded = true)
+        rateLimitRetries = 0
         flushPendingDeletes(except = null, out)   // before the ask: the model never sees the echo items
         if (modelBusy && !alreadyCancelled) cancel(t, out)
         // Not asked for yet: the hold first (they may be mid-sentence),
@@ -732,6 +806,7 @@ class BargeInController(
      *  and we disagree about what's generating — resync, never an error state. */
     private fun onBenignActiveResponseError(t: Long, out: MutableList<BargeInCommand>) {
         responseActive = false
+        createSentAt = null
         when {
             phase == BargeInPhase.DUCKED -> {
                 duckedSince = null; duckTrigger = null
@@ -771,6 +846,8 @@ class BargeInController(
      *  generating — or the cancelled reply's done never came (the fallback). */
     private fun tryAsk(t: Long): List<BargeInCommand> {
         val since = pendingTurnSince ?: return emptyList()
+        val notBefore = retryNotBefore
+        if (notBefore != null && t < notBefore) return listOf(BargeInCommand.StartTimer(notBefore - t))
         val elapsed = t - since
         if (responseActive) {
             if (elapsed < PENDING_CREATE_FALLBACK_MS) return emptyList()
@@ -778,8 +855,19 @@ class BargeInController(
         } else {
             if (elapsed < TURN_HOLD_MS || serverSpeaking) return emptyList()
         }
-        pendingTurnSince = null
-        return listOf(BargeInCommand.CreateResponse, uiTracked(BargeInUi.THINKING))
+        val sent = createSentAt
+        if (sent != null && t - sent < CREATE_GRACE_MS) {
+            // Our create is in flight: wait the grace out, then ask again if
+            // nothing was created. The turn stays pending until response.created
+            // (parity with iOS build 75).
+            return listOf(BargeInCommand.StartTimer(CREATE_GRACE_MS - (t - sent) + 1))
+        }
+        createSentAt = t
+        // The grace's own tick. Asked from idle, no done or error may ever
+        // come, and a swallowed create then waited for the user to speak
+        // again (review of the 2026-09-23 parity port). Once created, the
+        // tick finds nothing pending.
+        return listOf(BargeInCommand.CreateResponse, BargeInCommand.StartTimer(CREATE_GRACE_MS + 1), uiTracked(BargeInUi.THINKING))
     }
 
     /** The held deletes, as commands — all of them, or all but one item's. */

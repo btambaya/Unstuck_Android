@@ -1,5 +1,6 @@
 package tech.csalliance.unstuck.data
 
+import androidx.room.withTransaction
 import java.util.concurrent.ConcurrentHashMap
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
@@ -141,15 +142,19 @@ class LocalStore(private val db: UnstuckDatabase) {
      *  carries no timestamp, or neither can be parsed, the write proceeds (we
      *  can't prove it's stale) — matching the prior unconditional behaviour. */
     suspend fun <T> upsertIfNewer(table: String, model: T, ser: KSerializer<T>, id: String, incomingUpdatedAt: String?): Boolean {
-        if (incomingUpdatedAt != null) {
-            val incoming = Time.parseMillis(incomingUpdatedAt)
-            val localIso = records.getOne(table, id)?.updatedAt
-            val local = localIso?.let { Time.parseMillis(it) }
-            if (incoming != null && local != null && local > incoming) return false
-        }
+        if (localIsNewer(table, id, incomingUpdatedAt)) return false
         records.upsertOne(entity(table, model, ser, id, incomingUpdatedAt))
         invalidate(table)
         return true
+    }
+
+    /** [upsertIfNewer]'s guard: the stored row's stamp is STRICTLY newer. */
+    private suspend fun localIsNewer(table: String, id: String, incomingUpdatedAt: String?): Boolean {
+        if (incomingUpdatedAt == null) return false
+        val incoming = Time.parseMillis(incomingUpdatedAt)
+        val localIso = records.getOne(table, id)?.updatedAt
+        val local = localIso?.let { Time.parseMillis(it) }
+        return incoming != null && local != null && local > incoming
     }
 
     suspend fun delete(table: String, id: String) {
@@ -220,6 +225,64 @@ class LocalStore(private val db: UnstuckDatabase) {
 
     /** Rewrite a queued op's payload + base after a 3-way merge. */
     suspend fun rewriteOutbox(seq: Long, payload: String?, base: String?) = outboxDao.rewrite(seq, payload, base)
+
+    // --- one transaction over rows + outbox ---
+
+    /** The reads and writes the sync engine must make as ONE unit (the Android
+     *  side of iOS's `OutboxStore.*(in:)` open-connection helpers). Only valid
+     *  inside [transaction]'s block. Row writes do not signal observers here: a
+     *  collector that re-queried before the commit would read the old rows and
+     *  never be told again, so [transaction] bumps each written table once the
+     *  commit has landed. */
+    inner class Tx internal constructor() {
+        internal val touched = LinkedHashSet<String>()
+
+        suspend fun pending(): List<OutboxEntity> = outboxDao.all()
+        suspend fun latestPendingUpsert(table: String, id: String): OutboxEntity? = outboxDao.latestUpsert(table, id)
+        suspend fun enqueue(op: OutboxEntity): Long = outboxDao.enqueue(op)
+        suspend fun dequeue(seq: Long) = outboxDao.remove(seq)
+        suspend fun rewriteOutbox(seq: Long, payload: String?, base: String?) = outboxDao.rewrite(seq, payload, base)
+        suspend fun rebaseLaterUpserts(table: String, id: String, afterSeq: Long, base: String?) =
+            outboxDao.rebaseLaterUpserts(table, id, afterSeq, base)
+
+        suspend fun <T> getOne(table: String, id: String, ser: KSerializer<T>): T? = this@LocalStore.getOne(table, id, ser)
+        suspend fun <T> snapshot(table: String, ser: KSerializer<T>): List<T> = this@LocalStore.snapshot(table, ser)
+
+        suspend fun <T> upsert(table: String, model: T, ser: KSerializer<T>, id: String, updatedAt: String? = null) {
+            records.upsertOne(entity(table, model, ser, id, updatedAt))
+            touched += table
+        }
+
+        /** [LocalStore.upsertIfNewer] on the open transaction. */
+        suspend fun <T> upsertIfNewer(table: String, model: T, ser: KSerializer<T>, id: String, incomingUpdatedAt: String?): Boolean {
+            if (localIsNewer(table, id, incomingUpdatedAt)) return false
+            upsert(table, model, ser, id, incomingUpdatedAt)
+            return true
+        }
+
+        suspend fun delete(table: String, id: String) {
+            records.deleteById(table, id)
+            touched += table
+        }
+
+        /** Replace-per-table with rows the caller already merged (it read the
+         *  stored rows and the outbox in this same transaction). */
+        suspend fun <T> replace(table: String, items: List<T>, ser: KSerializer<T>, id: (T) -> String, updatedAt: (T) -> String? = { null }) {
+            records.replaceTable(table, items.map { entity(table, it, ser, id(it), updatedAt(it)) })
+            touched += table
+        }
+    }
+
+    /** Run [block] as ONE Room transaction. A concurrent writer's transaction
+     *  lands wholly before or wholly after it, never in between (audit
+     *  2026-09-22 C8/C9: an edit queued while the prune's fetch was in flight,
+     *  or a list edit acked mid-hydrate, fell into such a gap). */
+    suspend fun <R> transaction(block: suspend Tx.() -> R): R {
+        val tx = Tx()
+        val result = db.withTransaction { tx.block() }
+        for (table in tx.touched) invalidate(table)
+        return result
+    }
 
     // --- parked outbox (un-pushed ops kept across sign-out, per user) ---
 

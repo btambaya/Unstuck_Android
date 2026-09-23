@@ -25,8 +25,9 @@ import tech.csalliance.unstuck.data.db.Tables
  * re-reads — a row applied here reaches the screen without a relaunch.
  *
  * Returns TRUE when the row was written, FALSE when the store's last-write-wins
- * guard rejected it because the LOCAL row is strictly newer. A false is not an
- * error and not a gap: we have seen the row and deliberately kept ours.
+ * guard rejected it because the LOCAL row is strictly newer (or, for a task, a
+ * local edit of it is still queued). A false is not an error and not a gap: we
+ * have seen the row and deliberately kept ours.
  */
 internal object RowApply {
 
@@ -34,8 +35,19 @@ internal object RowApply {
      *  collections have no comparable per-row stamp, so they stay last-write-wins;
      *  everything else goes through upsertIfNewer. */
     suspend fun apply(table: String, row: JsonObject, store: LocalStore, userId: String): Boolean = when (table) {
+        // A task with a queued local edit keeps its local row, the rule the
+        // catch-up and the hydrate already follow. A newer echo (the web ticking
+        // it done) used to replace it; the next edit, built on that row, then
+        // carried the server's old values and the prune merged the first edit
+        // away. The prune merges the server's change in before the flush
+        // (parity with iOS build 81, audit 2026-09-22 C9). The check and the write
+        // are one transaction: an edit committed between them is stamped by the
+        // phone's clock, so an echo stamped later by the server's overwrote it.
         Tables.TASKS -> DbRowCodec.decodeTask(row).let {
-            store.upsertIfNewer(table, it, TaskItem.serializer(), it.id, it.updatedAt)
+            store.transaction {
+                if (latestPendingUpsert(table, it.id) != null) false
+                else upsertIfNewer(table, it, TaskItem.serializer(), it.id, it.updatedAt)
+            }
         }
         Tables.SESSIONS -> DbRowCodec.decodeSession(row).let {
             store.upsertIfNewer(table, it, Session.serializer(), it.id, it.completedAt)
@@ -52,7 +64,10 @@ internal object RowApply {
         // Collections: the incoming row carries neither members[] nor myRole (they
         // live in collection_members), so preserve whatever the local row knows —
         // the realtime.ts mergeKeep rule. A row we've never seen is owned by me
-        // only when the server says so.
+        // only when the server says so. The catch-up re-reads membership right
+        // after the collections pull (Hydrator.refreshCollectionMembership), which
+        // also gives a newly visible foreign list its real myRole (audit
+        // 2026-09-22 C8).
         Tables.COLLECTIONS -> {
             val m = DbRowCodec.decodeCollection(row)
             val existing = store.collections().first().firstOrNull { it.id == m.id }

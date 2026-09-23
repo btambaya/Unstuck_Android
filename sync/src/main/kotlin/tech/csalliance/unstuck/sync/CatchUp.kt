@@ -66,6 +66,13 @@ data class CatchUpOutcome(
     val failed: Set<String> = emptySet(),
     /** True when this pass was a full hydrate rather than a cursor pull. */
     val wasFullHydrate: Boolean = false,
+    /** A `collections` row came back (applied, kept by the local store, or skipped
+     *  for a queued write). The server row carries no membership, and migration 056
+     *  §4 bumps `updated_at` on every collection_members change, so this is what
+     *  tells the catch-up to re-read membership (audit 2026-09-22 C8). The pull is
+     *  strictly newer than the mark, so every returned row is one this device had
+     *  not seen, and a quiet tick never sets it. */
+    val collectionsChanged: Boolean = false,
 ) {
     val appliedCount: Int get() = applied.values.sum()
 }
@@ -121,6 +128,11 @@ class CatchUpPuller(
     private val cursors: SyncCursors,
     private val now: () -> Long = { System.currentTimeMillis() },
     private val log: (String) -> Unit = { println(it) },
+    /** The collections membership re-read, run right after the collections pull:
+     *  `(userId, collectionsChanged)`, and the Hydrator decides (it also retries a
+     *  membership read that failed earlier). Parity with iOS build 81, audit
+     *  2026-09-22 C8. */
+    private val refreshMembership: suspend (String, Boolean) -> Unit = { _, _ -> },
 ) {
 
     /**
@@ -133,6 +145,7 @@ class CatchUpPuller(
         val blocked = mutableSetOf<String>()
         val failed = mutableSetOf<String>()
         var provenMissed = 0
+        var collectionsChanged = false
         for (spec in CURSOR_TABLES) {
             val since = cursors.get(userId, spec.table) ?: EPOCH
             try {
@@ -140,6 +153,7 @@ class CatchUpPuller(
                 if (result.count > 0) applied[spec.table] = result.count
                 provenMissed += result.provenMissed
                 if (result.blocked) blocked += spec.table
+                if (spec.table == Tables.COLLECTIONS && result.seen) collectionsChanged = true
                 result.cursor?.let { cursors.put(userId, spec.table, it) }
             } catch (t: CancellationException) {
                 throw t
@@ -147,11 +161,28 @@ class CatchUpPuller(
                 failed += spec.table
                 log("[catchup] ${spec.table} failed, keeping local + cursor: $t")
             }
+            // Right after the collections pull, not after every table: an edit made
+            // while the rest of the pull runs would still route on the stale
+            // membership.
+            if (spec.table == Tables.COLLECTIONS) {
+                try {
+                    refreshMembership(userId, collectionsChanged)
+                } catch (t: CancellationException) {
+                    throw t
+                } catch (t: Throwable) {
+                    log("[catchup] collection membership re-read failed: $t")
+                }
+            }
         }
-        return CatchUpOutcome(applied = applied, blocked = blocked, failed = failed, provenMissed = provenMissed)
+        return CatchUpOutcome(
+            applied = applied, blocked = blocked, failed = failed, provenMissed = provenMissed,
+            collectionsChanged = collectionsChanged,
+        )
     }
 
-    private data class TablePull(val count: Int, val cursor: String?, val blocked: Boolean, val provenMissed: Int)
+    /** [seen]: at least one row came back and was taken or deliberately skipped
+     *  (not one that failed to apply). */
+    private data class TablePull(val count: Int, val cursor: String?, val blocked: Boolean, val provenMissed: Int, val seen: Boolean)
 
     private suspend fun pullTable(userId: String, spec: CursorSpec, since: String): TablePull {
         var cursor: String? = null
@@ -159,6 +190,7 @@ class CatchUpPuller(
         var applied = 0
         var provenMissed = 0
         var blocked = false
+        var seen = false
         var page = 0
         while (page < MAX_PAGES) {
             val rows = remote.fetchSince(spec.table, spec.column, at, PAGE_SIZE)
@@ -172,6 +204,7 @@ class CatchUpPuller(
                 // either: once the write lands, the server's copy is re-offered.
                 if (store.latestPendingUpsert(spec.table, id) != null) {
                     blocked = true
+                    seen = true
                     continue
                 }
                 // …and a row we DELETED here whose delete hasn't landed yet is
@@ -180,6 +213,7 @@ class CatchUpPuller(
                 // re-offered if that delete is ever abandoned.
                 if (store.hasPendingDelete(spec.table, id)) {
                     blocked = true
+                    seen = true
                     continue
                 }
                 // Was this row genuinely missing from this device? (Absent, or our
@@ -200,6 +234,7 @@ class CatchUpPuller(
                     continue
                 }
                 val ok = attempt.getOrDefault(false)
+                seen = true
                 // A row the local store deliberately kept (its copy is newer) still
                 // counts as SEEN — freezing the cursor on it would re-pull for ever
                 // on a device whose clock runs ahead. Only a row we could not
@@ -220,7 +255,7 @@ class CatchUpPuller(
             page++
         }
         if (page >= MAX_PAGES) log("[catchup] ${spec.table} hit the page cap — a full hydrate will re-baseline it")
-        return TablePull(applied, cursor, blocked, provenMissed)
+        return TablePull(applied, cursor, blocked, provenMissed, seen)
     }
 
     /** True when the local store demonstrably did NOT have this row's change and

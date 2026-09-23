@@ -112,7 +112,8 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
                     false
                 }
                 if (ok) {
-                    store.dequeue(op.seq); failCounts.remove(op.seq); progressed = true
+                    if (op.recordTable == Tables.TASKS && op.op == "upsert") landTaskUpsert(op) else store.dequeue(op.seq)
+                    failCounts.remove(op.seq); progressed = true
                 } else {
                     blockedRows.add(rowKey)
                     val n = (failCounts[op.seq] ?: 0) + 1
@@ -138,6 +139,18 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
             }
             if (!progressed) break // all remaining ops errored — stop, retry later
         }
+    }
+
+    /** Dequeue a `tasks` upsert that landed, and re-base the row's edits queued
+     *  behind it (made while it was in flight, so they carry ITS base) onto the
+     *  payload that landed, in one transaction. Their base was the state before
+     *  it: if one of them then failed to send, the next prune measured it against
+     *  that older state, and an Undo of a Mark done that had landed read as
+     *  "unchanged" and took the server's done=true (parity with iOS build 81,
+     *  where each queued edit's base is the edit before it; audit 2026-09-22 C9). */
+    private suspend fun landTaskUpsert(op: OutboxEntity) = store.transaction {
+        dequeue(op.seq)
+        rebaseLaterUpserts(op.recordTable, op.recordId, op.seq, op.payload)
     }
 
     /** Ids present in the local records cache for [table] (decoded snapshot).

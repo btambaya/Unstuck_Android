@@ -132,6 +132,12 @@ interface OutboxDao {
     /** Rewrite an op after a 3-way merge against a newer server row. */
     @Query("UPDATE outbox SET payload = :payload, base = :base WHERE seq = :seq")
     suspend fun rewrite(seq: Long, payload: String?, base: String?)
+
+    /** Re-base one row's upserts queued after [afterSeq] onto [base] (the payload
+     *  of the op that just landed). One statement: the drain calls it per landed
+     *  op, and reading the whole outbox each time cost O(n²) on a long drain. */
+    @Query("UPDATE outbox SET base = :base WHERE recordTable = :table AND recordId = :id AND op = 'upsert' AND seq > :afterSeq")
+    suspend fun rebaseLaterUpserts(table: String, id: String, afterSeq: Long, base: String?)
 }
 
 @Dao

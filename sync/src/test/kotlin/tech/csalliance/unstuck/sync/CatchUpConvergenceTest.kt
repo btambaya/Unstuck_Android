@@ -23,6 +23,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import tech.csalliance.unstuck.core.model.CollectionItem
+import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.OutboxEntity
@@ -66,6 +68,13 @@ class CatchUpConvergenceTest {
         val idCalls = mutableListOf<String>()
         var gate: CompletableDeferred<Unit>? = null
         var failIds = false
+        /** The NEXT collections full read waits on this (then it is cleared), so a
+         *  test can pile more collections hydrates up behind one in flight. */
+        var collectionsGate: CompletableDeferred<Unit>? = null
+        /** Full reads of a table that fail before one succeeds. */
+        val failNextFetchAll = mutableMapOf<String, Int>()
+        /** Runs as a full read of a table starts (a write landing mid-read). */
+        var onFetchAll: (suspend (String) -> Unit)? = null
 
         fun table(t: String) = rows.getOrPut(t) { mutableListOf() }
         fun put(t: String, row: JsonObject) {
@@ -79,6 +88,13 @@ class CatchUpConvergenceTest {
 
         override suspend fun fetchAll(table: String): List<JsonObject> {
             fetchAllCalls += table
+            onFetchAll?.invoke(table)
+            if (table == Tables.COLLECTIONS) collectionsGate?.let { collectionsGate = null; it.await() }
+            val left = failNextFetchAll[table] ?: 0
+            if (left > 0) {
+                failNextFetchAll[table] = left - 1
+                throw RuntimeException("simulated timeout")
+            }
             return rows[table].orEmpty().toList()
         }
         override suspend fun fetchSince(table: String, column: String, since: String, limit: Int): List<JsonObject> {
@@ -526,5 +542,227 @@ class CatchUpConvergenceTest {
         advanceUntilIdle()
         assertEquals("no marks ⇒ the next pull is a full hydrate", fullPulls + 1, remote.fetchAllCalls.count { it == Tables.TASKS })
         assertTrue("and it re-seeds them", puller.hasCursors(uid))
+    }
+
+    // ── 8. shared-list membership through the catch-up (audit 2026-09-22 C8) ─
+    //
+    // The owner's phone decides "shared" from the local members[]; with none it
+    // ships item edits as whole-row upserts over the members' edits. A join by
+    // link / an invite claimed at sign-up produces no row for the owner's own
+    // user_id, and realtime is torn down in the background: the ONLY pull-side
+    // trace is migration 056 §4 bumping the list's updated_at. These drive the
+    // real puller + a real Hydrator with no realtime event at all. Ported from
+    // the iOS CatchUpConvergenceTests (build 81).
+
+    private val partner = "user-2"
+
+    private fun listRow(id: String, owner: String, updatedAt: String): JsonObject {
+        val c = ItemCollection(id = id, name = "Groceries", color = "indigo", items = emptyList(), sortOrder = 0)
+        return JsonObject(DbRowCodec.encodeCollection(c) + mapOf("user_id" to JsonPrimitive(owner), "updated_at" to JsonPrimitive(updatedAt)))
+    }
+
+    private fun memberRow(collectionId: String, userId: String, role: String = "editor") = JsonObject(
+        mapOf(
+            "id" to JsonPrimitive("m-$collectionId-$userId"), "collection_id" to JsonPrimitive(collectionId),
+            "user_id" to JsonPrimitive(userId), "role" to JsonPrimitive(role),
+        ),
+    )
+
+    private suspend fun ownList(id: String = "c1") = store.upsert(
+        Tables.COLLECTIONS,
+        ItemCollection(id = id, name = "Groceries", color = "indigo", items = emptyList(), sortOrder = 0, ownerId = uid, members = emptyList(), myRole = "owner"),
+        ItemCollection.serializer(), id,
+    )
+
+    /** The puller wired exactly as SyncCoordinator wires it. */
+    private fun membershipPuller(h: Hydrator = hydrator) = CatchUpPuller(
+        remote, store, cursors, now = { nowMs }, log = {},
+        refreshMembership = { u, changed -> h.refreshCollectionMembership(u, changed) },
+    )
+
+    private fun membershipReads() = remote.fetchAllCalls.count { it == "collection_members" }
+
+    private suspend fun list(id: String) = store.collections().first().firstOrNull { it.id == id }
+
+    @Test fun aJoin_reachesTheOwnersList_throughTheCatchUp_withoutARelaunch() = runTest {
+        ownList()
+        remote.put(Tables.COLLECTIONS, listRow("c1", uid, "2027-01-15T08:00:00.000000+00:00"))
+        val p = membershipPuller()
+        p.catchUp(uid)   // seeds the cursors
+        assertEquals(emptyList<String>(), list("c1")?.members)
+
+        // THE GAP: the partner joins by link. No realtime event reaches the owner;
+        // the server only bumps the list's updated_at (056 §4).
+        remote.put("collection_members", memberRow("c1", partner))
+        remote.put(Tables.COLLECTIONS, listRow("c1", uid, "2027-01-15T08:05:00.000000+00:00"))
+
+        val outcome = p.catchUp(uid)
+
+        assertTrue(outcome.collectionsChanged)
+        assertEquals("the owner's list now reads as shared, in the same process", listOf(partner), list("c1")?.members)
+        assertEquals("owner", list("c1")?.myRole)
+    }
+
+    // Android's cursors persist, so a cold launch with a stored session only ever
+    // catches up. Before this, nothing in that path re-read membership: the
+    // owner's list stayed unshared across relaunches.
+    @Test fun aJoin_whileTheAppWasAway_reachesTheOwnersList_onTheNextLaunch() = runTest {
+        ownList()
+        remote.put(Tables.COLLECTIONS, listRow("c1", uid, "2027-01-15T08:00:00.000000+00:00"))
+        membershipPuller().catchUp(uid)
+        remote.put("collection_members", memberRow("c1", partner))
+        remote.put(Tables.COLLECTIONS, listRow("c1", uid, "2027-01-15T08:05:00.000000+00:00"))
+
+        // A new process: fresh engine objects over the same store + cursors.
+        val relaunched = Hydrator(remote, store)
+        assertTrue("a relaunch still takes the cursor path, not a full hydrate", CatchUpPuller(remote, store, cursors).hasCursors(uid))
+        membershipPuller(relaunched).catchUp(uid)
+
+        assertEquals(listOf(partner), list("c1")?.members)
+    }
+
+    /** Only a collections row the device had NOT seen triggers the re-read; the
+     *  60 s floor ticks while visible and must not cost a membership pull. */
+    @Test fun aQuietCatchUp_doesNotRereadMembership() = runTest {
+        ownList()
+        remote.put(Tables.COLLECTIONS, listRow("c1", uid, "2027-01-15T08:00:00.000000+00:00"))
+        val p = membershipPuller()
+        assertTrue("the seeding pull re-reads once", p.catchUp(uid).collectionsChanged)
+        val readsAfterSeed = membershipReads()
+
+        repeat(3) { assertFalse("nothing newer came back", p.catchUp(uid).collectionsChanged) }
+
+        assertEquals("quiet ticks add no membership pull", readsAfterSeed, membershipReads())
+    }
+
+    /** A fresh sign-in knows no membership to fall back on. If the members read
+     *  fails there AND on the seeding catch-up, the next catch-up retries it even
+     *  though nothing changed on the server. */
+    @Test fun aFailedMembershipRead_isRetriedByTheNextQuietCatchUp() = runTest {
+        remote.put(Tables.COLLECTIONS, listRow("c1", uid, "2027-01-15T08:00:00.000000+00:00"))
+        remote.put("collection_members", memberRow("c1", partner))
+        remote.failNextFetchAll["collection_members"] = 2
+        val p = membershipPuller()
+
+        hydrator.hydrateCollections(uid)   // the sign-in hydrate: the members read fails
+        p.catchUp(uid)                     // the seeding refresh: fails again
+        assertEquals(emptyList<String>(), list("c1")?.members)
+
+        val quiet = p.catchUp(uid)
+
+        assertFalse("nothing changed on the server", quiet.collectionsChanged)
+        assertEquals("the unresolved membership read is retried and fills the list in", listOf(partner), list("c1")?.members)
+        val readsAfterFix = membershipReads()
+        p.catchUp(uid)
+        assertEquals("once resolved, quiet ticks stop re-reading", readsAfterFix, membershipReads())
+    }
+
+    /** Android resumes from its persisted cursors, so a relaunch never runs the
+     *  full hydrate that re-reads membership on every iOS launch. A members read
+     *  that failed before the process died must still be retried on the next
+     *  launch, though no list changed meanwhile. */
+    @Test fun aFailedMembershipRead_isRetriedAfterARelaunch() = runTest {
+        remote.put(Tables.COLLECTIONS, listRow("c1", uid, "2027-01-15T08:00:00.000000+00:00"))
+        remote.put("collection_members", memberRow("c1", partner))
+        remote.failNextFetchAll["collection_members"] = 2
+        hydrator.hydrateCollections(uid)   // the sign-in hydrate: the members read fails
+        membershipPuller().catchUp(uid)    // the seeding catch-up: fails again, then the process dies
+        assertEquals(emptyList<String>(), list("c1")?.members)
+
+        // A new process: fresh engine objects over the same store + cursors.
+        val outcome = membershipPuller(Hydrator(remote, store)).catchUp(uid)
+
+        assertFalse("no list changed", outcome.collectionsChanged)
+        assertEquals("the relaunch re-reads membership anyway", listOf(partner), list("c1")?.members)
+    }
+
+    /** The re-read also runs after the user's OWN list edits (realtime never moves
+     *  the cursor), so it must never touch content: a list edit that lands while
+     *  the membership read is in flight is kept. */
+    @Test fun theCatchUpMembershipReRead_neverRevertsAListEdit() = runTest {
+        ownList()
+        remote.put(Tables.COLLECTIONS, listRow("c1", uid, "2027-01-15T08:00:00.000000+00:00"))
+        val p = membershipPuller()
+        p.catchUp(uid)
+        remote.put("collection_members", memberRow("c1", partner))
+        remote.put(Tables.COLLECTIONS, listRow("c1", uid, "2027-01-15T08:05:00.000000+00:00"))
+        // While the membership read is in flight, the owner's "milk" lands (the
+        // flush acked it and the realtime echo wrote it locally).
+        remote.onFetchAll = { table ->
+            if (table == "collection_members") {
+                val c1 = list("c1")!!
+                store.upsert(Tables.COLLECTIONS, c1.copy(items = listOf(CollectionItem(id = "i-milk", body = "milk", at = "2027-01-15T08:06:00.000Z"))), ItemCollection.serializer(), "c1")
+            }
+        }
+
+        p.catchUp(uid)
+
+        assertEquals("the edit that landed mid-read is kept", listOf("i-milk"), list("c1")?.items?.map { it.id })
+        assertEquals("and the list now reads as shared", listOf(partner), list("c1")?.members)
+        assertEquals("the pull already applied the list: only membership is read", 0, remote.fetchAllCalls.count { it == Tables.COLLECTIONS })
+    }
+
+    /** A list shared WITH me arrives through the pull with no role (the server row
+     *  carries none); the membership re-read gives it the real one, so a viewer
+     *  doesn't get edit controls. */
+    @Test fun aListSharedWithMe_getsItsRoleFromTheCatchUp() = runTest {
+        ownList()
+        remote.put(Tables.COLLECTIONS, listRow("c1", uid, "2027-01-15T08:00:00.000000+00:00"))
+        val p = membershipPuller()
+        p.catchUp(uid)
+        remote.put("collection_members", memberRow("c9", uid, role = "viewer"))
+        remote.put(Tables.COLLECTIONS, listRow("c9", partner, "2027-01-15T08:05:00.000000+00:00"))
+
+        p.catchUp(uid)
+
+        assertEquals("viewer", list("c9")?.myRole)
+        assertEquals(listOf(uid), list("c9")?.members)
+        assertEquals("my own list is untouched", "owner", list("c1")?.myRole)
+    }
+
+    /** Overlapping collections hydrates (realtime, a share action, a refused rpc,
+     *  the full hydrate) collapse into one run in flight + one trailing run, and a
+     *  caller that arrived mid-run returns only after a run that STARTED after
+     *  its call. */
+    @Test fun overlappingCollectionHydrates_collapseIntoOneTrailingRun() = runTest {
+        val scope = CoroutineScope(StandardTestDispatcher(testScheduler))
+        fun reads() = remote.fetchAllCalls.count { it == Tables.COLLECTIONS }
+        val gate = CompletableDeferred<Unit>()
+        remote.collectionsGate = gate
+        scope.launch { hydrator.hydrateCollections(uid) }
+        advanceUntilIdle()
+        assertEquals("the first run is in flight", 1, reads())
+
+        val readsWhenReturned = mutableListOf<Int>()
+        repeat(3) { scope.launch { hydrator.hydrateCollections(uid); readsWhenReturned += reads() } }
+        advanceUntilIdle()
+        assertTrue("they wait behind the run in flight", readsWhenReturned.isEmpty())
+
+        gate.complete(Unit)
+        advanceUntilIdle()
+        assertEquals("one run + one trailing run for the whole burst", 2, reads())
+        assertEquals("each returned only after the trailing run", listOf(2, 2, 2), readsWhenReturned)
+    }
+
+    /** The realtime side: the members channel used to await one hydrate per
+     *  event, so five buffered DELETEs (a list deleted with five members) ran five
+     *  collections pulls back to back. Driven through the consumer the mirror
+     *  builds. */
+    @Test fun aBurstOfMembershipEvents_costsOneRunAndOneTrailingRun() = runTest {
+        val scope = CoroutineScope(StandardTestDispatcher(testScheduler))
+        fun reads() = remote.fetchAllCalls.count { it == Tables.COLLECTIONS }
+        val gate = CompletableDeferred<Unit>()
+        remote.collectionsGate = gate
+        val (signal, consumer) = RealtimeMirror.coalescedSignal(scope) { hydrator.hydrateCollections(uid) }
+
+        signal()
+        advanceUntilIdle()
+        assertEquals("the first event's hydrate is in flight", 1, reads())
+        repeat(4) { signal() }   // four more DELETEs land meanwhile
+        gate.complete(Unit)
+        advanceUntilIdle()
+
+        assertEquals("the events that landed mid-run share ONE trailing run", 2, reads())
+        consumer.cancel()
     }
 }

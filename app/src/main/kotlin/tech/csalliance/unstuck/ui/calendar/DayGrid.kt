@@ -57,6 +57,7 @@ import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.time.Time
+import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
@@ -199,7 +200,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
         val yInGrid = (dragPos.y - gridBounds.top) + scroll.value
         val totalMin = START_HOUR * 60 + ((yInGrid / hourPx) * 60).roundToInt()
         val clamped = ((totalMin / 15) * 15).coerceIn(START_HOUR * 60, END_HOUR * 60 - 15)
-        return "%02d:%02d".format(clamped / 60, clamped % 60)
+        return WireTime.hm(clamped / 60, clamped % 60)
     }
 
     fun drop() {
@@ -244,7 +245,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
                             if (off.x < gutterPx) return@detectTapGestures   // ignore taps in the hour-label gutter
                             val totalMin = START_HOUR * 60 + ((off.y / hourPx) * 60).roundToInt()
                             val snapped = ((totalMin / 15) * 15).coerceIn(START_HOUR * 60, END_HOUR * 60 - 15)
-                            onCreateAt(date, "%02d:%02d".format(snapped / 60, snapped % 60))
+                            onCreateAt(date, WireTime.hm(snapped / 60, snapped % 60))
                         }
                     },
                 ) {

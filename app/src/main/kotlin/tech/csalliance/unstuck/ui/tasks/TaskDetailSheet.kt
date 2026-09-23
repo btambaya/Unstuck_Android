@@ -57,6 +57,7 @@ import tech.csalliance.unstuck.core.model.CaptureTag
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Time
+import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.design.component.AppBar
 import tech.csalliance.unstuck.design.component.AreaDotColor
 import tech.csalliance.unstuck.design.component.ButtonKind
@@ -130,7 +131,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
         val dlg = android.app.DatePickerDialog(context, { _, y, m, day ->
             android.app.TimePickerDialog(context, { _, h, min ->
                 val dateIso = java.time.LocalDate.of(y, m + 1, day).toString()
-                val timeIso = "%02d:%02d".format(h, min)
+                val timeIso = WireTime.hm(h, min)
                 onPicked(dateIso, timeIso)
                 scheduled = "${dateIso.takeLast(5)} ${formatTime(timeIso)}"
             }, t0.hour, t0.minute, false).show()

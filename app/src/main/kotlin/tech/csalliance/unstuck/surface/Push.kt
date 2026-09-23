@@ -102,7 +102,8 @@ internal object PendingPushToken {
  *
  *   kind=call ─▶ IncomingCallPayload.fromData ─▶ invalid → false (the generic
  *                renderer shows the server's fallback body; never silent)
- *     ├─ same callId as the ring that is up   → duplicate push: re-post, touch nothing
+ *     ├─ same callId as the ring that is up   → duplicate push: touch nothing (the ring is
+ *     │                                         INSISTENT — a re-post would silence it)
  *     ├─ another call is up (ringing / in-call) → outcome busy + notify
  *     └─ CallCoordinatorLogic.decide(payload, AppCallEnvironment):
  *          Ring      → CallRinger.ring (CallStyle + full-screen + 30 s missed alarm) —
@@ -111,7 +112,8 @@ internal object PendingPushToken {
  *          Silent    → nobody signed in: drop (no outcome — no JWT; no notes shown)
  *          Declined  → outcome declined + "outside your call hours" / "calls are off"
  *          Busy      → outcome busy + notify (a focus session is live)
- *          Stale     → outcome stale, silent (the task / block is gone or done)
+ *          Stale     → outcome stale, silent (the task / block is done, or deleted on this
+ *                      phone — one not synced here yet still rings)
  *
  * Outcomes go through the durable CallOutcomeStore queue (flushed now and on
  * every foreground / reconnect), never a fire-and-forget request. `env` is a
@@ -142,10 +144,11 @@ object CallPushHandler {
         // ringing. recover() reports the pending missed / done as it clears.
         CallRinger.recover(context, nowMs)
 
-        // A retried / duplicated push for the call that is ALREADY up: re-post the
-        // ring in place (CallRinger ignores it once answered), and touch nothing —
-        // not the 30 s clock, not the outcome. A push for ANOTHER call while one is
-        // up ends as busy (one call at a time, like CallKit's maximumCallGroups=1).
+        // A retried / duplicated push for the call that is ALREADY up touches
+        // nothing — not the notification (the ring is INSISTENT: a re-post would
+        // silence it, Android audit 2026-09-23 A4), not the 30 s clock, not the
+        // outcome. A push for ANOTHER call while one is up ends as busy (one call
+        // at a time, like CallKit's maximumCallGroups=1).
         // Same clock as recover() above and as CallRinger.ring() below stamps the
         // record with — asking the system clock here instead would let one decision
         // straddle two clocks (the record "live" to recover() and "stale" to this).

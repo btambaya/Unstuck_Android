@@ -111,7 +111,8 @@ object NotifIds {
     const val BRIEF = 2003
     const val COLLAB = 2004
     /** THE incoming-call ring. One ring at a time is the rule (a second call while
-     *  one is up ends as `busy`), so a single id: a retried push updates in place. */
+     *  one is up ends as `busy`), so a single id: a retried push leaves it alone
+     *  (CallRinger.ring — re-posting the INSISTENT ring would silence it). */
     const val CALL = 2005
     /** The in-call foreground-service notification (calls/CallVoiceService). A
      *  DIFFERENT slot from [CALL]: the ringer cancels its ring on Answer while

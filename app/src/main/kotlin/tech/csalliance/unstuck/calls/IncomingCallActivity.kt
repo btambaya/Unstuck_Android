@@ -3,8 +3,10 @@ package tech.csalliance.unstuck.calls
 import android.Manifest
 import android.app.Activity
 import android.app.KeyguardManager
+import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.graphics.Color
 import android.graphics.Typeface
@@ -13,8 +15,10 @@ import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.util.TypedValue
 import android.view.Gravity
+import android.view.KeyEvent
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowManager
@@ -43,7 +47,9 @@ import tech.csalliance.unstuck.surface.NotificationChannels
  * microphone foreground service (calls/CallVoiceService) starts: an
  * Activity in the foreground is the user-interaction exemption Android 14
  * needs for a `microphone` FGS (plan risk 3). The shade's "Answer" action
- * routes here too ([CallRinger.ACTION_ANSWER]) so the same rule holds.
+ * routes here too ([CallRinger.ACTION_ANSWER]) so the same rule holds. The
+ * power / volume key only silences the ring ([CallRinger.silence]); the call
+ * stays up for the buttons and the 30 s clock.
  *
  * Rotation / a recreate: the payload rides in the intent extras
  * (IncomingCallPayload.toData), and the 30 s ring clock is CallRinger's
@@ -62,6 +68,17 @@ class IncomingCallActivity : Activity() {
     private var notesView: TextView? = null
     private val missedTick = Runnable { onRingTimedOut() }
 
+    // Power / volume silence the ring, like a phone call (Android audit
+    // 2026-09-23, A4 review): the system's own silence on either key is
+    // Telecom's silenceRinger, which a notification ringtone is not part of, so
+    // the INSISTENT ring would play on for the whole 30 s. A screen-off counts
+    // only once the screen was seen ON with this screen up and is still off
+    // when it lands: KEEP_SCREEN_ON rules out the timeout, and a late
+    // SCREEN_OFF from before the ring woke the phone must not silence it.
+    private var silenced = false
+    private var screenSeenOn = false
+    private var screenReceiver: BroadcastReceiver? = null
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         showOverKeyguard()
@@ -77,6 +94,7 @@ class IncomingCallActivity : Activity() {
         if (intent.action == CallRinger.ACTION_ANSWER) { answer(); return }
         setContentView(buildUi(p))
         armCountdown()
+        watchScreen()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -98,11 +116,23 @@ class IncomingCallActivity : Activity() {
         val p = payload ?: return
         if (CallRinger.activeCallId(this) != p.callId) finish()
         notesView?.text = notesText(p)
+        if (interactive()) screenSeenOn = true
     }
 
     override fun onDestroy() {
         handler.removeCallbacks(missedTick)
+        screenReceiver?.let { runCatching { unregisterReceiver(it) } }
+        screenReceiver = null
         super.onDestroy()
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent): Boolean {
+        // The first volume press silences (and does not change the volume); later
+        // ones adjust it as usual.
+        val volume = keyCode == KeyEvent.KEYCODE_VOLUME_UP || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN ||
+            keyCode == KeyEvent.KEYCODE_VOLUME_MUTE
+        if (volume && silence()) return true
+        return super.onKeyDown(keyCode, event)
     }
 
     // ── actions ──────────────────────────────────────────────────────────────
@@ -175,6 +205,32 @@ class IncomingCallActivity : Activity() {
         }
         finish()
     }
+
+    /** Quieten the ring, leaving the call to the buttons / the 30 s clock
+     *  ([CallRinger.silence]). True only the first time it silenced something. */
+    private fun silence(): Boolean {
+        if (silenced) return false
+        val p = payload ?: return false
+        silenced = CallRinger.silence(this, p.callId)
+        return silenced
+    }
+
+    private fun watchScreen() {
+        val r = object : BroadcastReceiver() {
+            override fun onReceive(c: Context, i: Intent) {
+                when (i.action) {
+                    Intent.ACTION_SCREEN_ON -> screenSeenOn = true
+                    Intent.ACTION_SCREEN_OFF -> if (screenSeenOn && !interactive()) silence()
+                }
+            }
+        }
+        val filter = IntentFilter(Intent.ACTION_SCREEN_OFF).apply { addAction(Intent.ACTION_SCREEN_ON) }
+        runCatching { ContextCompat.registerReceiver(this, r, filter, ContextCompat.RECEIVER_NOT_EXPORTED) }
+            .onSuccess { screenReceiver = r }
+    }
+
+    private fun interactive(): Boolean =
+        (getSystemService(Context.POWER_SERVICE) as? PowerManager)?.isInteractive == true
 
     private fun onRingTimedOut() {
         val p = payload ?: return

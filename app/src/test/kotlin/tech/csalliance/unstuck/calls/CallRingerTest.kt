@@ -9,6 +9,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertSame
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -72,6 +73,38 @@ class CallRingerTest {
         fire(MissedCallReceiver.ACTION_DECLINE)
         assertFalse(CallRinger.settle(context, payload.callId, CallOutcome.ANSWERED))
         assertEquals(1, queued().size)
+    }
+
+    // ── the ring keeps ringing (Android audit 2026-09-23, A4) ────────────────
+    // The ring is the CALLS channel's ringtone + vibration. Without INSISTENT the
+    // system plays each ONCE: on vibrate that is three buzzes in ~5 s, then 25 s
+    // of silence while the ring screen and the missed timer still run.
+
+    private fun insistent(n: Notification) = (n.flags and Notification.FLAG_INSISTENT) != 0
+
+    @Test fun `the ring loops its ringtone and vibration until something settles it`() {
+        ring()
+        val n = shadowOf(nm).getNotification(NotifIds.CALL)
+        assertTrue("INSISTENT: the channel's sound + vibration repeat for the whole ring", insistent(n))
+        // A retried push for the SAME ring leaves the notification alone: re-posting
+        // an insistent ring is what silences it.
+        CallRinger.ring(context, payload, now + 5_000)
+        assertSame(n, shadowOf(nm).getNotification(NotifIds.CALL))
+        // Released by whatever settles it (here Decline; answer / missed / snooze
+        // cancel the same notification — see the tests above and below).
+        fire(MissedCallReceiver.ACTION_DECLINE)
+        assertNull(shadowOf(nm).getNotification(NotifIds.CALL))
+    }
+
+    @Test fun `Answer into the microphone prompt stops the ringing but keeps the call held`() {
+        ring()
+        assertTrue(CallRinger.holdForPermission(context, payload.callId, now + 3_000))
+        assertNull("no ringing under the prompt", shadowOf(nm).getNotification(NotifIds.CALL))
+        assertEquals("still the ringing call the prompt's answer settles", payload, CallRinger.ringing(context, now + 3_000))
+        // A retried push meanwhile doesn't bring the ringing back.
+        CallRinger.ring(context, payload, now + 5_000)
+        assertNull(shadowOf(nm).getNotification(NotifIds.CALL))
+        assertTrue(CallRinger.settle(context, payload.callId, CallOutcome.ANSWERED, nowMs = now + 6_000))
     }
 
     @Test fun `the alarm for a call that is not the active one does nothing`() {

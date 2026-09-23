@@ -6,6 +6,8 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Looper
+import android.os.PowerManager
+import android.view.KeyEvent
 import android.widget.TextView
 import androidx.test.core.app.ApplicationProvider
 import org.junit.After
@@ -203,6 +205,80 @@ class IncomingCallActivityTest {
         assertEquals(payload, queued().single().ringPayload)
         MissedCallReceiver().onReceive(context, MissedCallReceiver.intent(context, MissedCallReceiver.ACTION_MISSED, payload.callId))
         assertEquals(1, queued().size)
+    }
+
+    // ── silencing (Android audit 2026-09-23, A4 review) ─────────────────────
+    // The ring now loops for the whole 30 s, so the phone's own "not now" keys
+    // must quieten it WITHOUT deciding the call: only the notification (the
+    // ringtone + vibration) goes; the record, the screen and the clock stay.
+
+    /** The screen really turning on / off (the shadow broadcasts the change). */
+    private fun screen(on: Boolean) {
+        shadowOf(context.getSystemService(PowerManager::class.java)).turnScreenOn(on)
+        shadowOf(Looper.getMainLooper()).idle()
+    }
+
+    /** A SCREEN_OFF broadcast landing late — the screen itself does not change. */
+    private fun lateScreenOff() {
+        context.sendBroadcast(Intent(Intent.ACTION_SCREEN_OFF))
+        shadowOf(Looper.getMainLooper()).idle()
+    }
+
+    private fun press(a: IncomingCallActivity, key: Int): Boolean = a.onKeyDown(key, KeyEvent(KeyEvent.ACTION_DOWN, key))
+
+    private fun assertStillRingingSilently(a: IncomingCallActivity) {
+        assertNull("the ringtone + vibration stopped", shadowOf(nm).getNotification(NotifIds.CALL))
+        assertTrue("nothing decided", queued().isEmpty())
+        assertEquals("the call is still ringing", payload.callId, CallRinger.activeCallId(context))
+        assertTrue("the ring screen stays up", !a.isFinishing)
+    }
+
+    @Test fun `a volume key silences the ring - the buttons still decide the call`() {
+        screen(on = true)
+        ring()
+        val a = launch()
+        assertNotNull(shadowOf(nm).getNotification(NotifIds.CALL))
+        assertTrue("the first press is the silence, not a volume change", press(a, KeyEvent.KEYCODE_VOLUME_DOWN))
+        assertStillRingingSilently(a)
+        assertEquals("later presses are the volume again", false, press(a, KeyEvent.KEYCODE_VOLUME_UP))
+        a.findViewById<android.view.View>(IncomingCallActivity.ID_SNOOZE).performClick()
+        assertEquals(listOf(CallOutcome.SNOOZED), queued().map { it.outcome })
+    }
+
+    @Test fun `the power key silences the ring - the 30 s clock still ends it missed`() {
+        screen(on = true)
+        ring()
+        val a = launch()
+        screen(on = false)
+        assertStillRingingSilently(a)
+        shadowOf(Looper.getMainLooper()).idleFor(Duration.ofSeconds(31))
+        assertEquals(listOf(CallOutcome.MISSED), queued().map { it.outcome })
+        assertTrue(a.isFinishing)
+    }
+
+    @Test fun `a screen-off that is not the user's leaves it ringing`() {
+        ring()
+        // The ring woke a sleeping phone: the screen is still off as the activity
+        // comes up, and a late SCREEN_OFF from before the ring lands meanwhile.
+        screen(on = false)
+        val a = launch()
+        lateScreenOff()
+        assertNotNull("still ringing", shadowOf(nm).getNotification(NotifIds.CALL))
+        // A SCREEN_OFF that lands while the screen is back ON is late too.
+        screen(on = true)
+        lateScreenOff()
+        assertNotNull("still ringing", shadowOf(nm).getNotification(NotifIds.CALL))
+        // Once the screen was seen on, the power key is the user's.
+        screen(on = false)
+        assertStillRingingSilently(a)
+    }
+
+    @Test fun `silencing is only for the call that is still ringing`() {
+        ring()
+        assertEquals(false, CallRinger.silence(context, "another-call"))
+        assertNotNull(shadowOf(nm).getNotification(NotifIds.CALL))
+        CallRinger.settle(context, payload.callId, CallOutcome.ANSWERED)
+        assertEquals("answered: nothing left to silence", false, CallRinger.silence(context, payload.callId))
     }
 
     @Test fun `a screen opened after the call settled just closes`() {

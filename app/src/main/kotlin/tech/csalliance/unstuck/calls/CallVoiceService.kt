@@ -84,10 +84,11 @@ import tech.csalliance.unstuck.ui.assistant.VoiceState
 //              here as onSnooze: outcome `snoozed` + minutes is queued AT ONCE
 //              (a kill during the goodbye still snoozes), the goodbye gets
 //              SNOOZE_GOODBYE_MS to play, then the session ends.
-//   End    ──▶ finish(reason), ONCE per call: hung up → `done`; snoozed →
-//              already reported; failed (mic / socket / proxy) → `done` with
-//              outcomeNotes ["voice failed: …"] + the "here's what it was
-//              about" notification (iOS performEnd 1:1). Outcomes go through
+//   End    ──▶ finish(reason), ONCE per call: hung up → `done`; snoozed (and
+//              ANY end once snooze_call ran) → already reported; failed (mic /
+//              socket / proxy) → `done` with outcomeNotes ["voice failed: …"]
+//              + the "here's what it was about" notification (iOS performEnd
+//              1:1). Outcomes go through
 //              CallRinger.settle (first outcome wins, clears the ring state)
 //              and the durable CallOutcomeStore; process death mid-call → the
 //              next foreground flush reports what is queued.
@@ -372,13 +373,20 @@ class CallVoiceService : Service() {
         state = VoiceState.CLOSED
         activeCallId = null
         if (p != null) {
-            when (reason) {
+            // Once snooze_call has run, the call-back IS this call's outcome (Android
+            // audit 2026-09-23, A5): End tapped during the goodbye, the watchdog, a
+            // focus loss or a capture error all end it as that snooze. Reported as
+            // `done` it landed behind the `snoozed` and call-outcome applied it over
+            // it — snooze_until cleared, the promised call-back never rang. iOS
+            // performEnd (`pendingEnd ?? .hungUp`) and endedOnItsOwn do the same.
+            val snoozed = pendingSnoozeMin
+            when (val end = if (snoozed != null) CallEndReason.Snoozed(snoozed) else reason) {
                 CallEndReason.HungUp -> report(p, CallOutcome.DONE)
                 // Normally reported the moment the tool ran (snooze()) — the ring state
                 // closed with it; only a snooze that skipped that path reports here.
-                is CallEndReason.Snoozed -> if (pendingSnoozeMin == null) report(p, CallOutcome.SNOOZED, snoozeMin = CallCoordinatorLogic.clampSnooze(reason.minutes))
+                is CallEndReason.Snoozed -> if (snoozed == null) report(p, CallOutcome.SNOOZED, snoozeMin = CallCoordinatorLogic.clampSnooze(end.minutes))
                 is CallEndReason.Failed -> {
-                    val r = CallCoordinatorLogic.endOutcome(reason)
+                    val r = CallCoordinatorLogic.endOutcome(end)
                     // Direct enqueue: the failure note must reach the row (settle carries none).
                     CallOutcomeStore.enqueue(applicationContext, p.callId, r.outcome, outcomeNotes = r.outcomeNotes)
                     CallRinger.clear(applicationContext)
@@ -418,11 +426,14 @@ class CallVoiceService : Service() {
     }
 
     /** Through the ringer's first-outcome-wins state when it still knows the
-     *  call; straight into the durable queue when it doesn't (the process died
-     *  and came back, or the ring state was cleared) — never lost either way. */
+     *  call; straight into the durable queue when its record is gone (cleared,
+     *  or replaced by a later ring) — never lost either way. */
     private fun report(p: IncomingCallPayload, outcome: CallOutcome, snoozeMin: Int? = null) {
         val settled = runCatching { CallRinger.settle(applicationContext, p.callId, outcome, snoozeMin) }.getOrDefault(false)
-        if (!settled && CallRinger.activeCallId(applicationContext) != p.callId) {
+        // Only when the record is GONE (Android audit 2026-09-23, A5): one that is
+        // still this call's but refused the settle is already settled, its outcome
+        // (the in-call snooze) queued — a second one would be applied over it.
+        if (!settled && !CallRinger.recordIs(applicationContext, p.callId)) {
             CallOutcomeStore.enqueue(applicationContext, p.callId, outcome, snoozeMin)
         }
     }

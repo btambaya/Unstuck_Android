@@ -1,5 +1,6 @@
 package tech.csalliance.unstuck.calls
 
+import android.app.Notification
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
@@ -24,8 +25,12 @@ import org.robolectric.Robolectric
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import tech.csalliance.unstuck.core.logic.CallEndReason
+import tech.csalliance.unstuck.core.logic.CallNotificationCopy
+import tech.csalliance.unstuck.core.logic.CallOutcome
 import tech.csalliance.unstuck.core.logic.CallScript
 import tech.csalliance.unstuck.core.logic.IncomingCallPayload
+import tech.csalliance.unstuck.surface.NotifIds
 import tech.csalliance.unstuck.surface.NotificationChannels
 import tech.csalliance.unstuck.ui.assistant.CallMode
 
@@ -215,5 +220,78 @@ class CallVoiceServiceTest {
         // abandoned call into a reported `done`.
         controller.destroy()
         assertTrue(CallOutcomeStore.load(app).isEmpty)
+    }
+
+    // ── an in-call snooze is the call's outcome (Android audit 2026-09-23, A5) ──
+    // snooze_call reports `snoozed` at once and keeps the call up SNOOZE_GOODBYE_MS
+    // for the goodbye. Anything that ended the call in that window — the user
+    // tapping End after "bye", the watchdog, a focus loss, a capture error — used
+    // to report `done` (or `done` + "Couldn't start the call") BEHIND the
+    // `snoozed`; call-outcome applies `done` over `snoozed` and clears
+    // snooze_until, so the promised call-back never rang.
+
+    private fun outcomes(): List<CallOutcome> = CallOutcomeStore.load(app).items.map { it.outcome }
+
+    /** Rung, answered, the service up, and the conversation LIVE — the phase
+     *  openSession sets once the realtime session opens (no socket or microphone
+     *  can run here, so it is set directly) — then the model runs snooze_call. */
+    private fun snoozedCall(): org.robolectric.android.controller.ServiceController<CallVoiceService> {
+        CallOutcomeStore.clear(app)
+        NotificationChannels.ensureAll(app)
+        CallRinger.ring(app, payload)
+        assertTrue(CallRinger.settle(app, payload.callId, CallOutcome.ANSWERED))
+        val start = Intent(app, CallVoiceService::class.java)
+        payload.toData().forEach { (k, v) -> start.putExtra("p.$k", v) }
+        val controller = Robolectric.buildService(CallVoiceService::class.java, start).create()
+        controller.startCommand(0, 0)
+        val service = controller.get()
+        val phase = Class.forName(CallVoiceService::class.java.name + "\$Phase").enumConstants!!
+            .first { (it as Enum<*>).name == "ACTIVE" }
+        CallVoiceService::class.java.getDeclaredField("phase").apply { isAccessible = true }.set(service, phase)
+        CallVoiceService::class.java.getDeclaredMethod("snooze", Int::class.javaPrimitiveType)
+            .apply { isAccessible = true }.invoke(service, 10)
+        assertEquals(listOf(CallOutcome.ANSWERED, CallOutcome.SNOOZED), outcomes())
+        assertEquals(10, CallOutcomeStore.load(app).items.last().snoozeMin)
+        return controller
+    }
+
+    private fun resultTitle(): String? = shadowOf(app.getSystemService(NotificationManager::class.java))
+        .getNotification(NotifIds.callResult(payload.callId))?.extras?.getCharSequence(Notification.EXTRA_TITLE)?.toString()
+
+    @Test fun `End tapped during the goodbye after an in-call snooze keeps the call-back`() {
+        val controller = snoozedCall()
+        // The shade's End / the in-app call bar, 3 s into the goodbye.
+        controller.get().onStartCommand(Intent(app, CallVoiceService::class.java).setAction(CallVoiceService.ACTION_END), 0, 1)
+        assertNull("the call ended", CallVoiceService.activeCallId)
+        assertEquals("no `done` behind the `snoozed`", listOf(CallOutcome.ANSWERED, CallOutcome.SNOOZED), outcomes())
+        assertEquals("I'll call back in 10 minutes", resultTitle())
+        controller.destroy()
+        assertEquals(listOf(CallOutcome.ANSWERED, CallOutcome.SNOOZED), outcomes())
+    }
+
+    @Test fun `a focus loss or capture error during the goodbye does not undo the snooze or say the call failed`() {
+        val controller = snoozedCall()
+        CallVoiceService::class.java.getDeclaredMethod("finish", CallEndReason::class.java)
+            .apply { isAccessible = true }.invoke(controller.get(), CallEndReason.Failed("interrupted by another call"))
+        assertEquals(listOf(CallOutcome.ANSWERED, CallOutcome.SNOOZED), outcomes())
+        assertTrue("no voice-failed note on the row", CallOutcomeStore.load(app).items.all { it.outcomeNotes == null })
+        assertEquals("the confirmation stands, not \"${CallNotificationCopy.VOICE_FAILED_TITLE}\"",
+            "I'll call back in 10 minutes", resultTitle())
+        controller.destroy()
+    }
+
+    @Test fun `an end is queued straight only when the ring record is gone, never behind an outcome already settled`() {
+        val controller = snoozedCall()
+        val report = CallVoiceService::class.java.getDeclaredMethod(
+            "report", IncomingCallPayload::class.java, CallOutcome::class.java, Int::class.javaObjectType,
+        ).apply { isAccessible = true }
+        // The record is still this call's, settled by the snooze: nothing more to say.
+        report.invoke(controller.get(), payload, CallOutcome.DONE, null)
+        assertEquals(listOf(CallOutcome.ANSWERED, CallOutcome.SNOOZED), outcomes())
+        // The record is gone (cleared): the end still reaches the server — never lost.
+        CallRinger.clear(app)
+        report.invoke(controller.get(), payload, CallOutcome.DONE, null)
+        assertEquals(listOf(CallOutcome.ANSWERED, CallOutcome.SNOOZED, CallOutcome.DONE), outcomes())
+        controller.destroy()
     }
 }

@@ -67,22 +67,25 @@ fun AuthScreen(vm: AppViewModel) {
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var messageOk by remember { mutableStateOf(false) }
+    // A sign-up for an address that already has an account (AuthOutcome.Error
+    // .accountExists): no email went out, so offer the ways in instead.
+    var accountExists by remember { mutableStateOf(false) }
     // A tapped email link that couldn't sign in (expired / already used / offline) —
     // it used to crash the app instead (Android audit 2026-09-23, A7).
     val linkError by vm.authLinkError.collectAsStateWithLifecycle()
     LaunchedEffect(linkError) {
-        linkError?.let { messageOk = false; message = it; vm.consumeAuthLinkError() }
+        linkError?.let { messageOk = false; message = it; accountExists = false; vm.consumeAuthLinkError() }
     }
 
     // `success` is shown (in a calm tone) for flows that finish WITHOUT a session —
     // sign-up confirmation, magic link, password reset all just send an email, so an
     // empty Ok branch previously left the screen looking like nothing happened.
     fun run(success: String? = null, block: suspend () -> AuthOutcome) {
-        busy = true; message = null
+        busy = true; message = null; accountExists = false
         scope.launch {
             when (val r = block()) {
                 is AuthOutcome.Ok -> if (success != null) { messageOk = true; message = success }
-                is AuthOutcome.Error -> { messageOk = false; message = r.message }
+                is AuthOutcome.Error -> { messageOk = false; message = r.message; accountExists = r.accountExists }
             }
             busy = false
         }
@@ -149,6 +152,29 @@ fun AuthScreen(vm: AppViewModel) {
                     color = if (messageOk) c.greenInk else c.red,
                 )
             }
+            // "An account with this email already exists. Sign in instead." — the two
+            // ways in, right under it. Sign in keeps the email (and the password, in case
+            // it's theirs); Forgot password sends the reset email for that address.
+            if (accountExists && signUp) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
+                    Text(
+                        "Sign in instead",
+                        style = UFont.sans(13, FontWeight.SemiBold), color = c.primaryDeep,
+                        modifier = Modifier.clickable(enabled = !busy) {
+                            signUp = false; message = null; messageOk = false; accountExists = false
+                        }.semantics { role = Role.Button }.padding(horizontal = 10.dp, vertical = 12.dp),
+                    )
+                    Text(
+                        "Forgot password?",
+                        style = UFont.sans(13, FontWeight.Medium), color = c.ink2,
+                        modifier = Modifier.clickable(enabled = !busy) {
+                            val e = email.trim()
+                            if (e.isBlank()) { messageOk = false; message = "Enter your email first."; accountExists = false }
+                            else { signUp = false; run("Check your email — tap the link to set a new password.") { vm.resetPassword(e) } }
+                        }.semantics { role = Role.Button }.padding(horizontal = 10.dp, vertical = 12.dp),
+                    )
+                }
+            }
         }
 
         Spacer(Modifier.height(20.dp))
@@ -171,7 +197,7 @@ fun AuthScreen(vm: AppViewModel) {
             if (signUp) "Already have an account? Sign in" else "New here? Create an account",
             // Clear any stale error/success banner when switching modes; ≥44dp touch target.
             style = UFont.sans(13, FontWeight.Medium), color = c.primaryDeep,
-            modifier = Modifier.clickable { signUp = !signUp; message = null; messageOk = false }.padding(vertical = 10.dp),
+            modifier = Modifier.clickable { signUp = !signUp; message = null; messageOk = false; accountExists = false }.padding(vertical = 10.dp),
         )
         Text("Email me a magic link instead", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable(enabled = !busy) {
             val e = email.trim()

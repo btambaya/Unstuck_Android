@@ -1,20 +1,29 @@
 package tech.csalliance.unstuck.ui.collections
 
-import androidx.compose.animation.AnimatedVisibility
+import android.view.HapticFeedbackConstants
+import androidx.compose.animation.core.animate
+import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.gestures.Orientation
+import androidx.compose.foundation.gestures.draggable
+import androidx.compose.foundation.gestures.rememberDraggableState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -25,8 +34,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
-import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.outlined.AddTask
 import tech.csalliance.unstuck.ui.sharing.ShareScreen
 import tech.csalliance.unstuck.ui.sharing.ShareTarget
@@ -42,23 +51,40 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlin.math.roundToInt
+import kotlin.math.sign
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
+import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.model.CollectionItem
@@ -252,19 +278,31 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                 if (pinned.isNotEmpty()) {
                     SectionLabel("Pinned", Modifier.padding(start = 4.dp, top = 20.dp, bottom = 6.dp))
                     pinned.forEach { row ->
-                        CollItemRow(col, row, vm, readOnly = !canEdit,
-                            revealed = revealedId == row.id,
-                            onReveal = { revealedId = if (revealedId == row.id) null else row.id },
-                            onMoveToTask = { startPromote(row) })
+                        // Keyed to the item: pinning moves it between Pinned and All,
+                        // deleting shifts the rest up — its edit/swipe state must not
+                        // re-attach to whichever item lands in its slot.
+                        key(row.id) {
+                            CollItemRow(col, row, vm, readOnly = !canEdit,
+                                // One row open at a time: opening a swipe closes any other.
+                                revealed = revealedId == row.id,
+                                onReveal = { open -> revealedId = if (open) row.id else if (revealedId == row.id) null else revealedId },
+                                onMoveToTask = { startPromote(row) })
+                        }
                     }
                 }
                 if (rest.isNotEmpty()) {
                     SectionLabel("All", Modifier.padding(start = 4.dp, top = 14.dp, bottom = 6.dp))
                     rest.forEach { row ->
-                        CollItemRow(col, row, vm, readOnly = !canEdit,
-                            revealed = revealedId == row.id,
-                            onReveal = { revealedId = if (revealedId == row.id) null else row.id },
-                            onMoveToTask = { startPromote(row) })
+                        // Keyed to the item: pinning moves it between Pinned and All,
+                        // deleting shifts the rest up — its edit/swipe state must not
+                        // re-attach to whichever item lands in its slot.
+                        key(row.id) {
+                            CollItemRow(col, row, vm, readOnly = !canEdit,
+                                // One row open at a time: opening a swipe closes any other.
+                                revealed = revealedId == row.id,
+                                onReveal = { open -> revealedId = if (open) row.id else if (revealedId == row.id) null else revealedId },
+                                onMoveToTask = { startPromote(row) })
+                        }
                     }
                 }
             }
@@ -376,13 +414,20 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     )
 }
 
+/** One list item. The row used to do too many things at once — tap edited, a hold
+ *  slid out pin / move-to-task / remove icons (Ahmad: "too clunky because it does
+ *  so many things"). Now each gesture does one job: TAP strikes it out, SWIPE LEFT
+ *  offers Delete, SWIPE RIGHT offers Pin and To task, HOLD edits the text (Ahmad
+ *  2026-09-23, parity with iOS b84). View-only rows take no gestures at all. */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun CollItemRow(
     col: ItemCollection, item: CollectionItem, vm: AppViewModel,
     readOnly: Boolean,
+    /** This row is the open one (its swipe actions showing). */
     revealed: Boolean,
-    onReveal: () -> Unit,
+    /** Open (true) or close (false) this row's swipe actions. */
+    onReveal: (Boolean) -> Unit,
     onMoveToTask: () -> Unit,
 ) {
     val c = UTheme.colors
@@ -393,79 +438,207 @@ private fun CollItemRow(
     val dueMs = item.dueAt?.let { parseInstantMs(it) }
     val overdue = promoted && !promotedDone && dueMs != null && vm.nowMs() > dueMs
     val struck = done || promoted          // promoted items read as "handled / in flight"
+    val promotedLabel = if (!promoted) null else when {
+        promotedDone -> "done by ${item.assignee ?: "someone"} ✓"
+        overdue -> "⚠ overdue · due ${fmtTime(item.dueAt)}"
+        // Guard on the PARSED time (dueMs), not the raw string — an unparseable
+        // dueAt would otherwise render a dangling "…'s on it · by ".
+        item.assignee != null && dueMs != null -> "${item.assignee}'s on it · by ${fmtTime(item.dueAt)}"
+        item.assignee != null -> "${item.assignee}'s on it"
+        else -> "Promoted"
+    }
+    // Hide To task while a promotion is in flight (avoids a duplicate task).
+    val canMove = !promoted || promotedDone
     var editing by remember(item.id) { mutableStateOf(false) }
     var draft by remember(item.id) { mutableStateOf(item.body) }
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(12.dp))
-            // Hold ANYWHERE on the row to reveal the actions; tap = edit. (Gated
-            // off while editing so the text field gets the taps; the checkbox +
-            // revealed icons keep their own taps.)
-            .then(if (readOnly || editing) Modifier else Modifier.combinedClickable(
-                // If the action bar is showing, a tap dismisses it (was falling through
-                // to open the inline editor); otherwise tap = edit, hold = reveal.
-                onClick = { if (revealed) onReveal() else { draft = item.body; editing = true } },
-                onLongClick = onReveal,
-            ))
-            .padding(horizontal = 12.dp, vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+    val editFocus = remember(item.id) { FocusRequester() }
+    // A hold opens the editor with the keyboard up, not a field that needs a second tap.
+    LaunchedEffect(editing) { if (editing) runCatching { editFocus.requestFocus() } }
+
+    // --- swipe state (geometry + snap rules: CollItemSwipe.kt) ---
+    val density = LocalDensity.current
+    val actionPx = with(density) { COLL_ITEM_ACTION_WIDTH.toPx() }
+    val leadingPx = actionPx * (if (canMove) 2 else 1)   // Pin (+ To task), left side
+    val trailingPx = actionPx                           // Delete, right side
+    val flingPx = with(density) { COLL_ITEM_FLING_VELOCITY.toPx() }
+    val scope = rememberCoroutineScope()
+    val view = LocalView.current
+    // The card's horizontal offset: > 0 shows the left actions, < 0 the right one.
+    var offset by remember(item.id) { mutableFloatStateOf(0f) }
+    // Which side is showing (-1 / 0 / 1). Derived, so a drag recomposes the row only
+    // when the card crosses the middle — the card itself moves in the layout phase.
+    val side by remember(item.id) { derivedStateOf { sign(offset) } }
+    // The finger's own travel this drag (before the rubber band), where the drag
+    // began, and whether one is under way — set on the first delta, so nothing
+    // depends on onDragStarted landing before it.
+    var dragRaw by remember(item.id) { mutableFloatStateOf(0f) }
+    var dragOrigin by remember(item.id) { mutableFloatStateOf(0f) }
+    var dragging by remember(item.id) { mutableStateOf(false) }
+    val settle = remember(item.id) { arrayOfNulls<Job>(1) }
+    // iOS spring(response 0.28, damping 0.9): stiffness (2π/0.28)² ≈ 500.
+    fun settleTo(target: Float) {
+        settle[0]?.cancel()
+        settle[0] = scope.launch {
+            animate(offset, target, animationSpec = spring(dampingRatio = 0.9f, stiffness = 500f)) { v, _ -> offset = v }
+        }
+    }
+    fun close() {
+        settleTo(0f)
+        if (revealed) onReveal(false)
+    }
+    fun toggleDone() {
+        if (readOnly) return
+        // Tapping an open row just closes it — never a surprise strike-out.
+        if (offset != 0f) { close(); return }
+        vm.toggleCollectionItemDone(col, item.id)
+    }
+    fun startEdit() {
+        if (readOnly) return
+        close()
+        draft = item.body; editing = true
+    }
+    // Blank = cancel (keep the live body): a cleared field must not wipe the item
+    // silently (iOS commitEdit).
+    fun commitEdit() {
+        val text = draft.trim()
+        if (text.isNotEmpty()) vm.updateCollectionItemBody(col, item.id, text)
+        editing = false
+    }
+    val dragState = rememberDraggableState { delta ->
+        if (!dragging) { dragging = true; settle[0]?.cancel(); dragOrigin = offset; dragRaw = offset }
+        dragRaw += delta
+        offset = collItemRubberBand(dragRaw, leadingPx, trailingPx)
+    }
+    // Another row opened (or a promote started): slide this one shut.
+    LaunchedEffect(revealed) { if (!revealed && offset != 0f && !dragging) settleTo(0f) }
+
+    // The draggable sits on this box, which never moves: on the sliding card itself
+    // the pointer would stay still relative to it and every delta would read ~0.
+    // Horizontal only, so the page's vertical scroll keeps every up/down drag.
+    Box(
+        Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp))
+            // `enabled`, not a dropped modifier: switching it off mid-drag cancels the
+            // drag through onDragStopped, so `dragging` can't stick.
+            .draggable(
+                dragState, Orientation.Horizontal, enabled = !readOnly && !editing,
+                onDragStopped = { velocity ->
+                    dragging = false
+                    val target = collItemSnapTarget(offset, velocity, leadingPx, trailingPx, flingPx)
+                    settleTo(target)
+                    if (target != 0f) {
+                        // A light tick as a side opens (not when it only re-settles).
+                        if (target != dragOrigin) view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
+                        onReveal(true)
+                    } else if (revealed) onReveal(false)
+                },
+            ),
     ) {
-        // Done checkbox (always visible).
-        Box(
-            Modifier.size(18.dp).clip(CircleShape).background(if (done) c.coral else c.surface).border(if (done) 0.dp else 1.5.dp, c.line2, CircleShape)
-                .then(if (readOnly) Modifier else Modifier.clickable { vm.toggleCollectionItemDone(col, item.id) }),
-            contentAlignment = Alignment.Center,
-        ) { if (done) Icon(Icons.Filled.Check, contentDescription = null, tint = androidx.compose.ui.graphics.Color.White, modifier = Modifier.size(12.dp)) }
-
-        // Text + status. (Row handles tap = edit / hold = reveal.)
-        Column(Modifier.weight(1f)) {
-            if (editing && !readOnly) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    BasicTextField(
-                        value = draft, onValueChange = { draft = it }, textStyle = UFont.sans(14).copy(color = c.ink),
-                        singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f),
-                        // IME Done = the ✓ commit (single-field edit form).
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
-                        keyboardActions = KeyboardActions(onDone = { vm.updateCollectionItemBody(col, item.id, draft); editing = false }),
-                    )
-                    Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable { vm.updateCollectionItemBody(col, item.id, draft); editing = false }.padding(2.dp))
-                }
-            } else {
-                Text(
-                    item.body, style = UFont.sans(14), color = if (struck) c.ink3 else c.ink,
-                    textDecoration = if (struck) TextDecoration.LineThrough else null,
-                )
-            }
-            if (promoted) {
-                val label = when {
-                    promotedDone -> "done by ${item.assignee ?: "someone"} ✓"
-                    overdue -> "⚠ overdue · due ${fmtTime(item.dueAt)}"
-                    // Guard on the PARSED time (dueMs), not the raw string — an unparseable
-                    // dueAt would otherwise render a dangling "…'s on it · by ".
-                    item.assignee != null && dueMs != null -> "${item.assignee}'s on it · by ${fmtTime(item.dueAt)}"
-                    item.assignee != null -> "${item.assignee}'s on it"
-                    else -> "Promoted"
-                }
-                Text(
-                    label, style = UFont.sans(11, FontWeight.Medium),
-                    color = if (overdue) c.red else if (promotedDone) c.greenInk else c.primaryDeep,
-                    modifier = Modifier.padding(top = 2.dp),
-                )
-            }
+        if (!readOnly && side != 0f) {
+            CollItemSwipeActions(
+                showLeft = side > 0f, pinned = isPinned, canMove = canMove,
+                onPin = { vm.toggleCollectionItemPin(col, item.id); close() },
+                onMoveToTask = { close(); onMoveToTask() },
+                onDelete = { close(); vm.removeCollectionItem(col, item.id) },
+                modifier = Modifier.matchParentSize(),
+            )
         }
-
-        // Action bar — hidden by default, revealed on long-press.
-        if (!readOnly) {
-            AnimatedVisibility(visible = revealed) {
-                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Icon(Icons.Outlined.PushPin, contentDescription = "Pin", tint = if (isPinned) c.coral else c.ink4, modifier = Modifier.size(19.dp).clickable { vm.toggleCollectionItemPin(col, item.id) })
-                    // Hide Move-to-task while a promotion is in flight (avoids a duplicate task).
-                    if (!promoted || promotedDone) {
-                        Icon(Icons.Outlined.AddTask, contentDescription = "Move to task", tint = c.ink4, modifier = Modifier.size(19.dp).clickable { onMoveToTask() })
+        Row(
+            Modifier.fillMaxWidth()
+                .offset { IntOffset(offset.roundToInt(), 0) }
+                .clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(12.dp))
+                // Tap = strike out, hold = edit. Gated off while editing so the text
+                // field gets the taps. Swipes aren't reachable with TalkBack, so the
+                // row carries every action as well: the tap is the click, the rest are
+                // custom actions. clearAndSetSemantics comes FIRST so it also replaces
+                // combinedClickable's own long-click action — otherwise "Edit" would be
+                // listed twice.
+                .then(if (readOnly || editing) Modifier else Modifier
+                    .clearAndSetSemantics {
+                        contentDescription = listOfNotNull(item.body, promotedLabel).joinToString(", ")
+                        if (done) stateDescription = "Done"
+                        onClick(label = if (done) "Mark as not done" else "Strike it out") { toggleDone(); true }
+                        customActions = buildList {
+                            add(CustomAccessibilityAction(if (isPinned) "Unpin" else "Pin") { vm.toggleCollectionItemPin(col, item.id); true })
+                            if (canMove) add(CustomAccessibilityAction("Move to task") { onMoveToTask(); true })
+                            add(CustomAccessibilityAction("Edit") { startEdit(); true })
+                            add(CustomAccessibilityAction("Delete") { vm.removeCollectionItem(col, item.id); true })
+                        }
                     }
-                    Icon(Icons.Filled.Close, contentDescription = "Remove", tint = c.ink4, modifier = Modifier.size(19.dp).clickable { vm.removeCollectionItem(col, item.id) })
+                    .combinedClickable(onClick = { toggleDone() }, onLongClick = { startEdit() }))
+                .padding(horizontal = 12.dp, vertical = 10.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
+        ) {
+            // Done circle (always visible) — the row's state; tapping anywhere on the
+            // row is what toggles it.
+            Box(
+                Modifier.size(18.dp).clip(CircleShape).background(if (done) c.coral else c.surface).border(if (done) 0.dp else 1.5.dp, c.line2, CircleShape),
+                contentAlignment = Alignment.Center,
+            ) { if (done) Icon(Icons.Filled.Check, contentDescription = null, tint = Color.White, modifier = Modifier.size(12.dp)) }
+
+            // Text + status.
+            Column(Modifier.weight(1f)) {
+                if (editing && !readOnly) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        BasicTextField(
+                            value = draft, onValueChange = { draft = it }, textStyle = UFont.sans(14).copy(color = c.ink),
+                            singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f).focusRequester(editFocus),
+                            // IME Done = the ✓ commit (single-field edit form).
+                            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                            keyboardActions = KeyboardActions(onDone = { commitEdit() }),
+                        )
+                        Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable { commitEdit() }.padding(2.dp))
+                    }
+                } else {
+                    Text(
+                        item.body, style = UFont.sans(14), color = if (struck) c.ink3 else c.ink,
+                        textDecoration = if (struck) TextDecoration.LineThrough else null,
+                    )
+                }
+                promotedLabel?.let { label ->
+                    Text(
+                        label, style = UFont.sans(11, FontWeight.Medium),
+                        color = if (overdue) c.red else if (promotedDone) c.greenInk else c.primaryDeep,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
                 }
             }
         }
+    }
+}
+
+/** What a swipe uncovers under the card: Pin + To task on the left (swipe right),
+ *  Delete on the right (swipe left). Neutral ink for the two quiet ones; the app's
+ *  destructive red only for Delete — no new accent colours (Ahmad 2026-09-23,
+ *  parity with iOS b84). Hidden from TalkBack: the row's custom actions carry them. */
+@Composable
+private fun CollItemSwipeActions(
+    showLeft: Boolean, pinned: Boolean, canMove: Boolean,
+    onPin: () -> Unit, onMoveToTask: () -> Unit, onDelete: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val c = UTheme.colors
+    Row(modifier.clearAndSetSemantics {}) {
+        if (showLeft) {
+            CollItemSwipeAction(if (pinned) "Unpin" else "Pin", if (pinned) Icons.Filled.PushPin else Icons.Outlined.PushPin, c.ink2, onPin)
+            if (canMove) CollItemSwipeAction("To task", Icons.Outlined.AddTask, c.ink, onMoveToTask)
+            Spacer(Modifier.weight(1f))
+        } else {
+            Spacer(Modifier.weight(1f))
+            CollItemSwipeAction("Delete", Icons.Outlined.Delete, c.red, onDelete)
+        }
+    }
+}
+
+@Composable
+private fun CollItemSwipeAction(title: String, icon: ImageVector, tint: Color, onClick: () -> Unit) {
+    val c = UTheme.colors
+    Column(
+        Modifier.width(COLL_ITEM_ACTION_WIDTH).fillMaxHeight().background(tint).clickable(onClick = onClick),
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(3.dp, Alignment.CenterVertically),
+    ) {
+        Icon(icon, contentDescription = null, tint = c.bg, modifier = Modifier.size(16.dp))
+        Text(title, style = UFont.sans(11, FontWeight.SemiBold), color = c.bg, maxLines = 1)
     }
 }
 

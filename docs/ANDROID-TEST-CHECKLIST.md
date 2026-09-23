@@ -246,11 +246,13 @@ The must-pass set. If any item fails, do not ship.
 - [ ] Paused-check-in End action: records session, totalFocused++, clears live session + notif, stops service.
 
 ### Collections & Sharing
-- [ ] Long-press item reveals action bar (pin / move-to-task / remove); long-press or tap dismisses.
-- [ ] Pin/unpin: icon outline↔coral; items move between Pinned/All; section labels appear/vanish.
-- [ ] Check/uncheck item: coral checkbox + checkmark, strikethrough ink3 on done, restores on undo.
-- [ ] Inline-edit item: tap → BasicTextField + green check; another member's collection rename does NOT wipe draft (keyed on item.id).
-- [ ] Remove item via action bar: disappears immediately, count decrements, outbox enqueues delete.
+- [ ] List item gestures (Ahmad 2026-09-23, parity with iOS b84): TAP strikes it out / back; SWIPE LEFT → red Delete; SWIPE RIGHT → Pin/Unpin + To task (ink); HOLD → inline edit; no ellipsis. One row open at a time; tapping an open row only closes it.
+- [ ] Swipe feel: rubber-bands past the actions; opens past ~45 % or on a fling, shuts otherwise; a flick back shuts an open row; light tick on open; vertical scroll still works when the drag starts on a row.
+- [ ] Pin/unpin from the swipe: items move between Pinned/All; section labels appear/vanish; the moved row comes back closed.
+- [ ] Check/uncheck item (tap the row): coral circle + checkmark, strikethrough ink3 on done.
+- [ ] Inline-edit item: hold → BasicTextField focused with the keyboard up + green check; blank = cancel (body kept); another member's collection rename does NOT wipe draft (keyed on item.id).
+- [ ] Delete item via swipe left: disappears immediately, count decrements, outbox enqueues delete.
+- [ ] TalkBack on an item: double-tap strikes it out; the actions menu lists Pin/Unpin, Move to task (hidden while promoted), Edit, Delete — once each.
 - [ ] Edit collection name (owner): inline + checkmark, updates header + grid; non-owner read-only.
 - [ ] Change collection color (owner): palette updates header + grid; non-owner sees no palette.
 - [ ] Archive/restore collection; archived hidden from grid until "Archived (N)" toggle; unarchive restores.
@@ -260,7 +262,7 @@ The must-pass set. If any item fails, do not ship.
 - [ ] Non-owner: "Shared with you · can edit/view" note; editor can add/edit; Leave removes + pops.
 - [ ] Move item to task (solo list): no dialog → task (estimate 25, tag 'from-collection'); item shows struck-through "Promoted".
 - [ ] Keep-in-loop overdue warning ("⚠ overdue · due [time]" red); assignee completion flips item to "done by [name] ✓" green.
-- [ ] Viewer role read-only: add pill hidden, no long-press/edit, checkboxes disabled, status chips static.
+- [ ] Viewer role read-only: add pill hidden, no tap/swipe/hold on items, status chips static.
 - [ ] Concurrent edit on shared list synced to all members via realtime; atomic item RPCs prevent clobbering. `[regression]`
 - [ ] Collection deleted by owner: realtime delete drops members' local copy; detail screen pops back. `[edge]`
 - [ ] Share sheet member/pending list loads + refreshes after share/unshare/cancel; no stale data.

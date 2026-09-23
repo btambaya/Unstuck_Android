@@ -81,7 +81,10 @@ object CallSettingsLogic {
         val e = minutesOfDay(end)
         if (e == null || refusingMin != e) return "$start–$end"
         val last = (e + 24 * 60 - 1) % (24 * 60)
-        return "$start–$end; the latest it rings is %02d:%02d".format(last / 60, last % 60)
+        // ASCII like the hours beside it (and iOS): the phone's own digits here mixed
+        // two scripts in one sentence, which the model also reads (Android audit
+        // 2026-09-23, A12).
+        return "$start–$end; the latest it rings is ${WireTime.hm(last / 60, last % 60)}"
     }
 
     // ── will it ring here? (parity with iOS build 81, audit 2026-09-22 C12) ──
@@ -112,8 +115,8 @@ object CallSettingsLogic {
             ?: return "Unstuck only calls between ${SERVER_WINDOW.start} and ${SERVER_WINDOW.endInclusive}, so a call at $hhmm never rings."
         if (!enabled) return "Calls are off on this phone, so this call is declined here — switch them on above."
         val outside = listOf(ring, ring + 1).firstOrNull { !withinWindow(it, start, end) } ?: return null
-        return "Unstuck rings this call at about %02d:%02d, outside this phone's allowed hours (%s), so it's declined here — widen the hours above or pick another time."
-            .format(outside / 60, outside % 60, hoursLabel(start, end, outside))
+        // The time in ASCII, as in hoursLabel (Android audit 2026-09-23, A12).
+        return "Unstuck rings this call at about ${WireTime.hm(outside / 60, outside % 60)}, outside this phone's allowed hours (${hoursLabel(start, end, outside)}), so it's declined here — widen the hours above or pick another time."
     }
 
     /** The amber line under "Check in after a block" (it rings at the tick

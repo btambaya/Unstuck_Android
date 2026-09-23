@@ -149,6 +149,20 @@ class LocaleDigitsTest {
         }
     }
 
+    @Test fun callHoursSentencesUseOneDigitScript() {
+        // The allowed hours beside these minutes are ASCII now, so on a Persian phone
+        // the warning read "about ۲۱:۰۰ … (08:00–21:00; the latest it rings is ۲۰:۵۹)",
+        // and the model got the same mix in the refusal.
+        underEachLocale { l ->
+            assertEquals("$l", "08:00–21:00; the latest it rings is 20:59", CallSettingsLogic.hoursLabel("08:00", "21:00", 21 * 60))
+            assertEquals(
+                "$l",
+                "Unstuck rings this call at about 21:00, outside this phone's allowed hours (08:00–21:00; the latest it rings is 20:59), so it's declined here — widen the hours above or pick another time.",
+                CallSettingsLogic.proactiveTimeWarning("20:58", enabled = true, start = "08:00", end = "21:00"),
+            )
+        }
+    }
+
     @Test fun briefClockGoogleMirrorAndSharedSlotsAreAscii() {
         val ms = Time.parseMillis("2026-09-23T14:05:00.000Z")!!
         underEachLocale { l ->

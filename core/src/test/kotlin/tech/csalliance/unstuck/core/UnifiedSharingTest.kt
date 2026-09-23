@@ -6,6 +6,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.HAND_OVER_EXPLAINER
+import tech.csalliance.unstuck.core.logic.RecipientShareAction
 import tech.csalliance.unstuck.core.logic.ShareAccess
 import tech.csalliance.unstuck.core.logic.ShareExistingGrant
 import tech.csalliance.unstuck.core.logic.ShareFailure
@@ -21,6 +22,7 @@ import tech.csalliance.unstuck.core.logic.sharePeopleSplit
 import tech.csalliance.unstuck.core.logic.sharePersonMatches
 import tech.csalliance.unstuck.core.logic.shareResultLine
 import tech.csalliance.unstuck.core.logic.shareShortName
+import tech.csalliance.unstuck.core.logic.sharedTaskReportBody
 import tech.csalliance.unstuck.core.model.CircleMember
 import tech.csalliance.unstuck.core.model.CircleStatus
 import tech.csalliance.unstuck.core.model.ShareLevel
@@ -142,6 +144,11 @@ class UnifiedSharingTest {
         assertEquals("Maya no longer has this.", shareResultLine(ShareResult.Removed("Maya")))
         assertEquals("Invite to x@y.com cancelled.", shareResultLine(ShareResult.InviteCancelled("x@y.com")))
         assertEquals("It becomes their task to do — you keep view and hear when it's done.", HAND_OVER_EXPLAINER)
+        // Audit 2026-09-22, C10: a block is server-side and says what it did.
+        assertEquals(
+            "Blocked Maya — they can't share with you, and nothing is shared between you now.",
+            shareResultLine(ShareResult.Blocked("Maya Chen")),
+        )
     }
 
     // ── failure mapping ─────────────────────────────────────────────────────
@@ -166,6 +173,34 @@ class UnifiedSharingTest {
         assertEquals("codes are trimmed + case-folded", ShareFailure.SelfShare, ShareFailure.fromReason("SELF "))
         assertEquals(ShareFailure.Server("something_new"), ShareFailure.fromReason("something_new"))
         assertEquals("Couldn't share — try again.", ShareFailure.fromReason("something_new").message)
+        // Audit 2026-09-22, C10: a refused Block says the BLOCK didn't land — never
+        // "Couldn't share", on a safety action whose failure matters.
+        assertEquals("Couldn't block Maya — try again.", ShareFailure.BlockFailed("Maya Chen").message)
+    }
+
+    // ── the recipient's controls on a task shared WITH them (audit 2026-09-22 C10)
+
+    @Test fun `the recipient confirms say what happens`() {
+        assertEquals("Remove from my list?", RecipientShareAction.LEAVE.title("maya@x.com"))
+        assertEquals("You'll stop seeing this task. maya isn't told.", RecipientShareAction.LEAVE.message("maya@x.com"))
+        assertEquals("Remove", RecipientShareAction.LEAVE.confirmLabel)
+        assertEquals("Block Maya Chen?", RecipientShareAction.BLOCK.title("Maya Chen"))
+        assertEquals(
+            "Maya Chen won't be able to share tasks or lists with you, and everything shared between you stops. You can unblock them in Settings › People.",
+            RecipientShareAction.BLOCK.message("Maya Chen"),
+        )
+        assertEquals("Block", RecipientShareAction.BLOCK.confirmLabel)
+    }
+
+    @Test fun `the recipient report names the task the share and the owner`() {
+        assertEquals(
+            "⚠️ REPORT — task shared with me t1 (share s1) from Maya: Spam",
+            sharedTaskReportBody(taskId = "t1", shareId = "s1", ownerName = "Maya", reason = "Spam"),
+        )
+        assertEquals(
+            "⚠️ REPORT — task shared with me t1 from Maya: Other",
+            sharedTaskReportBody(taskId = "t1", shareId = null, ownerName = "Maya", reason = "Other"),
+        )
     }
 
     @Test fun `a thrown rpc message yields its raise-exception code`() {

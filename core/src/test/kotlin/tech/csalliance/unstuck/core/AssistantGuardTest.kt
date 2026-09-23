@@ -111,10 +111,25 @@ class AssistantGuardTest {
         assertFalse(looksLikeActionClaim("As I said, I pinned it for you."))
     }
 
+    // The four verbs iOS + web already had (parity with iOS build 71, 56f1f60).
+    @Test fun `catches the unpinned, finished, left and switched claims`() {
+        listOf(
+            "I've switched it to dark mode.",
+            "I've unpinned it.",
+            "I've finished the focus session.",
+            "I've left the list.",
+            "Switched your theme to dark.",
+            "Unpinned “Milk” in Groceries.",
+            "The session has been finished.",
+        ).forEach { assertTrue(it, looksLikeActionClaim(it)) }
+    }
+
     @Test fun `does not trip on honest sentence-leads that share a verb`() {
         assertFalse(looksLikeActionClaim("Set aside twenty minutes for it?"))
         assertFalse(looksLikeActionClaim("Shared tasks show up under People in Settings."))
         assertFalse(looksLikeActionClaim("Started already? Tell me how far you got."))
+        assertFalse(looksLikeActionClaim("Left to do: two things."))
+        assertFalse(looksLikeActionClaim("Finished with that one?"))
     }
 
     // Turn awareness

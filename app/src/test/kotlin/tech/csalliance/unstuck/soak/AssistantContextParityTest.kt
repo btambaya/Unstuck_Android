@@ -102,7 +102,10 @@ class AssistantContextParityTest {
 
         // tasks[].scheduledDate/Time come from the next-live-block map.
         val legacyNext = legacyNextLiveBlockByTask(blocks, today)
-        val open = tasks.asSequence().filter { !it.done }.take(60).toList()
+        // Newest first since iOS build 79 parity (audit 2026-09-21): a stable
+        // sort on the parsed createdAt, then the first 60.
+        val open = tasks.filter { !it.done }
+            .sortedByDescending { tech.csalliance.unstuck.core.time.Time.parseMillis(it.createdAt) ?: Long.MIN_VALUE }.take(60)
         val ctxTasks = ctx["tasks"]!!.jsonArray
         assertEquals(open.size, ctxTasks.size)
         assertTrue("fixture must schedule some of the 60", open.any { legacyNext[it.id] != null })

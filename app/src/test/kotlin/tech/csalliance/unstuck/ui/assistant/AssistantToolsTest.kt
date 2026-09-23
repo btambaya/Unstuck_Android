@@ -408,7 +408,8 @@ class AssistantToolsTest {
         assertTrue(later.contains("[id=t_later] 25m · Later"))
         val done = h.run("get_tasks", "view" to "completed")
         assertTrue(done, done.startsWith("ok: Completed (1):"))
-        assertTrue(done.contains("[id=t_done] 25m · done"))
+        // Dated since iOS build 76: created <day>, and no done-day without a stamp.
+        assertTrue(done, done.contains("[id=t_done] 25m · created ") && done.endsWith("· done"))
         val backlog = h.run("get_tasks", "view" to "backlog")
         assertTrue(backlog, backlog.startsWith("ok: Backlog (1):"))
         assertTrue(backlog.contains("[id=t_old]"))
@@ -2042,5 +2043,159 @@ class AssistantToolsTest {
         assertEquals("ok: no open task matches \"call mom\" — includeDone=true searches finished ones too",
             h.run("find_tasks", "query" to "call mom"))
         assertTrue(h.run("find_tasks", "query" to "call mom", "includeDone" to true).startsWith("ok: 1 match for \"call mom\""))
+    }
+
+    // ── iOS builds 75-79 (assistant text): dated reads, done guards, duplicates ──
+
+    /** PostgREST's timestamp shape (`+00:00`, microseconds) for [ms]. */
+    private fun serverIso(ms: Long): String = java.time.OffsetDateTime.ofInstant(Instant.ofEpochMilli(ms), java.time.ZoneOffset.UTC)
+        .format(java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSSSSSxxx"))
+
+    @Test fun `get_tasks completed is dated and newest first`() = runTest {
+        // An undated all-time list was read back as "today" (Zubair's evening
+        // call, 2026-09-20). Newest first, each line says when (iOS build 75).
+        val h = makeApi {
+            tasks += task("t_old", "Aged", done = true, completedAt = "2026-01-05T12:00:00.000Z")
+            tasks += task("t_today", "Fresh", done = true, completedAt = "${TODAY}T12:00:00.000Z")
+            // A server row: `+00:00` with microseconds still sorts and dates by its instant.
+            tasks += task("t_yday", "Recent", done = true, completedAt = "${YESTERDAY}T12:00:00.123456+00:00")
+            tasks += task("t_open", "Still open")
+        }
+        val r = h.run("get_tasks", "view" to "completed")
+        assertTrue(r, r.startsWith("ok: Completed (3), newest first:"))
+        val lines = r.split("\n")
+        assertTrue(lines[1], lines[1].contains("[id=t_today]") && lines[1].endsWith("· done today"))
+        assertTrue(lines[2], lines[2].contains("[id=t_yday]") && lines[2].endsWith("· done yesterday"))
+        assertTrue(lines[3], lines[3].contains("[id=t_old]") && lines[3].endsWith("· done Mon 5 Jan"))
+        assertFalse(r.contains("[id=t_open]"))
+        assertTrue("every line says when it was created", lines.drop(1).all { it.contains("· created ") })
+        // One row: no "newest first".
+        val one = makeApi { tasks += task("t1", "Only", done = true, completedAt = "${TODAY}T08:00:00.000Z") }.run("get_tasks", "view" to "completed")
+        assertTrue(one, one.startsWith("ok: Completed (1):"))
+    }
+
+    @Test fun `get_tasks says when each task was created, find_tasks keeps the plain line`() = runTest {
+        // "The ones I created last week" (Ahmad, 2026-09-20): iOS build 76.
+        val h = makeApi {
+            tasks += task("t_new", "Made today").copy(createdAt = Instant.ofEpochMilli(NOW_MS).toString())
+            tasks += task("t_old", "Made ages ago")
+        }
+        val r = h.run("get_tasks", "view" to "all")
+        assertTrue(r, r.contains("- Made today [id=t_new] 25m · created today"))
+        val ago = tech.csalliance.unstuck.core.logic.doneWhenLabel(PAST_CREATED, TODAY)!!
+        assertTrue(r, r.contains("- Made ages ago [id=t_old] 25m · created $ago"))
+        val found = h.run("find_tasks", "query" to "made")
+        assertTrue(found, found.contains("- Made today [id=t_new] 25m") && !found.contains("· created"))
+    }
+
+    @Test fun `get_insights week early in the week says it is not last week`() = runTest {
+        // "How was my last week?" on a Monday was answered from the current
+        // week's one day (Ahmad, 2026-09-20): iOS build 76.
+        val fake = makeApi().api
+        suspend fun insights(day: String, window: String): String {
+            val api = object : AssistantApi by fake { override fun todayIso() = day }
+            return runAssistantTool("get_insights", ToolArgs(json("window" to window)), api, TurnScratch())
+        }
+        val note = "note: this is the CURRENT week"
+        val mon = insights("2026-09-21", "week")
+        assertTrue(mon, mon.endsWith("\nnote: this is the CURRENT week, today only so far — it says nothing about last week. If they asked about last week, say the app has no last-week window yet and offer the month (window: month)."))
+        assertTrue(insights("2026-09-22", "week").contains("$note, two days so far"))   // Tuesday
+        assertFalse(insights("2026-09-23", "week").contains(note))                        // Wednesday
+        assertFalse(insights("2026-09-27", "week").contains(note))                        // Sunday: day 7
+        assertFalse(insights("2026-09-21", "month").contains(note))
+        assertFalse(insights("2026-09-21", "all").contains(note))
+    }
+
+    @Test fun `carry_to_tomorrow leaves a done task alone`() = runTest {
+        // Done on the TASK row, block untouched — not "unfinished" (Zubair's
+        // evening call, 2026-09-21: "moved 4 — Project Check-in, …"): iOS build 77.
+        val h = makeApi {
+            tasks += listOf(task("a", "Alpha"), task("d", "Project Check-in", done = true, completedAt = "${TODAY}T11:00:00.000Z"))
+            blocks += listOf(block("a_td", "a", TODAY, "09:00"), block("d_td", "d", TODAY, "12:00"))
+        }
+        assertEquals("ok: carried 1 to $TOMORROW — \"Alpha\"", h.run("carry_to_tomorrow"))
+        assertEquals("the done one stays where it was", TODAY, h.state.blocks.first { it.id == "d_td" }.date)
+        assertNull("and is not counted as a slip", h.state.tasks.first { it.id == "d" }.moveCount)
+        assertEquals("error: nothing left on today to carry", h.run("carry_to_tomorrow"))
+        // Asked for by id, it is still not carried.
+        assertEquals("error: nothing left on today to carry", h.run("carry_to_tomorrow", "taskIds" to listOf("d")))
+    }
+
+    @Test fun `complete_occurrence refuses a one-off task already done`() = runTest {
+        // Done can live on the TASK, not the block: ticking its open block moved
+        // completedAt to today and answered ok (iOS build 79).
+        val h = makeApi {
+            tasks += task("one", "Dentist", done = true, completedAt = "${YESTERDAY}T09:00:00.000Z")
+            blocks += block("one_td", "one", TODAY, "10:00")
+        }
+        val before = h.state.tasks.toList()
+        assertEquals("error: \"Dentist\" is already done — nothing changed", h.run("complete_occurrence", "taskId" to "one"))
+        assertFalse("nothing was ticked", h.state.blocks[0].done)
+        assertEquals("completedAt kept", before, h.state.tasks)
+    }
+
+    @Test fun `create_task refuses a fresh duplicate by name`() = runTest {
+        // A tester ended up with FOUR identical "Office" tasks (audit 2026-09-21): iOS build 79.
+        val h = makeApi()
+        val first = h.run("create_task", "name" to "Office")
+        assertTrue(first, first.startsWith("ok: created"))
+        val id = h.state.tasks.single().id
+        assertEquals(
+            "error: \"Office\" already exists (id=$id, created just now) — use schedule_task or update_task on it rather than making another. Only create a second one if the user asks for a separate task.",
+            h.run("create_task", "name" to "  office  "),
+        )
+        assertEquals("one Office, not two", 1, h.state.tasks.count { it.name.lowercase() == "office" })
+        // A DIFFERENT name is unaffected.
+        assertTrue(h.run("create_task", "name" to "Office admin").startsWith("ok: created"))
+        // An old task of the same name is not a duplicate — only a just-made twin is.
+        h.state.tasks += task("stale", "Gym").copy(createdAt = "2026-01-02T09:00:00.000Z")
+        assertTrue(h.run("create_task", "name" to "Gym").startsWith("ok: created"))
+        // Nor is a COMPLETED one.
+        h.state.tasks += task("fin", "Hike", done = true).copy(createdAt = Instant.ofEpochMilli(NOW_MS - 60_000).toString())
+        assertTrue(h.run("create_task", "name" to "Hike").startsWith("ok: created"))
+        // A server row (+00:00, microseconds) made two minutes ago IS one.
+        h.state.tasks += task("srv", "Standup").copy(createdAt = serverIso(NOW_MS - 120_000))
+        assertTrue(h.run("create_task", "name" to "Standup").contains("already exists (id=srv, created just now)"))
+        // Judged on the committed row: a stale open scratch copy of a task the
+        // store has as done never blocks (iOS audit 2026-09-22, C5)…
+        val fresh = Instant.ofEpochMilli(NOW_MS).toString()
+        h.state.tasks += task("swim", "Swim", done = true).copy(createdAt = fresh)
+        h.scratch.newTasks["swim"] = task("swim", "Swim").copy(createdAt = fresh)
+        assertTrue(h.run("create_task", "name" to "Swim").startsWith("ok: created"))
+        // …nor does a task this session made and the user then deleted (in the
+        // app or on the web): only the session-long scratch still holds it, and
+        // steering the model to that id would schedule a block for a missing task.
+        assertTrue(h.run("create_task", "name" to "Read").startsWith("ok: created"))
+        val ghost = h.state.tasks.single { it.name == "Read" }.id
+        h.state.tasks.removeAll { it.id == ghost }
+        assertTrue("scratch still holds it", ghost in h.scratch.newTasks)
+        val again = h.run("create_task", "name" to "Read")
+        assertTrue(again, again.startsWith("ok: created"))
+        assertFalse(again, ghost in again)
+        // create_tasks is not guarded (as on iOS).
+        assertTrue(h.run("create_tasks", "tasks" to listOf(mapOf("name" to "Office"))).startsWith("ok: created 1 tasks"))
+    }
+
+    @Test fun `the context lists open tasks newest first, so a task made seconds ago is in it`() = runTest {
+        // The store returns rows by primary key, not age: past 60 open tasks a
+        // task made seconds ago was in the context only by chance (iOS build 79).
+        val h = makeApi {
+            for (i in 1..60) tasks += task("t%02d".format(i), "Task $i").copy(createdAt = Instant.ofEpochMilli(NOW_MS - (100 - i) * 60_000L).toString())
+            // Same second as t_z but half a second later, in the server's shape:
+            // a string sort would put the `…Z` row first.
+            tasks += task("t_z", "Local row").copy(createdAt = Instant.ofEpochMilli(NOW_MS / 1000 * 1000 - 1000).toString())
+            tasks += task("t_new", "Just made").copy(createdAt = serverIso(NOW_MS / 1000 * 1000 - 500))
+            tasks += task("t_done", "Finished", done = true).copy(createdAt = Instant.ofEpochMilli(NOW_MS).toString())
+            blocks += block("b_new", "t_new", TOMORROW, "11:00")
+        }
+        val rows = buildAssistantContext(h.api)["tasks"]!!.jsonArray.map { it.jsonObject }
+        val ids = rows.map { it["id"]!!.jsonPrimitive.content }
+        assertEquals(60, ids.size)
+        assertEquals(listOf("t_new", "t_z", "t60"), ids.take(3))
+        assertFalse("the two oldest drop out", "t01" in ids || "t02" in ids)
+        assertFalse("done tasks never listed", "t_done" in ids)
+        // The next-live-block lookup still attaches to the right row.
+        assertEquals(TOMORROW, rows[0]["scheduledDate"]!!.jsonPrimitive.content)
+        assertEquals("11:00", rows[0]["scheduledTime"]!!.jsonPrimitive.content)
     }
 }

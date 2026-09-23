@@ -2,9 +2,11 @@ package tech.csalliance.unstuck.ui.assistant
 
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.InsightsWindow
+import tech.csalliance.unstuck.core.logic.IsoDate
 import tech.csalliance.unstuck.core.logic.addDaysIso
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
 import tech.csalliance.unstuck.core.logic.clampDurationMin
+import tech.csalliance.unstuck.core.logic.doneWhenLabel
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.newUuid
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
@@ -21,6 +23,7 @@ import tech.csalliance.unstuck.core.model.Priority
 import tech.csalliance.unstuck.core.model.isRecurringSeriesRefusal
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.model.TaskListView
+import tech.csalliance.unstuck.core.time.Time
 
 // The full app surface (2026-09-02: "the model should be able to do everything
 // a user can do"): reopen/find/list tasks, calendar edits, focus controls,
@@ -70,8 +73,11 @@ private fun onOff(b: Boolean) = if (b) "on" else "off"
 
 /** One task as the read tools list it: name, id, estimate, area, next slot,
  *  repeat / Later / slip / done markers. Recurring rows are OCCURRENCES whose
- *  id is the block id — the model must get the TASK id (templateId). */
-private fun taskLine(t: TaskItem, tasks: List<TaskItem>, blocks: List<CalBlock>, today: String): String {
+ *  id is the block id — the model must get the TASK id (templateId).
+ *  [dated] (get_tasks only; find_tasks keeps the plain line, as on iOS) adds
+ *  when it was created and when it was done (parity with iOS builds 75/76,
+ *  f125845 + 3564ccc). */
+private fun taskLine(t: TaskItem, tasks: List<TaskItem>, blocks: List<CalBlock>, today: String, dated: Boolean = false): String {
     val occ = occurrenceBlockFor(t.id, tasks, blocks)
     val taskId = occ?.taskId ?: t.id
     val b = occ ?: nextLiveBlock(blocks, today, taskId)
@@ -82,7 +88,13 @@ private fun taskLine(t: TaskItem, tasks: List<TaskItem>, blocks: List<CalBlock>,
     if (occ != null || t.recurrence != null) sb.append(" · repeats")
     if (t.later == true) sb.append(" · Later")
     if ((t.moveCount ?: 0) >= 3) sb.append(" · slipped ${t.moveCount}×")
-    if (t.done) sb.append(" · done")
+    // When it was created — "the ones I created last week" (Ahmad, 2026-09-20:
+    // the model rightly said the list didn't show it).
+    if (dated) doneWhenLabel(t.createdAt, today)?.let { sb.append(" · created $it") }
+    if (t.done) {
+        sb.append(" · done")
+        if (dated) doneWhenLabel(t.completedAt ?: occ?.completedAt, today)?.let { sb.append(" $it") }
+    }
     return sb.toString()
 }
 
@@ -143,8 +155,16 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             val blocks = api.getBlocks()
             var rows = visibleTasks(view, tasks, blocks, api.nowMs(), area, null, slipMode = v == "slipping")
             if (tag != null) rows = rows.filter { t -> t.tags?.any { it.lowercase() == tag } == true }
-            val lines = rows.take(30).map { taskLine(it, tasks, blocks, api.todayIso()) }
-            "ok: ${view.label} (${rows.size})${if (rows.size > 30) ", first 30" else ""}:\n${if (lines.isEmpty()) "(none)" else lines.joinToString("\n")}"
+            // The completed view is DATED and newest first: an undated all-time
+            // list was read back as "today" (Zubair's evening call, 2026-09-20 —
+            // weeks-old tasks said as done today). Sorted on the parsed instant:
+            // local rows stamp `…Z`, server rows `…+00:00` with microseconds
+            // (parity with iOS build 75, f125845).
+            if (view == TaskListView.COMPLETED) rows = rows.sortedByDescending { t -> t.completedAt?.let { Time.parseMillis(it) } ?: Long.MIN_VALUE }
+            val today = api.todayIso()
+            val lines = rows.take(30).map { taskLine(it, tasks, blocks, today, dated = true) }
+            val order = if (view == TaskListView.COMPLETED && rows.size > 1) ", newest first" else ""
+            "ok: ${view.label} (${rows.size})$order${if (rows.size > 30) ", first 30" else ""}:\n${if (lines.isEmpty()) "(none)" else lines.joinToString("\n")}"
         }
 
         "find_tasks" -> {
@@ -220,6 +240,11 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
                 ?: return "error: \"${t.name}\" has nothing on $date"
             // Already done that day → error, not a second "Done for today" receipt.
             if (b.done) return "error: \"${t.name}\" is already done on $date — nothing changed"
+            // …and for a ONE-OFF task, done can live on the task rather than the
+            // block (toggleDone flips only the task row): ticking its open block
+            // moved completedAt to today and answered ok over a no-op (parity
+            // with iOS build 79, 2c4b723).
+            if (t.recurrence == null && t.done) return "error: \"${t.name}\" is already done — nothing changed"
             // Stamped like the UI's tick: the block un-skipped with its completedAt,
             // and a one-off task its completedAt + the shared-list notice. The
             // template of a series is never touched (parity with iOS build 81, audit
@@ -255,8 +280,14 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             val wanted = args.strList("taskIds")
             // Task blocks only (web: `b.taskId && …`) — a block with no task has
             // nothing to carry and nothing to bump.
+            // "Unfinished" = neither the block nor its TASK is done: a one-off
+            // ticked on the task row kept an open block and was carried with the
+            // open ones (Zubair's evening call, 2026-09-21: "moved 4 — Project
+            // Check-in, …", done at noon) (parity with iOS build 77, 2c79212).
+            val doneTaskIds = api.getTasks().filter { it.done }.map { it.id }.toSet()
             val todays = api.getBlocks().filter { b ->
                 b.taskId != null && b.date == today && !b.done && !b.skipped && isTaskBlock(b) &&
+                    (b.taskId ?: "") !in doneTaskIds &&
                     (wanted == null || (b.taskId ?: "") in wanted)
             }
             if (todays.isEmpty()) return "error: nothing left on today to carry"
@@ -745,7 +776,16 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
         "get_insights" -> {
             val w = InsightsWindow.fromWire((args.str("window") ?: "week").lowercase())
                 ?: return "error: window must be week, month, or all"
-            renderInsights(api.getTasks(), api.getSessions(), api.getCaptures(), api.getReasonLogs(), api.getBlocks(), api.nowMs(), w)
+            val out = renderInsights(api.getTasks(), api.getSessions(), api.getCaptures(), api.getReasonLogs(), api.getBlocks(), api.nowMs(), w)
+            // The week window starts on Monday: early in the week it is a day or
+            // two of data. "How was my last week?" on a Monday was answered from
+            // it as if it were the week before (Ahmad, 2026-09-20) (parity with
+            // iOS build 76, 3564ccc).
+            if (w != InsightsWindow.WEEK) return out
+            val dow = IsoDate.dayOfWeek(api.todayIso())   // 0 = Sunday … 1 = Monday
+            val daysIn = if (dow == 0) 7 else dow
+            if (daysIn > 2) out
+            else out + "\nnote: this is the CURRENT week, ${if (daysIn == 1) "today only" else "two days"} so far — it says nothing about last week. If they asked about last week, say the app has no last-week window yet and offer the month (window: month)."
         }
 
         // ── NAVIGATE ──

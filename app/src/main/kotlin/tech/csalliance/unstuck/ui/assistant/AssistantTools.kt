@@ -208,6 +208,26 @@ suspend fun completeSeriesToday(t: TaskItem, api: AssistantApi): SeriesDayResult
     return SeriesDayResult.TICKED
 }
 
+/** A task with this exact name (case- and space-insensitive), still open, made
+ *  within the last [withinMs] — including one created earlier in THIS turn
+ *  (parity with iOS build 79, 2c4b723). Judged on the committed rows only, so
+ *  a task finished since never blocks a new one (audit 2026-09-22 C5). Unlike
+ *  iOS there is no scratch fallback: [AssistantApi.upsertTask] commits to the
+ *  store before it returns, so this turn's creations are already there, and a
+ *  scratch-only id is a task deleted since (in the app or on the web, mid
+ *  Talk/call session) — pointing the model at it would schedule a block for a
+ *  task that no longer exists. */
+suspend fun recentDuplicateTask(name: String, api: AssistantApi, nowMs: Long, withinMs: Long = 600_000L): TaskItem? {
+    val key = name.trim().lowercase()
+    if (key.isEmpty()) return null
+    return api.getTasks().firstOrNull { t ->
+        if (t.done || t.name.trim().lowercase() != key) return@firstOrNull false
+        // Local rows stamp `…Z`, server rows `…+00:00` with microseconds.
+        val made = Time.parseMillis(t.createdAt) ?: return@firstOrNull false
+        kotlin.math.abs(nowMs - made) <= withinMs
+    }
+}
+
 private suspend fun rejectPastDate(api: AssistantApi, date: String): String? = rejectPastDate(api.todayIso(), date)
 
 private suspend fun rejectPastTime(api: AssistantApi, date: String, startTime: String?): String? =
@@ -372,6 +392,15 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             if (date != null) {
                 rejectPastDate(api, date)?.let { return it }
                 if (startTime != null) rejectPastTime(api, date, startTime)?.let { return it }
+            }
+            // A task by this exact name made minutes ago is almost certainly the
+            // same one, not a second one. A tester ended up with FOUR identical
+            // "Office" tasks: the model could not see the task it had just made,
+            // so a nudge to "call the right tool now" made another (audit
+            // 2026-09-21). Point the model at the existing one instead (parity
+            // with iOS build 79, 2c4b723; create_tasks stays unguarded, as there).
+            recentDuplicateTask(nm, api, api.nowMs())?.let { dupe ->
+                return "error: \"${dupe.name}\" already exists (id=${dupe.id}, created just now) — use schedule_task or update_task on it rather than making another. Only create a second one if the user asks for a separate task."
             }
             val later = args.bool("later") ?: false
             val t = TaskItem(

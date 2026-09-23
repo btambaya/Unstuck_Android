@@ -9,6 +9,7 @@ import org.junit.Test
 import tech.csalliance.unstuck.core.logic.AssistantClock
 import tech.csalliance.unstuck.core.logic.FreeWindow
 import tech.csalliance.unstuck.core.logic.IsoDate
+import tech.csalliance.unstuck.core.logic.doneWhenLabel
 import tech.csalliance.unstuck.core.logic.freeWindowsToday
 import tech.csalliance.unstuck.core.logic.jsDayOfWeek
 import tech.csalliance.unstuck.core.logic.localNowHM
@@ -164,5 +165,26 @@ class AssistantTimeTest {
         assertNull(IsoDate.dateOfStamp("nope"))
         assertNull(IsoDate.dateOfStamp(null))
         assertNull(IsoDate.parse("2026-02-30"))
+    }
+
+    // ---- doneWhenLabel (iOS build 75, f125845): when a get_tasks line happened
+
+    @Test fun `doneWhenLabel says today, yesterday, or a short weekday date`() {
+        assertEquals("today", doneWhenLabel("2026-09-02T12:00:00.000Z", TODAY))
+        assertEquals("yesterday", doneWhenLabel("2026-09-01T12:00:00.000Z", TODAY))
+        assertEquals("Mon 5 Jan", doneWhenLabel("2026-01-05T12:00:00.000Z", TODAY))
+        assertEquals("Sat 19 Sep", doneWhenLabel("2026-09-19T08:00:00Z", TODAY))
+        assertNull(doneWhenLabel(null, TODAY))
+        assertNull(doneWhenLabel("", TODAY))
+        assertNull(doneWhenLabel("nope", TODAY))
+    }
+
+    @Test fun `doneWhenLabel reads a server stamp and judges the LOCAL day`() {
+        // PostgREST's shape (+00:00, microseconds) parses like the app's own Z form.
+        assertEquals("today", doneWhenLabel("2026-09-02T09:30:00.123456+00:00", TODAY))
+        // 23:30 UTC on the 1st is already the 2nd in Lagos (UTC+1).
+        val lagos = java.time.ZoneId.of("Africa/Lagos")
+        assertEquals("today", doneWhenLabel("2026-09-01T23:30:00.000Z", TODAY, lagos))
+        assertEquals("yesterday", doneWhenLabel("2026-09-01T23:30:00.000Z", TODAY))
     }
 }

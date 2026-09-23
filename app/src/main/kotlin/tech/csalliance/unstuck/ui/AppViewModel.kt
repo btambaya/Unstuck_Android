@@ -4038,6 +4038,17 @@ class AppViewModel(
         runCatching { tech.csalliance.unstuck.surface.PausedCheckinScheduler.cancel(ctx) }
     }
 
+    /** Settings › Interface › "Clear Assistant history": the server-side delete
+     *  of this user's stored conversations (`delete_my_assistant_turns`,
+     *  migration 074) — the control the privacy policy promises. The rows
+     *  deleted, or a failure (signed out, offline). Local chat threads are
+     *  untouched: this is the copy the backend keeps (parity with iOS build 78,
+     *  0f24908). */
+    suspend fun clearAssistantHistory(): Result<Int> {
+        val prefsClient = graph.coordinator?.preferences ?: return Result.failure(IllegalStateException("not signed in"))
+        return runCatching { prefsClient.deleteAssistantHistory() }
+    }
+
     /** Serialise every user-owned collection into one JSON bundle (matches web exportAll). */
     fun exportJson(): String = EXPORT_JSON.encodeToString(
         ExportBundle(

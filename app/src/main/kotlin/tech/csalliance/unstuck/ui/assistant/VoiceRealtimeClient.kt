@@ -436,11 +436,16 @@ class VoiceRealtimeClient(
         return cmds
     }
 
-    /** Event kind (+ the transcript, as the iOS log has it — that is what the
-     *  phone tests were diagnosed from) for the log line above. */
+    /** An event's SHAPE for the log line above — never its payload. A
+     *  transcription carries what the user said, and release builds keep Log
+     *  calls (no -assumenosideeffects), so it reached logcat and any bugreport a
+     *  tester sent: only its length and finality are loggable. The words live
+     *  in assistant_turns for testers who opt in (parity with iOS build 78,
+     *  0f24908). */
     private fun describe(event: BargeInEvent): String = when (event) {
         is BargeInEvent.SpeechStarted -> "speechStarted(${event.itemId})"
-        is BargeInEvent.Transcription -> "transcription(${if (event.final) "final" else "live"}, ${event.itemId}, \"${event.text.take(80)}\")"
+        is BargeInEvent.Transcription -> "transcription(${if (event.final) "final" else "live"}, ${event.itemId}, chars=${event.text.length})"
+        is BargeInEvent.AssistantTranscript -> "assistantTranscript(chars=${event.delta.length})"
         is BargeInEvent.ResponseCreated -> "responseCreated(${event.id})"
         is BargeInEvent.ResponseDone -> "responseDone(${event.id}, ${event.status})"
         is BargeInEvent.AudioDelta -> "audioDelta"

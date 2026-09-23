@@ -1,6 +1,7 @@
 package tech.csalliance.unstuck.calls
 
 import android.app.AlarmManager
+import android.app.Notification
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Context
@@ -51,8 +52,10 @@ import tech.csalliance.unstuck.surface.NotificationLog
 //
 // The ringtone + vibration are the CHANNEL's (system-managed: they follow the
 // ringer volume, silent/vibrate mode, DND, and keep going if our process dies
-// — see NotificationChannels.CALLS); nothing here touches the microphone: the
-// voice foreground service starts ONLY from the user's Answer tap (risk 3).
+// — see NotificationChannels.CALLS), looped for the whole ring by
+// FLAG_INSISTENT until the notification is cancelled; nothing here touches
+// the microphone: the voice foreground service starts ONLY from the user's
+// Answer tap (risk 3).
 object CallRinger {
 
     /** Ring for this long before giving up (iOS CallCoordinator.ringTimeout). */
@@ -237,9 +240,11 @@ object CallRinger {
     /**
      * Ring for [payload]: persist, post the CallStyle notification, arm the
      * missed alarm. Called synchronously from the FCM window. A retried /
-     * duplicated push for the call ALREADY ringing re-posts the notification
-     * (updates in place) and touches nothing else — the 30 s clock keeps its
-     * original start (iOS: "touch NOTHING").
+     * duplicated push for the call ALREADY ringing touches NOTHING (iOS) — not
+     * the 30 s clock, and not the notification: the ring is INSISTENT, and the
+     * system stops an insistent ringtone when its notification is re-posted
+     * (a muted update clears it: only-alert-once mutes every update, and API
+     * 31-32 mute any update of a looping ringtone) — Android audit 2026-09-23, A4.
      */
     fun ring(context: Context, payload: IncomingCallPayload, nowMs: Long = System.currentTimeMillis()) {
         val duplicate: Boolean
@@ -266,8 +271,9 @@ object CallRinger {
                     .commit()   // commit, not apply: the alarm + activity read this next
             }
         }
+        if (duplicate) return
         postRing(context, payload)
-        if (!duplicate) armMissedAlarm(context, payload.callId, nowMs + MISSED_AFTER_MS)
+        armMissedAlarm(context, payload.callId, nowMs + MISSED_AFTER_MS)
     }
 
     /** The intent the full-screen ring / a tap / the shade "Answer" open. */
@@ -318,6 +324,13 @@ object CallRinger {
             .setTimeoutAfter(MISSED_AFTER_MS + 15_000)
             .addAction(0, "Snooze 10", snooze)
             .build()
+        // Ring for the WHOLE ring (Android audit 2026-09-23, A4): without it the
+        // system plays the channel's ringtone once and its vibration pattern once
+        // (~5 s, three buzzes), and the rest of the 30 s is silent — a phone on
+        // vibrate in a pocket simply misses the call. INSISTENT loops both until
+        // the notification goes: every settle / recover / clear cancels it, and
+        // setTimeoutAfter bounds it if our process is gone.
+        n.flags = n.flags or Notification.FLAG_INSISTENT
         nm.notify(NotifIds.CALL, n)
         NotificationLog.add(context, "call", "Unstuck is calling", "About ${payload.label}", payload.deepLink)
     }
@@ -359,6 +372,11 @@ object CallRinger {
             p.edit().putLong(K_PHASE_AT, nowMs).commit()
         }
         armMissedAlarm(context, callId, nowMs + PERMISSION_HOLD_MS)
+        // They tapped Answer: the INSISTENT ring must not go on ringing under the
+        // microphone prompt (Android audit 2026-09-23, A4). Only the notification
+        // goes — the record stays RINGING, so the prompt's answer (or the held
+        // alarm) still settles the call exactly as before.
+        NotificationManagerCompat.from(context).cancel(NotifIds.CALL)
         return true
     }
 

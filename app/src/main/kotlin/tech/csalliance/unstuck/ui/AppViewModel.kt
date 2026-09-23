@@ -4717,6 +4717,16 @@ class AppViewModel(
                     runCatching { reconcileOnboarded(uid, afterPull = true) }
                 }
             }
+            // The recurrence horizon top-up (stage 2 — "same id for same day", Ahmad
+            // 2026-09-23; parity with iOS build 85 and web): after every completed
+            // pull, extend each repeating task's tail with its deterministic ids —
+            // before this, a series last edited on Android ran out 8 weeks later. The
+            // coordinator's gate decides whether this pull allows it (its cal_blocks
+            // read succeeded and was complete, once per local day); launched, so a
+            // run never holds up the reconciliations above.
+            viewModelScope.launch {
+                c.hydrated.collect { launch { runCatching { c.topUpRecurrenceHorizon() } } }
+            }
         }
     }
 

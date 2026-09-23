@@ -609,6 +609,27 @@ class SyncCoordinator(
         hydrateLock = hydrateMutex,
     )
 
+    /** The recurrence horizon top-up (stage 2 — "same id for same day", Ahmad
+     *  2026-09-23): extends every repeating task's tail with deterministic ids after
+     *  a good cal_blocks pull, once per local day. See RecurrenceHorizonTopUp. */
+    private val recurrenceTopUp = RecurrenceHorizonTopUp(
+        store = store,
+        write = write,
+        remote = gateway,
+        pull = { hydrator.calBlocksPull },
+        currentUserId = { auth.currentUserId },
+        today = { tech.csalliance.unstuck.core.time.Clock.todayIso() },
+        timeZone = { java.util.TimeZone.getDefault().id },
+        log = { Log.i(TAG, it) },
+    )
+
+    /** Run the horizon top-up if the last pull allows it (the app calls this after
+     *  every completed pull; the gate decides). No-op when signed out. */
+    suspend fun topUpRecurrenceHorizon() {
+        val uid = auth.currentUserId ?: return
+        recurrenceTopUp.request(uid)
+    }
+
     /** A Google 429 is being waited out (the "Sync now" caption says "busy"). */
     val calendarBackedOff: Boolean get() = calendarPull.backedOff
 
@@ -743,6 +764,7 @@ class SyncCoordinator(
                     catchUp.clearCursors(uid)
                     write.resetMirrors()
                     hydrator.resetCalBlocksPull()
+                    recurrenceTopUp.reset()
                 }
                 prefs.edit().putString(KEY_PREV_USER, uid).apply()
                 // Push offline edits (stale task ops pruned / merged first so they can't
@@ -801,6 +823,7 @@ class SyncCoordinator(
                 // carries over to the next one (stage 2).
                 write.resetMirrors()
                 hydrator.resetCalBlocksPull()
+                recurrenceTopUp.reset()
                 freshness.reset()
                 calendarConnect.signedOut()   // the next account never sees its result
                 prefs.edit().remove(KEY_PREV_USER).apply()

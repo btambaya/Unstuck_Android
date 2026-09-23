@@ -24,6 +24,7 @@ import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import org.robolectric.shadows.ShadowLog
 import tech.csalliance.unstuck.SettingsStore
 import tech.csalliance.unstuck.core.logic.BargeInController
 import java.time.Duration
@@ -577,5 +578,23 @@ class VoiceRealtimeClientTest {
         assertFalse(c2.failedBeforeAnyReply)
         assertEquals(listOf<String?>(null), ended2)
         assertEquals(VoiceState.CLOSED, states2.last())
+    }
+
+    // ── B78.3: logcat keeps the SHAPE of what was said, never the words ──
+
+    @Test
+    fun `the barge-in log carries a transcript's length, never the user's words`() {
+        // Release builds keep Log calls, so the words reached logcat and any
+        // bugreport a tester sent (parity with iOS build 78, 0f24908).
+        ShadowLog.reset()
+        val (_, factory, _) = session()
+        val said = "my bank PIN is 4471"
+        factory.message("""{"type":"input_audio_buffer.speech_started","item_id":"u1"}""")
+        factory.message("""{"type":"conversation.item.input_audio_transcription.delta","item_id":"u1","text":"","stash":"my bank PIN"}""")
+        factory.message("""{"type":"conversation.item.input_audio_transcription.completed","item_id":"u1","transcript":"$said"}""")
+        val lines = ShadowLog.getLogsForTag(VoiceRealtimeClient.TAG).map { it.msg }
+        assertTrue(lines.toString(), lines.any { it.contains("transcription(live, u1, chars=11)") })
+        assertTrue(lines.toString(), lines.any { it.contains("transcription(final, u1, chars=${said.length})") })
+        assertTrue(lines.toString(), lines.none { it.contains("PIN") || it.contains("4471") || it.contains("bank") })
     }
 }

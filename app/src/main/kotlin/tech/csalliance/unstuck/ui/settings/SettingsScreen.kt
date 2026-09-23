@@ -227,6 +227,7 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
                             modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
                         )
                     }
+                    ClearAssistantHistoryRow(vm)
                     SegRow("Accent", listOf("indigo", "rose", "forest"), accentKey(s.accent)) { v ->
                         vm.updateSettings { it.copy(accent = accentFromKey(v)) }
                     }
@@ -505,6 +506,46 @@ private fun BackupContent(vm: AppViewModel) {
     }
     Text("Your data is yours — export a complete copy any time.", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 10.dp))
     msg?.let { Text(it, style = UFont.sans(12), color = if (msgErr) c.red else c.green, modifier = Modifier.padding(top = 8.dp)) }
+}
+
+// ── Clear Assistant history (iOS InterfaceSettingsView, copy verbatim) ──
+
+internal const val CLEAR_HISTORY_ROW = "Clear Assistant history"
+internal const val CLEAR_HISTORY_IDLE = "Delete what you've said to it (kept 90 days)"
+internal const val CLEAR_HISTORY_CLEARING = "Clearing…"
+internal const val CLEAR_HISTORY_FAILED = "Couldn't clear it — try again"
+
+/** The row's sub-line: idle, clearing, or what the last clear did ([result]
+ *  = rows deleted, or the failure). */
+internal fun clearHistoryLine(clearing: Boolean, result: Result<Int>?): String = when {
+    clearing -> CLEAR_HISTORY_CLEARING
+    result == null -> CLEAR_HISTORY_IDLE
+    else -> result.fold(
+        onSuccess = { n -> if (n == 0) "Nothing was stored" else "Cleared $n stored line${if (n == 1) "" else "s"}" },
+        onFailure = { CLEAR_HISTORY_FAILED },
+    )
+}
+
+/** The control the privacy policy promises (§9.5, §17): conversations are kept
+ *  90 days, and the user can clear them now. Turning the Assistant off only
+ *  stops FUTURE logging — before this there was no way to remove what was
+ *  already stored short of deleting the account (audit 2026-09-21; parity with
+ *  iOS build 78, 0f24908). Shown whether or not the Assistant is on, as on iOS;
+ *  locked while the guided tour runs, like the other server-writing rows. */
+@Composable
+private fun ClearAssistantHistoryRow(vm: AppViewModel) {
+    val scope = rememberCoroutineScope()
+    var clearing by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<Result<Int>?>(null) }
+    SettingRow(CLEAR_HISTORY_ROW, clearHistoryLine(clearing, result), enabled = !TourEvents.running) {
+        if (clearing) return@SettingRow
+        clearing = true
+        result = null
+        scope.launch {
+            result = vm.clearAssistantHistory()
+            clearing = false
+        }
+    }
 }
 
 @Composable

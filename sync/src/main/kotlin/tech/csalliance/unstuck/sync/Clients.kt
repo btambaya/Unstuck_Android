@@ -167,6 +167,17 @@ class PreferencesClient(private val client: SupabaseClient) {
     suspend fun setTimezone(tz: String = TimeZone.getDefault().id): Boolean =
         client.postgrest.rpc("set_timezone", TimezoneParams(tz)).decodeAs<Boolean>()
 
+    // ── assistant history (migration 074) ───────────────────────────────────────
+
+    /** `delete_my_assistant_turns()`: clears THIS user's stored Assistant
+     *  conversations and returns how many rows went. The privacy policy (§9.5,
+     *  §17) promises both the 90-day purge and this control; the function is
+     *  scoped to `auth.uid()` server-side, so it can only ever delete the
+     *  caller's own rows (parity with iOS build 78, 0f24908). Throws on
+     *  transport / auth failure. */
+    suspend fun deleteAssistantHistory(): Int =
+        client.postgrest.rpc("delete_my_assistant_turns").decodeAs<Int>()
+
     // ── interview flag (migration 052) ──────────────────────────────────────────
 
     /** Mirror "the get-to-know-you interview is done" to the ACCOUNT —

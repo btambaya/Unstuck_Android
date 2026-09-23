@@ -57,6 +57,7 @@ import tech.csalliance.unstuck.sync.PreferencesClient
 import tech.csalliance.unstuck.sync.ProfileFactsService
 import tech.csalliance.unstuck.core.logic.InterviewFlag
 import tech.csalliance.unstuck.core.logic.labelNameTaken
+import tech.csalliance.unstuck.ui.onboarding.OnboardingGate
 import tech.csalliance.unstuck.core.logic.relabelingArea
 import tech.csalliance.unstuck.core.logic.renamingTag
 import tech.csalliance.unstuck.core.logic.strippingTag
@@ -833,6 +834,9 @@ class AppViewModel(
     // --- password recovery (from a "forgot password" email deep link) ---
     val pendingPasswordRecovery: StateFlow<Boolean> get() = graph.pendingPasswordRecovery
     fun consumeRecovery() { graph.pendingPasswordRecovery.value = false }
+    /** Why the last auth-callback link couldn't sign in (MainActivity; AuthScreen shows it once). */
+    val authLinkError: StateFlow<String?> get() = graph.authLinkError
+    fun consumeAuthLinkError() { graph.authLinkError.value = null }
     /** A forgot-password session carries amr method "recovery" (GoTrue stamps it on
      *  the recovery verification). PKCE recovery deep links have no `type=recovery` in
      *  the URL, so this token read is how we tell a reset apart from a magic-link /
@@ -2801,25 +2805,96 @@ class AppViewModel(
 
     // --- onboarding ---
 
-    /** Per-account (see AppGraph.onboarded) and reconciled from the server after each
-     *  pull, so neither a second account on this phone nor a returning account on a
-     *  fresh install gets the wrong answer. */
-    val onboarded: Boolean get() = graph.onboarded
+    // The gate MainScaffold follows. Per account (see AppGraph.onboarded), keyed on the
+    // session's RESOLVED account, and reactive: it used to be read once, as soon as the
+    // session was authed — before the first pull on a new phone (a web / iOS account was
+    // walked through setup again) and with no uid during an offline RefreshFailure (a
+    // long-time user got the steps). An account not onboarded here now waits on a splash
+    // until the server has answered (the early read, or the reconcile after the first
+    // pull), or the deadline passed — then the local flag decides, like iOS's
+    // onboardingResolved (Android audit 2026-09-23, A9).
+    private val onboardingUid = MutableStateFlow(graph.onboardedUid)
+    private val onboardingResolvedFor = MutableStateFlow<String?>(null)
+    private val onboardedChanged = MutableStateFlow(0)
+    private var onboardingArmedFor: String? = null
 
-    /** A pull just landed: if this device doesn't know the account as onboarded but
-     *  the SERVER shows it was (struggles saved / the interview done / life areas
-     *  seeded — on any platform), record it, so the account isn't re-onboarded. */
-    private suspend fun reconcileOnboarded(uid: String) {
-        if (graph.onboarded) return
-        val server = runCatching { graph.coordinator?.preferences?.fetchUserPrefs(uid) }.getOrNull()
-        val areas = store.snapshot(Tables.LIFE_AREAS, LifeArea.serializer())
-        val onboardedElsewhere = server?.adhd_struggles?.isNotEmpty() == true ||
-            server?.assistant_interview_done_at != null ||
-            areas.isNotEmpty()
-        if (onboardedElsewhere) graph.onboarded = true
+    /** null = not known yet (splash) · true = the onboarding steps · false = the app. */
+    val showOnboarding: StateFlow<Boolean?> =
+        combine(onboardingUid, onboardingResolvedFor, onboardedChanged) { uid, resolvedFor, _ ->
+            OnboardingGate.show(uid, graph.isOnboarded(uid), resolvedFor)
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, OnboardingGate.show(graph.onboardedUid, graph.onboarded, null))
+
+    init {
+        followOnboardingAccount()
+        graph.provider?.client?.let { client ->
+            viewModelScope.launch { client.auth.sessionStatus.collect { followOnboardingAccount() } }
+        }
     }
 
-    fun completeOnboarding(struggles: List<String>, areas: List<String> = emptyList()) = launchWrite {
+    /** The session changed: key the gate on its account, and start resolving one this
+     *  device doesn't know as onboarded — an early read of its prefs row and task count
+     *  (the gate resolves before the full first pull lands) plus the deadline. */
+    private fun followOnboardingAccount() {
+        val uid = graph.onboardedUid
+        onboardingUid.value = uid
+        if (uid == null) { onboardingArmedFor = null; return }
+        if (uid == onboardingArmedFor || graph.isOnboarded(uid)) return
+        onboardingArmedFor = uid
+        viewModelScope.launch { runCatching { reconcileOnboarded(uid, afterPull = false) } }
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(ONBOARDING_RESOLVE_DEADLINE_MS)
+            if (onboardingUid.value == uid) onboardingResolvedFor.value = uid
+        }
+    }
+
+    private fun markOnboarded() {
+        graph.onboarded = true
+        onboardedChanged.value++
+    }
+
+    /** Ask the SERVER whether this account onboarded on another platform, and pin the
+     *  local flag if it did — without re-arming the tour or touching its struggles.
+     *  [afterPull]: the store holds the server's rows. Before the pull, a head count of
+     *  the account's tasks goes out beside the prefs read (web's FirstRunGate), so that
+     *  early read is a whole answer too: it used to be able only to pin, and every new
+     *  sign-up — or, on a slow link, a web account with tasks but no struggles — waited
+     *  on the splash for the full first pull and the reconciles queued ahead of this one
+     *  (Android audit 2026-09-23, A9). Either way a "no" is an answer and the gate
+     *  resolves to the steps. A read that fails changes nothing (the deadline lets the
+     *  local flag decide). */
+    private suspend fun reconcileOnboarded(uid: String, afterPull: Boolean) {
+        if (graph.isOnboarded(uid)) return
+        val prefs = graph.coordinator?.preferences ?: return
+        val (server, serverTasks) = try {
+            kotlinx.coroutines.coroutineScope {
+                val tasks = if (afterPull) null else async { prefs.countOwnTasks(uid) }
+                prefs.fetchUserPrefs(uid) to tasks?.await()
+            }
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return
+        }
+        applyOnboardingAnswer(uid, server?.adhd_struggles, server?.assistant_interview_done_at, afterPull, serverTasks?.let { it > 0 })
+    }
+
+    /** The server's answer for [uid] (null fields: no row, or nothing saved).
+     *  [serverHasTasks]: the early read's head count (null = not asked, or no count came
+     *  back — then the early read can only pin). Life areas are no signal — the server
+     *  seeds them for every new account, so they marked a brand-new user onboarded after
+     *  one pull and a rotation mid-setup skipped it. */
+    internal suspend fun applyOnboardingAnswer(
+        uid: String, serverStruggles: List<String>?, interviewDoneAt: String?, afterPull: Boolean, serverHasTasks: Boolean? = null,
+    ) {
+        // A raw row count, not a decode: this only asks "any task?", and decoding every
+        // task on the main thread stalled the splash for a large account (A9).
+        val hasTasks = serverHasTasks == true || store.countRows(Tables.TASKS) > 0
+        if (graph.onboardedUid != uid) return   // the account changed while we asked
+        if (!graph.isOnboarded(uid) && OnboardingGate.onboardedElsewhere(serverStruggles, interviewDoneAt, hasTasks)) markOnboarded()
+        if (afterPull || serverHasTasks != null) onboardingResolvedFor.value = uid
+    }
+
+    fun completeOnboarding(struggles: List<String>, areas: List<String> = emptyList()) {
         // Arm the ONE-TIME guided-tour auto-offer (next Today arrival) FIRST —
         // nothing after it depends on the server, and arming after the network
         // write below could delay it past TourHost's mount (a lost/late offer).
@@ -2828,22 +2903,24 @@ class AppViewModel(
         runCatching {
             tech.csalliance.unstuck.ui.tour.TourStateStore(graph.appContext).patch { it.copy(eligible = true) }
         }
-        // Seed the user's PICKED areas (or canonical defaults if they picked none).
-        // Single source of seeding — onboarding no longer also writes areas itself,
-        // so we don't double-seed (picked + defaults).
-        if (lifeAreas.value.isEmpty()) {
-            val palette = listOf("indigo", "coral", "green", "amber", "teal", "blue", "violet", "red")
-            val seed = areas.ifEmpty { listOf("Work", "Personal", "Home", "Health") }
-            seed.forEachIndexed { i, n -> write?.upsertLifeArea(LifeArea(id = newUuid(), name = n, color = palette[i % palette.size], sortOrder = i)) }
+        // The gate follows the flag, so set it before anything below suspends.
+        markOnboarded()
+        launchWrite {
+            // Seed only the PICKED areas this account doesn't have. It used to check
+            // lifeAreas.value, a WhileSubscribed flow nothing collects during onboarding
+            // (always empty), and re-create the server-seeded Work / Personal / Home
+            // with fresh ids: shown twice in every picker, and refused by the server's
+            // unique(user_id, name) on every flush (Android audit 2026-09-23, A8).
+            val existing = store.snapshot(Tables.LIFE_AREAS, LifeArea.serializer())
+            OnboardingGate.areasToSeed(areas, existing, ::newUuid).forEach { write?.upsertLifeArea(it) }
+            val uid = auth?.currentUserId
+            if (uid != null && struggles.isNotEmpty()) {
+                // Cached locally first (the gateway + assistant context read them at
+                // once); the server row is the account's copy for every other device.
+                applyStruggles(uid, struggles)
+                runCatching { graph.coordinator?.preferences?.setAdhdStruggles(uid, struggles) }
+            }
         }
-        val uid = auth?.currentUserId
-        if (uid != null && struggles.isNotEmpty()) {
-            // Cached locally first (the gateway + assistant context read them at
-            // once); the server row is the account's copy for every other device.
-            applyStruggles(uid, struggles)
-            runCatching { graph.coordinator?.preferences?.setAdhdStruggles(uid, struggles) }
-        }
-        graph.onboarded = true
     }
 
     // --- settings (device-local prefs: theme / focus / sound / a11y) ---
@@ -4290,6 +4367,9 @@ class AppViewModel(
                 // open phone at all).
                 merge(c.hydrated, c.preferencesChanged).collect {
                     val uid = auth?.currentUserId ?: return@collect
+                    // Duplicate Work / Personal / Home rows (and their refused writes)
+                    // that onboarding on builds up to vc100 left behind (A8).
+                    runCatching { tech.csalliance.unstuck.sync.RefusedLifeAreas.heal(store) }
                     runCatching { reconcileNotificationPrefs(uid) }
                     runCatching { reconcileCallProactivePrefs(uid) }
                     runCatching { reconcileCaptureArchive(uid) }
@@ -4298,13 +4378,18 @@ class AppViewModel(
                     // decides on that flip, and an already-onboarded user (done on
                     // the web, few synced facts) must never be greeted as a stranger.
                     hydrateAssistantPrefs(uid)
-                    runCatching { reconcileOnboarded(uid) }
+                    runCatching { reconcileOnboarded(uid, afterPull = true) }
                 }
             }
         }
     }
 
     companion object {
+        /** How long a not-yet-onboarded account waits on the splash for the server's
+         *  answer before the local flag decides. The early read normally answers in one
+         *  round trip; this bounds the wait when it failed and the first pull is the next
+         *  chance (a whole pull — hence longer than iOS's 6 s). */
+        internal const val ONBOARDING_RESOLVE_DEADLINE_MS = 10_000L
         private const val NOTIF_PREF_LEVEL = "level"
         private const val NOTIF_PREF_LEAD = "lead"
         /** Gateway interview keys (web STORAGE_KEYS.GATEWAY_INTERVIEW_DONE / _STEP vocabulary). */

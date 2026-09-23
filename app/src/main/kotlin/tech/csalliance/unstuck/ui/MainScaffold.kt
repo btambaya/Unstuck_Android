@@ -170,7 +170,10 @@ fun MainScaffold(vm: AppViewModel) {
     var focusShared by remember { mutableStateOf<ShareLevel?>(null) }
     var sharedDetail by remember { mutableStateOf<SharedWithMe?>(null) }
     var activeArea by remember { mutableStateOf<String?>(null) }
-    var onboarding by remember { mutableStateOf(!vm.onboarded) }
+    // Collected, not `remember { !vm.onboarded }`: that read the flag once, before the
+    // first pull (an existing web / iOS account got the steps on a new phone) and with
+    // no uid while offline (Android audit 2026-09-23, A9). completeOnboarding flips it.
+    val showOnboarding by vm.showOnboarding.collectAsStateWithLifecycle()
     // Return to Today whenever the app is backgrounded, so reopening lands on the
     // home tab instead of a stale detail/overlay/sheet. A live focus session is
     // preserved (its overlay reappears). Config changes (rotation, dark-mode flip)
@@ -192,9 +195,10 @@ fun MainScaffold(vm: AppViewModel) {
         (vm.currentName ?: "U").split(' ', '.', '@').mapNotNull { it.firstOrNull()?.uppercaseChar() }.take(2).joinToString("").ifEmpty { "U" }
     }
 
-    if (onboarding) {
-        tech.csalliance.unstuck.ui.onboarding.OnboardingScreen(vm, onDone = { onboarding = false })
-        return
+    when (showOnboarding) {
+        null -> { LoadingScreen(); return }
+        true -> { tech.csalliance.unstuck.ui.onboarding.OnboardingScreen(vm, onDone = {}); return }
+        false -> {}
     }
 
     val tasks by vm.tasks.collectAsStateWithLifecycle()

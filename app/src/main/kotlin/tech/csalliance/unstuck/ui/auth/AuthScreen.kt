@@ -21,6 +21,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -40,6 +41,7 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.design.component.ButtonKind
 import tech.csalliance.unstuck.design.component.MdField
@@ -65,6 +67,12 @@ fun AuthScreen(vm: AppViewModel) {
     var busy by remember { mutableStateOf(false) }
     var message by remember { mutableStateOf<String?>(null) }
     var messageOk by remember { mutableStateOf(false) }
+    // A tapped email link that couldn't sign in (expired / already used / offline) —
+    // it used to crash the app instead (Android audit 2026-09-23, A7).
+    val linkError by vm.authLinkError.collectAsStateWithLifecycle()
+    LaunchedEffect(linkError) {
+        linkError?.let { messageOk = false; message = it; vm.consumeAuthLinkError() }
+    }
 
     // `success` is shown (in a calm tone) for flows that finish WITHOUT a session —
     // sign-up confirmation, magic link, password reset all just send an email, so an

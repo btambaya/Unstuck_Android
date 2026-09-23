@@ -55,7 +55,7 @@ fun AppRoot(graph: AppGraph) {
 }
 
 @Composable
-private fun LoadingScreen() {
+internal fun LoadingScreen() {
     Column(
         Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.Center,

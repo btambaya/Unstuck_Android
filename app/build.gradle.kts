@@ -165,7 +165,7 @@ dependencies {
     implementation(platform(libs.firebase.bom))
     implementation(libs.firebase.messaging)
 
-    // supabase (for handleDeeplinks in MainActivity)
+    // supabase (for the auth-callback code exchange in MainActivity)
     implementation(platform(libs.supabase.bom))
     implementation(libs.supabase.auth)
 

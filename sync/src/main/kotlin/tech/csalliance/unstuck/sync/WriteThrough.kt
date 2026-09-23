@@ -88,10 +88,7 @@ class WriteThrough(private val store: LocalStore) {
         // Google mirror keeps its real length (parity with iOS build 81, audit
         // 2026-09-22 C4).
         val clamped = if (external) block else block.copy(durationMinutes = clampDurationMin(block.durationMinutes))
-        // Date and start time in ASCII digits whatever wrote them: in the phone's own
-        // digits the block never matched a day here and the server refused it, so it
-        // lived on this phone only (Android audit 2026-09-23, A12).
-        val b = clamped.copy(date = WireTime.asciiDigits(clamped.date), startTime = WireTime.asciiDigits(clamped.startTime))
+        val b = asciiDateTime(clamped)
         store.upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id)
         if (external) return
         val dependsOn = b.taskId?.let { if (isUuid(it)) it else null } // wait for parent task op
@@ -104,6 +101,38 @@ class WriteThrough(private val store: LocalStore) {
         if (stamped.externalEventId != b.externalEventId || stamped.externalConnectionId != b.externalConnectionId) {
             store.upsert(Tables.CAL_BLOCKS, stamped, CalBlock.serializer(), stamped.id)
             enqueue("cal_blocks", stamped.id, "upsert", DbRowCodec.encodeCalBlock(stamped).toString(), dependsOn)
+        }
+    }
+
+    /** Date and start time in ASCII digits whatever wrote them: in the phone's own
+     *  digits the block never matched a day here and the server refused it, so it
+     *  lived on this phone only (Android audit 2026-09-23, A12). */
+    private fun asciiDateTime(b: CalBlock): CalBlock =
+        b.copy(date = WireTime.asciiDigits(b.date), startTime = WireTime.asciiDigits(b.startTime))
+
+    /** Rewrites, on this phone only, the cal_blocks rows an older build stored with
+     *  the phone's own digits in `date` / `start_time`; returns how many. The drain
+     *  heals their queued ops, but the cal_blocks pull keeps a row whose op is still
+     *  queued, so offline, or behind a parent task op that never lands, the local
+     *  "٢٠٢٦-٠٩-٢٣" stayed: it sorts after every ASCII date, so the block left Today
+     *  for Upcoming (Android audit 2026-09-23, A12). No op is queued here, as the one
+     *  already in the outbox carries the change (quarantined ops are never dropped).
+     *  Runs at every start: one read and no write once nothing needs it. */
+    suspend fun healNativeDigitBlocks(): Int {
+        val stale = store.snapshot(Tables.CAL_BLOCKS, CalBlock.serializer()).filter { asciiDateTime(it) != it }
+        if (stale.isEmpty()) return 0
+        // Re-read each row inside the transaction so an edit or a pull that landed
+        // after the snapshot is healed as it now stands, never overwritten.
+        return store.transaction {
+            var healed = 0
+            for (s in stale) {
+                val cur = getOne(Tables.CAL_BLOCKS, s.id, CalBlock.serializer()) ?: continue
+                val b = asciiDateTime(cur)
+                if (b == cur) continue
+                upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id)
+                healed++
+            }
+            healed
         }
     }
 

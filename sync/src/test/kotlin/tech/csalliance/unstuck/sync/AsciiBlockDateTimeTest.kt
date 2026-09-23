@@ -85,6 +85,29 @@ class AsciiBlockDateTimeTest {
         assertEquals("the op landed and left the queue", 0, store.pending().size)
     }
 
+    @Test fun aRowAnOlderBuildStoredInNativeDigitsHealsLocallyWithoutANewOp() = runTest {
+        // What vc100 left on an Arabic phone: the row and its refused, still-queued
+        // op both in native digits. Offline (or behind a stuck parent op) no pull
+        // replaces the row, so only a local heal brings it back to Today.
+        val old = block("٢٠٢٦-٠٩-٢٣", "١٠:٣٠", name = "دواء ٢")
+        store.upsert(Tables.CAL_BLOCKS, old, CalBlock.serializer(), bid)
+        val stale = DbRowCodec.encodeCalBlock(old).toString()
+        store.enqueue(OutboxEntity(op = "upsert", recordTable = Tables.CAL_BLOCKS, recordId = bid, payload = stale, createdAt = 1L))
+        val mirror = CalBlock(id = "g_ev1", taskId = null, taskName = "Dentist", startTime = "۰۹:۰۰", durationMinutes = 30, date = "۲۰۲۶-۰۹-۲۴", kind = CalBlockKind.EXTERNAL)
+        store.upsert(Tables.CAL_BLOCKS, mirror, CalBlock.serializer(), mirror.id)
+
+        assertEquals(2, write.healNativeDigitBlocks())
+        val row = store.getOne(Tables.CAL_BLOCKS, bid, CalBlock.serializer())!!
+        assertEquals("2026-09-23", row.date)
+        assertEquals("10:30", row.startTime)
+        assertEquals("the user's own text keeps its digits", "دواء ٢", row.taskName)
+        val g = store.getOne(Tables.CAL_BLOCKS, mirror.id, CalBlock.serializer())!!
+        assertEquals("2026-09-24" to "09:00", g.date to g.startTime)
+        // The queued op is left for the drain to heal; nothing new is sent.
+        assertEquals(listOf(stale), store.pending().map { it.payload })
+        assertEquals("nothing left to heal", 0, write.healNativeDigitBlocks())
+    }
+
     @Test fun asciiRowsAndOtherTablesPassThroughUntouched() {
         val ascii = DbRowCodec.encodeCalBlock(block("2026-09-23", "10:30"))
         assertSame(ascii, OutboxFlusher.asciiBlockDateTime(Tables.CAL_BLOCKS, ascii))

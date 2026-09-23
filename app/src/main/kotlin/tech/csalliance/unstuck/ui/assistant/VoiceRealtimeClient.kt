@@ -264,6 +264,8 @@ class VoiceRealtimeClient(
          *  a 429 before the socket opens, or a 1008 close mid-session. */
         const val DAILY_LIMIT = "You've used today's voice time — try again tomorrow."
         const val SESSION_TIME_LIMIT = "Voice sessions last up to 15 minutes."
+        /** Any other close the server started — its relayed reason is never shown. */
+        const val SERVER_CLOSED = "The voice server closed the session."
 
         /** A 401 before the socket ever opened, not yet retried — the one case
          *  worth a forced refresh + redial (iOS `shouldRetryUnauthorized`). */
@@ -291,7 +293,7 @@ class VoiceRealtimeClient(
             code == 1008 && reason.contains("daily voice limit", ignoreCase = true) -> DAILY_LIMIT
             reason.contains("session time limit", ignoreCase = true) -> SESSION_TIME_LIMIT
             code == 1000 || code == 1001 -> null
-            else -> "The voice server closed the session."
+            else -> SERVER_CLOSED
         }
     }
 
@@ -366,6 +368,9 @@ class VoiceRealtimeClient(
     /** The token the current dial sent — a forced refresh that hands it back is
      *  no answer to the proxy refusing it. */
     private var dialedToken: String? = null
+    /** Call mode: the call-back this session already accepted (the call is
+     *  ending as it). */
+    private var acceptedSnoozeMin: Int? = null
 
     /** Nothing in OkHttp fails a dial that stalls after the TCP connect (the
      *  shared client's readTimeout is 0 for the long-lived socket), so a proxy
@@ -383,9 +388,15 @@ class VoiceRealtimeClient(
         Log.i(TAG, "voice dial watchdog: nothing opened in time — giving up")
         val socket = ws
         ws = null
-        runCatching { socket?.cancel() }
-        mainHandler.removeCallbacks(tick); audio.shutdown()
+        mainHandler.removeCallbacks(tick)
+        // Report BEFORE the cancel: OkHttp fails a cancelled handshake on its own
+        // thread at once ("Canceled" / "Socket closed"), and that report must not
+        // beat this one to the user or the call's note (C14, review of the
+        // 2026-09-23 parity port).
         transportEnded(UNREACHABLE)
+        runCatching { socket?.cancel() }
+        // Off main, as in stop(): shutdown() joins the audio threads (~600 ms).
+        thread(name = "voice-dial-giveup") { audio.shutdown() }
     }
 
     /** The server failed the session before ANY reply (its capacity error, or
@@ -769,6 +780,9 @@ class VoiceRealtimeClient(
         override fun onFailure(webSocket: WebSocket, t: Throwable, response: Response?) {
             open = false
             if (stopped) return // already torn down by stop(); keep its CLOSED, don't paint an ERROR over it
+            // The end was already reported (the dial watchdog cancelling this socket,
+            // a server close) and whoever reported it shut the audio down.
+            if (transportEndedFired) return
             val code = response?.code
             // A pre-open 401 is a token the proxy refused — usually one that
             // expired while the app sat idle, or a race with the SDK's refresh.
@@ -817,7 +831,14 @@ class VoiceRealtimeClient(
             if (stopped) return
             Log.i(TAG, "voice server closed the session code=$code reason=$reason")
             mainHandler.removeCallbacks(tick); mainHandler.removeCallbacks(openingWatchdog); audio.shutdown()
-            transportEnded(serverCloseMessage(code, reason))
+            // Even a clean close before ANY reply is a session that never happened:
+            // a failure (dead on arrival — Talk reconnects quietly, a call ends as
+            // Failed with its notes), never a call reported done. iOS reads every
+            // server close as a receive error (SC-V1, review of the 2026-09-23
+            // parity port).
+            val msg = serverCloseMessage(code, reason)
+                ?: if (synchronized(ctlLock) { anyResponse }) null else SERVER_CLOSED
+            transportEnded(msg)
         }
 
         override fun onClosed(webSocket: WebSocket, code: Int, reason: String) {
@@ -929,10 +950,19 @@ class VoiceRealtimeClient(
     private suspend fun runCallAwareTool(name: String, args: JsonObject): String {
         val cm = callMode ?: return runTool(name, args)
         if (name == CallMode.SNOOZE_TOOL) {
+            // A repeat while the call ends as an accepted call-back is answered
+            // with that one — never refused over the goodbye (iOS snoozeActiveCall
+            // checks the pending snooze first, audit 2026-09-22 C12).
+            synchronized(ctlLock) { acceptedSnoozeMin }?.let { return CallMode.snoozeResult(it) }
             val minutes = CallMode.snoozeMinutes(args)
             runCatching { cm.snoozeRefusal(minutes) }.getOrNull()?.let { return it }
-            runCatching { cm.onSnoozeCall(minutes) }
-            return CallMode.snoozeResult(minutes)
+            val (m, first) = synchronized(ctlLock) {
+                val prev = acceptedSnoozeMin
+                if (prev == null) acceptedSnoozeMin = minutes
+                (prev ?: minutes) to (prev == null)
+            }
+            if (first) runCatching { cm.onSnoozeCall(m) }
+            return CallMode.snoozeResult(m)
         }
         if (name !in cm.allowedTools) return CallMode.notAvailable(name)
         return runTool(name, args)

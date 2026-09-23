@@ -1292,6 +1292,21 @@ class AssistantToolsTest {
         assertTrue(h.run("update_call", "callId" to "call1", "when" to "$TOMORROW 19:00").startsWith("error: calls are off on this phone"))
     }
 
+    /** The task editor's Update always sends its lead (AppViewModel.updateTaskCall):
+     *  an unchanged lead lands on the row's own time — a notes-only edit, which is
+     *  never refused, even with Calls off on this phone. A lead that moves the
+     *  time still is. */
+    @Test fun `update_call with the unchanged lead is a notes-only edit, even with Calls off`() = runTest {
+        val h = makeApi { callStoreAvailable = true; tasks += task("a", "Board prep"); blocks += block("b1", "a", TOMORROW, "10:00") }
+        assertEquals("ok: call booked $TOMORROW 09:45 \"Board prep\" (0 notes) id=call1", h.run("request_call", "taskId" to "a", "leadMin" to 15))
+        h.state.callSettings = tech.csalliance.unstuck.core.logic.CallSettings(enabled = false)
+        assertEquals("ok: updated call \"Board prep\" — $TOMORROW 09:45, 1 note id=call1",
+            h.run("update_call", "callId" to "call1", "leadMin" to 15, "notes" to listOf("bring the contract")))
+        assertEquals(listOf("bring the contract"), h.state.calls[0].notes)
+        assertTrue(h.run("update_call", "callId" to "call1", "leadMin" to 30, "notes" to listOf("x")).startsWith("error: calls are off on this phone"))
+        assertEquals("a refused time change writes nothing", listOf("bring the contract"), h.state.calls[0].notes)
+    }
+
     // ── ToolArgs ───────────────────────────────────────────────────────────
 
     @Test fun `ToolArgs parses the model's JSON tolerantly`() {

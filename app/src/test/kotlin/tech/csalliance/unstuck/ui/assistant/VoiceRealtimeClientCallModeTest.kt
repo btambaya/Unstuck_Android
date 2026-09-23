@@ -119,12 +119,21 @@ class VoiceRealtimeClientCallModeTest {
         assertEquals(listOf(CallMode.snoozeResult(20)), f.socket!!.outputs())
         assertEquals(listOf(20), snoozes)
         assertTrue(ran.isEmpty())
-        // Default 10; clamped to 1…180.
-        f.toolCall("snooze_call", "c2", "{}")
-        f.toolCall("snooze_call", "c3", """{"minutes": 999}""")
-        awaitOutputs(f.socket!!, 3)
-        assertEquals(listOf(10, 180), snoozes.drop(1))
-        assertEquals(listOf(20, 10, 180), snoozes)
+        // A repeat while the call ends as that call-back is answered with it and
+        // never handed over again (iOS snoozeActiveCall, audit 2026-09-22 C12).
+        f.toolCall("snooze_call", "c2", """{"minutes": 45}""")
+        awaitOutputs(f.socket!!, 2)
+        assertEquals(listOf(CallMode.snoozeResult(20), CallMode.snoozeResult(20)), f.socket!!.outputs())
+        assertEquals(listOf(20), snoozes)
+        // Default 10; clamped to 1…180 (one session per ask: the first one is kept).
+        for ((args, want) in listOf("{}" to 10, """{"minutes": 999}""" to 180, """{"minutes": 0}""" to 1)) {
+            val got = mutableListOf<Int>()
+            val (_, g, _) = session(setOf("complete_task"), onSnooze = { got += it })
+            g.toolCall("snooze_call", "c1", args)
+            awaitOutputs(g.socket!!, 1)
+            assertEquals(listOf(CallMode.snoozeResult(want)), g.socket!!.outputs())
+            assertEquals(listOf(want), got)
+        }
     }
 
     @Test fun `a tool outside the call set is refused before the executor, an allowed one runs`() {

@@ -281,9 +281,23 @@ internal val CALLS_PROACTIVE_HINT = "All off unless you switch them on. Unstuck 
     "${tech.csalliance.unstuck.core.logic.CallSettingsLogic.SERVER_WINDOW.start} and ${tech.csalliance.unstuck.core.logic.CallSettingsLogic.SERVER_WINDOW.endInclusive}; " +
     "this phone still declines one outside the allowed hours above, or while Calls is off."
 /** Under the Calls switch when the microphone was refused (iOS build 78): the
- *  phone rings, but the call can't hear them. Tapping it opens the app's
- *  system page — after a second refusal Android won't show the prompt again. */
+ *  phone rings, but the call can't hear them. A tap asks again while Android
+ *  still offers the prompt, else opens the app's system page ([callsMicHint]). */
 internal const val CALLS_MIC_DENIED_HINT = "Calls need microphone access — turn it on in Android Settings, or you'll ring but can't be heard."
+/** The red [CALLS_MIC_DENIED_HINT] line and what a tap on it does. */
+internal enum class MicHint { NONE, ASK, OPEN_SETTINGS }
+
+/** iOS shows the line whenever the microphone is denied, from the moment the
+ *  screen opens. Android reports a refusal only while it still offers the
+ *  prompt ([canAskAgain] = shouldShowRequestPermissionRationale) — then a tap
+ *  asks again. After "don't ask again" it can't be told from never asked, so
+ *  the line shows once refused here, and a tap opens the app's system page. */
+internal fun callsMicHint(granted: Boolean, canAskAgain: Boolean, refusedHere: Boolean): MicHint = when {
+    granted -> MicHint.NONE
+    canAskAgain -> MicHint.ASK
+    refusedHere -> MicHint.OPEN_SETTINGS
+    else -> MicHint.NONE
+}
 /** "Test call now" without the microphone (iOS build 78). */
 internal const val CALLS_TEST_MIC_REFUSED = "Calls need microphone access — turn it on for Unstuck in Android Settings."
 internal const val CALLS_TEST_BUTTON = "Test call now"
@@ -342,14 +356,26 @@ private fun CallsContent(vm: AppViewModel) {
     // build 78, 0f24908; the Answer-time request stays as the backstop).
     fun micGranted() = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) ==
         android.content.pm.PackageManager.PERMISSION_GRANTED
-    var micDenied by remember { mutableStateOf(false) }
+    // A refusal from before this screen (at a ring's Answer, say) shows too, as
+    // iOS build 78 reads the denied state on open — Android reports one only
+    // while it still offers the prompt (callsMicHint).
+    fun micCanAskAgain(): Boolean {
+        var host: android.content.Context? = context
+        while (host is android.content.ContextWrapper && host !is android.app.Activity) host = host.baseContext
+        val activity = host as? android.app.Activity ?: return false
+        return androidx.core.app.ActivityCompat.shouldShowRequestPermissionRationale(activity, android.Manifest.permission.RECORD_AUDIO)
+    }
+    var micRefusedHere by remember { mutableStateOf(false) }
+    var micCheck by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    val micHint = remember(micCheck, micRefusedHere) { callsMicHint(micGranted(), micCanAskAgain(), micRefusedHere) }
     var testAfterMic by remember { mutableStateOf(false) }
     fun bookTest() {
         testState = TestCallState.Booking
         scope.launch { testState = testCallStateFrom(vm.bookTestCall()) }
     }
     val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        micDenied = !granted
+        micRefusedHere = !granted
+        micCheck++
         if (testAfterMic) {
             testAfterMic = false
             if (granted) bookTest() else testState = TestCallState.Failed(CALLS_TEST_MIC_REFUSED)
@@ -366,7 +392,7 @@ private fun CallsContent(vm: AppViewModel) {
             if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
                 fullScreenOk = canUseFullScreenIntent(context)
                 // Back from the app's system page with the mic turned on.
-                if (micGranted()) micDenied = false
+                micCheck++
             }
         }
         lifecycleOwner.lifecycle.addObserver(obs)
@@ -438,11 +464,12 @@ private fun CallsContent(vm: AppViewModel) {
     if (s.assistantEnabled && !cs.enabled) {
         Text(CALLS_ENABLED_OFF_HINT, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
     }
-    if (s.assistantEnabled && cs.enabled && micDenied) {
+    if (s.assistantEnabled && cs.enabled && micHint != MicHint.NONE) {
         Text(
             CALLS_MIC_DENIED_HINT, style = UFont.sans(12), color = c.red,
             modifier = Modifier.padding(top = 10.dp).clickable {
-                runCatching {
+                if (micHint == MicHint.ASK) ensureMicrophone()
+                else runCatching {
                     context.startActivity(android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
                         .setData(android.net.Uri.parse("package:${context.packageName}"))
                         .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))

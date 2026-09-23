@@ -67,7 +67,10 @@ class VoiceRealtimeClientDialTest {
         override fun outputBusy(): Boolean = false
     }
 
-    private class FakeSocket(private val req: Request) : WebSocket {
+    /** [cancel] fails the socket through the listener at once, as OkHttp does
+     *  for a cancelled handshake ("Canceled", on its own thread — here on the
+     *  caller's, the worst case for who reports first). */
+    private class FakeSocket(private val req: Request, private val listener: WebSocketListener) : WebSocket {
         val sent: MutableList<String> = Collections.synchronizedList(mutableListOf())
         @Volatile var closedWith: Int? = null
         @Volatile var cancelled = false
@@ -76,7 +79,11 @@ class VoiceRealtimeClientDialTest {
         override fun send(text: String): Boolean { sent += text; return true }
         override fun send(bytes: ByteString): Boolean = true
         override fun close(code: Int, reason: String?): Boolean { closedWith = code; return true }
-        override fun cancel() { cancelled = true }
+        override fun cancel() {
+            if (cancelled) return
+            cancelled = true
+            listener.onFailure(this, java.io.IOException("Canceled"), null)
+        }
     }
 
     /** Every dial, in order — the Authorization header each one sent. */
@@ -87,7 +94,7 @@ class VoiceRealtimeClientDialTest {
         val last: FakeSocket get() = synchronized(sockets) { sockets.last() }
         override fun newWebSocket(request: Request, listener: WebSocketListener): WebSocket {
             this.listener = listener
-            return FakeSocket(request).also { sockets += it }
+            return FakeSocket(request, listener).also { sockets += it }
         }
         fun open() {
             val s = last
@@ -281,6 +288,8 @@ class VoiceRealtimeClientDialTest {
         val rec = Recorder(); val f = FakeFactory(); val p = Provider(normal = "fresh", delayMs = 300)
         val c = client(rec, f, p)
         c.start()
+        // Stop only once the provider is really resolving (the launch is async).
+        assertTrue(eventually { p.asks.isNotEmpty() })
         c.stop()
         Thread.sleep(600)
         assertEquals(listOf(false), p.asks)
@@ -328,6 +337,8 @@ class VoiceRealtimeClientDialTest {
         idle(15_000)
         assertEquals(listOf<String?>(VoiceRealtimeClient.UNREACHABLE), rec.ended)
         assertTrue(f.last.cancelled)
+        // The cancel's own failure ("Canceled") came after the report and said nothing.
+        assertEquals(listOf(VoiceRealtimeClient.UNREACHABLE), rec.errors)
         c.stop()
     }
 
@@ -389,6 +400,28 @@ class VoiceRealtimeClientDialTest {
         assertFalse("a relayed upstream reason is not shown", other.contains("org-XYZ"))
     }
 
+    /** A clean close before ANY reply is a session that never happened: dead on
+     *  arrival (Talk reconnects quietly, a call ends as Failed with its notes) —
+     *  never a call reported done. iOS reads every server close as an error. */
+    @Test fun `a clean server close before any reply is a failure, not a clean end`() {
+        val rec = Recorder(); val f = FakeFactory()
+        val c = client(rec, f, null)
+        c.start(); f.open()
+        f.serverClose(1000, "")
+        assertEquals(listOf<String?>(VoiceRealtimeClient.SERVER_CLOSED), rec.ended)
+        assertTrue(c.failedBeforeAnyReply)
+        assertEquals("dead on arrival is not shown — the owner reconnects or reports", emptyList<String>(), rec.errors)
+        // After an early server error (swallowed), the close still ends it as a failure.
+        val rec2 = Recorder(); val f2 = FakeFactory()
+        val c2 = client(rec2, f2, null)
+        c2.start(); f2.open()
+        f2.listener!!.onMessage(f2.last, """{"type":"error","error":{"message":"upstream busy"}}""")
+        f2.serverClose(1000, "")
+        assertEquals(listOf<String?>(VoiceRealtimeClient.SERVER_CLOSED), rec2.ended)
+        assertTrue(c2.failedBeforeAnyReply)
+        c.stop(); c2.stop()
+    }
+
     @Test fun `a clean server close ends the session without an error`() {
         val rec = Recorder(); val f = FakeFactory()
         val c = client(rec, f, null)
@@ -422,6 +455,12 @@ class VoiceRealtimeClientDialTest {
         assertEquals(CallMode.snoozeResult(20), outputs()["c2"])
         assertEquals("only the allowed call-back reaches the owner", listOf(20), snoozes.toList())
         assertTrue(c.isOpen)
+        // Once one is accepted, a repeat is answered with it — even one the hours
+        // would refuse — and never reaches the owner again (iOS snoozeActiveCall).
+        f.listener!!.onMessage(f.last, """{"type":"response.function_call_arguments.done","name":"snooze_call","call_id":"c3","arguments":"{\"minutes\":120}"}""")
+        assertTrue(eventually { outputs().size == 3 })
+        assertEquals(CallMode.snoozeResult(20), outputs()["c3"])
+        assertEquals(listOf(20), snoozes.toList())
         c.stop()
     }
 }

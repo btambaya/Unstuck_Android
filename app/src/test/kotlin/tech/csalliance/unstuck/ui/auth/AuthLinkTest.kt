@@ -2,6 +2,9 @@ package tech.csalliance.unstuck.ui.auth
 
 import io.github.jan.supabase.exceptions.RestException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.async
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
@@ -45,6 +48,27 @@ class AuthLinkTest {
         assertNull(AuthLink.complete("good", null, null) { exchanged = it })
         assertEquals("good", exchanged)
         assertNull(AuthLink.complete(null, null, null) { fail("no code, no exchange") })
+    }
+
+    @Test fun `a link opened twice - the code-less second copy says nothing while the first signs in`() = runTest {
+        val serverAnswer = CompletableDeferred<Unit>()
+        val first = async { AuthLink.complete("reset-code", null, null) { serverAnswer.await() } }
+        runCurrent()
+        assertNull("the first copy's exchange decides",
+            AuthLink.complete(null, errorCode = "otp_expired", errorDescription = "Email link is invalid or has expired") { fail("no code, no exchange") })
+        serverAnswer.complete(Unit)
+        assertNull(first.await())
+        assertEquals("with nothing in flight an expired link is reported again",
+            AuthLink.EXPIRED, AuthLink.complete(null, "otp_expired", null) { fail("no code, no exchange") })
+    }
+
+    @Test fun `a refused link says nothing while another link is still exchanging, and the last one speaks`() = runTest {
+        val newerAnswer = CompletableDeferred<Unit>()
+        val newer = async { AuthLink.complete("new-code", null, null) { newerAnswer.await() } }
+        runCurrent()
+        assertNull(AuthLink.complete("old-code", null, null) { throw RestException("invalid_grant", "flow state not found", 400, "https://x/auth/v1/token") })
+        newerAnswer.completeExceptionally(java.net.UnknownHostException("no route"))
+        assertEquals(AuthLink.OFFLINE, newer.await())
     }
 
     @Test fun `cancellation is not swallowed`() = runTest {

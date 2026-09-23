@@ -13,6 +13,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import io.github.jan.supabase.auth.auth
 import io.github.jan.supabase.auth.status.SessionStatus
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -159,19 +160,24 @@ class MainActivity : ComponentActivity() {
      *  no handler, so a refused code (an older email after a second link / reset
      *  request, a reused code, cleared app data) or a network drop crashed the app
      *  (Android audit 2026-09-23, A7). On the process scope, so a rotation mid-exchange
-     *  can't cancel it. Signed out, the reason goes to AuthScreen; otherwise a toast. */
+     *  can't cancel it; undispatched, so AuthLink counts links in arrival order. Signed
+     *  out, the reason goes to AuthScreen; otherwise a toast.
+     *
+     *  The recovery probe armed above is left alone here, even when this link fails:
+     *  only an exchange's own session (SessionSource.External — auth-kt 3.0.3 emits it
+     *  from exchangeCodeForSession alone) can consume it, and that session's amr
+     *  decides. Clearing it for a failed or code-less copy of a link opened twice
+     *  switched it off while the first copy was still exchanging a reset, which then
+     *  landed on Today with the link spent (Android audit 2026-09-23, A7). */
     private fun completeAuthLink(data: android.net.Uri) {
         val client = graph.provider?.client ?: return
         val code = data.getQueryParameter("code")
         val errorCode = data.getQueryParameter("error_code")
         val errorDescription = data.getQueryParameter("error_description")
-        graph.scope.launch {
+        graph.scope.launch(start = CoroutineStart.UNDISPATCHED) {
             val failure = tech.csalliance.unstuck.ui.auth.AuthLink.complete(code, errorCode, errorDescription) {
                 client.auth.exchangeCodeForSession(it)
-            }
-            // No session came from this link, so it can't be the one the probe waits for.
-            if (failure != null || code.isNullOrBlank()) graph.pendingRecoveryProbe.value = false
-            if (failure == null) return@launch
+            } ?: return@launch
             if (client.auth.sessionStatus.value is SessionStatus.NotAuthenticated) {
                 graph.authLinkError.value = failure
             } else {

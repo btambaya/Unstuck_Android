@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 100
-        versionName = "0.5.16"
+        versionCode = 101
+        versionName = "0.5.17"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.16 — Brought level with the iPhone app (build 81). Repeating tasks: moving or deleting one day no longer rebuilds the series, ticking a repeating task completes today only, and starting a repeat asks for a day and time. Voice: a busy assistant says so and retries instead of going quiet, provider errors read in plain words, one-word answers are kept, and calls greet once and hang up cleanly on a failure. Calls: default hours 6am-11pm and the assistant refuses times this phone would decline. Sharing: you can block someone from People, and removing a person also ends the lists you share. Plus: reminders skip done or skipped days, Google Calendar sync shows its errors, area/tag renames carry their tasks, and Settings can clear your Assistant history."
+    releaseNotes = "v0.5.17 — Fixes from the pre-launch review. Calls from Unstuck now ring when the app is closed or in the background (please test: lock the phone, or swipe the app away, and ask for a call), keep ringing for the whole call, and a call-back you asked for survives hanging up. Background sync, call results and reminders no longer wait for you to open the app; reminders are on time on Android 14+. Sign-up: no duplicate life areas, onboarding only for new accounts, and an old sign-in link no longer crashes. Offline edits no longer get stuck; dates work with Arabic, Persian and other non-Latin digits; habit focus starts at the right time; notes taken during focus sync; sharing shows up right after sign-in; assistant Undo never deletes what you kept; Export everything is complete; and the Google Calendar screen says plainly that your scheduled tasks are added to your main calendar."
 }
 
 dependencies {

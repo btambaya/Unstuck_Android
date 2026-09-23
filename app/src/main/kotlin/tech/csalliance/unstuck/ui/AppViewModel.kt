@@ -3735,6 +3735,18 @@ class AppViewModel(
             .map { rows -> tech.csalliance.unstuck.ui.tasks.CallMeLogic.liveForTask(rows, taskId) }
             .distinctUntilChanged()
 
+    /** The bell's "Unstuck called you about X" cards (notification_queue,
+     *  moment `call`), matched to the local call mirror. Null = couldn't read
+     *  (offline / signed out) — the bell keeps what it had (parity with iOS
+     *  build 72). */
+    suspend fun callQueueCards(): List<tech.csalliance.unstuck.surface.NotificationLog.Entry>? {
+        val n = graph.coordinator?.notifications ?: return null
+        if (currentUid() == null) return null
+        val cards = runCatching { n.queueCards(tech.csalliance.unstuck.ui.notifications.NotificationQueueCards.CALL_MOMENT) }.getOrNull() ?: return null
+        val calls = runCatching { CallRequestsMirror(store).all() }.getOrDefault(emptyList())
+        return cards.map { tech.csalliance.unstuck.ui.notifications.NotificationQueueCards.entry(it, calls) }
+    }
+
     /** One call row by id (after a book, to show what the server stored). */
     suspend fun callRequest(callId: String): CallRequest? =
         runCatching { assistantApi.callStore()?.call(callId) }.getOrNull()

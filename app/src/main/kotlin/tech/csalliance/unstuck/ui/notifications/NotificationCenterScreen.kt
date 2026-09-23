@@ -56,6 +56,15 @@ fun NotificationCenterScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (
     // Tick ~every 30s so the "Xm ago" / "in Xm" labels don't freeze at screen-open time.
     var now by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(vm.nowMs()) }
     androidx.compose.runtime.LaunchedEffect(Unit) { while (true) { now = vm.nowMs(); kotlinx.coroutines.delay(30_000) } }
+    // The server's call cards — a call rung on another device, or one this phone
+    // couldn't take (parity with iOS build 72). Read on open and on every return
+    // to the foreground while open (no realtime channel here, and
+    // postgres_changes has no replay). Best-effort: offline keeps what it had.
+    var callCards by remember { androidx.compose.runtime.mutableStateOf(emptyList<tech.csalliance.unstuck.surface.NotificationLog.Entry>()) }
+    var cardsTick by remember { androidx.compose.runtime.mutableIntStateOf(0) }
+    androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) { cardsTick++ }
+    androidx.compose.runtime.LaunchedEffect(cardsTick) { vm.callQueueCards()?.let { callCards = it } }
+    val recent = remember(notifs, callCards) { NotificationQueueCards.mergeRecent(notifs, callCards) }
 
     val upcoming = remember(blocks, tasks) {
         blocks.asSequence()
@@ -80,10 +89,10 @@ fun NotificationCenterScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (
                 }
             }
             item { SectionLabel("Recent", Modifier.padding(top = if (upcoming.isEmpty()) 4.dp else 18.dp, bottom = 8.dp)) }
-            if (notifs.isEmpty()) {
+            if (recent.isEmpty()) {
                 item { Text("Nothing yet. Reminders and recaps will show up here.", style = UFont.sans(13), color = c.ink3, modifier = Modifier.padding(vertical = 24.dp)) }
             } else {
-                items(notifs, key = { it.id }) { n ->
+                items(recent, key = { it.id }) { n ->
                     val dl = n.deepLink
                     val taskId = dl?.takeIf { it.startsWith("unstuck://task/") }?.removePrefix("unstuck://task/")
                     Card(
@@ -136,6 +145,10 @@ private fun kindLabel(kind: String): String = when (kind) {
     "morning_brief" -> "Morning brief"
     "evening_preview" -> "Evening preview"
     "daily_nudge" -> "Daily nudge"
+    // Every call entry this phone logs (the ring, and each call result) and
+    // the server's call cards — they used to read "Reminder" (parity with iOS
+    // build 72).
+    "call", "call_missed", "call_busy", "call_outside_hours", "call_voice_failed", "call_off" -> "Call from Unstuck"
     else -> "Reminder"
 }
 

@@ -160,8 +160,10 @@ class SyncCoordinator(
         // null there after the ON_STOP reset, and in a just-started process until its load
         // lands (Android audit 2026-09-23, A2). In the foreground the SDK's own ON_START
         // reload is followed by INITIAL_SESSION's pull, so the live read stays (no second
-        // pull per return).
-        currentUserId = { if (foreground) auth.currentUserId else session.ensure().liveUserId },
+        // pull per return) — minus an expired token: a background restore leaves one
+        // behind with no refresh timer, and pulling (plus the pre-pull drain) with it was
+        // a round of 401s; the SDK's refresh emission pulls instead (A2 — second pass).
+        currentUserId = { if (foreground) session.liveNow() else session.ensure().liveUserId },
         runFullHydrate = { uid -> fullHydrate(uid) },
         runCatchUp = { uid, sweep -> catchUpPull(uid, sweep) },
         needsFullHydrate = { uid -> !catchUp.hasCursors(uid) },
@@ -228,7 +230,13 @@ class SyncCoordinator(
      *  (Android audit 2026-09-23, A2). */
     private suspend fun flushNow() {
         val uid = session.ensure().liveUserId ?: return
-        engineMutex.withLock { flushUnlocked(uid) }
+        drainAcrossReset(
+            uid,
+            drain = { engineMutex.withLock { flushUnlocked(uid) } },
+            liveUser = { auth.currentUserId },
+            hasPending = { store.pending().isNotEmpty() },
+            ensure = { session.ensure().liveUserId },
+        )
     }
 
     private suspend fun flushUnlocked(uid: String) {
@@ -784,6 +792,27 @@ class SyncCoordinator(
         // must be registered as an Authorized redirect URI on the Google Web OAuth client.
         private const val CAL_REDIRECT = "https://unstuck-602.pages.dev/calendar-callback"
     }
+}
+
+/**
+ * One outbox drain as [uid] — and one more when supabase-kt's ON_STOP reset landed
+ * during it (the live user reads null afterwards). OutboxFlusher stops at its next
+ * pass once the live user is gone, and an op sent after the reset went out without
+ * the JWT and failed, so the rest of the queue sat until the next write or SyncWorker
+ * run: tick a task, press Home a second later, and part of it stayed on the phone.
+ * [ensure] restores the session in the background; a sign-out or another account
+ * ends it there (Android audit 2026-09-23, A2 — second pass).
+ */
+internal suspend fun drainAcrossReset(
+    uid: String,
+    drain: suspend () -> Unit,
+    liveUser: () -> String?,
+    hasPending: suspend () -> Boolean,
+    ensure: suspend () -> String?,
+) {
+    drain()
+    if (liveUser() != null || !hasPending()) return
+    if (ensure() == uid) drain()
 }
 
 /**

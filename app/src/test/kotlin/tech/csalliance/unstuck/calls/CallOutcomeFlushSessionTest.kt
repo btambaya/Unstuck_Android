@@ -39,7 +39,6 @@ class CallOutcomeFlushSessionTest {
         override suspend fun refresh(refreshToken: String): UserSession = error("not expired")
         override suspend fun adopt(session: UserSession) { status.value = SessionStatus.Authenticated(session, SessionSource.Unknown) }
         override fun stopAutoRefresh() = Unit
-        override suspend fun reload() { saved?.let { status.value = SessionStatus.Authenticated(it, SessionSource.Storage) } }
     }
 
     /** A process that loaded its session, then went to the background (ON_STOP reset). */
@@ -76,5 +75,23 @@ class CallOutcomeFlushSessionTest {
         var drains = 0
         CallOutcomeStore.flushWhenSignedIn(gate) { drains++ }
         assertEquals(0, drains)
+    }
+
+    // Second pass (R3): a ring at 10:00 restores the session in the background with no
+    // refresh timer; the user opens the app at 11:30 and the ON_START flush fires while
+    // the SDK's reload is still refreshing that expired token. Counting it live sent the
+    // outcome with a dead JWT — a 401, and the item backed off.
+    @Test fun `the foreground flush never sends with an expired token a background restore left behind`() = runTest {
+        val expired = session.copy(expiresAt = Instant.fromEpochMilliseconds(now - 60_000))
+        val auth = Auth(SessionStatus.Authenticated(expired, SessionSource.Unknown), expired)
+        val gate = SessionGate(auth, CoroutineScope(StandardTestDispatcher(testScheduler)), { true }, nowMs = { now }, log = {})
+        var drains = 0
+        val flush = async { CallOutcomeStore.flushWhenSignedIn(gate) { drains++ } }
+        advanceTimeBy(500)
+        assertEquals("not with the dead JWT", 0, drains)
+        auth.status.value = SessionStatus.Authenticated(session, SessionSource.Refresh(expired))
+        advanceUntilIdle()
+        flush.await()
+        assertEquals(1, drains)
     }
 }

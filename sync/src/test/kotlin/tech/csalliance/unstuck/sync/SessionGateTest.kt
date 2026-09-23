@@ -5,6 +5,7 @@ import io.github.jan.supabase.auth.status.SessionSource
 import io.github.jan.supabase.auth.status.SessionStatus
 import io.github.jan.supabase.auth.user.UserInfo
 import io.github.jan.supabase.auth.user.UserSession
+import io.github.jan.supabase.exceptions.RestException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
@@ -18,6 +19,8 @@ import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.datetime.Instant
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -48,12 +51,15 @@ class SessionGateTest {
         var timerStops = 0
         var refreshTakesMs = 0L
         var offline = false
+        /** The server refuses the refresh token outright (revoked) with this status. */
+        var refuse: Int? = null
 
         override suspend fun stored(): UserSession? = storedSession
         override suspend fun refresh(refreshToken: String): UserSession {
             refreshedWith += refreshToken
             delay(refreshTakesMs)
             if (offline) throw java.io.IOException("offline")
+            refuse?.let { throw RefreshRefused(it) }
             return session(token = "fresh${refreshedWith.size}")
         }
         override suspend fun adopt(session: UserSession) {
@@ -62,11 +68,6 @@ class SessionGateTest {
             status.value = SessionStatus.Authenticated(session, SessionSource.Unknown)
         }
         override fun stopAutoRefresh() { timerStops++ }
-        var reloads = 0
-        override suspend fun reload() {
-            reloads++
-            storedSession?.let { status.value = SessionStatus.Authenticated(it, SessionSource.Storage) }
-        }
     }
 
     private fun TestScope.gate(auth: FakeAuth, foreground: () -> Boolean = { false }) = SessionGate(
@@ -205,21 +206,107 @@ class SessionGateTest {
         assertEquals(emptyList<UserSession>(), auth.adopted)
     }
 
-    @Test fun `in the foreground a reload that never comes is done after the grace, the SDK's way`() = runTest {
-        val (auth, g) = afterOnStopReset(foreground = { true })
+    // Second pass (R2): the SDK's ON_START reload refreshes an expired token for up to
+    // the client's 90 s request timeout. A gate that reloaded itself after a 3 s grace
+    // spent the same refresh token twice (GoTrue revokes the family when the two land
+    // >10 s apart → the SDK signs out and wipes the outbox), and parked the SDK's
+    // for-ever network retry inside its single-flight step.
+    @Test fun `in the foreground a slow SDK reload is never raced - no load or refresh of its own`() = runTest {
+        val (auth, g) = afterOnStopReset(session(validForMs = -60_000), foreground = { true })
         val check = async { g.ensure() }
-        advanceTimeBy(SessionGate.SDK_GRACE_MS - 1)
-        assertEquals(0, auth.reloads)
+        advanceTimeBy(8_000)
+        assertFalse("still the SDK's reload to land", check.isCompleted)
+        assertEquals(emptyList<String>(), auth.refreshedWith)
+        assertEquals(emptyList<UserSession>(), auth.adopted)
+        auth.status.value = SessionStatus.Authenticated(session(token = "sdk"), SessionSource.Refresh(session()))
         advanceUntilIdle()
         assertEquals(SessionCheck.Live("u1"), check.await())
-        assertEquals("with its refresh timer + the launch it signals, not a timerless adopt", 1, auth.reloads)
+        assertEquals(emptyList<String>(), auth.refreshedWith)
+    }
+
+    @Test fun `in the foreground a reload that outlives the deadline is the stored account, still nothing of its own`() = runTest {
+        val (auth, g) = afterOnStopReset(session(validForMs = -60_000), foreground = { true })
+        assertEquals(SessionCheck.Stored("u1"), g.ensure(3_000))
+        advanceUntilIdle()
+        assertEquals(emptyList<String>(), auth.refreshedWith)
         assertEquals(emptyList<UserSession>(), auth.adopted)
+    }
+
+    // Second pass (R3): a background restore imports its session with no refresh timer;
+    // by the next ON_START it has often expired, and the SDK's reload is refreshing it.
+    // Counting it live on screen sent the ON_START outcome flush out with a dead JWT.
+    @Test fun `on screen an expired token is not live - the SDK's refresh is awaited, not duplicated`() = runTest {
+        val auth = FakeAuth(SessionStatus.Authenticated(session(validForMs = -60_000), SessionSource.Unknown))
+        val g = gate(auth, foreground = { true })
+        val check = async { g.ensure() }
+        advanceTimeBy(500)
+        assertFalse(check.isCompleted)
+        auth.status.value = SessionStatus.Authenticated(session(token = "sdk"), SessionSource.Refresh(session()))
+        advanceUntilIdle()
+        assertEquals(SessionCheck.Live("u1"), check.await())
+        assertEquals("the SDK's refresh, not a second one", emptyList<String>(), auth.refreshedWith)
+    }
+
+    @Test fun `on screen an expired token that outlives the deadline is the stored account, never live`() = runTest {
+        val auth = FakeAuth(SessionStatus.Authenticated(session(validForMs = -60_000), SessionSource.Unknown))
+        assertEquals(SessionCheck.Stored("u1"), gate(auth, foreground = { true }).ensure(3_000))
+        assertEquals(emptyList<String>(), auth.refreshedWith)
+    }
+
+    @Test fun `liveNow is the user only while the token is good`() = runTest {
+        val auth = FakeAuth(SessionStatus.Authenticated(session(validForMs = -60_000), SessionSource.Unknown))
+        val g = gate(auth, foreground = { true })
+        assertNull("expired: the SDK is refreshing it", g.liveNow())
+        auth.status.value = SessionStatus.Authenticated(session(), SessionSource.Refresh(session()))
+        assertEquals("u1", g.liveNow())
+        auth.status.value = SessionStatus.Initializing
+        assertNull(g.liveNow())
     }
 
     @Test fun `in the foreground an expiring token is left to the SDK's timer`() = runTest {
         val auth = FakeAuth(SessionStatus.Authenticated(session(validForMs = 60_000), SessionSource.Storage))
         assertEquals(SessionCheck.Live("u1"), gate(auth, foreground = { true }).ensure())
         assertEquals(emptyList<String>(), auth.refreshedWith)
+    }
+
+    // ── a refresh the server refused (second pass, R5) ───────────────────────
+    // A token revoked by a sign-out elsewhere is refused on every try. Answered as
+    // "stored, not live", the SyncWorker retried it with backoff all day, one doomed
+    // refresh per run, until the app was opened.
+
+    @Test fun `a refused refresh is signed out, and never asked again`() = runTest {
+        val (auth, g) = afterOnStopReset(session(validForMs = -60_000))
+        auth.refuse = 400
+        assertEquals(SessionCheck.SignedOut, g.ensure())
+        assertEquals(SessionCheck.SignedOut, g.ensure())
+        assertEquals("one doomed refresh, not one per call", 1, auth.refreshedWith.size)
+        assertEquals(emptyList<UserSession>(), auth.adopted)
+    }
+
+    @Test fun `a backgrounded token whose refresh is refused is signed out`() = runTest {
+        val stale = session(validForMs = 60_000)
+        val auth = FakeAuth(SessionStatus.Authenticated(stale, SessionSource.Storage)).apply { storedSession = stale; refuse = 400 }
+        val g = gate(auth)
+        assertEquals(SessionCheck.SignedOut, g.ensure())
+        assertEquals(SessionCheck.SignedOut, g.ensure())
+        assertEquals(1, auth.refreshedWith.size)
+    }
+
+    @Test fun `a new sign-in after a refusal is live again`() = runTest {
+        val (auth, g) = afterOnStopReset(session(validForMs = -60_000))
+        auth.refuse = 400
+        assertEquals(SessionCheck.SignedOut, g.ensure())
+        auth.status.value = SessionStatus.Authenticated(session(token = "new"), SessionSource.Storage)
+        assertEquals(SessionCheck.Live("u1"), g.ensure())
+    }
+
+    @Test fun `only an outright 4xx refusal counts - offline, 5xx, 401, timeouts and rate limits stay transient`() {
+        fun rest(code: Int) = RestException("e", "d", code, "https://x/auth/v1/token")
+        assertEquals(400, refreshRefusalStatus(rest(400)))
+        assertEquals(403, refreshRefusalStatus(rest(403)))
+        assertEquals(404, refreshRefusalStatus(rest(404)))
+        listOf(401, 408, 429, 500, 503).forEach { assertNull("$it", refreshRefusalStatus(rest(it))) }
+        assertNull(refreshRefusalStatus(java.io.IOException("offline")))
     }
 
     // ── the settled states ───────────────────────────────────────────────────

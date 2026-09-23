@@ -10,6 +10,7 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.advanceUntilIdle
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -282,13 +283,18 @@ class CatchUpConvergenceTest {
         val o = owner(scope)
         serverTask("a", "2027-01-15T08:00:00.000Z", "A")
         o.freshness.requestAndWait(FreshnessTrigger.COLD_START)
+        // On screen, where the socket is meant to be up: only there is a change that
+        // arrived by pull evidence (Android audit 2026-09-23, A2 — second pass). The
+        // floor re-arms for ever once visible, so runCurrent, not advanceUntilIdle.
+        o.freshness.onVisible()
+        runCurrent()
 
         // A change old enough that a healthy channel would have delivered it, and
         // no realtime event has been reported at all.
         serverTask("a", "2027-01-15T08:02:00.000Z", "A-changed")
         nowMs += 6 * 60_000L
         o.freshness.requestAndWait(FreshnessTrigger.FLOOR)
-        advanceUntilIdle()
+        runCurrent()
 
         assertEquals("the deaf channel is recorded, not guessed at", 1, o.freshness.state.value.deafConfirmed)
         assertEquals("and the subscriptions are rebuilt", 1, o.rebuilds())
@@ -300,8 +306,9 @@ class CatchUpConvergenceTest {
         o.freshness.noteRealtimeEvent()
         nowMs += 6 * 60_000L
         o.freshness.requestAndWait(FreshnessTrigger.FLOOR)
-        advanceUntilIdle()
+        runCurrent()
         assertEquals("a row the socket already delivered is not evidence", 1, o.freshness.state.value.deafConfirmed)
+        o.freshness.onHidden()
     }
 
     @Test fun visibleSilence_pullsAndRebuilds_thenTheFloorKeepsPulling() = runTest {

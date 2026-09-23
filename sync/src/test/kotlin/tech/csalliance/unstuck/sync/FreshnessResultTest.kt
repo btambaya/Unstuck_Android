@@ -4,6 +4,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -21,13 +22,14 @@ class FreshnessResultTest {
         user: suspend () -> String? = { "u1" },
         catchUp: suspend (String, Boolean) -> CatchUpOutcome? = { _, _ -> CatchUpOutcome() },
         onCatchUp: () -> Unit = {},
+        onRebuild: () -> Unit = {},
     ) = FreshnessOwner(
         scope = CoroutineScope(StandardTestDispatcher(testScheduler)),
         currentUserId = user,
         runFullHydrate = { true },
         runCatchUp = { u, sweep -> onCatchUp(); catchUp(u, sweep) },
         needsFullHydrate = { false },
-        rebuildSubscriptions = {},
+        rebuildSubscriptions = { onRebuild() },
         log = {},
     )
 
@@ -55,5 +57,45 @@ class FreshnessResultTest {
         val o = owner(user = { delay(1_200); "u1" }, onCatchUp = { pulls++ })
         assertTrue(o.requestAndWait(FreshnessTrigger.NETWORK))
         assertEquals(1, pulls)
+    }
+
+    // Second pass (R1): the DEAF rule rebuilt the realtime mirror after any pull that
+    // caught remote edits the socket "missed". In the background the socket is closed
+    // on purpose, so every worker pull that found a web edit opened the websocket from
+    // the background — and nothing closed it again until the next foreground.
+    private val caughtUpRemoteEdits: suspend (String, Boolean) -> CatchUpOutcome =
+        { _, _ -> CatchUpOutcome(applied = mapOf("tasks" to 2), provenMissed = 2) }
+
+    @Test fun `a background pull that catches remote edits never rebuilds the realtime mirror`() = runTest {
+        var rebuilds = 0
+        val o = owner(catchUp = caughtUpRemoteEdits, onRebuild = { rebuilds++ })
+        o.onVisible(); runCurrent()
+        o.onHidden()   // Home: pauseRealtime closed the socket
+        rebuilds = 0
+        val deafBefore = o.state.value.deafConfirmed
+        assertTrue(o.requestAndWait(FreshnessTrigger.WORKER))
+        assertEquals(0, rebuilds)
+        assertEquals("a closed socket is not a deaf one", deafBefore, o.state.value.deafConfirmed)
+    }
+
+    @Test fun `on screen the same evidence still rebuilds it`() = runTest {
+        var rebuilds = 0
+        val o = owner(catchUp = caughtUpRemoteEdits, onRebuild = { rebuilds++ })
+        o.onVisible(); runCurrent()
+        val before = rebuilds
+        o.requestAndWait(FreshnessTrigger.FLOOR)
+        assertEquals(before + 1, rebuilds)
+        o.onHidden()
+    }
+
+    @Test fun `a sign-out on screen leaves the DEAF rule on for the next account`() = runTest {
+        var rebuilds = 0
+        val o = owner(catchUp = caughtUpRemoteEdits, onRebuild = { rebuilds++ })
+        o.onVisible(); runCurrent()
+        o.reset()
+        val before = rebuilds
+        o.requestAndWait(FreshnessTrigger.NETWORK)
+        assertEquals(before + 1, rebuilds)
+        o.onHidden()
     }
 }

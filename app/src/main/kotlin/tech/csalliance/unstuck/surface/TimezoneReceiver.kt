@@ -5,6 +5,7 @@ import android.content.Context
 import android.content.Intent
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import tech.csalliance.unstuck.UnstuckApp
 import tech.csalliance.unstuck.sync.liveUserId
 import java.util.TimeZone
@@ -35,7 +36,13 @@ class TimezoneReceiver : BroadcastReceiver() {
         val pending: PendingResult? = goAsync()
         scope.launch {
             try {
-                runCatching { push(context.applicationContext, tz) }
+                // The WHOLE push — session wait AND the RPC — inside the broadcast
+                // window: only the session wait was bounded, so a restore that had to
+                // refresh followed by a slow set_timezone could outlive goAsync, and the
+                // system ANRs the receiver (killing a backgrounded process). A cut push
+                // is re-sent by the next pull (Hydrator.pushTimezone) (Android audit
+                // 2026-09-23, A2 — second pass).
+                runCatching { withTimeoutOrNull(PUSH_TIMEOUT_MS) { push(context.applicationContext, tz) } }
             } finally {
                 pending?.finish()
             }
@@ -48,8 +55,11 @@ class TimezoneReceiver : BroadcastReceiver() {
             (context as? UnstuckApp)?.let { app -> runCatching { app.graph.scope }.getOrNull() }
         }
 
-        /** The session wait, inside the broadcast's ~10 s goAsync window. */
+        /** The session wait, inside [PUSH_TIMEOUT_MS]. */
         const val SESSION_TIMEOUT_MS = 6_000L
+        /** The whole push, inside the broadcast's ~10 s goAsync window (a process the
+         *  broadcast cold-starts has already spent some of it starting up). */
+        const val PUSH_TIMEOUT_MS = 8_000L
 
         /** The push itself — a seam so the receiver is testable without a
          *  server. Default: `set_timezone` through the signed-in coordinator.

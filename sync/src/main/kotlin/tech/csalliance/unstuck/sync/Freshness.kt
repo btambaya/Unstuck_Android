@@ -154,9 +154,12 @@ class FreshnessOwner(
         floorJob = null
     }
 
-    /** Sign-out: forget everything (the next user starts cold). */
+    /** Sign-out: forget everything (the next user starts cold). Stops the floor but
+     *  leaves [visible] alone: a sign-out on screen is still on screen, and the DEAF
+     *  rule reads it for the next account's session. */
     fun reset() {
-        onHidden()
+        floorJob?.cancel()
+        floorJob = null
         lastEventAtMs = 0L
         lastReconcileAtMs = 0L
         silenceSinceMs = 0L
@@ -243,8 +246,13 @@ class FreshnessOwner(
             // DEAFNESS, PROVEN: the pull brought changes this device did not have,
             // old enough that the socket should have delivered them, and the socket
             // delivered nothing while we pulled. Rebuild rather than trust status.
+            // Only on screen: in the background the socket is closed on purpose
+            // (pauseRealtime), so every remote change arrives only by pull — and now
+            // that a backgrounded worker's pull runs (the session gate), a rebuild
+            // there opened the websocket and left it up until the next foreground
+            // (Android audit 2026-09-23, A2 — second pass). resume() re-subscribes.
             val heardDuringPull = lastEventAtMs >= startedAt
-            if (outcome.provenMissed > 0 && !heardDuringPull && trigger != FreshnessTrigger.COLD_START) {
+            if (visible && outcome.provenMissed > 0 && !heardDuringPull && trigger != FreshnessTrigger.COLD_START) {
                 _state.update { it.copy(deafConfirmed = it.deafConfirmed + 1) }
                 log("[freshness] DEAF channel: ${outcome.provenMissed} change(s) arrived only by pull — rebuilding subscriptions (${_state.value.deafConfirmed} so far)")
                 rebuildSubscriptions()

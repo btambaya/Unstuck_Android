@@ -107,6 +107,7 @@ import tech.csalliance.unstuck.core.logic.TestCallLogic
 import tech.csalliance.unstuck.sync.CallRequest
 import tech.csalliance.unstuck.sync.CallRequestsMirror
 import tech.csalliance.unstuck.sync.CallsClient
+import tech.csalliance.unstuck.sync.CalendarConnectOutcome
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.putJsonArray
 import tech.csalliance.unstuck.core.logic.DivergenceResolution
@@ -677,8 +678,16 @@ class AppViewModel(
     // --- google calendar ---
     /** Begin OAuth consent — returns the authorize URL to open in a Custom Tab. */
     suspend fun beginGoogleConnect(): String? = graph.coordinator?.beginGoogleConnect()
-    /** Pull external events now (manual refresh). */
-    suspend fun syncCalendar() { graph.coordinator?.pullCalendar() }
+    /** Pull external events now ("Sync now"; forgets any 429 back-off first). False =
+     *  the server or Google could not be read — the bar says so instead of ending
+     *  silently (parity with iOS build 81, audit 2026-09-22 C18). */
+    suspend fun syncCalendar(): Boolean = graph.coordinator?.pullCalendar(manual = true) ?: false
+    /** A Google 429 is being waited out: a failed "Sync now" reads "busy", not offline. */
+    val calendarBackedOff: Boolean get() = graph.coordinator?.calendarBackedOff ?: false
+    /** The in-app connect's result, held until the calendar bar shows it. */
+    val calendarConnectOutcome: StateFlow<CalendarConnectOutcome?> =
+        graph.coordinator?.calendarConnectOutcome ?: MutableStateFlow(null)
+    fun consumeCalendarConnectOutcome() { graph.coordinator?.consumeCalendarConnectOutcome() }
     fun disconnectCalendar(id: String) = launchWrite { graph.coordinator?.disconnectCalendar(id) }
 
     // --- reminders (pre-task "remind me N min before"; device-local) ---

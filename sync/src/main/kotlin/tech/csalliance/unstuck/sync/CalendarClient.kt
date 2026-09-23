@@ -40,8 +40,29 @@ class CalendarClient(private val client: SupabaseClient) {
         val calendarId: String? = null,
         val status: Int? = null,
         val reason: String? = null,
-    )
-    @Serializable data class EventsResponse(val events: List<ExternalEvent>, val failures: List<EventFailure> = emptyList())
+    ) {
+        /** 401 / a dead refresh token: the connection needs a fresh consent. */
+        val needsReauth: Boolean
+            get() = status == 401 || reason == "invalid_grant" || reason == "needs_reauth" || reason == "unauthorized"
+    }
+    @Serializable data class EventsResponse(val events: List<ExternalEvent>, val failures: List<EventFailure> = emptyList()) {
+        /** True when Google answered for NONE of [connections]: each failed whole (token
+         *  mint / unreachable — calendarId "*" or none) or on every selected calendar, and
+         *  not only for a dead token (the bar already offers "Reconnect Google" for that).
+         *  calendar-sync reports Google's 429 / 5xx / 403 inside a 200's `failures`, never
+         *  as an HTTP error, so this is how "Sync now" learns it read nothing. One calendar
+         *  failing next to a readable one is not "nothing" (parity with iOS build 81,
+         *  audit 2026-09-22 C18). */
+        fun readNothing(connections: List<CalendarConnection>): Boolean {
+            if (connections.isEmpty() || failures.isEmpty() || failures.all { it.needsReauth }) return false
+            return connections.all { conn ->
+                val own = failures.filter { it.connectionId == conn.id }
+                if (own.any { (it.calendarId ?: "*") == "*" }) return@all true
+                val failedCalendars = own.mapNotNull { it.calendarId }.toSet()
+                own.isNotEmpty() && conn.selectedCalendarIds.all { it in failedCalendars }
+            }
+        }
+    }
 
     // The /connections endpoint returns raw DB rows (snake_case) — unlike /connect,
     // which returns camelCase. Decode the snake_case shape, then map to the domain model.

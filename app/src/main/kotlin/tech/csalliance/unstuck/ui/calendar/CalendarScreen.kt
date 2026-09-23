@@ -50,6 +50,7 @@ import android.net.Uri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
+import tech.csalliance.unstuck.sync.CalendarConnectOutcome
 import tech.csalliance.unstuck.core.logic.SHARED_BLOCK_ID_PREFIX
 import tech.csalliance.unstuck.core.logic.asCalBlock
 import tech.csalliance.unstuck.core.logic.busyMinutesByDay
@@ -136,6 +137,12 @@ private fun CalendarSyncBar(vm: AppViewModel) {
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmDisconnect by remember { mutableStateOf(false) }
+    // How the Google consent ended (MainActivity finishes it from the deep link): held
+    // until shown here, since the bar is often off screen when the callback lands.
+    val connectOutcome by vm.calendarConnectOutcome.collectAsStateWithLifecycle()
+    LaunchedEffect(connectOutcome) {
+        connectOutcome?.let { error = calendarConnectCaption(it); vm.consumeCalendarConnectOutcome() }
+    }
     Column(Modifier.fillMaxWidth()) {
         Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             if (conns.isEmpty()) {
@@ -177,7 +184,9 @@ private fun CalendarSyncBar(vm: AppViewModel) {
                     }.padding(horizontal = 8.dp, vertical = 4.dp))
                 } else {
                     Text("Sync now", style = UFont.sans(12, FontWeight.Medium), color = if (busy) c.ink3 else c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(enabled = !busy) {
-                        scope.launch { busy = true; error = null; runCatching { vm.syncCalendar() }.onFailure { error = "Sync failed. Try again." }; busy = false }
+                        // A failed "Sync now" used to end silently: the pull never threw, so the
+                        // old onFailure was dead (parity with iOS build 81, audit 2026-09-22 C18).
+                        scope.launch { busy = true; error = null; error = calendarSyncCaption(vm.syncCalendar(), vm.calendarBackedOff); busy = false }
                     }.padding(horizontal = 8.dp, vertical = 4.dp))
                 }
                 Text("Disconnect", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { confirmDisconnect = true }.padding(horizontal = 8.dp, vertical = 4.dp))
@@ -193,6 +202,21 @@ private fun CalendarSyncBar(vm: AppViewModel) {
         dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmDisconnect = false }) { Text("Cancel", color = c.ink2) } },
         containerColor = c.surface,
     )
+}
+
+/** The bar's caption after "Sync now" (null = it worked): iOS's copy, word for word
+ *  (parity with iOS build 81, audit 2026-09-22 C18). */
+internal fun calendarSyncCaption(ok: Boolean, backedOff: Boolean): String? = when {
+    ok -> null
+    backedOff -> "Google is busy right now. Try again in a few minutes."
+    else -> "Couldn't sync with Google. Check your connection and try again."
+}
+
+/** The bar's caption once the in-app Google connect finished (null = connected). */
+internal fun calendarConnectCaption(outcome: CalendarConnectOutcome): String? = when (outcome) {
+    CalendarConnectOutcome.CONNECTED -> null
+    CalendarConnectOutcome.FIRST_SYNC_FAILED -> "Google is connected, but the first sync didn't finish. Tap Sync now."
+    CalendarConnectOutcome.FAILED -> "Couldn't connect. Try again."
 }
 
 @Composable

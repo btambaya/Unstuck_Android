@@ -857,7 +857,7 @@ class SyncCoordinator(
         // (the same one iOS uses). That page forwards ?code&state to
         // unstuck://calendar-callback, which MainActivity captures. This EXACT URL
         // must be registered as an Authorized redirect URI on the Google Web OAuth client.
-        private const val CAL_REDIRECT = "https://unstuck-602.pages.dev/calendar-callback"
+        private const val CAL_REDIRECT = "https://unstucknow.io/calendar-callback"
     }
 }
 

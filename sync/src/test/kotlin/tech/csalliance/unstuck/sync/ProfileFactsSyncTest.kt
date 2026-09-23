@@ -340,6 +340,28 @@ class ProfileFactsSyncTest {
         assertFalse(row(stored.id)!!.active)
     }
 
+    /** The assistant's Undo of a save that refined a fact in place puts the
+     *  old wording back on the SAME row — never a forget, never a resurrection
+     *  of a fact forgotten since (Android audit 2026-09-23, A17). */
+    @Test fun restorePutsThePriorWordingBackOnTheSameRow() = runTest {
+        val prior = service(now = T0).save(ProfileFactCategory.PERSON, "Maleek — son", ProfileFactSource.INTERVIEW, whenIso = "2026-09-14")!!
+        val refined = service(now = T1).save(ProfileFactCategory.PERSON, "Maleek — son, 9", ProfileFactSource.CHAT)!!
+        assertEquals("the save refined it in place", prior.id, refined.id)
+        assertTrue(service(now = T1).restore(prior))
+        val back = row(prior.id)!!
+        assertTrue(back.active)
+        assertEquals("Maleek — son", back.fact)
+        assertEquals(ProfileFactSource.INTERVIEW, back.source)
+        assertEquals("2026-09-14", back.whenIso)
+        assertEquals(T1, back.updatedAt)
+        assertEquals("one op per fact", 1, pending().size)
+        // Forgotten since: the Undo leaves it forgotten.
+        service(now = T1).remove(prior.id)
+        assertFalse(service(now = T1).restore(prior))
+        assertFalse(row(prior.id)!!.active)
+        assertFalse(service().restore(prior.copy(id = "nope")))
+    }
+
     @Test fun removeTombstonesAndQueuesThePush() = runTest {
         val stored = service(now = T0).save(ProfileFactCategory.PERSON, "Maleek — son", ProfileFactSource.CHAT)!!
         assertEquals(1, pending().size)

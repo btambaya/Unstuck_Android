@@ -44,6 +44,7 @@ import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Time
+import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.sync.CallRequest
 import tech.csalliance.unstuck.sync.CallsClient
 import tech.csalliance.unstuck.sync.ProfileFactSaveError
@@ -844,7 +845,7 @@ object CallToolLogic {
     fun ymd(ms: Long, zone: ZoneId = ZoneId.systemDefault()): String = Instant.ofEpochMilli(ms).atZone(zone).toLocalDate().toString()
     /** "HH:MM" local. */
     fun hhmm(ms: Long, zone: ZoneId = ZoneId.systemDefault()): String =
-        Instant.ofEpochMilli(ms).atZone(zone).let { "%02d:%02d".format(it.hour, it.minute) }
+        Instant.ofEpochMilli(ms).atZone(zone).let { WireTime.hm(it.hour, it.minute) }
     /** "YYYY-MM-DD HH:MM" local. */
     fun fmt(ms: Long?, zone: ZoneId = ZoneId.systemDefault()): String = if (ms == null) "?" else "${ymd(ms, zone)} ${hhmm(ms, zone)}"
 

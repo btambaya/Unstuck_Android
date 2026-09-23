@@ -5,6 +5,7 @@ import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.OffsetDateTime
 import java.time.ZoneId
+import java.util.Locale
 
 // Reproduce the JS Date semantics the web logic relies on: timestamps are
 // ISO strings, date math is LOCAL (ZoneId.systemDefault(), like JS Date),
@@ -73,8 +74,40 @@ object Time {
 
 object Clock {
     fun todayIso(): String = dateIso(System.currentTimeMillis())
-    fun dateIso(epochMs: Long): String {
-        val d = Instant.ofEpochMilli(epochMs).atZone(ZoneId.systemDefault()).toLocalDate()
-        return "%04d-%02d-%02d".format(d.year, d.monthValue, d.dayOfMonth)
+    fun dateIso(epochMs: Long): String =
+        WireTime.ymd(Instant.ofEpochMilli(epochMs).atZone(ZoneId.systemDefault()).toLocalDate())
+}
+
+/**
+ * The machine-readable dates and times the app stores, syncs, compares and
+ * sends ('YYYY-MM-DD', 'HH:MM') — always ASCII digits, whatever the phone's
+ * language. A bare `"%02d".format(…)` goes through java.util.Formatter with the
+ * DEFAULT locale, which writes that locale's own digits: on a phone set to
+ * Arabic, Persian, Bengali, Marathi, Nepali or Burmese, todayIso read
+ * "۲۰۲۶-۰۹-۲۳", never equalled a server date (scheduled tasks fell out of Today),
+ * and the server refused every block written with it (Android audit 2026-09-23,
+ * A12). Text only shown to the user may stay localised.
+ */
+object WireTime {
+    fun ymd(year: Int, month: Int, day: Int): String =
+        String.format(Locale.ROOT, "%04d-%02d-%02d", year, month, day)
+
+    fun ymd(d: LocalDate): String = ymd(d.year, d.monthValue, d.dayOfMonth)
+
+    fun hm(hour: Int, minute: Int): String = String.format(Locale.ROOT, "%02d:%02d", hour, minute)
+
+    fun pad2(n: Int): String = String.format(Locale.ROOT, "%02d", n)
+
+    /** [s] with every non-ASCII decimal digit ('٢', '۲', '২', '२', '၂' …) turned
+     *  into its ASCII one; anything else is kept. Heals a date or time an older
+     *  build wrote in the phone's digits before it reaches the server. */
+    fun asciiDigits(s: String): String {
+        if (s.all { it < '\u0080' }) return s
+        val out = StringBuilder(s.length)
+        for (c in s) {
+            val d = if (c >= '\u0080') Character.digit(c, 10) else -1
+            out.append(if (d >= 0) '0' + d else c)
+        }
+        return out.toString()
     }
 }

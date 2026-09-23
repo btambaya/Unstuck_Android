@@ -6,6 +6,7 @@ import tech.csalliance.unstuck.core.model.ShareSlot
 import tech.csalliance.unstuck.core.model.SharedBlock
 import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.time.Time
+import tech.csalliance.unstuck.core.time.WireTime
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
@@ -107,9 +108,8 @@ data class LocalSlot(val date: String?, val time: String?)
 fun resolveSharedSlot(startAt: String?, date: String?, time: String?, zone: ZoneId = ZoneId.systemDefault()): LocalSlot {
     val ms = startAt?.takeIf { it.isNotBlank() }?.let { Time.parseMillis(it) } ?: return LocalSlot(date, time)
     val local = runCatching { Instant.ofEpochMilli(ms).atZone(zone) }.getOrNull() ?: return LocalSlot(date, time)
-    val d = "%04d-%02d-%02d".format(local.year, local.monthValue, local.dayOfMonth)
-    val t = "%02d:%02d".format(local.hour, local.minute)
-    return LocalSlot(d, t)
+    // ASCII digits, so the slot buckets against todayIso (Android audit 2026-09-23, A12).
+    return LocalSlot(WireTime.ymd(local.toLocalDate()), WireTime.hm(local.hour, local.minute))
 }
 
 /** Chronological: earliest slot first; unscheduled rows sink to the end. Equal

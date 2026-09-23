@@ -61,6 +61,7 @@ import tech.csalliance.unstuck.core.model.Density
 import tech.csalliance.unstuck.core.model.LifeArea
 import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.ThemePref
+import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.design.component.AppBar
 import tech.csalliance.unstuck.design.theme.AccentPalette
 import tech.csalliance.unstuck.sync.AuthOutcome
@@ -404,7 +405,7 @@ private fun CallsContent(vm: AppViewModel) {
         val parts = current.split(":").mapNotNull { it.toIntOrNull() }
         val h0 = parts.getOrNull(0) ?: 8
         val m0 = parts.getOrNull(1) ?: 0
-        android.app.TimePickerDialog(context, { _, h, m -> commit("%02d:%02d".format(h, m)) }, h0, m0, true).show()
+        android.app.TimePickerDialog(context, { _, h, m -> commit(WireTime.hm(h, m)) }, h0, m0, true).show()
     }
 
     // Explainer (iOS `explainer` + `deviceStatus`)

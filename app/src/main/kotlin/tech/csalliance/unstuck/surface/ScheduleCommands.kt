@@ -7,6 +7,7 @@ import tech.csalliance.unstuck.UnstuckApp
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
 import tech.csalliance.unstuck.core.logic.findFreeSlotsForDate
 import tech.csalliance.unstuck.core.time.Clock
+import tech.csalliance.unstuck.core.time.WireTime
 import java.time.Instant
 
 /**
@@ -57,6 +58,6 @@ object ScheduleCommands {
         val h = p.getOrNull(0)?.toIntOrNull() ?: 9
         val m = p.getOrNull(1)?.toIntOrNull() ?: 0
         val total = (h * 60 + m + 60).coerceAtMost(23 * 60 + 59)
-        return "%02d:%02d".format(total / 60, total % 60)
+        return WireTime.hm(total / 60, total % 60)
     }
 }

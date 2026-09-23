@@ -65,6 +65,7 @@ import tech.csalliance.unstuck.core.logic.taskForBlock
 import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
+import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.design.component.AppBar
 import tech.csalliance.unstuck.design.component.Card
 import tech.csalliance.unstuck.design.component.Leading
@@ -322,7 +323,7 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
                             detectTapGestures { off ->
                                 val totalMin = WSTART * 60 + ((off.y / weekHourPx) * 60).roundToInt()
                                 val snapped = ((totalMin / 15) * 15).coerceIn(WSTART * 60, WEND * 60 - 15)
-                                onCreateAt(d.toString(), "%02d:%02d".format(snapped / 60, snapped % 60))
+                                onCreateAt(d.toString(), WireTime.hm(snapped / 60, snapped % 60))
                             }
                         },
                 ) {

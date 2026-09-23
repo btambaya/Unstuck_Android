@@ -1,5 +1,6 @@
 package tech.csalliance.unstuck.core.logic
 
+import tech.csalliance.unstuck.core.time.WireTime
 import java.time.DayOfWeek
 import java.time.Instant
 import java.time.ZoneId
@@ -18,7 +19,8 @@ fun wakeWindowSample(nowMs: Long, zone: ZoneId): WakeWindowSample {
     val weekday = if (local.dayOfWeek == DayOfWeek.SUNDAY) 0 else local.dayOfWeek.value   // MON=1 … SAT=6
     return WakeWindowSample(
         localDate = local.toLocalDate().toString(),
-        firstInputLocal = "%02d:%02d".format(local.hour, local.minute),
+        // ASCII digits: record_wake_window refuses the phone's own digits (Android audit 2026-09-23, A12).
+        firstInputLocal = WireTime.hm(local.hour, local.minute),
         weekday = weekday,
     )
 }

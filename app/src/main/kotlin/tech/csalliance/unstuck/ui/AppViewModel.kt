@@ -51,6 +51,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import tech.csalliance.unstuck.AppGraph
 import tech.csalliance.unstuck.core.time.Clock
+import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.sync.AssistantResult
 import tech.csalliance.unstuck.sync.PreferencesClient
 import tech.csalliance.unstuck.sync.ProfileFactsService
@@ -2309,7 +2310,7 @@ class AppViewModel(
         // Schedule keep-in-loop tasks at the "by" time so they show on the calendar.
         if (loop && dueAtIso != null) {
             runCatching { java.time.Instant.parse(dueAtIso).atZone(java.time.ZoneId.systemDefault()) }.getOrNull()?.let { z ->
-                scheduleTaskNow(task, z.toLocalDate().toString(), String.format("%02d:%02d", z.hour, z.minute))
+                scheduleTaskNow(task, z.toLocalDate().toString(), WireTime.hm(z.hour, z.minute))
             }
         }
         // "Just me" on a SHARED list must NOT announce to the others (it would mark the

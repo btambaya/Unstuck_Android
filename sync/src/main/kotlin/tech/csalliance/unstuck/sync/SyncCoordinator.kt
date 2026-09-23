@@ -419,6 +419,13 @@ class SyncCoordinator(
 
     fun start() {
         if (observeJob != null) return
+        // Local only, so it heals offline too: blocks an older build dated in the
+        // phone's own digits (Android audit 2026-09-23, A12).
+        scope.launch {
+            runCatching { write.healNativeDigitBlocks() }
+                .onSuccess { if (it > 0) Log.i(TAG, "healed $it native-digit block date(s)") }
+                .onFailure { if (it is CancellationException) throw it; Log.w(TAG, "native-digit block heal failed", it) }
+        }
         observeJob = scope.launch {
             client.auth.sessionStatus.collect { handle(it) }
         }

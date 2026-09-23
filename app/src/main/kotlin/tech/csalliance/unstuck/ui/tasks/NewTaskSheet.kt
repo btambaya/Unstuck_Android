@@ -75,6 +75,7 @@ import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.time.Time
+import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.design.component.ButtonKind
 import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.component.SheetHandle
@@ -470,7 +471,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
             onDismissRequest = { showTimePicker = false },
             confirmButton = {
                 TextButton(onClick = {
-                    pickedTime = "%02d:%02d".format(tpState.hour, tpState.minute); autoTime = false; showTimePicker = false
+                    pickedTime = WireTime.hm(tpState.hour, tpState.minute); autoTime = false; showTimePicker = false
                 }) { Text("OK") }
             },
             dismissButton = { TextButton(onClick = { showTimePicker = false }) { Text("Cancel") } },

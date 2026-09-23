@@ -15,6 +15,7 @@ import tech.csalliance.unstuck.core.logic.clampDurationMin
 import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.OutboxEntity
 import tech.csalliance.unstuck.data.db.Tables
@@ -274,6 +275,24 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
             return if (clamped == raw) row else JsonObject(row + (key to JsonPrimitive(clamped)))
         }
 
+        /** A cal_blocks row's `date` and `start_time` in ASCII digits. Builds before
+         *  the fix formatted them in the phone's locale, so an Arabic, Persian,
+         *  Bengali, Marathi, Nepali or Burmese phone queued "۲۰۲۶-۰۹-۲۳" / "۱۰:۳۰":
+         *  the server refuses both (a `date` column, the start_time CHECK), the op
+         *  was quarantined and re-sent on every launch, and the block never left
+         *  the phone. Normalising here heals those ops on the next drain
+         *  (Android audit 2026-09-23, A12). */
+        internal fun asciiBlockDateTime(table: String, row: JsonObject): JsonObject {
+            if (table != Tables.CAL_BLOCKS) return row
+            var out = row
+            for (key in listOf("date", "start_time")) {
+                val v = (out[key] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: continue
+                val ascii = WireTime.asciiDigits(v)
+                if (ascii != v) out = JsonObject(out + (key to JsonPrimitive(ascii)))
+            }
+            return out
+        }
+
         /** Seqs of upsert ops that a LATER upsert for the same (table,id) makes
          *  redundant. Keeps only the highest-seq upsert per row; returns the older
          *  ones to drop. A `delete` op resets a row's run (an upsert after a delete
@@ -346,7 +365,8 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
             }
             return
         }
-        gateway.upsert(op.recordTable, clampServerChecks(op.recordTable, Json.parseToJsonElement(payload).jsonObject), userId)
+        val row = asciiBlockDateTime(op.recordTable, Json.parseToJsonElement(payload).jsonObject)
+        gateway.upsert(op.recordTable, clampServerChecks(op.recordTable, row), userId)
     }
 
 }

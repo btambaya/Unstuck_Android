@@ -6,6 +6,8 @@ import tech.csalliance.unstuck.core.logic.MomentRituals
 import tech.csalliance.unstuck.core.logic.MomentState
 import tech.csalliance.unstuck.core.logic.RitualPrefs
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
+import tech.csalliance.unstuck.core.logic.clampDurationMin
+import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.composeBrief
 import tech.csalliance.unstuck.core.logic.pickMoment
 import tech.csalliance.unstuck.core.logic.toneFromFacts
@@ -79,14 +81,15 @@ object GatewayActions {
             anchor.copy(date = date, startTime = time ?: anchor.startTime)
         } else {
             CalBlock(id = newId, taskId = taskId, taskName = t.name, startTime = time ?: "09:00",
-                durationMinutes = t.estimateMin, date = date, kind = CalBlockKind.TASK)
+                durationMinutes = clampDurationMin(t.estimateMin), date = date, kind = CalBlockKind.TASK)
         }
         return GatewayWrites(listOf(block), emptyList(), "Blocked — ${t.name}, $date${time?.let { " $it" } ?: ""}.")
     }
 
-    /** `create_task`: a plain new task (estimate defaults to 25 like the web). */
+    /** `create_task`: a plain new task (estimate defaults to 25 like the web),
+     *  held to the server's 1…1440 (audit 2026-09-22, C4). */
     fun createTask(name: String, estimateMin: Int?, id: String, nowIso: String): GatewayWrites {
-        val t = TaskItem(id = id, name = name, estimateMin = estimateMin ?: 25, totalFocused = 0, done = false,
+        val t = TaskItem(id = id, name = name, estimateMin = clampEstimateMin(estimateMin), totalFocused = 0, done = false,
             createdAt = nowIso, updatedAt = nowIso)
         return GatewayWrites(emptyList(), listOf(t), "Added “$name”.")
     }

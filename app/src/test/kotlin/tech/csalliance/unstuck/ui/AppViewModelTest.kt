@@ -624,6 +624,102 @@ class AppViewModelTest {
         assertNull("recurrence cleared on the task", awaitTask("tpl") { it.recurrence == null }.recurrence)
     }
 
+    // ── repeat edits and the chosen day (audit 2026-09-22, B79.1 / C1 / C7) ──
+
+    private fun occ(id: String, taskId: String, date: String, startTime: String, done: Boolean = false, skipped: Boolean = false) =
+        CalBlock(id = id, taskId = taskId, taskName = taskId, startTime = startTime, durationMinutes = 25, date = date, kind = CalBlockKind.TASK, done = done, skipped = skipped)
+
+    @Test fun setRecurrence_onATaskWithNoTimedBlock_refusesAndWritesNothing() = runTest(dispatcher) {
+        // A series needs a time of day: the old 09:00 fallback built it from
+        // TOMORROW, so the task left Today at a time the user never chose (C7).
+        val t = task("t1", name = "Stretch")
+        seedTask(t)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        assertFalse(vm.setRecurrence(t, Recurrence.Daily()))
+        advanceUntilIdle()
+        assertNull("the rule is not saved", loadTask("t1")!!.recurrence)
+        assertTrue("no block is minted", store.blocks().first().none { it.taskId == "t1" })
+    }
+
+    @Test fun startRepeating_savesTheRuleAndPlacesTheChosenDaysOccurrence() = runTest(dispatcher) {
+        // The editor's "Start repeating" answer: the rule first, then the series
+        // plus today's occurrence (regenerate alone only fills days after today),
+        // and the Later parking ends in the same row (C7).
+        val t = task("t1", name = "Stretch").copy(later = true)
+        seedTask(t)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        val today = Clock.todayIso()
+
+        vm.startRepeating(t, Recurrence.Daily(), today, "19:00")
+        advanceUntilIdle()
+
+        val mine = awaitBlocks { l -> l.count { it.taskId == "t1" } == 56 }.filter { it.taskId == "t1" }
+        assertTrue("today's occurrence at the chosen time", mine.any { it.date == today && it.startTime == "19:00" })
+        assertTrue(mine.all { it.startTime == "19:00" })
+        val saved = awaitTask("t1") { it.recurrence != null }
+        assertEquals(Recurrence.Daily(), saved.recurrence)
+        assertEquals(false, saved.later)
+    }
+
+    @Test fun setRecurrence_onASeriesStartedLongAgo_keepsItsFutureOccurrences() = runTest(dispatcher) {
+        // The old anchor was the OLDEST block: a series whose first block was 56+
+        // days old materialised nothing after today, so any repeat edit deleted
+        // every future occurrence and added none (B79.1, Android's worse variant).
+        val today = Clock.todayIso()
+        val t = task("tpl", name = "Gym", recurrence = Recurrence.Daily())
+        seedTask(t)
+        (60 downTo 1).forEach { seedBlock(occ("h$it", "tpl", addDaysIso(today, -it), "07:00", done = true)) }
+        (0..20).forEach { seedBlock(occ("u$it", "tpl", addDaysIso(today, it), "07:00")) }
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        assertTrue(vm.setRecurrence(t, Recurrence.Daily(addDaysIso(today, 90))))
+        advanceUntilIdle()
+
+        val future = awaitBlocks { l -> l.count { it.taskId == "tpl" && it.date > today } == 55 }.filter { it.taskId == "tpl" && it.date > today }
+        assertTrue("every upcoming occurrence survives", (1..20).all { i -> future.any { it.id == "u$i" } })
+        assertTrue(future.all { it.startTime == "07:00" })
+    }
+
+    @Test fun scheduleTask_templateForToday_retimesAndUnskipsTodaysOccurrence() = runTest(dispatcher) {
+        // "Any block on the day covers it" left today at 07:00 and a skipped today
+        // hidden. Today's occurrence is retimed (and un-skipped), never twinned (C7).
+        val today = Clock.todayIso()
+        val t = task("tpl", name = "Walk", recurrence = Recurrence.Daily())
+        seedTask(t)
+        seedBlock(occ("td", "tpl", today, "07:00", skipped = true))
+        seedBlock(occ("tm", "tpl", addDaysIso(today, 1), "07:00"))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.scheduleTask(t, today, "16:00")
+        advanceUntilIdle()
+
+        val td = awaitBlock("td") { it.startTime == "16:00" }
+        assertFalse(td.skipped)
+        assertEquals("one occurrence today", 1, store.blocks().first().count { it.taskId == "tpl" && it.date == today })
+    }
+
+    @Test fun scheduleTask_templateAtItsNextOccurrence_doesNotBumpMoveCount() = runTest(dispatcher) {
+        // The move check compared with the EARLIEST block — weeks-old history on a
+        // template — so every re-schedule, even a no-op, tripped the slip detector
+        // (C7). Compared with the series' next occurrence, a no-op writes nothing.
+        val today = Clock.todayIso()
+        val t = task("tpl", name = "Standup", recurrence = Recurrence.Daily())
+        seedTask(t)
+        seedBlock(occ("old", "tpl", addDaysIso(today, -30), "07:00", done = true))
+        (1..56).forEach { seedBlock(occ("u$it", "tpl", addDaysIso(today, it), "08:00")) }
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.scheduleTask(t, addDaysIso(today, 1), "08:00")
+        advanceUntilIdle()
+        assertNull(loadTask("tpl")!!.moveCount)
+    }
+
     @Test fun skipOccurrence_hidesOneDayWithoutTouchingSeries() = runTest(dispatcher) {
         val template = task("tpl", name = "Daily", recurrence = Recurrence.Daily())
         val occ = CalBlock(id = "occ1", taskId = "tpl", taskName = "Daily", startTime = "09:00", durationMinutes = 25, date = "2026-05-22", kind = CalBlockKind.TASK)

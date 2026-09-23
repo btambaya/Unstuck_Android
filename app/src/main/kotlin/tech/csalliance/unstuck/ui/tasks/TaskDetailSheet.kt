@@ -45,11 +45,14 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.formatTime
+import tech.csalliance.unstuck.core.logic.materializeOccurrences
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
 import tech.csalliance.unstuck.core.logic.recurrenceLabel
 import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.CaptureTag
+import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.design.component.AppBar
@@ -120,24 +123,37 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     val isAssignedOut = assignedOutName != null
 
     // Pick an actual date + time (platform dialogs, local-zone — no Material UTC
-    // off-by-one). scheduleTask both creates and reschedules in place; scheduling a
-    // concrete time also moves the task out of "Later".
-    fun pickSchedule() {
-        val d0 = java.time.LocalDate.now()
+    // off-by-one), seeded on [d0] (today unless a caller has a better first day).
+    fun pickDateTime(d0: java.time.LocalDate, title: String?, onPicked: (dateIso: String, timeIso: String) -> Unit) {
         val t0 = java.time.LocalTime.now()
         val dlg = android.app.DatePickerDialog(context, { _, y, m, day ->
             android.app.TimePickerDialog(context, { _, h, min ->
                 val dateIso = java.time.LocalDate.of(y, m + 1, day).toString()
                 val timeIso = "%02d:%02d".format(h, min)
-                // vm.scheduleTask clears "Later" itself now (AppViewModel
-                // .scheduleTaskNow) — for EVERY scheduling surface, not just this
-                // one — so the second whole-row write that used to live here is gone.
-                vm.scheduleTask(task, dateIso, timeIso)
+                onPicked(dateIso, timeIso)
                 scheduled = "${dateIso.takeLast(5)} ${formatTime(timeIso)}"
-            }, t0.hour, t0.minute, false).show()
+            }, t0.hour, t0.minute, false).apply { title?.let { setTitle(it) } }.show()
         }, d0.year, d0.monthValue - 1, d0.dayOfMonth)
+        title?.let { dlg.setTitle(it) }
         dlg.datePicker.minDate = System.currentTimeMillis() - 60_000   // no past days
         dlg.show()
+    }
+    // scheduleTask both creates and reschedules in place; scheduling a concrete
+    // time also moves the task out of "Later". vm.scheduleTask clears "Later"
+    // itself now (AppViewModel.scheduleTaskNow) — for EVERY scheduling surface,
+    // not just this one — so the second whole-row write that used to live here is gone.
+    fun pickSchedule() = pickDateTime(java.time.LocalDate.now(), title = null) { dateIso, timeIso -> vm.scheduleTask(task, dateIso, timeIso) }
+    // A repeat set on a task with no timed block is refused by vm.setRecurrence (a
+    // series needs a day and a time), so ask for them — "Start repeating" — instead
+    // of inventing 09:00 from tomorrow and hiding the task from Today. Seeded on the
+    // rule's first matching day: Weekly (Mon) opened on a Tuesday would otherwise
+    // mint an off-pattern occurrence today. Cancelling abandons the repeat (parity
+    // with iOS build 81, audit 2026-09-22 C7).
+    fun pickStartRepeating(pending: Recurrence) {
+        val today = Time.startOfDayMillis(System.currentTimeMillis())
+        val first = materializeOccurrences(pending, today, "00:00", 35).firstOrNull()?.date
+        val seed = first?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() } ?: java.time.LocalDate.now()
+        pickDateTime(seed, title = "Start repeating") { dateIso, timeIso -> vm.startRepeating(editTarget, pending, dateIso, timeIso) }
     }
     var confirmDelete by remember { mutableStateOf(false) }
     var showEstimate by remember { mutableStateOf(false) }
@@ -305,7 +321,9 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                 Text(recurrenceLabel(task.recurrence).ifEmpty { "Does not repeat" }, style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(bottom = 6.dp))
                 // The heading above + the summary line are this sheet's — the
                 // editor must not print its own "Repeat" on top of them.
-                RecurrenceEditor(task.recurrence, showHeading = false) { vm.setRecurrence(editTarget, it) }
+                RecurrenceEditor(task.recurrence, showHeading = false) { r ->
+                    if (!vm.setRecurrence(editTarget, r) && r != null) pickStartRepeating(r)
+                }
             }
 
             SectionLabel("Tags", Modifier.padding(top = 18.dp, bottom = 6.dp))
@@ -330,7 +348,8 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
 
     if (showEstimate) {
         var v by remember { mutableStateOf(task.estimateMin.toString()) }
-        fun saveEstimate() { v.toIntOrNull()?.takeIf { it > 0 }?.let { vm.updateTask(editTarget.copy(estimateMin = it)) }; showEstimate = false }
+        // Held to the server's 1…1440 (audit 2026-09-22, C4) so the chip shows what is stored.
+        fun saveEstimate() { v.toIntOrNull()?.takeIf { it > 0 }?.let { vm.updateTask(editTarget.copy(estimateMin = clampEstimateMin(it))) }; showEstimate = false }
         AlertDialog(
             onDismissRequest = { showEstimate = false },
             title = { Text("Estimate (minutes)", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },

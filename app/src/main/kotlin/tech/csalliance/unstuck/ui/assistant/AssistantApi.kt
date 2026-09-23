@@ -125,6 +125,12 @@ interface AssistantApi {
     /** A task that just went done → open is a loop-promoted shared-list item:
      *  un-tick the collection row for the other members (best-effort). */
     suspend fun notifyTaskReopenedIfShared(t: TaskItem)
+    /** The mirror image: a task that just went open → done and was promoted from
+     *  a shared list ticks the collection row for the other members — the hook
+     *  the UI's toggleDone and finishFocus fire (audit 2026-09-22 C6). Both
+     *  notices return at once and go out in the background, so a tool's reply
+     *  never waits on the network. */
+    suspend fun notifyTaskCompletedIfShared(t: TaskItem)
     suspend fun upsertBlock(b: CalBlock)
     suspend fun deleteBlock(id: String)
     /** Per-task reminder lead override (minutes; 0 = off), null = the default. */
@@ -202,6 +208,12 @@ interface AssistantApi {
     /** End the running session and LOG it — the Focus screen's Done / Stop here
      *  path; markDone also closes the task (today's occurrence for a repeat). */
     suspend fun finishFocus(markDone: Boolean): Boolean
+    /** After [finishFocus] with markDone on a session shared WITH the user: why the
+     *  owner's task was NOT ticked, or null when it was. A repeating share answers
+     *  'recurring_series' — only its owner ticks it off (075 §1, audit 2026-09-22
+     *  C3) — and any other text is a tick that failed. The reply is worded off what
+     *  happened, never off a guess (SC-12). */
+    fun sharedFinishRefusal(taskId: String): String? = null
     /** Abandon the running session WITHOUT logging it. */
     suspend fun cancelFocus(): Boolean
 

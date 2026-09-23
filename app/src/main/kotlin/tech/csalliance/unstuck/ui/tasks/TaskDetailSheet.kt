@@ -242,7 +242,12 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                     Box(Modifier.weight(1f)) { UButton("Focus", kind = ButtonKind.CORAL, leadingIcon = Icons.Filled.PlayArrow, onClick = { if (!isAssignedOut) onStartFocus() }) }
                 }
                 if (!isOcc) UButton("Schedule", kind = ButtonKind.OUTLINED, fill = false) { pickSchedule() }
-                if (!isAssignedOut) UButton(if (task.done) "✓ Done" else "Mark done", kind = ButtonKind.TEXT, fill = false) {
+                // An OPEN series (the template itself, not one day of it) has no done of
+                // its own — Mark done there ended the whole series. A series the old path
+                // already ended still shows "✓ Done", so it can be reopened (parity with
+                // iOS build 81, audit 2026-09-22 C3; the VM refuses it too).
+                val isOpenSeries = !isOcc && editTarget.recurrence != null && !task.done
+                if (!isAssignedOut && !isOpenSeries) UButton(if (task.done) "✓ Done" else "Mark done", kind = ButtonKind.TEXT, fill = false) {
                     if (isAssignedOut) return@UButton
                     val wasDone = task.done
                     vm.toggleDone(task)

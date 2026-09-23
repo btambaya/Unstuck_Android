@@ -129,6 +129,8 @@ import tech.csalliance.unstuck.core.logic.clearLaterOnSchedule
 import tech.csalliance.unstuck.core.logic.liveOccurrenceBlockForTemplate
 import tech.csalliance.unstuck.core.logic.newUuid
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
+import tech.csalliance.unstuck.core.logic.occurrencesCarryingTaskDone
+import tech.csalliance.unstuck.core.logic.taskAfterSettingRecurrence
 import tech.csalliance.unstuck.core.logic.resolveDivergence
 import tech.csalliance.unstuck.core.logic.sharedRevFloor
 import tech.csalliance.unstuck.core.logic.sharedSessionStep
@@ -155,6 +157,7 @@ import tech.csalliance.unstuck.core.model.LiveSession
 import tech.csalliance.unstuck.core.model.Priority
 import tech.csalliance.unstuck.core.model.ReasonAction
 import tech.csalliance.unstuck.core.model.ReasonLog
+import tech.csalliance.unstuck.core.model.RECURRING_SERIES_REFUSAL
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.ShareBadge
@@ -165,6 +168,8 @@ import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.logic.IsoRange
 import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.model.shareCanTickDone
+import tech.csalliance.unstuck.core.model.shareTickErrorText
 import tech.csalliance.unstuck.sync.AuthOutcome
 import java.time.Instant
 import java.time.ZoneOffset
@@ -515,27 +520,51 @@ class AppViewModel(
 
     fun updateTask(task: TaskItem) = launchWrite { write?.upsertTask(task.copy(updatedAt = isoNow())) }
 
-    fun toggleDone(task: TaskItem) = launchWrite {
+    fun toggleDone(task: TaskItem) = launchWrite { toggleDoneNow(task) }
+
+    /** [toggleDone], committed before returning. */
+    internal suspend fun toggleDoneNow(task: TaskItem) {
         // Defense in depth: a task the owner ASSIGNED OUT is view-only — never flip its
         // completion, even via a deep-link / command that bypasses the hidden button.
         // (Recurring occurrences are never assigned out, so their block id won't match.)
-        if (assignedOut.value.containsKey(task.id)) return@launchWrite
+        if (assignedOut.value.containsKey(task.id)) return
         // A recurring OCCURRENCE's id is its cal_block id — complete the block,
-        // never the template (which would end the whole series).
-        val occ = occurrenceBlockFor(task.id, tasks.value, blocks.value)
+        // never the template (which would end the whole series). Resolved from the
+        // store, not the WhileSubscribed caches, which lag a remote edit or sit
+        // empty with nothing on screen collecting them.
+        val block = store.getOne(Tables.CAL_BLOCKS, task.id, CalBlock.serializer())
+        val occ = block?.let { b ->
+            occurrenceBlockFor(task.id, listOfNotNull(b.taskId?.let { store.getOne(Tables.TASKS, it, TaskItem.serializer()) }), listOf(b))
+        }
         if (occ != null) {
             val nextDone = !occ.done
             write?.upsertCalBlock(occ.copy(done = nextDone, skipped = false, completedAt = if (nextDone) isoNow() else null))
-            return@launchWrite
+            return
         }
-        val flipped = task.copy(done = !task.done)
-        write?.upsertTask(applyCompletion(flipped, prior = task, nowISO = isoNow()))
+        // Flip what the CALLER showed onto the STORED row. The caller's copy was
+        // composed earlier, and writing it whole went out as a fresh edit (the
+        // outbox base is the current row) that reverted a rename or a first step
+        // synced in meanwhile. Only done + completedAt are this tap's change. A row
+        // already in the target state needs no write (and no second shared-list
+        // notice), and a row that is gone is never re-created from the copy
+        // (parity with iOS build 81, audit 2026-09-22 C5).
+        val prior = store.getOne(Tables.TASKS, task.id, TaskItem.serializer()) ?: return
+        val target = !task.done
+        // A repeating series' TEMPLATE never takes a done flip: it ENDS the series —
+        // the on-device reminders and the server's calls and reminders all skip a
+        // done task.
+        // Judged on the STORED row so a stale copy can't slip past. A template that
+        // is already done may still be reopened, to recover a series the old path
+        // ended (parity with iOS build 81, audit 2026-09-22 C3).
+        if (prior.recurrence != null && target) return
+        if (prior.done == target) return
+        write?.upsertTask(applyCompletion(prior.copy(done = target), prior = prior, nowISO = isoNow()))
         // Completing a task promoted from a shared collection item → flip the
         // shared item to "done by <name>" + notify the other members (best-effort).
         // UN-completing it → 'reopen': the item goes back to "<name>'s on it"
         // (collection-task-done, contract 2026-09) instead of staying "done by ✓".
-        if (task.sourceCollectionId != null && task.sourceItemId != null && flipped.done != task.done) {
-            share?.taskDone(task.sourceCollectionId!!, task.sourceItemId!!, task.name, currentName ?: "Someone", action = if (flipped.done) "done" else "reopen")
+        if (prior.sourceCollectionId != null && prior.sourceItemId != null) {
+            share?.taskDone(prior.sourceCollectionId!!, prior.sourceItemId!!, prior.name, currentName ?: "Someone", action = if (target) "done" else "reopen")
         }
     }
 
@@ -579,14 +608,21 @@ class AppViewModel(
      * TOMORROW (regenerate skips today), so the task left Today and came back at a
      * time the user never chose. The caller asks for a day and a time and starts
      * the series with [startRepeating] (parity with iOS build 81, audit 2026-09-22 C7).
+     *
+     * The done state crosses over with the repeat (parity with iOS build 81, audit
+     * 2026-09-22 C3): "Never" on a day whose occurrences are all ticked carries the
+     * tick onto the task, and a repeat turned on never leaves a DONE template — an
+     * ended series. Built on the STORED row, like toggleDone (C5).
      */
     fun setRecurrence(task: TaskItem, recurrence: Recurrence?): Boolean {
         val existing = blocks.value
-        val today = tech.csalliance.unstuck.core.time.Clock.todayIso()
+        val today = Clock.todayIso()
         val start = tech.csalliance.unstuck.core.logic.recurrenceEditStart(task.id, recurrence, existing, today)
         if (recurrence != null && start == null) return false
         launchWrite {
-            val updated = task.copy(recurrence = recurrence, updatedAt = isoNow())
+            val base = store.getOne(Tables.TASKS, task.id, TaskItem.serializer()) ?: task
+            val now = isoNow()
+            val updated = taskAfterSettingRecurrence(base, recurrence, existing, today, now).copy(updatedAt = now)
             write?.upsertTask(updated)
             // Without a start we are clearing the repeat, where regenerateForTask
             // ignores the time and date (it only deletes the future).
@@ -601,6 +637,14 @@ class AppViewModel(
             // stays (see RecurrenceStart.keepId).
             plan.toDelete.filter { it != start?.keepId }.forEach { write?.deleteCalBlock(it) }
             plan.toUpsert.forEach { write?.upsertCalBlock(it) }
+            // A done task made to repeat keeps the day it was done ticked, on that day's
+            // occurrence — else it came back open in Today, or overdue in Backlog.
+            occurrencesCarryingTaskDone(base, recurrence, existing, today, now).forEach { write?.upsertCalBlock(it) }
+            // The done flip travels to a loop-promoted task's shared-list row, as the
+            // UI's toggle does — else it stays ticked over an open series.
+            if (updated.done != base.done && base.sourceCollectionId != null && base.sourceItemId != null) {
+                share?.taskDone(base.sourceCollectionId!!, base.sourceItemId!!, base.name, currentName ?: "Someone", action = if (updated.done) "done" else "reopen")
+            }
         }
         return true
     }
@@ -609,10 +653,13 @@ class AppViewModel(
      *  task with no timed block: the rule is saved FIRST, then [scheduleTaskNow]
      *  builds the series plus the chosen day's occurrence, today's too when today
      *  is picked. The Later un-park rides in the same row, because scheduling
-     *  never clears Later on a repeating task (parity with iOS build 81, audit
-     *  2026-09-22 C7). */
+     *  never clears Later on a repeating task, and a done task reopens — a series
+     *  never starts as a done template (parity with iOS build 81, audit 2026-09-22
+     *  C7, C3). */
     fun startRepeating(task: TaskItem, recurrence: Recurrence, date: String, startTime: String) = launchWrite {
-        val next = task.copy(recurrence = recurrence, later = if (task.later == true) false else task.later, updatedAt = isoNow())
+        val now = isoNow()
+        val next = taskAfterSettingRecurrence(task, recurrence, blocks.value, Clock.todayIso(), now)
+            .copy(later = if (task.later == true) false else task.later, updatedAt = now)
         write?.upsertTask(next)
         scheduleTaskNow(next, date, startTime)
     }
@@ -630,7 +677,13 @@ class AppViewModel(
     fun scheduleTask(task: TaskItem, date: String, startTime: String) = launchWrite { scheduleTaskNow(task, date, startTime) }
 
     /** [scheduleTask], committed before returning. */
-    private suspend fun scheduleTaskNow(original: TaskItem, date: String, startTime: String) {
+    private suspend fun scheduleTaskNow(caller: TaskItem, date: String, startTime: String) {
+        // The row as STORED, not the caller's copy: the task sheet hands over the row
+        // it had when the date dialog opened, and the whole-row writes below reverted
+        // an edit synced in while the pickers were up (parity with iOS build 81,
+        // audit 2026-09-22 C5). A row the store doesn't have yet (the create sheet's
+        // new task) or an occurrence row (a block id) keeps the caller's copy.
+        val original = store.getOne(Tables.TASKS, caller.id, TaskItem.serializer()) ?: caller
         // Giving a task a real slot ends its "Later" parking — done HERE, the one
         // choke point every scheduling surface goes through (the task-detail sheet,
         // the create sheet, a calendar drop, promote-to-loop), instead of only at
@@ -1676,7 +1729,8 @@ class AppViewModel(
         // `done` on the template (a row no list shows, which keeps generating) while
         // today's occurrence stayed open. liveOccurrenceBlockForTemplate closes that
         // at the same choke point.
-        val occ = occurrenceBlockFor(task.id, tasks.value, blocks.value)
+        val tapped = occurrenceBlockFor(task.id, tasks.value, blocks.value)
+        val occ = tapped
             ?: liveOccurrenceBlockForTemplate(task.id, tasks.value, blocks.value, Clock.todayIso())
         if (occ != null) {
             val tpl = tasks.value.firstOrNull { it.id == occ.taskId }
@@ -1685,10 +1739,18 @@ class AppViewModel(
                     // Re-entering the SAME template's live session keeps it exactly as
                     // the non-occurrence path does — never re-probe/re-mint on re-entry
                     // (a re-mint replaced THE shared session and broadcast a spurious
-                    // ended). If the occurrence rolled (e.g. past midnight) just
-                    // re-point the completion target at today's block.
-                    if (cur.sessionStart != null && cur.occurrenceBlockId != occ.id) {
-                        store.setLiveSession(cur.copy(occurrenceBlockId = occ.id))
+                    // ended). A tapped occurrence row re-points the completion target
+                    // at that day. Coming back through the TEMPLATE (Today's live card,
+                    // the assistant's PAUSED chip, the capture link, a reminder's
+                    // Start) keeps the session's OWN day while its block exists, ticked
+                    // or not:
+                    // re-pointing it at today's first open block made Done tick today
+                    // and left the overdue day it was started on open (parity with
+                    // iOS build 81 reopenLiveFocus, audit 2026-09-22 C3).
+                    val ownDay = cur.occurrenceBlockId?.takeIf { id -> tapped == null && blocks.value.any { it.id == id && it.taskId == tpl.id } }
+                    val target = ownDay ?: occ.id
+                    if (cur.sessionStart != null && cur.occurrenceBlockId != target) {
+                        store.setLiveSession(cur.copy(occurrenceBlockId = target))
                     }
                     return true
                 }
@@ -1825,8 +1887,10 @@ class AppViewModel(
 
     /** [finishFocus], committed before returning — the assistant's finish_focus
      *  (2026-09-20) runs the SAME path the Focus screen's Done / Stop here
-     *  buttons do. FALSE when no session was running (nothing logged). */
-    internal suspend fun finishFocusNow(task: TaskItem, markDone: Boolean = false): Boolean {
+     *  buttons do. FALSE when no session was running (nothing logged).
+     *  [onSharedTick] hears, for a markDone on a task shared WITH me, why the
+     *  owner's task was NOT ticked (null = it was). */
+    internal suspend fun finishFocusNow(task: TaskItem, markDone: Boolean = false, onSharedTick: ((refusal: String?) -> Unit)? = null): Boolean {
         val live = store.getLiveSession() ?: return false
         val elapsed = FocusTimer.elapsedSec(live, nowMs())
         // Shared focus (T3, Option B): the task isn't in MY store — reflect the time
@@ -1841,12 +1905,18 @@ class AppViewModel(
             val sid = live.id ?: newUuid()
             store.setLiveSession(null)
             accrueSharedFocus(live.taskId, elapsed, sid, live.sessionEstimateMin, ownerFallback = false)
+            // Never a repeating share: the server refuses that tick ('recurring_series',
+            // 075 §1) and the owner ticks each day (parity with iOS build 81, audit
+            // 2026-09-22 C3). A refused tick pings nobody (SC-12). The outcome goes
+            // back to the caller: this pre-check reads the Shared-with-you list, a
+            // WhileSubscribed cache that is empty while no screen collects it (a call
+            // with the app in the background), so a repeating share can still reach
+            // the RPC, and its refusal must not be reported as a tick.
             if (markDone) {
-                // Same optimistic completion stamp as completeSharedTask, so finishing a
-                // SHARED focus also moves the row out of the active lists right away.
-                _sharedCompletedAt.value = _sharedCompletedAt.value + (live.taskId to isoNow())
-                runCatching { circleClient?.sharedTaskSetDone(live.taskId, true) }
-                circleClient?.notifyTaskDone(live.taskId)
+                val refusal =
+                    if (sharedTaskAllowsTick(live.taskId)) setSharedTaskDone(live.taskId, true)?.let { it.message ?: "failed" }
+                    else RECURRING_SERIES_REFUSAL
+                onSharedTick?.invoke(refusal)
             }
             refreshShares()
             runCatching { graph.coordinator?.notifications?.sessionRecap(sharedTitle, away = false) }
@@ -1862,10 +1932,23 @@ class AppViewModel(
         // resolved a TEMPLATE (the notification "Start" path, incl. one persisted
         // across that upgrade): without it, finishing with Done flipped the hidden
         // template's own `done` and today's occurrence never ticked.
-        val occBlock = live.occurrenceBlockId?.let { id -> blocks.value.firstOrNull { it.id == id } }
-            ?: occurrenceBlockFor(task.id, tasks.value, blocks.value)
-            ?: liveOccurrenceBlockForTemplate(task.id, tasks.value, blocks.value, Clock.todayIso())
-        val realTask = occBlock?.let { b -> tasks.value.firstOrNull { it.id == b.taskId } } ?: task
+        // Everything below lands on the rows as STORED, never the caller's copy
+        // (FocusScreen's snapshot, the assistant's scratch) or the WhileSubscribed
+        // caches: writing a copy whole reverted edits made during the session, and
+        // re-created a task deleted meanwhile (parity with iOS build 81, audit
+        // 2026-09-22 C5).
+        val storedTasks = store.tasks().first()
+        val storedBlocks = store.blocks().first()
+        val occBlock = live.occurrenceBlockId?.let { id -> storedBlocks.firstOrNull { it.id == id } }
+            ?: occurrenceBlockFor(task.id, storedTasks, storedBlocks)
+            ?: liveOccurrenceBlockForTemplate(task.id, storedTasks, storedBlocks, Clock.todayIso())
+        // The row this finish lands on — the TEMPLATE for an occurrence. Null when it
+        // was deleted elsewhere mid-session: then no task (or block) is written, and
+        // the Session goes up without the dead task id — sessions.task_id references
+        // tasks(id), so that insert would fail and sit quarantined in the outbox
+        // (the minutes still count in insights).
+        val stored = storedTasks.firstOrNull { it.id == (occBlock?.taskId ?: task.id) }
+        val realTask = stored ?: task
         // One-true-shared-session accrual (owner side): EVERY session on a partner-
         // shared task accrues total_focused EXCLUSIVELY via the log_shared_focus ledger
         // (exactly-once by session id — the partner finalizes the SAME id), so the
@@ -1878,23 +1961,27 @@ class AppViewModel(
         // Reuse the live-session id so captures taken during the session join back
         // to this Session row (the interruption histogram depends on it).
         write?.upsertSession(
-            Session(id = sid, taskId = realTask.id, taskName = realTask.name, estimateMin = realTask.estimateMin, actualSec = elapsed, completedAt = isoNow()),
+            Session(id = sid, taskId = stored?.id, taskName = realTask.name, estimateMin = realTask.estimateMin, actualSec = elapsed, completedAt = isoNow()),
         )
-        if (occBlock != null) {
-            if (!partnerShared) write?.upsertTask(realTask.copy(totalFocused = realTask.totalFocused + elapsed, updatedAt = isoNow()))
+        // NEVER flip `done` on a recurring TEMPLATE: that ends the whole series
+        // (the template stops generating and shows in no list), which is not what
+        // "I finished this session" means. Reachable from the starts-now
+        // notification's "Start" when today's occurrence was ticked or skipped
+        // between the notification and the tap, so no block resolves here. The
+        // time still accrues on the series; no day is falsely marked off. Judged on
+        // the stored row: a repeat set elsewhere mid-session is respected, and a
+        // task already completed elsewhere is neither re-stamped nor announced to
+        // its shared list a second time.
+        val completes = markDone && occBlock == null && stored != null && stored.recurrence == null && !stored.done
+        if (stored != null && occBlock != null) {
+            if (!partnerShared) write?.upsertTask(stored.copy(totalFocused = stored.totalFocused + elapsed, updatedAt = isoNow()))
             if (markDone) write?.upsertCalBlock(occBlock.copy(done = true, skipped = false, completedAt = isoNow()))
-        } else {
+        } else if (stored != null) {
             val focused =
-                if (partnerShared) realTask.copy(updatedAt = isoNow())   // total via the ledger
-                else realTask.copy(totalFocused = realTask.totalFocused + elapsed, updatedAt = isoNow())
-            // NEVER flip `done` on a recurring TEMPLATE: that ends the whole series
-            // (the template stops generating and shows in no list), which is not what
-            // "I finished this session" means. Reachable from the starts-now
-            // notification's "Start" when today's occurrence was ticked or skipped
-            // between the notification and the tap, so no block resolves here. The
-            // time still accrues on the series; no day is falsely marked off.
-            if (markDone && realTask.recurrence == null) {
-                write?.upsertTask(applyCompletion(focused.copy(done = true), prior = realTask, nowISO = isoNow()))
+                if (partnerShared) stored.copy(updatedAt = isoNow())   // total via the ledger
+                else stored.copy(totalFocused = stored.totalFocused + elapsed, updatedAt = isoNow())
+            if (completes) {
+                write?.upsertTask(applyCompletion(focused.copy(done = true), prior = stored, nowISO = isoNow()))
             } else if (!partnerShared) {
                 write?.upsertTask(focused)
             }
@@ -1902,7 +1989,7 @@ class AppViewModel(
             // the row; the total accrues server-side (realtime/hydrate brings it back).
         }
         store.setLiveSession(null)
-        if (partnerShared) {
+        if (partnerShared && stored != null) {
             // Land the row writes first (the whole-row upsert must not clobber the
             // server-side accrual), then log DURABLY: the RPC clamps + dedups on
             // session id; a transient failure queues a persisted retry and a revoked
@@ -1913,10 +2000,8 @@ class AppViewModel(
         // Completing a promoted shared-collection task from Focus must also flip the
         // shared item + notify members (same as toggleDone).
         // (…and only when the row was ACTUALLY completed above — a template is not.)
-        if (markDone && occBlock == null && realTask.recurrence == null &&
-            realTask.sourceCollectionId != null && realTask.sourceItemId != null
-        ) {
-            share?.taskDone(realTask.sourceCollectionId!!, realTask.sourceItemId!!, realTask.name, currentName ?: "Someone")
+        if (completes && stored?.sourceCollectionId != null && stored.sourceItemId != null) {
+            share?.taskDone(stored.sourceCollectionId!!, stored.sourceItemId!!, stored.name, currentName ?: "Someone")
         }
         // Session-end recap (design moment B3): records an in-app card always; the
         // server only pushes when away — finishing in-app means away = false.
@@ -2450,13 +2535,41 @@ class AppViewModel(
      *  Stamps [_sharedCompletedAt] so the row moves like any other completed task the
      *  instant it's ticked — gone from Today, still today's win in All, permanently in
      *  Completed — even against a server whose projection has no completed_at yet. */
-    fun completeSharedTask(taskId: String, done: Boolean) = launchWrite {
+    fun completeSharedTask(taskId: String, done: Boolean, onRefused: ((String) -> Unit)? = null) = launchWrite {
+        val refused = setSharedTaskDone(taskId, done)
+        refreshShares()
+        // The detail sheet rolls its optimistic tick back and says why — it used
+        // to keep a "✓ Completed" that never landed (audit 2026-09-22 SC-12).
+        if (refused != null) onRefused?.invoke(shareTickErrorText(refused.message))
+    }
+
+    /** shared_task_set_done with the optimistic stamp, the owner's "Done" ping only
+     *  once the server took it, and the stamp dropped again on a refusal — which
+     *  used to be swallowed while the ping still went out: shared_task_set_done now
+     *  refuses a tick on a repeating task ('recurring_series', 075 §1). Null = saved,
+     *  else what refused it (parity with iOS build 81, audit 2026-09-22 SC-12). */
+    private suspend fun setSharedTaskDone(taskId: String, done: Boolean): Throwable? {
+        val client = circleClient ?: return IllegalStateException("not_configured")
         _sharedCompletedAt.value =
             if (done) _sharedCompletedAt.value + (taskId to isoNow()) else _sharedCompletedAt.value - taskId
-        runCatching { circleClient?.sharedTaskSetDone(taskId, done) }
-        if (done) circleClient?.notifyTaskDone(taskId)
-        refreshShares()
+        val err = runCatching { client.sharedTaskSetDone(taskId, done) }.exceptionOrNull()
+        if (err != null) {
+            if (done) _sharedCompletedAt.value = _sharedCompletedAt.value - taskId
+            println("[share] shared_task_set_done($taskId, $done) refused: ${err.message}")
+            return err
+        }
+        if (done) client.notifyTaskDone(taskId)
+        return null
     }
+
+    /** May a finished shared session tick the owner's task done? Not a repeating
+     *  share: its row is the owner's series and the server refuses the tick, so the
+     *  Focus finish and the assistant must not claim a completion. A share the list
+     *  hasn't loaded falls back to true — every caller has already checked the
+     *  level, and the server still refuses a series (parity with iOS build 81,
+     *  audit 2026-09-22 C3). */
+    fun sharedTaskAllowsTick(taskId: String): Boolean =
+        sharedWithMe.value.firstOrNull { it.taskId == taskId }?.let(::shareCanTickDone) ?: true
 
     // --- tags & areas ---
 
@@ -3311,8 +3424,18 @@ class AppViewModel(
                 any
             }
             "COMPLETE_TASK" -> {
-                val t = api.getTasks().firstOrNull { it.id == ids[0] && !it.done } ?: return false
+                // Never a series' template: its done ENDS the series (audit
+                // 2026-09-22 C3 — only an older persisted "Reopened" receipt names one).
+                val t = api.getTasks().firstOrNull { it.id == ids[0] && it.recurrence == null } ?: return false
+                // Re-ticked by hand meanwhile: the undo's target state already holds
+                // and that tick sent its own `done` — re-writing would only re-stamp
+                // the real completion time (parity with iOS build 81, audit 2026-09-22 C6).
+                if (t.done) return true
                 api.upsertTask(applyCompletion(t.copy(done = true), prior = t, nowISO = isoNow()))
+                // Undoing a "Reopened" re-completes — the shared-list `done` travels
+                // as the UI's tick sends it, since the reopen already went out
+                // (parity with iOS build 81, audit 2026-09-22 C6).
+                api.notifyTaskCompletedIfShared(t)
                 true
             }
             "FORGET_FACT" -> api.removeProfileFact(ids[0])
@@ -3808,10 +3931,25 @@ class AppViewModel(
     internal fun stagePendingShare(p: PendingShare) { _pendingShares.value = _pendingShares.value + p }
 
     /** The UI's un-complete hook: a loop-promoted shared-list task reopened →
-     *  un-tick the collection row for the other members (best-effort). */
-    internal suspend fun notifyTaskReopenedIfShared(t: TaskItem) {
+     *  un-tick the collection row for the other members (best-effort). Launched,
+     *  never awaited: the assistant's tools answer once the local write is saved —
+     *  awaiting the edge function held a voice reply for up to the 90 s request
+     *  timeout on a stalled network (parity with iOS build 81's fire-and-forget
+     *  seam, audit 2026-09-22 C6). */
+    internal fun notifyTaskReopenedIfShared(t: TaskItem) {
         if (t.sourceCollectionId != null && t.sourceItemId != null) {
-            runCatching { share?.taskDone(t.sourceCollectionId!!, t.sourceItemId!!, t.name, currentName ?: "Someone", action = "reopen") }
+            viewModelScope.launch { runCatching { share?.taskDone(t.sourceCollectionId!!, t.sourceItemId!!, t.name, currentName ?: "Someone", action = "reopen") } }
+        }
+    }
+
+    /** The mirror image: a loop-promoted task that just went open → done ticks the
+     *  collection row for the other members — what toggleDone and finishFocus send.
+     *  The assistant's completions never sent it, so a voice completion left every
+     *  member seeing the item open or overdue (parity with iOS build 81, audit
+     *  2026-09-22 C6). Launched like the reopen hook above. */
+    internal fun notifyTaskDoneIfShared(t: TaskItem) {
+        if (t.sourceCollectionId != null && t.sourceItemId != null) {
+            viewModelScope.launch { runCatching { share?.taskDone(t.sourceCollectionId!!, t.sourceItemId!!, t.name, currentName ?: "Someone", action = "done") } }
         }
     }
 

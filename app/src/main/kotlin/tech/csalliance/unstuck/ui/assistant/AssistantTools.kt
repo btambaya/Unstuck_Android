@@ -23,6 +23,7 @@ import tech.csalliance.unstuck.core.logic.ChosenDateAction
 import tech.csalliance.unstuck.core.logic.RECURRENCE_HORIZON_DAYS
 import tech.csalliance.unstuck.core.logic.RecurrenceStart
 import tech.csalliance.unstuck.core.logic.RegenPlan
+import tech.csalliance.unstuck.core.logic.applyCompletion
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
 import tech.csalliance.unstuck.core.logic.clampDurationMin
 import tech.csalliance.unstuck.core.logic.clampEstimateMin
@@ -32,8 +33,10 @@ import tech.csalliance.unstuck.core.logic.materializeOccurrences
 import tech.csalliance.unstuck.core.logic.newUuid
 import tech.csalliance.unstuck.core.logic.recurrenceChosenDateAction
 import tech.csalliance.unstuck.core.logic.recurrenceEditStart
+import tech.csalliance.unstuck.core.logic.occurrencesCarryingTaskDone
 import tech.csalliance.unstuck.core.logic.regenerateForTask
 import tech.csalliance.unstuck.core.logic.resolveShareRequest
+import tech.csalliance.unstuck.core.logic.taskAfterSettingRecurrence
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.ItemCollection
@@ -124,12 +127,29 @@ fun parseToolArgs(s: String): JsonObject =
 
 // ── shared helpers (tools.ts module-private functions) ──
 
-/** Resolve a task id: scratch map first (the live store lags the optimistic
- *  write), then the live store. */
+/** Resolve a task id: the committed store first, the turn's scratch copy only
+ *  for a row the store doesn't have.
+ *
+ *  Store writes through [AssistantApi] are committed before they return, so the
+ *  stored row is always at least as fresh as scratch — and scratch went STALE
+ *  behind writes that never refresh it (scheduleTask's un-park and move-count
+ *  bump, finish_focus, carry_to_tomorrow, an edit from the web). Every write
+ *  tool upserts the whole row it gets back, and scratch lives for a whole Talk
+ *  or call session, so a rename after "finish it" reopened the finished task
+ *  and wiped its focus time (parity with iOS build 81, audit 2026-09-22 C5). */
 suspend fun findTask(id: String?, api: AssistantApi, scratch: TurnScratch): TaskItem? {
     if (id == null) return null
-    scratch.newTasks[id]?.let { return it }
-    return api.getTasks().firstOrNull { it.id == id }
+    api.getTasks().firstOrNull { it.id == id }?.let { return it }
+    return scratch.newTasks[id]
+}
+
+/** [findTask]'s rule for a whole list: the committed rows, plus scratch only for
+ *  the ids the store lacks — a stale scratch copy (done=false after finish_focus
+ *  completed it) listed a finished task as still open (parity with iOS build 81
+ *  find_tasks, audit 2026-09-22 C5). */
+fun storeFirst(stored: List<TaskItem>, scratch: TurnScratch): List<TaskItem> {
+    val ids = stored.mapTo(HashSet()) { it.id }
+    return stored + scratch.newTasks.values.filter { it.id !in ids }
 }
 
 suspend fun findList(id: String?, api: AssistantApi, scratch: TurnScratch): ItemCollection? {
@@ -146,6 +166,47 @@ fun nextLiveBlock(blocks: List<CalBlock>, today: String, taskId: String): CalBlo
         .firstOrNull()
 
 suspend fun nextLiveBlock(api: AssistantApi, taskId: String): CalBlock? = nextLiveBlock(api.getBlocks(), api.todayIso(), taskId)
+
+/** Complete a task the way the UI's toggleDone does: completedAt stamped
+ *  (applyCompletion) and the shared-list `done` sent. Only the done + completedAt
+ *  delta is applied, to the COMMITTED row — a write in between (scheduleTask's
+ *  un-park) must not be reverted by the caller's earlier copy — and a row the
+ *  store already has done is returned as it is: no write, no second shared-list
+ *  notice (parity with iOS build 81, audit 2026-09-22 C6). */
+suspend fun markTaskDone(t: TaskItem, api: AssistantApi, scratch: TurnScratch): TaskItem {
+    val prior = api.getTasks().firstOrNull { it.id == t.id } ?: t
+    if (prior.done) return prior
+    val stamped = applyCompletion(prior.copy(done = true), prior = prior, nowISO = api.nowIso())
+    api.upsertTask(stamped)
+    api.notifyTaskCompletedIfShared(stamped)
+    scratch.newTasks[stamped.id] = stamped
+    return stamped
+}
+
+/** Tick one day's occurrence block the way the UI's toggleDone does: un-skipped
+ *  and completion-stamped, so the day counts as a done-today win (C6). */
+suspend fun markOccurrenceDone(b: CalBlock, api: AssistantApi) {
+    api.upsertBlock(b.copy(done = true, skipped = false, completedAt = api.nowIso()))
+}
+
+/** What [completeSeriesToday] did with a repeating task's day. */
+enum class SeriesDayResult { TICKED, NOTHING_TODAY, ALREADY_DONE }
+
+/** "I did X" for a repeating series ticks TODAY's occurrence — never the series.
+ *  The model sees a series only by its TEMPLATE id (the context, get_tasks,
+ *  find_tasks), and complete_task / complete_tasks set the template's done, which
+ *  ENDS the series: every reminder stopped, the server's calls skip a done task,
+ *  and today's row stayed open. The earliest open occurrence today is ticked the
+ *  way the UI ticks one; the template is never written (parity with iOS build 81,
+ *  audit 2026-09-22 C3). */
+suspend fun completeSeriesToday(t: TaskItem, api: AssistantApi): SeriesDayResult {
+    val today = api.todayIso()
+    val day = api.getBlocks().filter { it.taskId == t.id && it.date == today && !it.skipped }
+    if (day.isEmpty()) return SeriesDayResult.NOTHING_TODAY
+    val open = day.filter { !it.done }.minByOrNull { it.startTime } ?: return SeriesDayResult.ALREADY_DONE
+    markOccurrenceDone(open, api)
+    return SeriesDayResult.TICKED
+}
 
 private suspend fun rejectPastDate(api: AssistantApi, date: String): String? = rejectPastDate(api.todayIso(), date)
 
@@ -433,7 +494,11 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 "monthly" -> Recurrence.Monthly(until)
                 else -> null
             }
-            val upd = t.copy(recurrence = rec, updatedAt = now())
+            // The editor's rule (AppViewModel.setRecurrence): "stop repeating" carries
+            // a ticked today onto the task, and a repeat turned on never leaves a
+            // DONE template — an ended series (parity with iOS build 81, audit
+            // 2026-09-22 C3).
+            val upd = taskAfterSettingRecurrence(t, rec, api.getBlocks(), api.todayIso(), now()).copy(updatedAt = now())
             api.upsertTask(upd)
             scratch.newTasks[t.id] = upd
             // Regenerate future blocks off the existing anchor, if scheduled.
@@ -460,12 +525,27 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 // passed stays (see RecurrenceStart.keepId).
                 for (id in plan.toDelete) if (id != start.keepId) api.deleteBlock(id)
             }
+            // A done task made to repeat keeps the day it was done ticked, and the
+            // done flip reaches a loop-promoted task's shared-list row — as in the editor.
+            for (b in occurrencesCarryingTaskDone(t, rec, blocks, api.todayIso(), now())) api.upsertBlock(b)
+            if (t.done != upd.done) {
+                if (upd.done) api.notifyTaskCompletedIfShared(upd) else api.notifyTaskReopenedIfShared(upd)
+            }
+            val todays = api.getBlocks().filter { it.taskId == t.id && isTaskBlock(it) && it.date == api.todayIso() && !it.skipped }
+            val doneNote = when {
+                !t.done && upd.done -> " — today's occurrence was already done, so the task is now marked done"
+                // Never "open again" over a day that stays ticked: the user would be
+                // told to do today's again.
+                t.done && !upd.done ->
+                    if (todays.isNotEmpty() && todays.all { it.done }) " (it was done — today's occurrence stays done)" else " (it was done — now open again)"
+                else -> ""
+            }
             // Only a TIMED block anchors a series: a timeless one used to read as
             // "regenerated" over a rule that materialised nothing (audit 2026-09-22, C7).
             val anchored = start != null
             // Worded as on web (lib/assistant/tools.ts) and iOS build 81.
             if (rec == null) {
-                "ok: \"${t.name}\" no longer repeats${if (anchored) " (future occurrences removed)" else ""}"
+                "ok: \"${t.name}\" no longer repeats${if (anchored) " (future occurrences removed)" else ""}$doneNote"
             } else {
                 val how = when (kind) {
                     "weekly" -> "weekly on " + (days ?: emptyList()).joinToString(", ") { WEEKDAY_NAMES_CAP[it].take(3) }
@@ -473,19 +553,29 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 }
                 // The time the series now runs at, so the reply can't claim a
                 // re-time that didn't happen (audit 2026-09-22, C1).
-                "ok: \"${t.name}\" now repeats $how${start?.let { " at ${it.startTime}" } ?: ""}${if (until != null) " until $until" else ""}" +
+                "ok: \"${t.name}\" now repeats $how${start?.let { " at ${it.startTime}" } ?: ""}${if (until != null) " until $until" else ""}$doneNote" +
                     if (anchored) "" else " — it has no calendar slot yet; schedule_task it to place the first one"
             }
         }
 
         "complete_task" -> {
             val t = findTask(args.str("taskId"), api, scratch) ?: return "error: task not found"
+            // A repeating series: today's occurrence, never the series (C3). The
+            // result is complete_occurrence's line, with no id= — so no Undo, whose
+            // reopen/complete would land on the series itself.
+            if (t.recurrence != null) {
+                val day = api.todayIso()
+                return when (completeSeriesToday(t, api)) {
+                    SeriesDayResult.TICKED -> "ok: marked \"${t.name}\" done for $day (series continues)"
+                    SeriesDayResult.ALREADY_DONE -> "error: \"${t.name}\" is already done on $day — nothing changed"
+                    SeriesDayResult.NOTHING_TODAY -> "error: \"${t.name}\" repeats and has nothing on $day — nothing changed. complete_task only ticks TODAY's occurrence of a repeating task and never ends the series; use complete_occurrence with the day, or set_task_recurrence kind none to stop it repeating"
+                }
+            }
             // Already done → error, not ok: an "ok: completed" receipt's Undo would
             // REOPEN something the user finished earlier (web parity).
             if (t.done) return "error: \"${t.name}\" is already done — nothing changed"
-            val upd = t.copy(done = true, completedAt = now(), updatedAt = now())
-            api.upsertTask(upd)
-            scratch.newTasks[t.id] = upd
+            // Stamped + the shared-list notice, like the UI's tick (C6).
+            markTaskDone(t, api, scratch)
             // F8: id in the result — the receipt's undo must target THIS task.
             "ok: completed \"${t.name}\" id=${t.id}"
         }
@@ -542,22 +632,30 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             if (ids.isEmpty()) return "error: taskIds required"
             // Report only the ids we ACTUALLY flipped — the receipt's undo re-opens exactly these.
             val flipped = ArrayList<Pair<String, String>>()
+            // Repeating series whose TODAY was ticked (C3) — named, but kept out of
+            // ids=, so the receipt's Undo reopens only plain tasks, never a series.
+            val ticked = ArrayList<String>()
             val skipped = ArrayList<String>()
             for (id in ids) {
                 val t = findTask(id, api, scratch)
                 when {
                     t == null -> skipped += "\"$id\" (not found)"
+                    t.recurrence != null -> when (completeSeriesToday(t, api)) {
+                        SeriesDayResult.TICKED -> ticked += t.name
+                        SeriesDayResult.ALREADY_DONE -> skipped += "\"${t.name}\" (already done today)"
+                        SeriesDayResult.NOTHING_TODAY -> skipped += "\"${t.name}\" (repeats — nothing today)"
+                    }
                     t.done -> skipped += "\"${t.name}\" (already done)"
                     else -> {
-                        val upd = t.copy(done = true, completedAt = now(), updatedAt = now())
-                        api.upsertTask(upd)
-                        scratch.newTasks[t.id] = upd
+                        // Stamped + the shared-list notice, like the UI's tick (C6).
+                        markTaskDone(t, api, scratch)
                         flipped += t.id to t.name
                     }
                 }
             }
-            if (flipped.isEmpty()) return "error: none completed — ${skipped.joinToString(", ")}"
-            "ok: completed ${flipped.size} tasks ids=${flipped.joinToString(",") { it.first }} — ${flipped.joinToString(", ") { "\"${it.second}\"" }}" +
+            if (flipped.isEmpty() && ticked.isEmpty()) return "error: none completed — ${skipped.joinToString(", ")}"
+            val names = flipped.map { "\"${it.second}\"" } + ticked.map { "\"$it\" (today — series continues)" }
+            "ok: completed ${flipped.size + ticked.size} tasks ids=${flipped.joinToString(",") { it.first }} — ${names.joinToString(", ")}" +
                 if (skipped.isEmpty()) "" else " — not done: ${skipped.joinToString(", ")}"
         }
 
@@ -646,7 +744,7 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             val res = resolveShareRequest(
                 taskId = args.str("taskId"), taskName = args.str("taskName"),
                 person = args.str("person"), level = args.str("level"),
-                tasks = scratch.newTasks.values.toList() + api.getTasks(), people = api.getShareCandidates(), newId = ::newUuid,
+                tasks = storeFirst(api.getTasks(), scratch), people = api.getShareCandidates(), newId = ::newUuid,
             )
             res.pending?.let { api.stageShare(it) }
             res.message
@@ -919,6 +1017,6 @@ private suspend fun updateCall(args: ToolArgs, api: AssistantApi, store: Assista
 private suspend fun getCalls(api: AssistantApi, scratch: TurnScratch, store: AssistantCallStore): String {
     val rows = store.liveCalls().sortedBy { it.callAtMs ?: Long.MAX_VALUE }
     if (rows.isEmpty()) return "ok: no calls booked"
-    val tasks = scratch.newTasks.values.toList() + api.getTasks()
+    val tasks = storeFirst(api.getTasks(), scratch)
     return CallToolLogic.formatCalls(rows, taskName = { id -> tasks.firstOrNull { it.id == id }?.name })
 }

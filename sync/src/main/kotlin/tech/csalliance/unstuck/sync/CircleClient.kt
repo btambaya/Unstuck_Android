@@ -150,9 +150,12 @@ enum class SharedFocusLogResult { LOGGED, SKIPPED, NOT_ALLOWED, FAILED }
 /** The `later` column as a flag: only an explicit true parks the share. */
 internal val SharedWithMeRow.isLater: Boolean get() = later == true
 
-/** A recurrence template is present when the column is a non-empty JSON object. */
+/** A recurrence template is present when the column is a JSON object — the
+ *  server's own test (`jsonb_typeof(recurrence) = 'object'`) for refusing a
+ *  recipient's tick, so an empty object counts too: the tick it showed was then
+ *  refused (075 §1, audit 2026-09-22 SC-12). */
 internal val SharedWithMeRow.isRecurring: Boolean
-    get() = (recurrence as? JsonObject)?.isNotEmpty() == true
+    get() = recurrence is JsonObject
 
 /** Row → model, with the owner's slot re-expressed in [zone] (the recipient's)
  *  when `next_start_at` arrived; the raw owner date/time otherwise. Internal so

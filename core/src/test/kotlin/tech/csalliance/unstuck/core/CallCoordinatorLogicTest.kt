@@ -179,7 +179,7 @@ class CallCoordinatorLogicTest {
         assertEquals("task-1", n.taskId)
         assertEquals("block-1", n.blockId)
         assertEquals("Speak to James", n.taskName)
-        assertEquals("unstuck://task/task-1", n.deepLink)
+        assertEquals("unstuck://task/task-1?exact", n.deepLink)
         assertEquals("unstuck.call.missed.$callId", n.id)
         assertEquals(CallNotificationKind.MISSED, n.kind)
         assertEquals(CallNotificationKind.MISSED, CallCoordinatorLogic.missedReport().notify)

@@ -147,7 +147,7 @@ class PushTest {
         assertEquals("I called about speak to James", n.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
         assertEquals("A\nB\n" + CallNotificationCopy.HOURS_HINT, n.extras.getCharSequence(Notification.EXTRA_BIG_TEXT).toString())
         assertEquals(listOf("Start", "Reschedule"), n.actions.map { it.title.toString() })
-        assertEquals("unstuck://task/t-1", shadowOf(n.contentIntent).savedIntent.data.toString())
+        assertEquals("unstuck://task/t-1?exact", shadowOf(n.contentIntent).savedIntent.data.toString())
         assertEquals(NotificationChannels.REMINDERS, n.channelId)
     }
 

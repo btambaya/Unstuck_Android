@@ -87,6 +87,12 @@ fun SharedTaskDetailSheet(
     var done by remember(shared.taskId) { mutableStateOf(shared.done) }
     LaunchedEffect(detail?.done) { detail?.let { done = it.done } }
 
+    // Whether the share repeats lives on my Shared-with-you row (the detail RPC
+    // doesn't carry it); a sheet opened before that list loaded keeps its own row.
+    val sharedRows by vm.sharedWithMe.collectAsStateWithLifecycle()
+    val repeating = (sharedRows.firstOrNull { it.taskId == shared.taskId } ?: shared).recurring
+    val context = androidx.compose.ui.platform.LocalContext.current
+
     val level = detail?.level ?: shared.level
     val ownerName = (detail?.ownerName ?: shared.ownerName).substringBefore('@')
     val title = detail?.title ?: shared.title
@@ -187,10 +193,18 @@ fun SharedTaskDetailSheet(
                         if (level == ShareLevel.PARTNER) "Focus with them" else "Focus",
                         kind = ButtonKind.CORAL, fill = false, leadingIcon = Icons.Filled.PlayArrow,
                     ) { detail?.let(onFocus) ?: onFocus(fallbackDetail(shared)) }
-                    UButton(if (done) "✓ Completed" else "Complete", kind = ButtonKind.OUTLINED, fill = false) {
+                    // Hidden on an OPEN repeating share: the row is the owner's series
+                    // and the server refuses the tick; Reopen stays, to recover a series
+                    // the old path ended (parity with iOS build 81, audit 2026-09-22 C3).
+                    if (done || !repeating) UButton(if (done) "✓ Completed" else "Complete", kind = ButtonKind.OUTLINED, fill = false) {
                         val next = !done
-                        done = next
-                        vm.completeSharedTask(shared.taskId, next)
+                        done = next   // optimistic
+                        // Rolled back, with the reason, when the server refuses it — the
+                        // sheet used to keep a "✓ Completed" that never landed (SC-12).
+                        vm.completeSharedTask(shared.taskId, next) { refused ->
+                            done = !next
+                            android.widget.Toast.makeText(context, refused, android.widget.Toast.LENGTH_SHORT).show()
+                        }
                     }
                 }
             } else {

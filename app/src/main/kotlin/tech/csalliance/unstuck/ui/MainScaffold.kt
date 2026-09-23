@@ -72,6 +72,9 @@ import tech.csalliance.unstuck.ui.settings.SettingsHub
 import tech.csalliance.unstuck.ui.settings.SettingsSection
 import tech.csalliance.unstuck.ui.tasks.NewTaskSheet
 import tech.csalliance.unstuck.core.logic.taskForBlock
+import tech.csalliance.unstuck.core.logic.isExactTaskLink
+import tech.csalliance.unstuck.core.logic.taskLinkRowForId
+import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.ui.tasks.TaskDetailScreen
 import tech.csalliance.unstuck.ui.tasks.TasksScreen
 import tech.csalliance.unstuck.ui.today.TodayScreen
@@ -239,6 +242,11 @@ fun MainScaffold(vm: AppViewModel) {
     val navScope = rememberCoroutineScope()
     fun push(r: Route) = stack.add(r)
     fun pop() { if (stack.isNotEmpty()) stack.removeAt(stack.lastIndex) }
+    /** Open a task the way its `unstuck://task/<id>` link would: a series' TEMPLATE
+     *  id (a bell reminder row, an Inbox capture filed on a series) opens the day's
+     *  OCCURRENCE — the template editor's Mark done used to end the whole series
+     *  (parity with iOS build 81, audit 2026-09-22 C3). */
+    fun openTaskRow(id: String) = push(Route.Detail(taskLinkRowForId(id, tasks, blocks, Clock.todayIso())?.id ?: id))
     val openNotifs: () -> Unit = { vm.markNotificationsSeen(); push(Route.Notifications) }
     val openInbox: () -> Unit = { push(Route.Inbox) }
 
@@ -328,7 +336,9 @@ fun MainScaffold(vm: AppViewModel) {
     // dumping the user on Today, we DON'T consume — the effect re-runs when tasks
     // populates and routes correctly. A bounded delay falls back to Today if the list
     // genuinely stays empty (e.g. a stale link / zero tasks).
-    LaunchedEffect(deepLink, tasks) {
+    // …and on `blocks`: Room emits them apart from the tasks, and a series' link
+    // resolves to the day's occurrence only once they are in (below).
+    LaunchedEffect(deepLink, tasks, blocks) {
         val dl = deepLink ?: return@LaunchedEffect
         when {
             dl == "capture" -> {
@@ -351,9 +361,21 @@ fun MainScaffold(vm: AppViewModel) {
             }
             dl.startsWith("unstuck://task/") -> {
                 val id = dl.removePrefix("unstuck://task/").substringBefore('?').substringBefore('#').trim()
+                // A series opens through the day's OCCURRENCE: a reminder carries the
+                // block's taskId — the hidden TEMPLATE — and the template editor's
+                // Mark done ended the whole series. A block id opens that exact day;
+                // an exact link (a call, the assistant's open_screen) opens the series
+                // itself (parity with iOS build 81, audit 2026-09-22 C3).
+                val exact = isExactTaskLink(dl)
+                val own = if (exact) tasks.firstOrNull { it.id == id } else taskLinkRowForId(id, tasks, blocks, Clock.todayIso())
                 when {
                     id.isEmpty() -> { tab = "today"; stack.clear() }
-                    tasks.any { it.id == id } -> { tab = "today"; stack.clear(); push(Route.Detail(id)) }
+                    // A cold launch can bring the tasks before the blocks: wait for them
+                    // (this effect re-runs when they land) before settling for the series.
+                    !exact && own?.id == id && own.recurrence != null && blocks.isEmpty() -> {
+                        kotlinx.coroutines.delay(2500); tab = "today"; stack.clear(); push(Route.Detail(id))
+                    }
+                    own != null -> { tab = "today"; stack.clear(); push(Route.Detail(own.id)) }
                     else -> {
                         // Not in my store ⇒ a task someone shared WITH me (the
                         // `task_share` / `invite_claimed` push, unified sharing v1):
@@ -587,16 +609,18 @@ fun MainScaffold(vm: AppViewModel) {
                     Route.Palette -> tech.csalliance.unstuck.ui.palette.CommandPalette(
                         vm,
                         onDismiss = ::pop,
-                        onOpenTask = { pop(); push(Route.Detail(it.id)) },
+                        // A series opens on the day's occurrence, as the bell and Inbox do (parity
+                        // with iOS build 81's palette acting on the day's row, audit 2026-09-22 C3).
+                        onOpenTask = { pop(); openTaskRow(it.id) },
                         onTab = { tab = it; stack.clear() },
                         onSettings = { stack.clear(); push(Route.Settings) },
                     )
                     Route.Notifications -> tech.csalliance.unstuck.ui.notifications.NotificationCenterScreen(
-                        vm, onBack = ::pop, onOpenTask = { id -> pop(); push(Route.Detail(id)) },
+                        vm, onBack = ::pop, onOpenTask = { id -> pop(); openTaskRow(id) },
                         onDeepLink = { link -> pop(); vm.openDeepLink(link) },
                     )
                     Route.Inbox -> tech.csalliance.unstuck.ui.inbox.InboxScreen(
-                        vm, onBack = ::pop, onOpenTask = { id -> pop(); push(Route.Detail(id)) },
+                        vm, onBack = ::pop, onOpenTask = { id -> pop(); openTaskRow(id) },
                     )
                 }
             }

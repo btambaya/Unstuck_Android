@@ -228,7 +228,9 @@ class CircleClientTest {
         assertEquals("09:00", m.nextStartTime)
         assertTrue(m.later)
         assertFalse("a non-object recurrence is not a template", m.recurring)
-        assertFalse("an EMPTY recurrence object is not a template", json.decodeFromString<SharedWithMeRow>("""{"share_id":"s","task_id":"t","recurrence":{}}""").isRecurring)
+        // Any object is a template, as the server's tick refusal judges it (075 §1,
+        // jsonb_typeof = 'object'): an empty one showed a tick that was then refused.
+        assertTrue("an EMPTY recurrence object still repeats for the tick", json.decodeFromString<SharedWithMeRow>("""{"share_id":"s","task_id":"t","recurrence":{}}""").isRecurring)
     }
 
     @Test fun `shared-block row decodes start_at and paints the block on the recipient's day + time`() {

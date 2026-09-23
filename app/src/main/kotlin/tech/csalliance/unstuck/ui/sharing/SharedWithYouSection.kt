@@ -31,6 +31,7 @@ import tech.csalliance.unstuck.core.logic.fmtDuration
 import tech.csalliance.unstuck.core.logic.shareBucket
 import tech.csalliance.unstuck.core.logic.shareFirstName
 import tech.csalliance.unstuck.core.logic.shareSlotLabel
+import tech.csalliance.unstuck.core.model.shareCanTickDone
 import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.shareStatusLabel
@@ -80,7 +81,9 @@ fun SharedWithYouSection(
         }
         items.forEach { s ->
             val done = s.done
-            val canComplete = s.level.canComplete
+            // No tick on a repeating share: it would end the owner's series, and the
+            // server refuses it (parity with iOS build 81, audit 2026-09-22 C3).
+            val canComplete = shareCanTickDone(s)
             Row(
                 // Row opens the read-only detail; the checkbox (below) has its own
                 // clickable that consumes the tap, so ticking never opens the sheet.

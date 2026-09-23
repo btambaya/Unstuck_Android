@@ -88,6 +88,10 @@ class ReminderReceiver : BroadcastReceiver() {
                     val blocks = runCatching { app.graph.store.blocks().first() }.getOrNull()
                     val tasks = runCatching { app.graph.store.tasks().first() }.getOrNull()
                     if (blocks != null && blocks.none { it.id == blockId }) return@withTimeoutOrNull false   // schedule gone
+                    // The day itself is handled: a repeating task's tick / skip lives
+                    // on the BLOCK. Backstops an alarm armed before that day was ticked
+                    // on another device (parity with iOS build 81, audit 2026-09-22 C2).
+                    if (blocks?.firstOrNull { it.id == blockId }?.let { it.done || it.skipped } == true) return@withTimeoutOrNull false
                     if (taskId.isNotBlank() && tasks != null) {
                         val task = tasks.firstOrNull { it.id == taskId }
                         if (task == null || task.done) return@withTimeoutOrNull false   // task deleted or already done

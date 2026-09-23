@@ -552,9 +552,16 @@ class AssistantToolsTest {
      *  "regenerated" over a rule that materialised nothing (C7). */
     @Test fun `set_task_recurrence on a timeless task nudges for a slot`() = runTest {
         val h = makeApi { tasks += task("a", "Alpha"); blocks += block("t1", "a", TOMORROW, "") }
-        assertEquals("ok: \"Alpha\" now repeats daily (not on the calendar yet — schedule_task it to place the series)",
+        assertEquals("ok: \"Alpha\" now repeats daily — it has no calendar slot yet; schedule_task it to place the first one",
             h.run("set_task_recurrence", "taskId" to "a", "kind" to "daily"))
         assertEquals("ok: \"Alpha\" no longer repeats", h.run("set_task_recurrence", "taskId" to "a", "kind" to "none"))
+    }
+
+    /** The replies read the same as on web (lib/assistant/tools.ts) and iOS. */
+    @Test fun `set_task_recurrence replies in the web and iOS wording`() = runTest {
+        val h = makeApi { tasks += task("a", "Gym"); blocks += block("b1", "a", TOMORROW, "07:00") }
+        assertEquals("ok: \"Gym\" now repeats daily at 07:00", h.run("set_task_recurrence", "taskId" to "a", "kind" to "daily"))
+        assertEquals("ok: \"Gym\" no longer repeats (future occurrences removed)", h.run("set_task_recurrence", "taskId" to "a", "kind" to "none"))
     }
 
     // ── the server's CHECKs (migration 001), audit 2026-09-22 C4 ──
@@ -785,7 +792,7 @@ class AssistantToolsTest {
         val h = makeApi { tasks += task("a", "Gym", recurrence = Recurrence.Weekly(listOf(1, 3))) }
         assertEquals("error: unknown recurrence kind \"fortnightly\" — use daily, weekly, monthly, or none", h.run("set_task_recurrence", "taskId" to "a", "kind" to "fortnightly"))
         assertEquals(Recurrence.Weekly(listOf(1, 3)), h.state.tasks[0].recurrence)
-        assertEquals("ok: \"Gym\" now repeats daily (not on the calendar yet — schedule_task it to place the series)", h.run("set_task_recurrence", "taskId" to "a", "kind" to "daily"))
+        assertEquals("ok: \"Gym\" now repeats daily — it has no calendar slot yet; schedule_task it to place the first one", h.run("set_task_recurrence", "taskId" to "a", "kind" to "daily"))
         assertEquals(Recurrence.Daily(), h.state.tasks[0].recurrence)
         assertEquals("ok: \"Gym\" no longer repeats", h.run("set_task_recurrence", "taskId" to "a", "kind" to "none"))
         assertNull(h.state.tasks[0].recurrence)

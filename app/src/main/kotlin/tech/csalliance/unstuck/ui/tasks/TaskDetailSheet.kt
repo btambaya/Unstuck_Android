@@ -49,6 +49,8 @@ import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.formatTime
 import tech.csalliance.unstuck.core.logic.materializeOccurrences
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
+import tech.csalliance.unstuck.core.logic.recurrenceAnchor
+import tech.csalliance.unstuck.core.logic.recurrenceEditStart
 import tech.csalliance.unstuck.core.logic.recurrenceLabel
 import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.CaptureTag
@@ -123,18 +125,16 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     val isAssignedOut = assignedOutName != null
 
     // Pick an actual date + time (platform dialogs, local-zone — no Material UTC
-    // off-by-one), seeded on [d0] (today unless a caller has a better first day).
-    fun pickDateTime(d0: java.time.LocalDate, title: String?, onPicked: (dateIso: String, timeIso: String) -> Unit) {
-        val t0 = java.time.LocalTime.now()
+    // off-by-one), seeded on [d0] at [t0] (today and now unless a caller has better).
+    fun pickDateTime(d0: java.time.LocalDate, t0: java.time.LocalTime, onPicked: (dateIso: String, timeIso: String) -> Unit) {
         val dlg = android.app.DatePickerDialog(context, { _, y, m, day ->
             android.app.TimePickerDialog(context, { _, h, min ->
                 val dateIso = java.time.LocalDate.of(y, m + 1, day).toString()
                 val timeIso = "%02d:%02d".format(h, min)
                 onPicked(dateIso, timeIso)
                 scheduled = "${dateIso.takeLast(5)} ${formatTime(timeIso)}"
-            }, t0.hour, t0.minute, false).apply { title?.let { setTitle(it) } }.show()
+            }, t0.hour, t0.minute, false).show()
         }, d0.year, d0.monthValue - 1, d0.dayOfMonth)
-        title?.let { dlg.setTitle(it) }
         dlg.datePicker.minDate = System.currentTimeMillis() - 60_000   // no past days
         dlg.show()
     }
@@ -142,19 +142,27 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     // time also moves the task out of "Later". vm.scheduleTask clears "Later"
     // itself now (AppViewModel.scheduleTaskNow) — for EVERY scheduling surface,
     // not just this one — so the second whole-row write that used to live here is gone.
-    fun pickSchedule() = pickDateTime(java.time.LocalDate.now(), title = null) { dateIso, timeIso -> vm.scheduleTask(task, dateIso, timeIso) }
+    // A series opens on its next occurrence at its own time (seriesScheduleSeed).
+    fun pickSchedule() {
+        val seed = seriesScheduleSeed(task, blocks, Clock.todayIso())
+        val d0 = seed?.date?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() } ?: java.time.LocalDate.now()
+        val t0 = seed?.startTime?.let { runCatching { java.time.LocalTime.parse(it) }.getOrNull() } ?: java.time.LocalTime.now()
+        pickDateTime(d0, t0) { dateIso, timeIso -> vm.scheduleTask(task, dateIso, timeIso) }
+    }
     // A repeat set on a task with no timed block is refused by vm.setRecurrence (a
-    // series needs a day and a time), so ask for them — "Start repeating" — instead
-    // of inventing 09:00 from tomorrow and hiding the task from Today. Seeded on the
-    // rule's first matching day: Weekly (Mon) opened on a Tuesday would otherwise
-    // mint an off-pattern occurrence today. Cancelling abandons the repeat (parity
-    // with iOS build 81, audit 2026-09-22 C7).
+    // series needs a day and a time), so ask for them ([StartRepeatingPrompt], then
+    // these pickers) instead of inventing 09:00 from tomorrow and hiding the task
+    // from Today. Seeded on the rule's first matching day: Weekly (Mon) opened on a
+    // Tuesday would otherwise mint an off-pattern occurrence today. Cancelling
+    // abandons the repeat (parity with iOS build 81, audit 2026-09-22 C7).
     fun pickStartRepeating(pending: Recurrence) {
         val today = Time.startOfDayMillis(System.currentTimeMillis())
         val first = materializeOccurrences(pending, today, "00:00", 35).firstOrNull()?.date
         val seed = first?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() } ?: java.time.LocalDate.now()
-        pickDateTime(seed, title = "Start repeating") { dateIso, timeIso -> vm.startRepeating(editTarget, pending, dateIso, timeIso) }
+        pickDateTime(seed, java.time.LocalTime.now()) { dateIso, timeIso -> vm.startRepeating(editTarget, pending, dateIso, timeIso) }
     }
+    // The refused repeat, waiting on StartRepeatingPrompt.
+    var pendingRepeat by remember(editTarget.id) { mutableStateOf<Recurrence?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     var showEstimate by remember { mutableStateOf(false) }
     var showShare by remember { mutableStateOf(false) }
@@ -322,7 +330,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                 // The heading above + the summary line are this sheet's — the
                 // editor must not print its own "Repeat" on top of them.
                 RecurrenceEditor(task.recurrence, showHeading = false) { r ->
-                    if (!vm.setRecurrence(editTarget, r) && r != null) pickStartRepeating(r)
+                    if (!vm.setRecurrence(editTarget, r) && r != null) pendingRepeat = r
                 }
             }
 
@@ -374,6 +382,10 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
         dismissButton = { TextButton(onClick = { confirmDelete = false }) { Text("Cancel", color = c.ink2) } },
         containerColor = c.surface,
     )
+
+    pendingRepeat?.let { r ->
+        StartRepeatingPrompt(onPick = { pendingRepeat = null; pickStartRepeating(r) }, onCancel = { pendingRepeat = null })
+    }
 
     // The ONE Share screen (unified sharing v1) + the "Hand over to…" picker —
     // both on the editable target (the template for an occurrence).
@@ -509,6 +521,44 @@ private fun MetaCell(label: String, value: String, modifier: Modifier = Modifier
         SectionLabel(label)
         Text(value, style = UFont.sans(13), color = c.ink, modifier = Modifier.padding(top = 3.dp))
     }
+}
+
+/**
+ * Says why a day and a time are being asked for when a repeat is set on a task
+ * with no timed block (iOS titles its picker sheet "Start repeating", build 81,
+ * audit 2026-09-22 C7). The platform pickers can't carry it: their Material
+ * dialog theme sets showTitle=false, so setTitle never shows and the user got a
+ * bare calendar after tapping Weekly.
+ */
+@Composable
+internal fun StartRepeatingPrompt(onPick: () -> Unit, onCancel: () -> Unit) {
+    val c = UTheme.colors
+    AlertDialog(
+        onDismissRequest = onCancel,
+        title = { Text("Start repeating", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+        text = { Text("A repeating task needs a day and a time. Pick when it starts.", style = UFont.sans(13), color = c.ink2) },
+        confirmButton = { TextButton(onClick = onPick) { Text("Pick day and time", color = c.primaryDeep) } },
+        dismissButton = { TextButton(onClick = onCancel) { Text("Cancel", color = c.ink2) } },
+        containerColor = c.surface,
+    )
+}
+
+/** Where Schedule opens on a repeating task (unit-tested, TaskDetailScheduleSeedTest). */
+internal data class ScheduleSeed(val date: String, val startTime: String?)
+
+/**
+ * A series opens Schedule on its NEXT occurrence (never before today) at the
+ * series' own time, so OK without changes re-plans nothing. Opened on today
+ * at the current minute, OK rebuilt every future occurrence at that minute and
+ * moved today's there too (parity with iOS build 81 TaskEditor.openSchedule,
+ * audit 2026-09-22 C7). Null for a one-off, which opens on today and now as
+ * before; the time is null when the series has no timed block.
+ */
+internal fun seriesScheduleSeed(task: TaskItem, blocks: List<CalBlock>, todayIso: String): ScheduleSeed? {
+    if (task.recurrence == null) return null
+    val anchor = recurrenceAnchor(task.id, blocks, todayIso)
+    val time = recurrenceEditStart(task.id, task.recurrence, blocks, todayIso)?.startTime ?: anchor?.startTime
+    return ScheduleSeed(maxOf(anchor?.date ?: todayIso, todayIso), time)
 }
 
 // ── "Call me about this" (iOS App/Calls/CallMeSection.swift, copy verbatim) ──

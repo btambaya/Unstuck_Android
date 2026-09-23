@@ -720,6 +720,34 @@ class AppViewModelTest {
         assertNull(loadTask("tpl")!!.moveCount)
     }
 
+    @Test fun scheduleTask_templateAtTheSheetsSeed_changesNothing() = runTest(dispatcher) {
+        // The task sheet's Schedule opened on today at the current minute, so OK
+        // without changes rebuilt the whole series at that minute. It now opens on
+        // the next occurrence at the series' own time, where OK is a no-op (C7).
+        val today = Clock.todayIso()
+        val t = task("tpl", name = "Gym", recurrence = Recurrence.Daily())
+        val sentinel = task("s", name = "Sentinel")
+        seedTask(t); seedTask(sentinel)
+        (30 downTo 1).forEach { seedBlock(occ("h$it", "tpl", addDaysIso(today, -it), "06:30", done = true)) }
+        (0..55).forEach { seedBlock(occ("u$it", "tpl", addDaysIso(today, it), "07:00")) }
+        val before = store.blocks().first().filter { it.taskId == "tpl" }.toSet()
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        val seed = tech.csalliance.unstuck.ui.tasks.seriesScheduleSeed(t, vm.blocks.value, today)!!
+        assertEquals(today, seed.date)
+        assertEquals("07:00", seed.startTime)
+        vm.scheduleTask(t, seed.date, seed.startTime!!)
+        // A later write that is awaited, so a stray write from the call above has
+        // landed before the series is compared.
+        vm.scheduleTask(sentinel, today, "10:00")
+        advanceUntilIdle()
+        awaitBlocks { l -> l.any { it.taskId == "s" } }
+
+        assertEquals(before, store.blocks().first().filter { it.taskId == "tpl" }.toSet())
+        assertNull(loadTask("tpl")!!.moveCount)
+    }
+
     @Test fun skipOccurrence_hidesOneDayWithoutTouchingSeries() = runTest(dispatcher) {
         val template = task("tpl", name = "Daily", recurrence = Recurrence.Daily())
         val occ = CalBlock(id = "occ1", taskId = "tpl", taskName = "Daily", startTime = "09:00", durationMinutes = 25, date = "2026-05-22", kind = CalBlockKind.TASK)

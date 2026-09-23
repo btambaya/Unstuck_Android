@@ -463,8 +463,9 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             // Only a TIMED block anchors a series: a timeless one used to read as
             // "regenerated" over a rule that materialised nothing (audit 2026-09-22, C7).
             val anchored = start != null
+            // Worded as on web (lib/assistant/tools.ts) and iOS build 81.
             if (rec == null) {
-                "ok: \"${t.name}\" no longer repeats${if (anchored) " (its future slots were removed)" else ""}"
+                "ok: \"${t.name}\" no longer repeats${if (anchored) " (future occurrences removed)" else ""}"
             } else {
                 val how = when (kind) {
                     "weekly" -> "weekly on " + (days ?: emptyList()).joinToString(", ") { WEEKDAY_NAMES_CAP[it].take(3) }
@@ -473,7 +474,7 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 // The time the series now runs at, so the reply can't claim a
                 // re-time that didn't happen (audit 2026-09-22, C1).
                 "ok: \"${t.name}\" now repeats $how${start?.let { " at ${it.startTime}" } ?: ""}${if (until != null) " until $until" else ""}" +
-                    if (anchored) "" else " (not on the calendar yet — schedule_task it to place the series)"
+                    if (anchored) "" else " — it has no calendar slot yet; schedule_task it to place the first one"
             }
         }
 

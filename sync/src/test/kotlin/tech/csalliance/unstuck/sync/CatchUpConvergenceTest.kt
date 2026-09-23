@@ -657,6 +657,25 @@ class CatchUpConvergenceTest {
         assertEquals("once resolved, quiet ticks stop re-reading", readsAfterFix, membershipReads())
     }
 
+    /** Android resumes from its persisted cursors, so a relaunch never runs the
+     *  full hydrate that re-reads membership on every iOS launch. A members read
+     *  that failed before the process died must still be retried on the next
+     *  launch, though no list changed meanwhile. */
+    @Test fun aFailedMembershipRead_isRetriedAfterARelaunch() = runTest {
+        remote.put(Tables.COLLECTIONS, listRow("c1", uid, "2027-01-15T08:00:00.000000+00:00"))
+        remote.put("collection_members", memberRow("c1", partner))
+        remote.failNextFetchAll["collection_members"] = 2
+        hydrator.hydrateCollections(uid)   // the sign-in hydrate: the members read fails
+        membershipPuller().catchUp(uid)    // the seeding catch-up: fails again, then the process dies
+        assertEquals(emptyList<String>(), list("c1")?.members)
+
+        // A new process: fresh engine objects over the same store + cursors.
+        val outcome = membershipPuller(Hydrator(remote, store)).catchUp(uid)
+
+        assertFalse("no list changed", outcome.collectionsChanged)
+        assertEquals("the relaunch re-reads membership anyway", listOf(partner), list("c1")?.members)
+    }
+
     /** The re-read also runs after the user's OWN list edits (realtime never moves
      *  the cursor), so it must never touch content: a list edit that lands while
      *  the membership read is in flight is kept. */

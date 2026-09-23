@@ -99,29 +99,48 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
             for ((rowId, chain) in chains) {
                 val server = serverRows[rowId] ?: continue
                 // One row's failure must not stop every other row's merge.
-                try {
-                    reconcileTaskChain(chain, server, now)
+                val plan = try {
+                    planTaskChain(chain, server, now)
                 } catch (t: CancellationException) {
                     throw t
                 } catch (t: Throwable) {
                     println("[outbox] tasks op chain $rowId not reconciled: $t")
+                    continue
                 }
+                // A failed WRITE is not caught: it rolls the whole prune back and
+                // aborts the flush after it. iOS rolls just the row back to a
+                // savepoint; Room has none (a failed nested transaction rolls back
+                // the outer one), and committing half a chain would flush a tail
+                // that never took the server's changes in (audit 2026-09-22 C9).
+                for (seq in plan.drops) dequeue(seq)
+                for ((seq, merged) in plan.rewrites) rewriteOutbox(seq, merged, server.toString())
+                plan.local?.let { upsert(Tables.TASKS, it, TaskItem.serializer(), it.id, it.updatedAt) }
             }
         }
     }
 
     private fun isLiveTaskUpsert(op: OutboxEntity) = op.recordTable == Tables.TASKS && op.op == "upsert"
 
-    /** Judge + merge one row's queued edits (seq order) against the server row,
-     *  inside the prune's transaction. See [pruneStaleTaskOps].
+    /** One row's chain reconcile, worked out in full before anything is written:
+     *  the ops to drop, each merged op's new payload (its base becomes the server
+     *  row), and the local row to save. */
+    private class ChainPlan {
+        val drops = mutableListOf<Long>()
+        val rewrites = mutableListOf<Pair<Long, String>>()
+        var local: TaskItem? = null
+    }
+
+    /** Judge + merge one row's queued edits (seq order) against the server row.
+     *  Writes nothing: [pruneStaleTaskOps] applies the plan.
      *
      *  Every rewritten op gets base = the server row, not the previous merged row
      *  as on iOS: the flusher coalesces a row's upserts, so only the tail is ever
      *  sent, and its payload already holds every earlier edit. A tail based on a
      *  merged row that never reached the server would drop those edits at the
      *  next prune. */
-    private suspend fun LocalStore.Tx.reconcileTaskChain(chain: List<OutboxEntity>, server: JsonObject, now: String) {
-        val serverMs = updatedAtMs(server) ?: return
+    private fun planTaskChain(chain: List<OutboxEntity>, server: JsonObject, now: String): ChainPlan {
+        val plan = ChainPlan()
+        val serverMs = updatedAtMs(server) ?: return plan
         var onto: JsonObject? = null          // the previous op's merged row, once the chain is in conflict
         var previous: JsonObject? = null      // the previous op's payload as queued
         var lastMerged: Pair<Long, TaskItem>? = null
@@ -136,7 +155,7 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
                 // This op's own change is its payload against the op before it.
                 val merged = mergeTaskRow(base = diffBase, local = local, server = prevMerged, localMs = localMs, serverMs = serverMs, nowIso = now)
                 val model = runCatching { DbRowCodec.decodeTask(merged) }.getOrNull() ?: continue
-                rewriteOutbox(op.seq, merged.toString(), server.toString())
+                plan.rewrites += op.seq to merged.toString()
                 onto = merged
                 lastMerged = op.seq to model
                 continue
@@ -144,25 +163,26 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
             // The chain's head.
             val base = op.base?.let { b -> runCatching { Json.parseToJsonElement(b).jsonObject }.getOrNull() }
             if (base != null) {
-                if (stripVolatile(server) == stripVolatile(base)) return   // server unchanged since we read it → the chain is the only change
+                if (stripVolatile(server) == stripVolatile(base)) return plan   // server unchanged since we read it → the chain is the only change
                 val merged = mergeTaskRow(base = base, local = local, server = server, localMs = localMs, serverMs = serverMs, nowIso = now)
-                val model = runCatching { DbRowCodec.decodeTask(merged) }.getOrNull() ?: return
+                val model = runCatching { DbRowCodec.decodeTask(merged) }.getOrNull() ?: return plan
                 println("[outbox] 3-way merged tasks op ${op.recordId} against a newer server row")
-                rewriteOutbox(op.seq, merged.toString(), server.toString())
+                plan.rewrites += op.seq to merged.toString()
                 onto = merged
                 lastMerged = op.seq to model
             } else if (serverMs > localMs + LWW_SKEW_MS) {
                 println("[outbox] pruning stale tasks op ${op.recordId} — server is newer (no merge base)")
-                dequeue(op.seq)   // the next op becomes the head
+                plan.drops += op.seq   // the next op becomes the head
             } else {
-                return
+                return plan
             }
         }
         // The local row follows the chain's LAST op (the UI shows the server's
         // changes to the fields this device didn't touch), but only when that op
         // was merged; otherwise the local row already is its intent.
-        val (seq, model) = lastMerged ?: return
-        if (seq == chain.last().seq) upsert(Tables.TASKS, model, TaskItem.serializer(), model.id, model.updatedAt)
+        val (seq, model) = lastMerged ?: return plan
+        if (seq == chain.last().seq) plan.local = model
+        return plan
     }
 
     /** The newest SERVER stamp seen per table during the last [hydrate] — the
@@ -250,8 +270,14 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
      *  catch-up's) failed. Only a successful read clears it; until then every
      *  catch-up re-reads, because a device that knew nothing (a fresh sign-in)
      *  filled its lists with no members and the owner's edits would route as
-     *  unshared (audit 2026-09-22 C8). */
-    @Volatile private var membershipUnresolved = false
+     *  unshared (audit 2026-09-22 C8).
+     *
+     *  It starts TRUE: a relaunch resumes from the persisted cursors with no full
+     *  hydrate, so a read that failed before the process died was never retried
+     *  until some list changed. iOS re-reads membership on every launch through
+     *  its full hydrate; here the first catch-up of a process does (one
+     *  collection_members read per launch). */
+    @Volatile private var membershipUnresolved = true
 
     /** Collections + their membership. RLS returns own AND shared-with-me rows;
      *  collection_members (visible to member or owner) supplies each row's
@@ -476,6 +502,23 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
 
         private fun stripVolatile(o: JsonObject): Map<String, JsonElement> = o.filterKeys { it !in VOLATILE_KEYS }
 
+        // The task columns that hold an instant. PostgREST writes them "…+00:00",
+        // the phone "…Z", so the merge compares these as instants.
+        private val TIMESTAMP_KEYS = setOf("completed_at", "due_at", "created_at")
+
+        /** Equal values for [key]: the same JSON, or for a timestamp column the
+         *  same instant. A base taken from the phone's own payload (the op queued
+         *  before it, or the one that just landed) holds the phone's text, and the
+         *  server's copy of the same instant read as a server change (audit
+         *  2026-09-22 C9: an Undo under a slow commit kept the old completion time). */
+        private fun sameValue(key: String, a: JsonElement?, b: JsonElement?): Boolean {
+            if (a == b) return true
+            if (key !in TIMESTAMP_KEYS) return false
+            val am = (a as? JsonPrimitive)?.contentOrNull?.let { Time.parseMillis(it) } ?: return false
+            val bm = (b as? JsonPrimitive)?.contentOrNull?.let { Time.parseMillis(it) } ?: return false
+            return am == bm
+        }
+
         internal fun updatedAtMs(row: JsonObject): Long? =
             (row["updated_at"] as? JsonPrimitive)?.contentOrNull?.let { Time.parseMillis(it) }
 
@@ -485,6 +528,7 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
          *   - changed locally, unchanged on the server → the local value
          *   - changed on BOTH → the newer writer, with a skew margin: the server
          *     wins only when it is newer by more than [LWW_SKEW_MS], else local.
+         *  Timestamp columns compare as instants ([sameValue]).
          *  `updated_at` is re-stamped with [nowIso] (strictly newer than both, so the
          *  other devices' stale-write guards accept the merged row); `user_id` is
          *  dropped (the gateway re-attaches it). Pure — unit-tested. */
@@ -503,8 +547,8 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
                 val l = local[key]
                 val s = server[key]
                 val b = base[key]
-                val localChanged = l != b
-                val serverChanged = s != b
+                val localChanged = !sameValue(key, l, b)
+                val serverChanged = !sameValue(key, s, b)
                 val chosen = when {
                     !localChanged -> s
                     !serverChanged -> l

@@ -142,15 +142,19 @@ class LocalStore(private val db: UnstuckDatabase) {
      *  carries no timestamp, or neither can be parsed, the write proceeds (we
      *  can't prove it's stale) — matching the prior unconditional behaviour. */
     suspend fun <T> upsertIfNewer(table: String, model: T, ser: KSerializer<T>, id: String, incomingUpdatedAt: String?): Boolean {
-        if (incomingUpdatedAt != null) {
-            val incoming = Time.parseMillis(incomingUpdatedAt)
-            val localIso = records.getOne(table, id)?.updatedAt
-            val local = localIso?.let { Time.parseMillis(it) }
-            if (incoming != null && local != null && local > incoming) return false
-        }
+        if (localIsNewer(table, id, incomingUpdatedAt)) return false
         records.upsertOne(entity(table, model, ser, id, incomingUpdatedAt))
         invalidate(table)
         return true
+    }
+
+    /** [upsertIfNewer]'s guard: the stored row's stamp is STRICTLY newer. */
+    private suspend fun localIsNewer(table: String, id: String, incomingUpdatedAt: String?): Boolean {
+        if (incomingUpdatedAt == null) return false
+        val incoming = Time.parseMillis(incomingUpdatedAt)
+        val localIso = records.getOne(table, id)?.updatedAt
+        val local = localIso?.let { Time.parseMillis(it) }
+        return incoming != null && local != null && local > incoming
     }
 
     suspend fun delete(table: String, id: String) {
@@ -238,12 +242,26 @@ class LocalStore(private val db: UnstuckDatabase) {
         suspend fun enqueue(op: OutboxEntity): Long = outboxDao.enqueue(op)
         suspend fun dequeue(seq: Long) = outboxDao.remove(seq)
         suspend fun rewriteOutbox(seq: Long, payload: String?, base: String?) = outboxDao.rewrite(seq, payload, base)
+        suspend fun rebaseLaterUpserts(table: String, id: String, afterSeq: Long, base: String?) =
+            outboxDao.rebaseLaterUpserts(table, id, afterSeq, base)
 
         suspend fun <T> getOne(table: String, id: String, ser: KSerializer<T>): T? = this@LocalStore.getOne(table, id, ser)
         suspend fun <T> snapshot(table: String, ser: KSerializer<T>): List<T> = this@LocalStore.snapshot(table, ser)
 
         suspend fun <T> upsert(table: String, model: T, ser: KSerializer<T>, id: String, updatedAt: String? = null) {
             records.upsertOne(entity(table, model, ser, id, updatedAt))
+            touched += table
+        }
+
+        /** [LocalStore.upsertIfNewer] on the open transaction. */
+        suspend fun <T> upsertIfNewer(table: String, model: T, ser: KSerializer<T>, id: String, incomingUpdatedAt: String?): Boolean {
+            if (localIsNewer(table, id, incomingUpdatedAt)) return false
+            upsert(table, model, ser, id, incomingUpdatedAt)
+            return true
+        }
+
+        suspend fun delete(table: String, id: String) {
+            records.deleteById(table, id)
             touched += table
         }
 

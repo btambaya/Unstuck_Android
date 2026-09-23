@@ -40,10 +40,14 @@ internal object RowApply {
         // it done) used to replace it; the next edit, built on that row, then
         // carried the server's old values and the prune merged the first edit
         // away. The prune merges the server's change in before the flush
-        // (parity with iOS build 81, audit 2026-09-22 C9).
+        // (parity with iOS build 81, audit 2026-09-22 C9). The check and the write
+        // are one transaction: an edit committed between them is stamped by the
+        // phone's clock, so an echo stamped later by the server's overwrote it.
         Tables.TASKS -> DbRowCodec.decodeTask(row).let {
-            if (store.latestPendingUpsert(table, it.id) != null) false
-            else store.upsertIfNewer(table, it, TaskItem.serializer(), it.id, it.updatedAt)
+            store.transaction {
+                if (latestPendingUpsert(table, it.id) != null) false
+                else upsertIfNewer(table, it, TaskItem.serializer(), it.id, it.updatedAt)
+            }
         }
         Tables.SESSIONS -> DbRowCodec.decodeSession(row).let {
             store.upsertIfNewer(table, it, Session.serializer(), it.id, it.completedAt)

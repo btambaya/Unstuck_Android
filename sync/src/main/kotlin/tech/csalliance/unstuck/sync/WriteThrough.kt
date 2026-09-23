@@ -179,9 +179,19 @@ class WriteThrough(private val store: LocalStore) {
     suspend fun deleteReasonLog(id: String) = deleteLocalAndEnqueue(Tables.REASON_LOGS, id)
 
     private suspend fun deleteLocalAndEnqueue(table: String, id: String) {
-        store.delete(table, id)
-        cancelPendingUpserts(table, id)
-        enqueue(table, id, "delete", null)
+        // The row delete, the cancel of its queued upserts and the delete op are
+        // ONE transaction (parity with iOS build 81 deleteAndEnqueue, audit
+        // 2026-09-22 C9). Apart, the task prune's transaction could land after the
+        // row delete, find the upserts still queued and save its merged row back:
+        // a task the server no longer has.
+        store.transaction {
+            delete(table, id)
+            for (op in pending()) {
+                if (op.recordTable == table && op.recordId == id && op.op == "upsert") dequeue(op.seq)
+            }
+            enqueue(outboxOp(table, id, "delete", null))
+        }
+        runCatching { onEnqueue?.invoke() }
     }
 
     /** Drop any queued upsert ops for a row about to be deleted, so a held-back

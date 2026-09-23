@@ -147,11 +147,7 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
      *  where each queued edit's base is the edit before it; audit 2026-09-22 C9). */
     private suspend fun landTaskUpsert(op: OutboxEntity) = store.transaction {
         dequeue(op.seq)
-        for (later in pending()) {
-            if (later.seq > op.seq && later.op == "upsert" && later.recordTable == op.recordTable && later.recordId == op.recordId) {
-                rewriteOutbox(later.seq, later.payload, op.payload)
-            }
-        }
+        rebaseLaterUpserts(op.recordTable, op.recordId, op.seq, op.payload)
     }
 
     /** Ids present in the local records cache for [table] (decoded snapshot).

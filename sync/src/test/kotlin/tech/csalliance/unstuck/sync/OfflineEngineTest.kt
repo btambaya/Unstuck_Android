@@ -1,11 +1,22 @@
 package tech.csalliance.unstuck.sync
 
 import androidx.room.Room
+import androidx.room.RoomDatabase
 import androidx.test.core.app.ApplicationProvider
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.Executor
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Deferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitCancellation
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
@@ -323,6 +334,26 @@ class OfflineEngineTest {
         assertFalse("user_id is never carried (the gateway re-attaches it)", m2.containsKey("user_id"))
     }
 
+    // PostgREST hands timestamps back as "…+00:00"; the phone writes "…Z". A base
+    // taken from the phone's own payload (the op queued before it, or the one that
+    // just landed) holds the phone's text, so the server's copy of the SAME instant
+    // read as a server change, and the two-sided "conflict" went to the server's
+    // stamp: an Undo under a slow commit kept the old completion time.
+    @Test fun mergeTaskRow_aTimestampTheServerOnlyReformattedIsNotAServerChange() {
+        val done = task("t1", updatedAt = "2026-05-21T09:10:00.000Z").copy(done = true, completedAt = "2026-05-21T09:10:00.000Z")
+        val base = serverRow(done)
+        val undo = serverRow(done.copy(done = false, completedAt = null, updatedAt = "2026-05-21T09:10:00.500Z"))
+        // Mark done committed 3 s after the Undo tap (past the skew margin).
+        val server = serverRow(done.copy(completedAt = "2026-05-21T09:10:00+00:00", updatedAt = "2026-05-21T09:10:03.500000+00:00"))
+        val m = Hydrator.mergeTaskRow(base, undo, server, localMs = Hydrator.updatedAtMs(undo)!!, serverMs = Hydrator.updatedAtMs(server)!!, nowIso = "x")
+        assertEquals(false, m.bool("done"))
+        assertNull("the Undo's cleared completion time stands", m.str("completed_at"))
+        // A genuinely different time is still a server change (newer, so it wins).
+        val redone = serverRow(done.copy(completedAt = "2026-05-21T09:20:00+00:00", updatedAt = "2026-05-21T09:20:00.000000+00:00"))
+        val m2 = Hydrator.mergeTaskRow(base, undo, redone, localMs = Hydrator.updatedAtMs(undo)!!, serverMs = Hydrator.updatedAtMs(redone)!!, nowIso = "x")
+        assertEquals("2026-05-21T09:20:00+00:00", m2.str("completed_at"))
+    }
+
     @Test fun pruneStaleTaskOps_withoutBase_keepsAnOpInsideTheSkewMargin_dropsBeyondIt() = runTest {
         val remote = FakeRemote()
         val hydrator = Hydrator(remote, store)
@@ -517,6 +548,96 @@ class OfflineEngineTest {
         assertFalse(store.tasks().first().single().done)
     }
 
+    // The same two Undo paths on a slow link: Mark done commits 3 s after the Undo
+    // tap, and the server hands its completion time back as "…+00:00". The Undo
+    // must clear the completion time too, or the next completion keeps the stale
+    // one (stampCompletion preserves a prior completed_at).
+    @Test fun chain_anUndoBehindAMarkDoneThatCommittedSlowlyClearsTheCompletionTime() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store).apply { nowIso = { "2026-05-21T12:00:00.000Z" } }
+        val write = WriteThrough(store)
+        val s0 = synced("2026-05-21T09:00:00.000000+00:00")
+        store.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+        val done = s0.copy(done = true, completedAt = "2026-05-21T09:10:00.000Z", updatedAt = "2026-05-21T09:10:00.000Z")
+        write.upsertTask(done)
+        write.upsertTask(done.copy(done = false, completedAt = null, updatedAt = "2026-05-21T09:10:00.500Z"))
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(done.copy(completedAt = "2026-05-21T09:10:00+00:00", updatedAt = "2026-05-21T09:10:03.500000+00:00")))
+
+        hydrator.pruneStaleTaskOps()
+
+        val undo = payload(store.pending().last())
+        assertEquals(false, undo.bool("done"))
+        assertNull(undo.str("completed_at"))
+        val local = store.tasks().first().single()
+        assertFalse(local.done)
+        assertNull(local.completedAt)
+    }
+
+    @Test fun chain_anUndoQueuedBehindASlowlyCommittedMarkDoneClearsTheCompletionTime() = runTest {
+        val write = WriteThrough(store)
+        val s0 = synced("2026-05-21T09:00:00.000000+00:00")
+        store.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+        val done = s0.copy(done = true, completedAt = "2026-05-21T09:10:00.000Z", updatedAt = "2026-05-21T09:10:00.000Z")
+        write.upsertTask(done)
+        val remote = object : SyncRemote {
+            var landed: JsonObject? = null
+            override suspend fun fetchAll(table: String): List<JsonObject> = listOfNotNull(landed)
+            override suspend fun upsert(table: String, row: JsonObject, userId: String) {
+                if (landed != null) throw RuntimeException("offline")   // Undo's send fails
+                write.upsertTask(done.copy(done = false, completedAt = null, updatedAt = "2026-05-21T09:10:00.500Z"))
+                landed = JsonObject(
+                    row + mapOf(
+                        "completed_at" to JsonPrimitive("2026-05-21T09:10:00+00:00"),
+                        "updated_at" to JsonPrimitive("2026-05-21T09:10:03.500000+00:00"),
+                    ),
+                )
+            }
+            override suspend fun delete(table: String, id: String) {}
+            override suspend fun rpc(fn: String, params: JsonObject) {}
+            override suspend fun fetchSince(table: String, column: String, since: String, limit: Int): List<JsonObject> = emptyList()
+            override suspend fun fetchIds(table: String, offset: Int, limit: Int): List<String> = emptyList()
+        }
+        OutboxFlusher(remote, store).flush("u1")
+
+        Hydrator(remote, store).apply { nowIso = { "2026-05-21T12:00:00.000Z" } }.pruneStaleTaskOps()
+
+        val undo = payload(store.pending().single())
+        assertEquals(false, undo.bool("done"))
+        assertNull(undo.str("completed_at"))
+        assertNull(store.tasks().first().single().completedAt)
+    }
+
+    // Android has no per-row savepoint (a nested Room transaction that fails rolls
+    // the outer one back), so a write that fails partway through a chain must not
+    // commit the writes before it: a head merged onto the server row with its tail
+    // still unmerged flushes the tail and re-opens the completion the head took in.
+    @Test fun chain_aWriteThatFailsMidChainLeavesTheWholeChainAsQueued() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store).apply { nowIso = { "2026-05-21T12:00:00.000Z" } }
+        val write = WriteThrough(store)
+        val s0 = synced("2026-05-21T09:00:00.000000+00:00")
+        store.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+        val e1 = s0.copy(name = "Call mom re: birthday", updatedAt = "2026-05-21T09:10:00.000Z")
+        write.upsertTask(e1)
+        write.upsertTask(e1.copy(estimateMin = 10, updatedAt = "2026-05-21T09:11:00.000Z"))
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(s0.copy(done = true, completedAt = "2026-05-21T09:30:00.000Z", updatedAt = "2026-05-21T09:30:00.000000+00:00")))
+        val queued = store.pending()
+        // The second op's rewrite fails (a full disk, an I/O error).
+        db.openHelper.writableDatabase.execSQL(
+            "CREATE TRIGGER fail_rewrite BEFORE UPDATE ON outbox WHEN OLD.seq = ${queued[1].seq} " +
+                "BEGIN SELECT RAISE(ABORT, 'disk I/O error'); END",
+        )
+
+        val pruned = runCatching { hydrator.pruneStaleTaskOps() }
+
+        assertTrue("the failure aborts the prune, and with it the flush after it", pruned.isFailure)
+        assertEquals("neither op was rewritten", queued, store.pending())
+        assertFalse("the local row is untouched", store.tasks().first().single().done)
+        db.openHelper.writableDatabase.execSQL("DROP TRIGGER fail_rewrite")
+        hydrator.pruneStaleTaskOps()
+        assertEquals("the next prune merges the whole chain", listOf(true, true), store.pending().map { payload(it).bool("done") })
+    }
+
     // Mark done, then Undo, while the web renamed the task: both edits merge onto
     // the rename, and the Undo is what reaches the server.
     @Test fun chain_markDoneThenUndoWhileTheWebRenamedLandsTheRenameUndone() = runTest {
@@ -622,6 +743,104 @@ class OfflineEngineTest {
         val later = serverRow(s0.copy(name = "Web", updatedAt = "2026-05-21T13:00:00.000000+00:00"))
         assertTrue(RowApply.apply(Tables.TASKS, later, store, "u1"))
         assertEquals("Web", store.tasks().first().single().name)
+    }
+
+    // --- a write landing between two statements (audit 2026-09-22 C9) ---
+    // Room runs its query callback on the calling thread just before each
+    // statement, so the gate below can hold one statement that runs OUTSIDE a
+    // transaction while the test commits another write in the gap. Inside a
+    // transaction it never holds: there the other write lands wholly before or
+    // after.
+
+    private class StatementGate : RoomDatabase.QueryCallback {
+        lateinit var db: RoomDatabase
+        private val armed = AtomicReference<((String) -> Boolean)?>(null)
+        private val released = CountDownLatch(1)
+        val reached = CompletableDeferred<Unit>()
+        fun holdNext(match: (String) -> Boolean) = armed.set(match)
+        fun disarm() = armed.set(null)
+        fun release() = released.countDown()
+        override fun onQuery(sqlQuery: String, bindArgs: List<Any?>) {
+            val match = armed.get() ?: return
+            if (!match(sqlQuery) || db.inTransaction() || !armed.compareAndSet(match, null)) return
+            reached.complete(Unit)
+            released.await(10, TimeUnit.SECONDS)
+        }
+    }
+
+    private fun gatedDb(gate: StatementGate): UnstuckDatabase =
+        Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext(), UnstuckDatabase::class.java)
+            .allowMainThreadQueries()
+            .setQueryCallback(gate, Executor { it.run() })
+            .build()
+            .also { gate.db = it }
+
+    /** Until [gate] holds a statement, or [job] finished without reaching one. */
+    private suspend fun awaitGateOr(gate: StatementGate, job: Deferred<*>) =
+        withTimeout(5_000) { while (!gate.reached.isCompleted && !job.isCompleted) delay(5) }
+
+    // The realtime guard read "is an edit of this task queued?" and wrote the echo
+    // as two statements. With the phone's clock behind the server's, a rename
+    // committed between them was stamped EARLIER than the web's echo, and the echo
+    // overwrote it; the next edit, built on that row, carried the old name and the
+    // prune merged the rename away.
+    @Test fun realtimeEcho_cannotLandBetweenTheQueuedEditCheckAndItsWrite() = runBlocking {
+        val gate = StatementGate()
+        val gdb = gatedDb(gate)
+        try {
+            val gstore = LocalStore(gdb)
+            val write = WriteThrough(gstore)
+            val s0 = synced("2026-05-21T09:00:00.000000+00:00")
+            gstore.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+            val webDone = serverRow(s0.copy(done = true, completedAt = "2026-05-21T09:10:05.000Z", updatedAt = "2026-05-21T09:10:05.000000+00:00"))
+            // Hold the echo at its read of the local row, the step after the check.
+            gate.holdNext { it.startsWith("SELECT * FROM records WHERE tableName = ? AND id = ?") }
+            val echo = async(Dispatchers.IO) { RowApply.apply(Tables.TASKS, webDone, gstore, "u1") }
+            awaitGateOr(gate, echo)
+            gate.disarm()
+
+            write.upsertTask(s0.copy(name = "Call mom re: birthday", updatedAt = "2026-05-21T09:10:04.000Z"))
+            gate.release()
+            echo.await()
+
+            assertEquals("the echo must not overwrite the edit queued in between", "Call mom re: birthday", gstore.tasks().first().single().name)
+        } finally {
+            gate.release()
+            gdb.close()
+        }
+    }
+
+    // A task deleted while the prune reconciles it. The delete was three
+    // statements (drop the row, cancel its queued edits, queue the delete); the
+    // prune's transaction landed after the first, found the edits still queued and
+    // saved its merged row back over the delete: a task the server no longer has.
+    @Test fun chain_thePruneCannotLandInsideATaskDelete() = runBlocking {
+        val gate = StatementGate()
+        val gdb = gatedDb(gate)
+        try {
+            val gstore = LocalStore(gdb)
+            val remote = FakeRemote()
+            val write = WriteThrough(gstore)
+            val s0 = synced("2026-05-21T09:00:00.000000+00:00")
+            gstore.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+            write.upsertTask(s0.copy(name = "Call mom re: birthday", updatedAt = "2026-05-21T09:10:00.000Z"))
+            remote.serverRows[Tables.TASKS] = listOf(serverRow(s0.copy(done = true, updatedAt = "2026-05-21T09:30:00.000000+00:00")))
+            // Hold the delete at its read of the queued ops, after the row is gone.
+            gate.holdNext { it.startsWith("SELECT * FROM outbox ORDER BY seq ASC") }
+            val delete = async(Dispatchers.IO) { write.deleteTask("t1") }
+            awaitGateOr(gate, delete)
+            gate.disarm()
+
+            Hydrator(remote, gstore).pruneStaleTaskOps()
+            gate.release()
+            delete.await()
+
+            assertTrue("the deleted task stays deleted", gstore.tasks().first().isEmpty())
+            assertEquals(listOf("delete"), gstore.pending().map { it.op })
+        } finally {
+            gate.release()
+            gdb.close()
+        }
     }
 
     // The sign-out drain's 5 s timeout cancels the prune's read. The prune used to

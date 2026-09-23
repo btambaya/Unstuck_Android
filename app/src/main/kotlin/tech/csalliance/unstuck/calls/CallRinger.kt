@@ -125,6 +125,14 @@ object CallRinger {
         else p.getString(K_CALL_ID, null)
     }
 
+    /** Whether the persisted ring record is still [callId]'s — live, settled or
+     *  stale alike; false once it was cleared or a later ring replaced it. The
+     *  voice service reports straight into the queue only when it is not
+     *  (Android audit 2026-09-23, A5). */
+    fun recordIs(context: Context, callId: String): Boolean = synchronized(lock) {
+        prefs(context).getString(K_CALL_ID, null) == callId
+    }
+
     /** The payload of the call that is still RINGING (unsettled, not stale), for
      *  the activity to restore itself from / a deep link to resume into. */
     fun ringing(context: Context, nowMs: Long = System.currentTimeMillis()): IncomingCallPayload? = synchronized(lock) {

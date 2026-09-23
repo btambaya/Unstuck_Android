@@ -452,8 +452,9 @@ class AssistantMemoryHooksTest {
 
     /** One voice session's receipts, landed in the thread (stamped) — the turn. */
     private fun kotlinx.coroutines.test.TestScope.landVoice(vm: AppViewModel): ChatMessage {
+        val before = vm.assistantHistory.count { it.content == VOICE_SESSION_RECEIPTS }
         vm.endVoiceSession()
-        settleUntil { vm.assistantHistory.any { it.content == VOICE_SESSION_RECEIPTS } }
+        settleUntil { vm.assistantHistory.count { it.content == VOICE_SESSION_RECEIPTS } > before }
         return vm.assistantHistory.last { it.content == VOICE_SESSION_RECEIPTS }
     }
 
@@ -486,6 +487,20 @@ class AssistantMemoryHooksTest {
         assertNull("unlinked from the task that is gone", back!!.taskId)
         assertFalse("back in the inbox", cap.id in vm.assistantApi.getArchivedCaptureIds())
         assertTrue(vm.assistantApi.getTasks().none { it.id == taskId })
+
+        // A focus note already filed on another task: the promote left that
+        // link alone, so the Undo does too — and still puts it back in the inbox.
+        val made = vm.tool("create_task", buildJsonObject { put("name", "Renew the lease") })
+        val onTask = Regex("id=(\\S+)").find(made)!!.groupValues[1]
+        val filed = capture(taskId = onTask, body = "check the break clause")
+        vm.assistantApi.upsertCapture(filed)
+        vm.resetVoiceScratch()
+        assertTrue(vm.runVoiceTool("promote_capture", buildJsonObject { put("captureId", filed.id) }).startsWith("ok"))
+        val second = landVoice(vm)
+        vm.undoAssistantReceipt(second.id!!, 0)
+        settleUntil { vm.receipt(second).undone }
+        assertEquals(onTask, vm.assistantApi.getCaptures().single { it.id == filed.id }.taskId)
+        assertFalse(filed.id in vm.assistantApi.getArchivedCaptureIds())
     }
 
     /** A task the assistant made that the user has since taken notes on (or

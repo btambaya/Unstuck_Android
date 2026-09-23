@@ -4,6 +4,22 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
+## 2026-09-23 (evening) — vc102 / 0.5.18 (list-item gestures + reconnect card) and vc103 / 0.5.19 (stage 2: same id for same day)
+
+- **vc102** (c10d689, parity with iOS build 84): collection items use one gesture per job — TAP strikes out, SWIPE LEFT Delete,
+  SWIPE RIGHT Pin/Unpin + "To task", HOLD edits (also as accessibility actions); a dead Google connection is a plain
+  "Google Calendar stopped syncing" card with Reconnect, never the raw `invalid_grant (400)`.
+- **vc103** (2534bc5, Firebase release 560gofaakv1h8, 2 testers only): stage 2 / C21 — every repeating-task occurrence id is
+  UUIDv5(task id | date) (`occurrenceId`, the shared vectors in unstuck_ios/audit/parity-2026-09-23/deterministic-occurrence-ids.md
+  §1.5), minted insert-if-absent (`on_conflict=id`, `resolution=ignore-duplicates`) and retimed only while open on its date
+  (rules G + H); the horizon top-up is tail-only and serialised after a GOOD cal_blocks pull. Shipped the same evening as
+  web stage 2 (unstuck main 976b900) — iOS has had it since build 85.
+- **Backend live the same evening:** 077 daily voice minutes (Talk + calls share 10 min/local day; the Worker refuses a connect
+  with none left with the 429 Android already maps — the minutes-left line / 1-minute warning are iOS-only so far) and 078 push
+  tokens tied to the auth session (senders read `live_device_tokens`; a remote sign-out stops pushes/calls).
+- **Device checks:** the Google stage-2 path (a repeating task mirrored to Google: no duplicate events after a second device
+  fills in the same day; a moved occurrence stays moved).
+
 ## 2026-09-23 — vc100 / 0.5.16 (parity with iOS build 81) and vc101 / 0.5.17 (pre-launch audit P0 + P1)
 
 Both went to the 2 Firebase testers only.

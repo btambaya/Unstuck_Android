@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 101
-        versionName = "0.5.17"
+        versionCode = 102
+        versionName = "0.5.18"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.17 — Fixes from the pre-launch review. Calls from Unstuck now ring when the app is closed or in the background (please test: lock the phone, or swipe the app away, and ask for a call), keep ringing for the whole call, and a call-back you asked for survives hanging up. Background sync, call results and reminders no longer wait for you to open the app; reminders are on time on Android 14+. Sign-up: no duplicate life areas, onboarding only for new accounts, and an old sign-in link no longer crashes. Offline edits no longer get stuck; dates work with Arabic, Persian and other non-Latin digits; habit focus starts at the right time; notes taken during focus sync; sharing shows up right after sign-in; assistant Undo never deletes what you kept; Export everything is complete; and the Google Calendar screen says plainly that your scheduled tasks are added to your main calendar."
+    releaseNotes = "v0.5.18 — List items: tap to strike an item out, swipe left to delete, swipe right to pin it or move it to your tasks, press and hold to edit — no more ••• menu. And if Google Calendar stops syncing, the calendar says so in plain words with a Reconnect button instead of a raw error code."
 }
 
 dependencies {

@@ -115,8 +115,7 @@ fun SharedTaskDetailSheet(
     val canAct = level.canComplete
 
     // The share this sheet is for — the row carries it, else (opened from a push,
-    // by task id alone) my Shared-with-you row does. None → no menu.
-    val sharedRows by vm.sharedWithMe.collectAsStateWithLifecycle()
+    // by task id alone) my Shared-with-you row does (sharedRows, above). None → no menu.
     val shareId = shared.shareId.ifBlank { null }
         ?: sharedRows.firstOrNull { it.taskId == shared.taskId }?.shareId?.ifBlank { null }
     val owner = ownerName.ifBlank { "Someone" }

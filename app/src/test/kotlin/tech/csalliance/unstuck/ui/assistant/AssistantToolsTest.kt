@@ -2048,21 +2048,21 @@ class AssistantToolsTest {
     @Test fun `stop repeating carries today's tick onto the task`() = runTest {
         val h = makeApi().also { seedSeries(it) }
         h.run("complete_task", "taskId" to "r")
-        assertEquals("ok: \"Standup\" no longer repeats (its future slots were removed) — today's occurrence was already done, so the task is now marked done",
+        assertEquals("ok: \"Standup\" no longer repeats (future occurrences removed) — today's occurrence was already done, so the task is now marked done",
             h.run("set_task_recurrence", "taskId" to "r", "kind" to "none"))
         assertNull(h.state.tasks[1].recurrence)
         assertTrue(h.state.tasks[1].done)
         assertTrue(h.state.tasks[1].completedAt != null)
 
         val open = makeApi().also { seedSeries(it) }
-        assertEquals("ok: \"Standup\" no longer repeats (its future slots were removed)", open.run("set_task_recurrence", "taskId" to "r", "kind" to "none"))
+        assertEquals("ok: \"Standup\" no longer repeats (future occurrences removed)", open.run("set_task_recurrence", "taskId" to "r", "kind" to "none"))
         assertFalse("an open day leaves the task open", open.state.tasks[1].done)
     }
 
     /** Turning a repeat on for a done task never leaves a DONE template. */
     @Test fun `start repeating a done task reopens it`() = runTest {
         val h = makeApi { tasks += task("d", "Stretch", done = true, completedAt = "${TODAY}T08:00:00Z") }
-        assertEquals("ok: \"Stretch\" now repeats daily (it was done — now open again) (not on the calendar yet — schedule_task it to place the series)",
+        assertEquals("ok: \"Stretch\" now repeats daily (it was done — now open again) — it has no calendar slot yet; schedule_task it to place the first one",
             h.run("set_task_recurrence", "taskId" to "d", "kind" to "daily"))
         assertFalse(h.state.tasks[0].done)
         assertNull(h.state.tasks[0].completedAt)
@@ -2074,7 +2074,7 @@ class AssistantToolsTest {
     @Test fun `start repeating a task done today keeps today's tick`() = runTest {
         val done = promoted("d", "Stretch", "i1", done = true, completedAt = Instant.ofEpochMilli(NOW_MS).toString())
         val h = makeApi { tasks += done; blocks += block("dtd", "d", TODAY, "07:30") }
-        assertEquals("ok: \"Stretch\" now repeats daily (it was done — today's occurrence stays done) (calendar slots regenerated from its next slot)",
+        assertEquals("ok: \"Stretch\" now repeats daily at 07:30 (it was done — today's occurrence stays done)",
             h.run("set_task_recurrence", "taskId" to "d", "kind" to "daily"))
         assertFalse("an open series", h.state.tasks[0].done)
         val slot = h.state.blocks.first { it.id == "dtd" }

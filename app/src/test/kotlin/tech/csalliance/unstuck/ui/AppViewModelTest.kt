@@ -904,6 +904,116 @@ class AppViewModelTest {
     }
 
     // -----------------------------------------------------------------------
+    // ONE serialized label cascade for Settings + the assistant (iOS build 81,
+    // audit 2026-09-22 C19)
+    // -----------------------------------------------------------------------
+
+    private suspend fun seedArea(a: LifeArea) = store.upsert(Tables.LIFE_AREAS, a, LifeArea.serializer(), a.id)
+    private suspend fun seedTag(t: TagRow) = store.upsert(Tables.TAGS, t, TagRow.serializer(), t.id)
+
+    @Test fun labelCascade_readsTheStoreNotTheScreensFlows() = runTest(dispatcher) {
+        // Nothing collects vm.tasks / vm.lifeAreas here (the assistant in Talk mode with
+        // the sheet shut): their .value is []. The cascade still finds every row.
+        seedArea(LifeArea("la1", "Work", "indigo", 0))
+        seedTask(task("t1").copy(lifeArea = "Work"))
+        val vm = vm()
+        assertTrue(vm.renameLifeAreaNow("la1", "Career"))
+        assertEquals("Career", loadTask("t1")!!.lifeArea)
+        assertEquals("Career", store.lifeAreas().first().single().name)
+    }
+
+    @Test fun renameTag_dedupesIgnoringCase() = runTest(dispatcher) {
+        seedTag(TagRow("tg1", "x", null, 0))
+        seedTask(task("t1").copy(tags = listOf("x", "Y")))
+        val vm = vm()
+        assertTrue(vm.renameTagNow("tg1", "y"))
+        assertEquals("[x, Y] with x→y is one tag, not [y, Y]", listOf("y"), loadTask("t1")!!.tags)
+    }
+
+    @Test fun renameLifeArea_refusesATakenUnchangedOrBlankNameAndWritesNothing() = runTest(dispatcher) {
+        seedArea(LifeArea("la1", "Work", "indigo", 0))
+        seedArea(LifeArea("la2", "Home", "green", 1))
+        seedTask(task("t1").copy(lifeArea = "Work"))
+        val vm = vm()
+        assertFalse(vm.renameLifeAreaNow("la1", "home"))
+        assertFalse("an unchanged name is not a rename", vm.renameLifeAreaNow("la1", " Work "))
+        assertFalse(vm.renameLifeAreaNow("la1", "  "))
+        assertFalse("no such area", vm.renameLifeAreaNow("zz", "Office"))
+        assertEquals("Work", loadTask("t1")!!.lifeArea)
+        assertTrue("nothing queued", store.pending().isEmpty())
+        assertTrue("a case-only rename is allowed and carries the tasks", vm.renameLifeAreaNow("la1", "WORK"))
+        assertEquals("WORK", loadTask("t1")!!.lifeArea)
+    }
+
+    /** The old unchecked assistant rename left some devices with two same-named rows
+     *  (the quarantined op keeps the renamed local row alive through every pull).
+     *  Tidying the twin up must not move or strip the real row's tasks. */
+    @Test fun labelCascade_aTwinLeftByTheOldRenameKeepsTheRealRowsTasks() = runTest(dispatcher) {
+        seedArea(LifeArea("la1", "Work", "indigo", 0))
+        seedArea(LifeArea("la2", "Work", "amber", 9))
+        seedTag(TagRow("tg1", "quick", null, 0))
+        seedTag(TagRow("tg2", "Quick", null, 9))
+        seedTask(task("t1").copy(lifeArea = "Work", tags = listOf("quick")))
+        val vm = vm()
+        assertTrue(vm.renameLifeAreaNow("la2", "Errands"))
+        assertEquals("the real Work area keeps its tasks", "Work", loadTask("t1")!!.lifeArea)
+        seedArea(LifeArea("la3", "Work", "amber", 10))
+        assertTrue(vm.deleteLifeAreaNow("la3"))
+        assertEquals("Work", loadTask("t1")!!.lifeArea)
+        assertTrue(vm.renameTagNow("tg2", "fast"))
+        assertEquals(listOf("quick"), loadTask("t1")!!.tags)
+        seedTag(TagRow("tg3", "QUICK", null, 10))
+        assertTrue(vm.deleteTagNow("tg3"))
+        assertEquals("the tag \"quick\" still exists", listOf("quick"), loadTask("t1")!!.tags)
+        assertTrue("no task was rewritten", store.pending().none { it.recordTable == Tables.TASKS })
+    }
+
+    /** Settings fires and forgets (with the row as the editor saw it), so two renames of
+     *  one area can overlap. The cascades run one after the other: the tasks always end
+     *  on the area's final name, never on a name no area has. */
+    @Test fun labelCascade_overlappingAreaRenamesNeverStrandTasksOnAGoneName() = runTest(dispatcher) {
+        val area = LifeArea("la1", "Work", "indigo", 0)
+        seedArea(area)
+        val ids = (1..12).map { "t$it" }
+        ids.forEach { seedTask(task(it).copy(lifeArea = "Work")) }
+        val vm = vm()
+
+        vm.renameLifeArea(area, "Day job")
+        vm.renameLifeArea(area, "Office")
+        advanceUntilIdle()
+
+        assertEquals("Office", awaitLifeAreas { it.single().name == "Office" }.single().name)
+        val tasks = awaitTasks { l -> l.size == ids.size && l.all { it.lifeArea == "Office" } }
+        assertEquals(ids.toSet(), tasks.map { it.id }.toSet())
+    }
+
+    /** rename_area / delete_area / rename_tag / delete_tag go through the same cascade,
+     *  refusal included, on the live store. */
+    @Test fun assistant_labelToolsGoThroughTheCascadeOnTheLiveStore() = runTest(dispatcher) {
+        seedArea(LifeArea("la1", "Work", "indigo", 0))
+        seedArea(LifeArea("la2", "Health", "green", 1))
+        seedTag(TagRow("tg1", "deep", null, 0))
+        seedTask(task("t1").copy(lifeArea = "Work"))
+        seedTask(task("t2").copy(tags = listOf("deep", "Focus")))
+        val vm = vm()
+        fun args(vararg kv: Pair<String, String>) =
+            kotlinx.serialization.json.JsonObject(kv.associate { it.first to kotlinx.serialization.json.JsonPrimitive(it.second) })
+        suspend fun run(name: String, vararg kv: Pair<String, String>) = vm.runAssistantTool(name, args(*kv), HashMap(), HashMap())
+
+        assertEquals("error: area \"Health\" already exists — nothing changed", run("rename_area", "name" to "Work", "newName" to "health"))
+        assertEquals("Work", loadTask("t1")!!.lifeArea)
+        assertEquals("ok: renamed area \"Work\" → \"Day job\" (tasks updated)", run("rename_area", "name" to "Work", "newName" to "Day job"))
+        assertEquals("Day job", loadTask("t1")!!.lifeArea)
+        assertTrue(run("delete_area", "name" to "Day job").startsWith("ok: deleted area"))
+        assertNull(loadTask("t1")!!.lifeArea)
+
+        assertEquals("ok: renamed tag \"deep\" → \"focus\"", run("rename_tag", "name" to "deep", "newName" to "focus"))
+        assertEquals(listOf("focus"), loadTask("t2")!!.tags)
+        assertTrue(run("delete_tag", "name" to "focus").startsWith("ok: deleted tag"))
+        assertNull(loadTask("t2")!!.tags)
+    }
+
+    // -----------------------------------------------------------------------
     // deleteTask cascade
     // -----------------------------------------------------------------------
 

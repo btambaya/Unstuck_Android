@@ -5,11 +5,9 @@ import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
-import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -200,32 +198,59 @@ class GoogleCalendarPullTest {
         assertEquals(0, listCalls)
     }
 
-    /** A disconnect purges between pulls: an /events answer read before the revoke lands
-     *  first, and the purge then removes it — it can no longer bring the meetings back. */
-    @Test fun aDisconnectPurgeWaitsForThePullInFlight() = runTest {
+    /** A disconnect's purge supersedes every pull still reading: an /events answer read
+     *  before the revoke is never applied after it (the purge itself never waits on the
+     *  network), and the next pull applies as usual. */
+    @Test fun aPullReadBeforeADisconnectIsNeverAppliedAfterItsPurge() = runTest {
+        seed(gBlock("g_e1"))
         val reached = CompletableDeferred<Unit>()
         val release = CompletableDeferred<Unit>()
         events = {
             reached.complete(Unit)
             release.await()
-            CalendarClient.EventsResponse(listOf(event("e1")), emptyList())
+            CalendarClient.EventsResponse(listOf(event("e1"), event("e2")), emptyList())
         }
         val pull = newPull()
         val pulling = launch { pull.pull() }
         reached.await()
         var purged = false
-        val purge = launch {
-            pull.exclusive {
-                store.blocks().first().filter { it.externalConnectionId == "c1" }.forEach { write.deleteCalBlock(it.id) }
-                purged = true
+        pull.exclusive {
+            store.blocks().first().filter { it.externalConnectionId == "c1" }.forEach { write.deleteCalBlock(it.id) }
+            purged = true
+        }
+        assertTrue("the purge ran while the pull was still reading", purged)
+        release.complete(Unit)
+        pulling.join()
+        assertTrue("the stale answer was dropped", ids().isEmpty())
+        assertTrue(upserts.isEmpty())
+
+        respond(event("e3"))
+        assertTrue(pull.pull())
+        assertEquals("a pull begun after the purge applies", setOf("g_e3"), ids())
+    }
+
+    /** Two pulls overlap and the newer answer lands first: the older one must not put
+     *  back what the newer one removed, nor remove what it imported. */
+    @Test fun anOlderAnswerLandingAfterANewerOneIsDropped() = runTest {
+        val reached = CompletableDeferred<Unit>()
+        val release = CompletableDeferred<Unit>()
+        var calls = 0
+        events = {
+            if (++calls == 1) {
+                reached.complete(Unit)
+                release.await()
+                CalendarClient.EventsResponse(listOf(event("old")), emptyList())
+            } else {
+                CalendarClient.EventsResponse(listOf(event("new")), emptyList())
             }
         }
-        advanceUntilIdle()
-        assertFalse("the purge waits for the pull's writes", purged)
+        val pull = newPull()
+        val older = launch { pull.pull() }
+        reached.await()
+        assertTrue(pull.pull())
+        assertEquals(setOf("g_new"), ids())
         release.complete(Unit)
-        pulling.join(); purge.join()
-        assertTrue(purged)
-        assertNotNull("the pull did write", upserts.singleOrNull())
-        assertTrue("and the purge then removed it for good", ids().isEmpty())
+        older.join()
+        assertEquals("the older answer changed nothing", setOf("g_new"), ids())
     }
 }

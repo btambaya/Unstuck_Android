@@ -572,9 +572,10 @@ class SyncCoordinator(
             .onFailure { Log.w(TAG, "calendar disconnect failed", it) }
         // Drop the connection row locally so the bar flips back to "Connect" now
         // (the server row is gone; a later hydrate would reach the same state). Done
-        // between Google pulls and under the mutexes every catch-up holds, so neither a
-        // pull nor a catch-up whose read predates the revoke can put the account or its
-        // meetings back after this (parity with iOS build 81, audit 2026-09-22 C18).
+        // under the Google pull's write gate (a pull already reading is then never
+        // applied) and the mutexes every catch-up holds, so no answer read before the
+        // revoke can put the account or its meetings back (parity with iOS build 81,
+        // audit 2026-09-22 C18).
         calendarPull.exclusive {
             hydrateMutex.withLock {
                 engineMutex.withLock {

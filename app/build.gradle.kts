@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 99
-        versionName = "0.5.15"
+        versionCode = 100
+        versionName = "0.5.16"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.11 — The + button now creates whatever you're looking at: a new list on the Collections tab, an item inside a list, a task everywhere else. And the assistant stops announcing success out loud — no more 'Done —' opening every spoken reply, and no more tagging advice with where it remembered something from."
+    releaseNotes = "v0.5.16 — Brought level with the iPhone app (build 81). Repeating tasks: moving or deleting one day no longer rebuilds the series, ticking a repeating task completes today only, and starting a repeat asks for a day and time. Voice: a busy assistant says so and retries instead of going quiet, provider errors read in plain words, one-word answers are kept, and calls greet once and hang up cleanly on a failure. Calls: default hours 6am-11pm and the assistant refuses times this phone would decline. Sharing: you can block someone from People, and removing a person also ends the lists you share. Plus: reminders skip done or skipped days, Google Calendar sync shows its errors, area/tag renames carry their tasks, and Settings can clear your Assistant history."
 }
 
 dependencies {

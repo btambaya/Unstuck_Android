@@ -167,6 +167,9 @@ class GoogleBlockMirror(
             return
         }
         if (!isTaskBlock(fresh)) return
+        // Its delete is the newest queued op (a stale realtime echo put the row back
+        // for a moment): the delete's own Google call handles the event.
+        if (store.isBeingDeleted(Tables.CAL_BLOCKS, id)) return
         val stamped = push(fresh) ?: return
         if (stamped.externalEventId == fresh.externalEventId && stamped.externalConnectionId == fresh.externalConnectionId) return
         val result = stamp(id, stamped.externalEventId, stamped.externalConnectionId)

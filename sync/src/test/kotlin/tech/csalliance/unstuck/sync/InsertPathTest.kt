@@ -406,6 +406,28 @@ class InsertPathTest {
         assertNull(local("b1"))
     }
 
+    /** A row whose delete is queued — put back for a moment by a stale realtime
+     *  echo — is never pushed, and never stamped: a stamp queued behind the delete
+     *  would re-create the row on the server. */
+    @Test fun aRowBeingDeletedIsNeitherPushedNorStamped() = runTest {
+        val w = write(); val g = Google()
+        w.pushCalBlock = { g.push(it) }
+        w.pushCalBlockDelete = { g.delete(it) }
+        val x = occ("2026-09-24").copy(id = "b1")
+        store.upsert(Tables.CAL_BLOCKS, x, CalBlock.serializer(), "b1")
+        w.deleteCalBlock("b1")
+        store.upsert(Tables.CAL_BLOCKS, x, CalBlock.serializer(), "b1")   // the stale INSERT echo
+        w.googleMirror.queueLanded("b1")
+        w.googleMirror.awaitIdle()
+        assertTrue(g.calls.isEmpty())
+        assertEquals(MappingStamp.GONE, w.stampCalBlockMapping("b1", "evt-x", null))
+        assertEquals(listOf("delete"), ops().map { it.op })
+        // An Undo that re-creates it (a write queued after the delete) is pushed.
+        w.upsertCalBlock(x)
+        w.googleMirror.awaitIdle()
+        assertEquals(listOf("insert evt-1 07:00"), g.calls)
+    }
+
     /** Every save but the stamp carries the row's CURRENT mapping: a rewrite built
      *  from a snapshot taken before the stamp no longer nulls it. */
     @Test fun aSnapshotRewriteKeepsTheStampedMapping() = runTest {

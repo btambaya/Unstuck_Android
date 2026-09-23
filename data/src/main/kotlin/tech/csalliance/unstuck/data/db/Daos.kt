@@ -152,6 +152,11 @@ interface OutboxDao {
     @Query("SELECT COUNT(*) FROM outbox WHERE recordTable = :table AND recordId = :id AND op IN ('insert', 'insert_or_retime')")
     suspend fun insertFamilyCount(table: String, id: String): Int
 
+    /** The kind of the row's newest queued op ("delete" = the row is going), or
+     *  null when nothing is queued for it. */
+    @Query("SELECT op FROM outbox WHERE recordTable = :table AND recordId = :id ORDER BY seq DESC LIMIT 1")
+    suspend fun latestOp(table: String, id: String): String?
+
     /** Any queued op for that row (upsert, mint, delete, rpc). */
     @Query("SELECT COUNT(*) FROM outbox WHERE recordTable = :table AND recordId = :id")
     suspend fun pendingOpCount(table: String, id: String): Int

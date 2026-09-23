@@ -256,6 +256,11 @@ class LocalStore(private val db: UnstuckDatabase) {
     suspend fun hasPendingDelete(table: String, id: String): Boolean =
         outboxDao.pendingDeleteCount(table, id) > 0
 
+    /** True when the row's newest queued op is a DELETE: whatever the store shows
+     *  for it (a stale realtime echo can put it back for a moment) is going. A
+     *  write queued after the delete (an Undo re-creating it) means it is not. */
+    suspend fun isBeingDeleted(table: String, id: String): Boolean = outboxDao.latestOp(table, id) == "delete"
+
     /** True while a MINT (`insert` / `insert_or_retime`) for that row is queued. */
     suspend fun hasInsertFamilyOp(table: String, id: String): Boolean =
         outboxDao.insertFamilyCount(table, id) > 0
@@ -278,6 +283,7 @@ class LocalStore(private val db: UnstuckDatabase) {
         suspend fun latestPendingUpsert(table: String, id: String): OutboxEntity? = outboxDao.latestUpsert(table, id)
         suspend fun hasInsertFamilyOp(table: String, id: String): Boolean = outboxDao.insertFamilyCount(table, id) > 0
         suspend fun hasPendingOp(table: String, id: String): Boolean = outboxDao.pendingOpCount(table, id) > 0
+        suspend fun isBeingDeleted(table: String, id: String): Boolean = outboxDao.latestOp(table, id) == "delete"
         suspend fun enqueue(op: OutboxEntity): Long = outboxDao.enqueue(op)
         suspend fun dequeue(seq: Long) = outboxDao.remove(seq)
         suspend fun rewriteOutbox(seq: Long, payload: String?, base: String?) = outboxDao.rewrite(seq, payload, base)

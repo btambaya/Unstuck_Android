@@ -232,6 +232,10 @@ class WriteThrough(
     suspend fun stampCalBlockMapping(id: String, eventId: String?, connectionId: String?): MappingStamp {
         val result = store.transaction {
             val row = getOne(Tables.CAL_BLOCKS, id, CalBlock.serializer()) ?: return@transaction MappingStamp.GONE
+            // A row whose newest queued op is its delete is going: a stale realtime
+            // echo can put it back for a moment, and a stamp queued behind the delete
+            // would re-create it on the server.
+            if (isBeingDeleted(Tables.CAL_BLOCKS, id)) return@transaction MappingStamp.GONE
             if (row.kind == CalBlockKind.EXTERNAL || id.startsWith("g_")) return@transaction MappingStamp.UNCHANGED
             if (hasInsertFamilyOp(Tables.CAL_BLOCKS, id)) return@transaction MappingStamp.INSERT_UNRESOLVED
             if (row.externalEventId == eventId && row.externalConnectionId == connectionId) return@transaction MappingStamp.UNCHANGED

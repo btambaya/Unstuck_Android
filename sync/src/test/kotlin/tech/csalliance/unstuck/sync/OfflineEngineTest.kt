@@ -1088,6 +1088,8 @@ class OfflineEngineTest {
         val t = task("t1", updatedAt = "2026-05-21T10:00:00.000Z")
         store.upsert(Tables.TASKS, t, TaskItem.serializer(), t.id, t.updatedAt)
         write.upsertCalBlock(tech.csalliance.unstuck.core.model.CalBlock(id = "b1", taskId = "t1", taskName = "T", startTime = "09:00", durationMinutes = 25, date = "2026-05-21"))
+        // The push runs on the Google worker, after the local write (stage 2).
+        write.googleMirror.awaitIdle()
         val stored = store.blocks().first().single()
         assertEquals("evt-1", stored.externalEventId)
         assertEquals(connId, stored.externalConnectionId)
@@ -1099,6 +1101,7 @@ class OfflineEngineTest {
         val write = WriteThrough(store)
         write.pushCalBlock = { null }
         write.upsertCalBlock(tech.csalliance.unstuck.core.model.CalBlock(id = "b1", taskId = "t1", taskName = "T", startTime = "09:00", durationMinutes = 25, date = "2026-05-21", externalEventId = "evt-1"))
+        write.googleMirror.awaitIdle()
         assertEquals("one upsert only — nothing changed", 1, store.pending().count { it.recordTable == Tables.CAL_BLOCKS })
     }
 

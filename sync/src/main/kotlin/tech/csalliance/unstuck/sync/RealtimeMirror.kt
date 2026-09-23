@@ -45,6 +45,10 @@ class RealtimeMirror(
     // device. Those tables are not row-mirrored into the local store (the app reads
     // them through PreferencesClient), so the mirror just says "re-read them".
     private val onPreferencesChanged: () -> Unit = {},
+    // A cal_blocks row was just written from an INSERT/UPDATE echo. Rule G's gate
+    // releases a confirmed mint's Google push that was waiting for its row to come
+    // back (stage 2: its own delete's DELETE echo can land after the re-mint).
+    private val onCalBlockLanded: suspend (String) -> Unit = {},
 ) {
     private val channels = mutableListOf<RealtimeChannel>()
     private val jobs = mutableListOf<Job>()
@@ -85,8 +89,13 @@ class RealtimeMirror(
             onEvent()
             runCatching {
                 when (action) {
-                    is PostgresAction.Insert -> RowApply.apply(tableName, action.record, store, userId)
-                    is PostgresAction.Update -> RowApply.apply(tableName, action.record, store, userId)
+                    is PostgresAction.Insert, is PostgresAction.Update -> {
+                        val record = if (action is PostgresAction.Insert) action.record else (action as PostgresAction.Update).record
+                        val applied = RowApply.apply(tableName, record, store, userId)
+                        if (applied && tableName == Tables.CAL_BLOCKS) {
+                            record["id"]?.jsonPrimitive?.content?.let { onCalBlockLanded(it) }
+                        }
+                    }
                     is PostgresAction.Delete -> action.oldRecord["id"]?.let { store.delete(tableName, it.jsonPrimitive.content) }
                     else -> {}
                 }

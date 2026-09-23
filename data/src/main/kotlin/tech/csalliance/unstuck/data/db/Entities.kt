@@ -49,7 +49,7 @@ data class RecordEntity(
 @Entity(tableName = "outbox")
 data class OutboxEntity(
     @PrimaryKey(autoGenerate = true) val seq: Long = 0,
-    val op: String, // "upsert" | "delete"
+    val op: String, // "upsert" | "delete" | "rpc" | "insert" | "insert_or_retime" (a mint, stage 2)
     val recordTable: String,
     val recordId: String,
     val payload: String?,

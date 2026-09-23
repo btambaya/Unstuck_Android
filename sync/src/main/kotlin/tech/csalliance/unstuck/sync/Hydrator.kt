@@ -511,19 +511,52 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
         }.onFailure { println("[hydrate] ${Tables.CALL_REQUESTS} failed, leaving local intact: $it") }
     }
 
+    /** The last SUCCESSFUL cal_blocks read (stage 2, deterministic-occurrence-ids.md
+     *  §3c): the horizon top-up runs only after one, and never over one that hit
+     *  the row cap. The generic "pull finished" signal can't tell: this read's
+     *  failure was swallowed and [hydrated] fired anyway. Null until one succeeds
+     *  in this process, and again after a sign-out. */
+    @Volatile var calBlocksPull: CalBlocksPull? = null
+        private set
+    private val calBlocksSeq = AtomicLong(0)
+
+    /** Runs after every successful cal_blocks read (the rule-G gate releases the
+     *  pushes that waited for a row this read brought back). */
+    internal var onCalBlocksPulled: (suspend () -> Unit)? = null
+
+    /** Sign-out / user switch: the next account's top-up waits for its own read. */
+    fun resetCalBlocksPull() { calBlocksPull = null }
+
     private suspend fun hydrateCalBlocks() {
-        runCatching {
+        try {
             // Per-row tolerant decode (see replace()): a single bad cal_block row
             // mustn't wipe the whole schedule.
-            val remote = gateway.fetchAll(Tables.CAL_BLOCKS).mapNotNull { runCatching { DbRowCodec.decodeCalBlock(it) }.getOrNull() }
+            val rows = gateway.fetchAll(Tables.CAL_BLOCKS)
+            val remote = rows.mapNotNull { runCatching { DbRowCodec.decodeCalBlock(it) }.getOrNull() }
             val local = store.snapshot(Tables.CAL_BLOCKS, CalBlock.serializer())
             val localExternal = local.filter { isExternalBlock(it) }
             val merged = SyncDecision.mergeHydratedCalBlocks(remote, localExternal)
-            // Preserve unsynced optimistic TASK blocks (a pending outbox upsert) — even
-            // when the server already has an older copy of that block (a move that
-            // hasn't flushed yet must not snap back). See replace().
+            // Preserve unsynced optimistic TASK blocks (a pending outbox upsert or a
+            // queued mint) — even when the server already has an older copy of that
+            // block (a move that hasn't flushed yet must not snap back). See replace().
             store.replace(Tables.CAL_BLOCKS, merged, CalBlock.serializer(), { it.id }, keepPendingUpserts = true)
-        }.onFailure { println("[hydrate] cal_blocks failed, leaving local intact: $it") }
+            calBlocksPull = CalBlocksPull(calBlocksSeq.incrementAndGet(), rows.size)
+        } catch (t: CancellationException) {
+            throw t
+        } catch (t: Throwable) {
+            println("[hydrate] cal_blocks failed, leaving local intact: $t")
+            return
+        }
+        runCatching { onCalBlocksPulled?.invoke() }.onFailure { if (it is CancellationException) throw it }
+    }
+
+    /** One successful cal_blocks read: its order in this process, and how many
+     *  rows it returned. PostgREST cuts an unpaged select at [SERVER_ROW_CAP]
+     *  without saying so, so a read that size may be missing rows — the top-up
+     *  would then keep re-minting days it can't see (§f; paginating the pull is
+     *  the real fix). */
+    data class CalBlocksPull(val seq: Long, val rowCount: Int) {
+        val mayBeTruncated: Boolean get() = rowCount >= SERVER_ROW_CAP
     }
 
     companion object {

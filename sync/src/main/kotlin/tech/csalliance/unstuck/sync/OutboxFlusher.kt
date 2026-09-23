@@ -3,8 +3,10 @@ package tech.csalliance.unstuck.sync
 import io.github.jan.supabase.exceptions.RestException
 import io.ktor.client.plugins.ResponseException
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
@@ -13,6 +15,7 @@ import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import tech.csalliance.unstuck.core.logic.clampDurationMin
 import tech.csalliance.unstuck.core.logic.clampEstimateMin
+import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.WireTime
@@ -27,12 +30,26 @@ import tech.csalliance.unstuck.data.db.Tables
 // the op is removed; if all remaining ops error the pass stops (retried on the
 // next reconnect/sign-in). Port of the iOS OutboxFlusher.swift.
 
-class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalStore) {
+class OutboxFlusher(
+    private val gateway: SyncRemote,
+    private val store: LocalStore,
+    /** Rule G (stage 2): every insert-family send is bracketed here, so a Google
+     *  push of the row waits for the server's answer. Null in tests that don't
+     *  mint. */
+    private val mirrorGate: InsertMirrorGate? = null,
+) {
 
     /** An outbox `rpc` op the server REFUSED (4xx): it has been dequeued (retrying
      *  can't change the answer) — the app layer must roll the optimistic local write
      *  back (re-pull the row) and tell the user. Never throws into the drain. */
     var onRpcRejected: (suspend (op: OutboxEntity, error: RpcRejected) -> Unit)? = null
+
+    /** An insert-family op (a MINT, stage 2) resolved and was dequeued: inserted,
+     *  retimed (rule H — the server row is already in the local store) or ignored.
+     *  Fired once the drain has let go of its lock, so the listener may flush or
+     *  write freely; it must not block (the coordinator only queues a Google push).
+     *  Never throws into the drain. */
+    var onInsertResolved: ((InsertResolution) -> Unit)? = null
 
     // Per-op tally of SERVER REFUSALS (keyed by outbox seq). After FAIL_CAP an
     // op is QUARANTINED (dead-lettered) so it can't wedge its dependents (e.g. a
@@ -64,7 +81,21 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
     // (server keeps the stale state, both ops dequeued) and race failCounts.
     private val mutex = Mutex()
 
-    suspend fun flush(userId: String, currentUserId: () -> String? = { userId }) = mutex.withLock {
+    suspend fun flush(userId: String, currentUserId: () -> String? = { userId }) {
+        val resolved = ArrayList<InsertResolution>()
+        try {
+            mutex.withLock { drain(userId, currentUserId, resolved) }
+        } finally {
+            // Outside the lock, and even when the drain was cut short: each of these
+            // ops is already dequeued, and its "mirror wanted" already consumed.
+            val hook = onInsertResolved
+            if (hook != null) {
+                for (r in resolved) runCatching { hook(r) }.onFailure { println("[outbox] insert-resolved hook failed: $it") }
+            }
+        }
+    }
+
+    private suspend fun drain(userId: String, currentUserId: () -> String?, resolved: MutableList<InsertResolution>) {
         if (quarantineReleased) {
             quarantineReleased = false
             deadLettered.clear(); failCounts.clear()
@@ -74,7 +105,7 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
             // a different account). RLS already blocks a cross-account write, but
             // this avoids confusing FK/RLS errors + a stuck op. Mirrors the web
             // bridge's intendedUserId guard.
-            if (currentUserId() != userId) return@withLock
+            if (currentUserId() != userId) return
             val raw = store.pending()   // FIFO by seq
             if (raw.isEmpty()) break
             // Per-(table,id) coalescing: when two whole-row upserts for the SAME
@@ -107,13 +138,19 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
             for (op in flushable) {
                 val rowKey = "${op.recordTable}:${op.recordId}"
                 if (rowKey in blockedRows) continue
+                // Rule G: from here until resolve the row counts as unresolved even
+                // once the op is dequeued, so no Google push slips into that gap.
+                val gate = if (isInsertFamily(op.op)) mirrorGate else null
+                gate?.begin(op.recordId)
+                var answer: InsertAnswer? = null
                 val ok = try {
-                    apply(op, userId)
+                    answer = apply(op, userId)
                     true
                 } catch (e: CancellationException) {
                     // A cancelled drain (sign-out's 5s timeout, WorkManager stopping
                     // the SyncWorker) is normal control flow, not a server rejection —
                     // abort without burning failCounts toward the poison-drop cap.
+                    gate?.let { withContext(NonCancellable) { it.abandon(op.recordId) } }
                     throw e
                 } catch (e: RpcRejected) {
                     // TERMINAL: the server refused the RPC (RLS / not a member / gone).
@@ -126,6 +163,8 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
                         .onFailure { println("[outbox] rpc rollback hook failed: $it") }
                     continue
                 } catch (e: Throwable) {
+                    // The op stays queued, so the outbox keeps the row unresolved.
+                    gate?.abandon(op.recordId)
                     if (classifyFailure(e) == FlushFailure.TRANSIENT) {
                         // Offline, timeout, 5xx, a 401 while the token refreshes: the
                         // op is fine, the network isn't. Hold the row for this pass
@@ -143,6 +182,15 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
                 if (ok) {
                     if (op.recordTable == Tables.TASKS && op.op == "upsert") landTaskUpsert(op) else store.dequeue(op.seq)
                     failCounts.remove(op.seq); progressed = true
+                    answer?.let { a ->
+                        // Rule H's answer is shown at once, like a realtime echo of that
+                        // UPDATE: the other device's occurrence, now at this device's
+                        // time, with ITS Google mapping — so a push that waited on this
+                        // answer PATCHes that event instead of inserting a second one.
+                        a.serverRow?.let { showRetimedRow(op.recordTable, op.recordId, it) }
+                        val wanted = gate?.resolve(op.recordId, a.outcome) ?: false
+                        resolved += InsertResolution(op.recordTable, op.recordId, a.outcome, wanted)
+                    }
                 } else {
                     blockedRows.add(rowKey)
                     val n = (failCounts[op.seq] ?: 0) + 1
@@ -204,6 +252,26 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
     companion object {
         /** Outbox op kind for a queued RPC (vs "upsert" / "delete"). */
         const val OP_RPC = "rpc"
+
+        /** A MINT (stage 2, deterministic occurrence ids, Ahmad 2026-09-23): a
+         *  repeating task's occurrence written insert-if-absent — `INSERT … ON
+         *  CONFLICT (id) DO NOTHING`, never over another device's row. The horizon
+         *  top-up and the assistant's tail fill. Stored as text: no Room migration. */
+        const val OP_INSERT = "insert"
+
+        /** A MINT the USER asked for (an editor save, Schedule, Start repeating,
+         *  set_task_recurrence, a first placement): [OP_INSERT], and when the server
+         *  ignores it, rule H's conditional retime of that day's open occurrence. */
+        const val OP_INSERT_OR_RETIME = "insert_or_retime"
+
+        /** The insert family. Never coalesced with an upsert either way
+         *  ([supersededUpsertSeqs] only matches "upsert"): it must resolve, or rule
+         *  G's gate never opens. */
+        fun isInsertFamily(op: String): Boolean = op == OP_INSERT || op == OP_INSERT_OR_RETIME
+
+        /** A write of the row's content (an upsert or a mint) — what a delete
+         *  cancels and a pull must not lay the server's copy over. */
+        fun isRowWrite(op: String): Boolean = op == "upsert" || isInsertFamily(op)
 
         /** Encode an rpc op payload: `{"fn": name, "params": {...}, "legacy"?: {fn, params}}`.
          *  [legacy] is the pre-migration signature to fall back to when the server
@@ -347,26 +415,68 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
         }
     }
 
-    private suspend fun apply(op: OutboxEntity, userId: String) {
+    /** A resolved insert-family op: its outcome, and the server row rule H moved. */
+    private class InsertAnswer(val outcome: InsertOutcome, val serverRow: JsonObject? = null)
+
+    /** Send one op. Returns the answer for an insert-family op, null otherwise. */
+    private suspend fun apply(op: OutboxEntity, userId: String): InsertAnswer? {
         if (op.op == "delete") {
             gateway.delete(op.recordTable, op.recordId)
-            return
+            return null
         }
-        val payload = op.payload ?: return
+        val payload = op.payload ?: return null
         if (op.op == OP_RPC) {
             // Shared-collection item edit: an idempotent server-side RPC (upsert-by-id
             // add / set flag / update / remove — a replay is a no-op), so it is safe to
             // retry across drains exactly like a row upsert. Payload = {fn, params}.
-            val (fn, params, legacy) = decodeRpcCall(payload) ?: return
+            val (fn, params, legacy) = decodeRpcCall(payload) ?: return null
             try {
                 gateway.rpc(fn, params)
             } catch (e: RpcRejected) {
                 if (legacy != null && isFunctionMissing(e)) gateway.rpc(legacy.first, legacy.second) else throw e
             }
-            return
+            return null
         }
-        val row = asciiBlockDateTime(op.recordTable, Json.parseToJsonElement(payload).jsonObject)
-        gateway.upsert(op.recordTable, clampServerChecks(op.recordTable, row), userId)
+        // A queued mint heals exactly like an upsert: an op from a build without the
+        // clamp / the ASCII digits goes out as the server accepts it.
+        val row = clampServerChecks(op.recordTable, asciiBlockDateTime(op.recordTable, Json.parseToJsonElement(payload).jsonObject))
+        if (isInsertFamily(op.op)) return applyInsert(op, row, userId)
+        gateway.upsert(op.recordTable, row, userId)
+        return null
+    }
+
+    /** A MINT (stage 2): insert-if-absent, and for `insert_or_retime` whose insert
+     *  the server ignored, rule H's conditional retime with the op's date, start
+     *  and length. An op missing any of those resolves as ignored — the insert was
+     *  already refused, and nothing else is safe to send. */
+    private suspend fun applyInsert(op: OutboxEntity, row: JsonObject, userId: String): InsertAnswer {
+        if (gateway.insertIfAbsent(op.recordTable, row, userId)) return InsertAnswer(InsertOutcome.INSERTED)
+        if (op.op != OP_INSERT_OR_RETIME) return InsertAnswer(InsertOutcome.IGNORED)
+        val date = (row["date"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        val start = (row["start_time"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        val duration = (row["duration_minutes"] as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull
+        if (date == null || start == null || duration == null) return InsertAnswer(InsertOutcome.IGNORED)
+        val server = gateway.retimeIfOpen(op.recordTable, op.recordId, date, start, duration)
+            ?: return InsertAnswer(InsertOutcome.IGNORED)
+        return InsertAnswer(InsertOutcome.RETIMED, server)
+    }
+
+    /** Write a RETIMED answer's server row into the local store, unless the row has
+     *  a pending op of its own (a newer local edit, or a delete — that op is the
+     *  newer intent and flushes over it). Best-effort: the next pull brings it too. */
+    private suspend fun showRetimedRow(table: String, id: String, serverRow: JsonObject) {
+        if (table != Tables.CAL_BLOCKS) return
+        try {
+            val block = DbRowCodec.decodeCalBlock(serverRow)
+            if (block.id != id) return
+            store.transaction {
+                if (!hasPendingOp(table, id)) upsert(table, block, CalBlock.serializer(), block.id)
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            println("[outbox] retimed $table:$id not shown locally: $e")
+        }
     }
 
 }

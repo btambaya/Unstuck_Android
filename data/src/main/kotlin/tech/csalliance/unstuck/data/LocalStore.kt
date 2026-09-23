@@ -256,6 +256,10 @@ class LocalStore(private val db: UnstuckDatabase) {
     suspend fun hasPendingDelete(table: String, id: String): Boolean =
         outboxDao.pendingDeleteCount(table, id) > 0
 
+    /** True while a MINT (`insert` / `insert_or_retime`) for that row is queued. */
+    suspend fun hasInsertFamilyOp(table: String, id: String): Boolean =
+        outboxDao.insertFamilyCount(table, id) > 0
+
     /** Rewrite a queued op's payload + base after a 3-way merge. */
     suspend fun rewriteOutbox(seq: Long, payload: String?, base: String?) = outboxDao.rewrite(seq, payload, base)
 
@@ -272,6 +276,8 @@ class LocalStore(private val db: UnstuckDatabase) {
 
         suspend fun pending(): List<OutboxEntity> = outboxDao.all()
         suspend fun latestPendingUpsert(table: String, id: String): OutboxEntity? = outboxDao.latestUpsert(table, id)
+        suspend fun hasInsertFamilyOp(table: String, id: String): Boolean = outboxDao.insertFamilyCount(table, id) > 0
+        suspend fun hasPendingOp(table: String, id: String): Boolean = outboxDao.pendingOpCount(table, id) > 0
         suspend fun enqueue(op: OutboxEntity): Long = outboxDao.enqueue(op)
         suspend fun dequeue(seq: Long) = outboxDao.remove(seq)
         suspend fun rewriteOutbox(seq: Long, payload: String?, base: String?) = outboxDao.rewrite(seq, payload, base)

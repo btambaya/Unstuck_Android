@@ -730,6 +730,64 @@ class AppViewModelTest {
     }
 
     // -----------------------------------------------------------------------
+    // Focus on a repeating task starts from ITS day, not the series' lifetime
+    // (Android audit 2026-09-23, A13; web W10)
+    // -----------------------------------------------------------------------
+
+    @Test fun startFocus_onARepeatingTasksDay_startsAtZero_notTheSeriesLifetimeTotal() = runTest(dispatcher) {
+        // Day 4 of a daily 25-min habit focused 25 min on each of 3 days: the
+        // template's totalFocused is 4500 s. Seeded into the ring, Focus opened at
+        // 75:00, overrun from the first second.
+        val template = task("tpl", name = "Stretch", recurrence = Recurrence.Daily(), totalFocused = 4500)
+        val occ = CalBlock(id = "occ4", taskId = "tpl", taskName = "Stretch", startTime = "09:00", durationMinutes = 25, date = Clock.todayIso(), kind = CalBlockKind.TASK)
+        seedTask(template); seedBlock(occ)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.startFocus(template.copy(id = "occ4", recurrence = null))   // the day's row, as the detail screen hands it
+        advanceUntilIdle()
+
+        val live = awaitLiveSession { it?.sessionStart != null }!!
+        assertEquals("tpl", live.taskId)
+        assertEquals("occ4", live.occurrenceBlockId)
+        assertEquals("no prior from the series' lifetime", 0, live.priorAccumulatedSec ?: 0)
+        assertEquals(0, tech.csalliance.unstuck.core.logic.FocusTimer.displayedElapsedSec(live, nowMs))
+        assertEquals(
+            tech.csalliance.unstuck.core.model.FocusState.RUNNING,
+            tech.csalliance.unstuck.core.logic.FocusTimer.deriveState(live, nowMs, 1.0),
+        )
+    }
+
+    @Test fun startFocus_onASeriesWithNoOpenDay_startsAtZero() = runTest(dispatcher) {
+        // No block today (or the blocks not loaded yet on a cold notification
+        // Start): the template itself reaches the plain path, with its lifetime total.
+        val template = task("tpl", name = "Stretch", recurrence = Recurrence.Daily(), totalFocused = 4500)
+        seedTask(template)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.startFocus(template)
+        advanceUntilIdle()
+
+        val live = awaitLiveSession { it?.sessionStart != null }!!
+        assertEquals("tpl", live.taskId)
+        assertEquals(0, live.priorAccumulatedSec ?: 0)
+    }
+
+    @Test fun startFocus_onAPlainTask_stillContinuesFromItsFocusedTotal() = runTest(dispatcher) {
+        // "End for now" then back: a one-off task's total IS its progress.
+        val t = task("t1", name = "Write report", estimateMin = 50, totalFocused = 600)
+        seedTask(t)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.startFocus(t)
+        advanceUntilIdle()
+
+        assertEquals(600, awaitLiveSession { it?.sessionStart != null }!!.priorAccumulatedSec)
+    }
+
+    // -----------------------------------------------------------------------
     // scheduleTask + recurrence regen
     // -----------------------------------------------------------------------
 

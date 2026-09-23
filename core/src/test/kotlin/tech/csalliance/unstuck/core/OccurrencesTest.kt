@@ -48,6 +48,19 @@ class OccurrencesTest {
         assertEquals(40, occ.estimateMin)
     }
 
+    // The template's totalFocused is the series' LIFETIME focus; a day's row that
+    // inherited it read as "In progress" untouched and seeded that day's focus ring
+    // (Android audit 2026-09-23, A13; web W10).
+    @Test fun aDaysRowCarriesNoneOfTheSeriesLifetimeFocus() {
+        val series = template.copy(totalFocused = 4500)
+        val today = mkBlock(id = "b1", taskId = "t1", date = "2026-06-10")
+        val missed = mkBlock(id = "b0", taskId = "t1", date = "2026-06-08")
+        assertEquals(0, projectOccurrences(listOf(series), listOf(today), "2026-06-10").single().totalFocused)
+        assertEquals(0, projectOverdueOccurrences(listOf(series), listOf(missed), "2026-06-10").single().totalFocused)
+        assertEquals(0, taskForBlock(today, listOf(series))?.totalFocused)
+        assertEquals("a plain task keeps its own total", 900, taskForBlock(mkBlock(id = "b2", taskId = "t2"), listOf(mkTask(id = "t2", totalFocused = 900)))?.totalFocused)
+    }
+
     @Test fun excludesSkippedAndPast() {
         val blocks = listOf(
             mkBlock(id = "past", taskId = "t1", date = "2026-06-09"),

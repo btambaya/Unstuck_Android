@@ -1798,13 +1798,18 @@ class AppViewModel(
                 // sessionId + clock) instead of minting a second one. Partner-shared
                 // sessions run on the SESSION clock (priorAccumulatedSec = 0, minted or
                 // adopted) so every device's ring shows the same number.
+                // An occurrence seeds NO prior either: the template's totalFocused is the
+                // series' LIFETIME focus, not progress on this day's slice. Seeded into the
+                // ring, day 4 of a 25-min habit opened at 75:00, overrun from the first
+                // second with the coach saying "That's your block" (Android audit
+                // 2026-09-23, A13; web W10).
                 val partnerSharedOcc = shareBadges.value[tpl.id].orEmpty().any { it.level == ShareLevel.PARTNER }
                 val adoptedOcc = if (partnerSharedOcc) probeCoFocusAdoption(tpl.id) else null
                 val live = if (adoptedOcc != null) {
                     registerAdoptedSession(adoptedOcc.sessionId)
                     FocusTimer.adopt(base, tpl.id, adoptedOcc, now = nowMs(), priorAccumulatedSec = 0, occurrenceBlockId = occ.id)
                 } else {
-                    FocusTimer.start(base, tpl.id, estimateMin = occ.durationMinutes, priorAccumulatedSec = if (partnerSharedOcc) 0 else tpl.totalFocused, now = nowMs(), occurrenceBlockId = occ.id)
+                    FocusTimer.start(base, tpl.id, estimateMin = occ.durationMinutes, priorAccumulatedSec = 0, now = nowMs(), occurrenceBlockId = occ.id)
                 }
                 store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
                 return true
@@ -1833,8 +1838,12 @@ class AppViewModel(
             return true
         }
         // Seed prior focus so reopening after "End for now" continues from the
-        // accumulated total instead of restarting the displayed timer at 0.
-        val live = FocusTimer.start(base, task.id, estimateMin = task.estimateMin, priorAccumulatedSec = if (partnerShared) 0 else task.totalFocused, now = nowMs())
+        // accumulated total instead of restarting the displayed timer at 0. Not for
+        // a repeating series with no open day to attach (none today, or the blocks
+        // not loaded yet on a cold notification Start): its total is the series'
+        // lifetime focus, never progress on this sitting (Android audit 2026-09-23, A13).
+        val seedsPrior = !partnerShared && task.recurrence == null
+        val live = FocusTimer.start(base, task.id, estimateMin = task.estimateMin, priorAccumulatedSec = if (seedsPrior) task.totalFocused else 0, now = nowMs())
         store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
         return true
     }

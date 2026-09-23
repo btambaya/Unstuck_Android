@@ -25,7 +25,10 @@ fun isTemplate(t: TaskItem): Boolean = t.recurrence != null
  * Project one synthetic one-day occurrence row per non-skipped occurrence
  * cal_block of a recurring template, on or after [fromIso]. id = block id;
  * name/tags/area/priority inherited from the template; estimate/done/completedAt
- * from the block; recurrence cleared (a plain one-day task).
+ * from the block; recurrence cleared (a plain one-day task). totalFocused is 0,
+ * never the template's: that is the SERIES' lifetime focus, and on a day's row
+ * it read as progress ("In progress" on an untouched day, and a prior seeded
+ * into that day's focus ring) (Android audit 2026-09-23, A13; web W10).
  */
 fun projectOccurrences(tasks: List<TaskItem>, blocks: List<CalBlock>, fromIso: String): List<TaskItem> {
     val templates = tasks.filter { it.recurrence != null }.associateBy { it.id }
@@ -38,6 +41,7 @@ fun projectOccurrences(tasks: List<TaskItem>, blocks: List<CalBlock>, fromIso: S
             done = b.done,
             completedAt = b.completedAt,
             estimateMin = b.durationMinutes,
+            totalFocused = 0,
             recurrence = null,
             later = false,
         )
@@ -92,6 +96,7 @@ fun projectOverdueOccurrences(tasks: List<TaskItem>, blocks: List<CalBlock>, tod
             done = false,
             completedAt = null,
             estimateMin = b.durationMinutes,
+            totalFocused = 0,
             recurrence = null,
             later = false,
         )
@@ -245,7 +250,7 @@ fun isExactTaskLink(link: String): Boolean = link.substringBefore('#').endsWith(
 fun taskForBlock(block: CalBlock, tasks: List<TaskItem>): TaskItem? {
     val t = tasks.firstOrNull { it.id == block.taskId } ?: return null
     return if (t.recurrence != null) {
-        t.copy(id = block.id, recurrence = null, done = block.done, completedAt = block.completedAt, estimateMin = block.durationMinutes)
+        t.copy(id = block.id, recurrence = null, done = block.done, completedAt = block.completedAt, estimateMin = block.durationMinutes, totalFocused = 0)
     } else {
         t
     }

@@ -231,6 +231,44 @@ class LocalStoreTest {
         job.cancel()
     }
 
+    // --- one transaction over rows + outbox (audit 2026-09-22 C8/C9) ---
+
+    // The prune and WriteThrough rely on this: a row write and its op land
+    // together or not at all, and a LIVE collector is told once the commit lands.
+    @Test fun transaction_isAllOrNothing_andALiveCollectorSeesTheCommit() = runBlocking {
+        val seen = mutableListOf<List<String>>()
+        val job = launch(Dispatchers.Default) { store.tasks().collect { seen.add(it.map { t -> t.name }) } }
+        suspend fun await(n: Int) = withTimeoutOrNull(5_000) { while (seen.size < n) delay(5) }
+        await(1)
+        val failed = runCatching {
+            store.transaction {
+                upsert(Tables.TASKS, task("a", "Half"), TaskItem.serializer(), "a")
+                enqueue(OutboxEntity(op = "upsert", recordTable = Tables.TASKS, recordId = "a", payload = "{}", createdAt = 1))
+                error("boom")
+            }
+        }
+        assertTrue(failed.isFailure)
+        assertTrue("a thrown block leaves no row behind", store.tasks().first().isEmpty())
+        assertTrue("…and no op", store.pending().isEmpty())
+        val seq = store.transaction {
+            upsert(Tables.TASKS, task("a", "Whole"), TaskItem.serializer(), "a")
+            enqueue(OutboxEntity(op = "upsert", recordTable = Tables.TASKS, recordId = "a", payload = "{}", createdAt = 1))
+        }
+        await(2)
+        assertEquals(listOf("Whole"), seen.last())
+        assertEquals(listOf(seq), store.pending().map { it.seq })
+        // Inside a block, reads see the block's own writes; replace() swaps the table.
+        store.transaction {
+            assertEquals(listOf("Whole"), snapshot(Tables.TASKS, TaskItem.serializer()).map { it.name })
+            replace(Tables.TASKS, listOf(task("b", "B")), TaskItem.serializer(), { it.id })
+            rewriteOutbox(seq, "merged", "base")
+        }
+        await(3)
+        assertEquals(listOf("B"), seen.last())
+        assertEquals("merged", store.pending().single().payload)
+        job.cancel()
+    }
+
     @Test fun latestPendingUpsert_andRewrite() = runTest {
         assertNull(store.latestPendingUpsert(Tables.TASKS, "a"))
         store.enqueue(OutboxEntity(op = "upsert", recordTable = Tables.TASKS, recordId = "a", payload = "v1", createdAt = 1, base = "b0"))

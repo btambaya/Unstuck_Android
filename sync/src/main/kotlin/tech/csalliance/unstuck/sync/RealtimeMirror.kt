@@ -6,10 +6,13 @@ import io.github.jan.supabase.realtime.PostgresAction
 import io.github.jan.supabase.realtime.RealtimeChannel
 import io.github.jan.supabase.realtime.channel
 import io.github.jan.supabase.realtime.postgresChangeFlow
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.launch
 import kotlinx.serialization.json.jsonPrimitive
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.Tables
@@ -166,20 +169,25 @@ class RealtimeMirror(
      *  anywhere reaches every subscriber as one extra cheap collections pull — rare
      *  (a membership change, not an edit) and harmless (RLS scopes the pull itself).
      *  Belt-and-braces: migration 056 also bumps collections.updated_at on every
-     *  membership change, so the collections echo carries the owner's row too. */
+     *  membership change, so the collections echo carries the owner's row too.
+     *  A burst of events (a list deleted with N members, an account deletion's
+     *  cascade) used to run N collections pulls back to back; now it costs one run
+     *  plus at most one trailing run ([coalescedSignal]). */
     private suspend fun subscribeMembers(userId: String, onChanged: suspend () -> Unit) {
         val channel = client.channel("unstuck_collection_members_$userId")
         val flow = channel.postgresChangeFlow<PostgresAction>(schema = "public") {
             table = "collection_members"
         }
+        val (signal, consumer) = coalescedSignal(scope, onChanged)
         val job = flow.onEach {
             onEvent()
-            runCatching { onChanged() }.onFailure { println("[realtime] collection_members refresh failed: $it") }
+            signal()
         }.launchIn(scope)
         runCatching { channel.subscribe() }
             .onFailure { println("[realtime] subscribe collection_members failed: $it") }
         val statusJob = observeChannelStatus(channel, "collection_members")
         channels += channel
+        jobs += consumer
         jobs += job
         jobs += statusJob
     }
@@ -192,6 +200,28 @@ class RealtimeMirror(
     }
 
     companion object {
+        /** `signal()` never waits. [onChanged] runs once for every signal that
+         *  arrived before that run started: a burst costs one run plus at most one
+         *  trailing run (a CONFLATED channel holds at most one pending signal).
+         *  Cancelling the returned job stops the consumer. Parity with iOS
+         *  coalescedSignal (build 81, audit 2026-09-22 C8). */
+        internal fun coalescedSignal(scope: CoroutineScope, onChanged: suspend () -> Unit): Pair<() -> Unit, Job> {
+            val signals = Channel<Unit>(Channel.CONFLATED)
+            val consumer = scope.launch {
+                for (s in signals) {
+                    try {
+                        onChanged()
+                    } catch (t: CancellationException) {
+                        throw t
+                    } catch (t: Throwable) {
+                        println("[realtime] collection_members refresh failed: $t")
+                    }
+                }
+            }
+            consumer.invokeOnCompletion { signals.close() }
+            return { signals.trySend(Unit); Unit } to consumer
+        }
+
         /** The row tables mirrored into the local store. calendar_connections is
          *  deliberately absent — its encrypted credentials must never be broadcast. */
         internal val MIRRORED_TABLES: List<String> = listOf(

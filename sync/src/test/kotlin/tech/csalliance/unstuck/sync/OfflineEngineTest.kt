@@ -2,11 +2,17 @@ package tech.csalliance.unstuck.sync
 
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -18,6 +24,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import tech.csalliance.unstuck.core.model.CollectionItem
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.data.LocalStore
@@ -45,7 +52,16 @@ class OfflineEngineTest {
         var failUpsert = false
         val upserts = mutableListOf<Pair<String, String>>()   // (table, id-via-payload)
         val deletes = mutableListOf<Pair<String, String>>()
-        override suspend fun fetchAll(table: String): List<JsonObject> = serverRows[table].orEmpty()
+        /** Runs while a table's read is "in flight" — lets a test land a write
+         *  between a read and what the engine does with it. */
+        var onFetchAll: (suspend (String) -> Unit)? = null
+        /** Tables whose read fails (a flaky link between two back-to-back GETs). */
+        val failFetchAll = mutableSetOf<String>()
+        override suspend fun fetchAll(table: String): List<JsonObject> {
+            onFetchAll?.invoke(table)
+            if (table in failFetchAll) throw RuntimeException("simulated timeout")
+            return serverRows[table].orEmpty()
+        }
         override suspend fun upsert(table: String, row: JsonObject, userId: String) {
             if (failUpsert) throw RuntimeException("simulated server reject")
             upserts.add(table to row.toString())
@@ -335,6 +351,294 @@ class OfflineEngineTest {
         assertEquals(before.base, after.base)
     }
 
+    // --- two or more queued edits to one task (audit 2026-09-22 C9) ---
+    // Every later edit of a row carries the FIRST edit's base (WriteThrough), so
+    // the prune judges a row's queued edits as ONE chain by its oldest op. These
+    // enqueue through the real WriteThrough, as the app does. Ported from the iOS
+    // HydratorPruneTests (build 81).
+
+    private val ser = TaskItem.serializer()
+
+    private fun synced(updatedAt: String) = TaskItem(
+        id = "t1", name = "Call mom", estimateMin = 25, createdAt = "2026-05-21T08:00:00.000Z", updatedAt = updatedAt,
+    )
+
+    private fun payload(op: OutboxEntity): JsonObject = Json.parseToJsonElement(op.payload!!).jsonObject
+    private fun JsonObject.str(key: String) = (this[key] as? JsonPrimitive)?.contentOrNull
+    private fun JsonObject.bool(key: String) = (this[key] as? JsonPrimitive)?.booleanOrNull
+    private fun JsonObject.int(key: String) = (this[key] as? JsonPrimitive)?.intOrNull
+    private fun FakeRemote.sentTasks() = upserts.filter { it.first == Tables.TASKS }.map { Json.parseToJsonElement(it.second).jsonObject }
+
+    // Case A: two offline edits, THEN the web completes the task. Already safe on
+    // Android (the carried base); a guard that the chain keeps it so.
+    @Test fun chain_twoOfflineEditsBothSurviveAWebCompletionThatLandsAfterThem() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store).apply { nowIso = { "2026-05-21T12:00:00.000Z" } }
+        val write = WriteThrough(store)
+        val s0 = synced("2026-05-21T09:00:00.000000+00:00")
+        store.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+        val e1 = s0.copy(name = "Call mom re: birthday", updatedAt = "2026-05-21T09:10:00.000Z")
+        write.upsertTask(e1)
+        write.upsertTask(e1.copy(estimateMin = 10, updatedAt = "2026-05-21T09:11:00.000Z"))
+        val s1 = s0.copy(done = true, completedAt = "2026-05-21T09:30:00.000Z", updatedAt = "2026-05-21T09:30:00.000000+00:00")
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(s1))
+
+        hydrator.pruneStaleTaskOps()
+
+        val ops = store.pending()
+        assertEquals("both edits stay queued", 2, ops.size)
+        val op1 = payload(ops[0])
+        val op2 = payload(ops[1])
+        assertEquals("Call mom re: birthday", op1.str("name"))
+        assertEquals(25, op1.int("estimate_min"))
+        assertEquals("the web completion is kept in the first op", true, op1.bool("done"))
+        assertEquals("the second op must not revert the rename", "Call mom re: birthday", op2.str("name"))
+        assertEquals(10, op2.int("estimate_min"))
+        assertEquals(true, op2.bool("done"))
+        assertEquals("2026-05-21T09:30:00.000Z", op2.str("completed_at"))
+        assertEquals("every op is re-based on the server row", listOf(serverRow(s1).toString(), serverRow(s1).toString()), ops.map { it.base })
+        val local = store.tasks().first().single()
+        assertEquals("Call mom re: birthday", local.name)
+        assertEquals(10, local.estimateMin)
+        assertTrue(local.done)
+
+        OutboxFlusher(remote, store).flush("u1")
+        val sent = remote.sentTasks().single()
+        assertEquals("only the tail is sent, and it carries both edits and the completion", "Call mom re: birthday", sent.str("name"))
+        assertEquals(10, sent.int("estimate_min"))
+        assertEquals(true, sent.bool("done"))
+    }
+
+    // Case B: the web completed the task BEFORE the phone's two offline edits.
+    @Test fun chain_twoOfflineEditsDoNotReopenAnEarlierWebCompletion() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store).apply { nowIso = { "2026-05-21T12:00:00.000Z" } }
+        val write = WriteThrough(store)
+        val s0 = synced("2026-05-21T08:00:00.000000+00:00")
+        store.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+        val e1 = s0.copy(name = "Call mom re: birthday", updatedAt = "2026-05-21T09:00:00.000Z")
+        write.upsertTask(e1)
+        write.upsertTask(e1.copy(estimateMin = 10, updatedAt = "2026-05-21T09:01:00.000Z"))
+        val s1 = s0.copy(done = true, completedAt = "2026-05-21T08:50:00.000Z", updatedAt = "2026-05-21T08:50:00.000000+00:00")
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(s1))
+
+        hydrator.pruneStaleTaskOps()
+
+        val last = payload(store.pending().last())
+        assertEquals("the op that lands must not re-open the web completion", true, last.bool("done"))
+        assertEquals("2026-05-21T08:50:00.000Z", last.str("completed_at"))
+        assertEquals("Call mom re: birthday", last.str("name"))
+        assertEquals(10, last.int("estimate_min"))
+        assertTrue(store.tasks().first().single().done)
+    }
+
+    // A slow device clock with an UNCHANGED server row: the content judge says
+    // "keep" for the whole chain, whatever the stamps say.
+    @Test fun chain_aSlowClockLeavesTheChainAloneWhenTheServerRowIsUnchanged() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store)
+        val write = WriteThrough(store)
+        val s0 = synced("2026-05-21T10:00:00.000000+00:00")
+        store.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+        val e1 = s0.copy(name = "Call mom re: birthday", updatedAt = "2026-05-21T09:57:00.000Z")
+        write.upsertTask(e1)
+        write.upsertTask(e1.copy(estimateMin = 10, updatedAt = "2026-05-21T09:57:30.000Z"))
+        val before = store.pending()
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(s0))
+
+        hydrator.pruneStaleTaskOps()
+
+        assertEquals("an unmoved server row leaves the whole chain untouched", before, store.pending())
+        val local = store.tasks().first().single()
+        assertEquals("Call mom re: birthday", local.name)
+        assertEquals(10, local.estimateMin)
+        OutboxFlusher(remote, store).flush("u1")
+        assertEquals(listOf("Call mom re: birthday"), remote.sentTasks().map { it.str("name") })
+    }
+
+    // Mark done is SENT, lands on the server, but the client sees a failure (a
+    // timeout), so it stays queued; Undo queues behind it with the same carried
+    // base. Merged on its own against that base, the Undo's done=false read as
+    // "unchanged" and took the server's done=true: the Undo was lost and the row
+    // flipped back to done.
+    @Test fun chain_anUndoBehindAMarkDoneThatLandedButReportedAFailureSurvives() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store).apply { nowIso = { "2026-05-21T12:00:00.000Z" } }
+        val write = WriteThrough(store)
+        val s0 = synced("2026-05-21T09:00:00.000000+00:00")
+        store.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+        val done = s0.copy(done = true, completedAt = "2026-05-21T09:10:00.000Z", updatedAt = "2026-05-21T09:10:00.000Z")
+        write.upsertTask(done)
+        // The server committed it (stamped by its own clock); the client never heard.
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(done.copy(updatedAt = "2026-05-21T09:10:01.000000+00:00")))
+        write.upsertTask(done.copy(done = false, completedAt = null, updatedAt = "2026-05-21T09:11:00.000Z"))
+
+        hydrator.pruneStaleTaskOps()
+
+        val undo = payload(store.pending().last())
+        assertEquals("the Undo must not be lost to the completion that landed", false, undo.bool("done"))
+        assertNull(undo.str("completed_at"))
+        assertFalse("the local row stays undone", store.tasks().first().single().done)
+        OutboxFlusher(remote, store).flush("u1")
+        assertEquals(listOf(false), remote.sentTasks().map { it.bool("done") })
+    }
+
+    // Mark done is in flight when Undo is queued (it carries Mark done's base);
+    // Mark done then lands cleanly, but Undo's own send fails. Undo's base still
+    // said "not done", so the next prune read its done=false as unchanged and took
+    // the server's done=true. Once an op lands, the ops queued behind it measure
+    // against what landed.
+    @Test fun chain_anUndoQueuedWhileMarkDoneWasInFlightSurvivesItsOwnFailedSend() = runTest {
+        val write = WriteThrough(store)
+        val s0 = synced("2026-05-21T09:00:00.000000+00:00")
+        store.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+        val done = s0.copy(done = true, completedAt = "2026-05-21T09:10:00.000Z", updatedAt = "2026-05-21T09:10:00.000Z")
+        write.upsertTask(done)
+        val remote = object : SyncRemote {
+            var landed: JsonObject? = null
+            override suspend fun fetchAll(table: String): List<JsonObject> = listOfNotNull(landed)
+            override suspend fun upsert(table: String, row: JsonObject, userId: String) {
+                if (landed != null) throw RuntimeException("offline")   // Undo's send fails
+                // Undo is tapped while Mark done is on the wire; then it lands.
+                write.upsertTask(done.copy(done = false, completedAt = null, updatedAt = "2026-05-21T09:10:02.000Z"))
+                landed = JsonObject(row + ("updated_at" to JsonPrimitive("2026-05-21T09:10:03.000000+00:00")))
+            }
+            override suspend fun delete(table: String, id: String) {}
+            override suspend fun rpc(fn: String, params: JsonObject) {}
+            override suspend fun fetchSince(table: String, column: String, since: String, limit: Int): List<JsonObject> = emptyList()
+            override suspend fun fetchIds(table: String, offset: Int, limit: Int): List<String> = emptyList()
+        }
+        OutboxFlusher(remote, store).flush("u1")
+        assertEquals("Undo is still queued", listOf(false), store.pending().map { payload(it).bool("done") })
+
+        Hydrator(remote, store).apply { nowIso = { "2026-05-21T12:00:00.000Z" } }.pruneStaleTaskOps()
+
+        assertEquals("the Undo must survive the next prune", false, payload(store.pending().single()).bool("done"))
+        assertFalse(store.tasks().first().single().done)
+    }
+
+    // Mark done, then Undo, while the web renamed the task: both edits merge onto
+    // the rename, and the Undo is what reaches the server.
+    @Test fun chain_markDoneThenUndoWhileTheWebRenamedLandsTheRenameUndone() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store).apply { nowIso = { "2026-05-21T12:00:00.000Z" } }
+        val write = WriteThrough(store)
+        val s0 = synced("2026-05-21T09:00:00.000000+00:00")
+        store.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+        val done = s0.copy(done = true, completedAt = "2026-05-21T09:10:00.000Z", updatedAt = "2026-05-21T09:10:00.000Z")
+        write.upsertTask(done)
+        write.upsertTask(done.copy(done = false, completedAt = null, updatedAt = "2026-05-21T09:11:00.000Z"))
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(s0.copy(name = "Web name", updatedAt = "2026-05-21T09:30:00.000000+00:00")))
+
+        hydrator.pruneStaleTaskOps()
+
+        val ops = store.pending().map { payload(it) }
+        assertEquals(listOf("Web name", "Web name"), ops.map { it.str("name") })
+        assertEquals(listOf(true, false), ops.map { it.bool("done") })
+        val local = store.tasks().first().single()
+        assertEquals("Web name", local.name)
+        assertFalse(local.done)
+        OutboxFlusher(remote, store).flush("u1")
+        val sent = remote.sentTasks().single()
+        assertEquals("Web name", sent.str("name"))
+        assertEquals(false, sent.bool("done"))
+    }
+
+    // An edit queued WHILE the prune's server read is in flight. The prune read
+    // the ops before the fetch and saved its merged row after it, so the new
+    // edit's local row was overwritten and its op flushed unmerged (re-opening
+    // the web completion).
+    @Test fun chain_anEditQueuedWhileThePruneIsFetchingJoinsTheChain() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store).apply { nowIso = { "2026-05-21T12:00:00.000Z" } }
+        val write = WriteThrough(store)
+        val s0 = synced("2026-05-21T09:00:00.000000+00:00")
+        store.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+        val e1 = s0.copy(name = "Call mom re: birthday", updatedAt = "2026-05-21T09:10:00.000Z")
+        write.upsertTask(e1)
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(s0.copy(done = true, completedAt = "2026-05-21T09:30:00.000Z", updatedAt = "2026-05-21T09:30:00.000000+00:00")))
+        remote.onFetchAll = { table ->
+            if (table == Tables.TASKS) write.upsertTask(e1.copy(estimateMin = 10, updatedAt = "2026-05-21T09:31:00.000Z"))
+        }
+
+        hydrator.pruneStaleTaskOps()
+
+        val ops = store.pending()
+        assertEquals(2, ops.size)
+        val op2 = payload(ops.last())
+        assertEquals("the edit queued mid-fetch is merged too", true, op2.bool("done"))
+        assertEquals("Call mom re: birthday", op2.str("name"))
+        assertEquals(10, op2.int("estimate_min"))
+        val local = store.tasks().first().single()
+        assertEquals("the local row follows the LAST op, not the first op's merge", 10, local.estimateMin)
+        assertEquals("Call mom re: birthday", local.name)
+        assertTrue(local.done)
+    }
+
+    // A task deleted while the prune's read is in flight stays deleted: its
+    // upserts were cancelled, so there is no chain left to save a row for.
+    @Test fun chain_aTaskDeletedWhileThePruneIsFetchingIsNotResurrected() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store)
+        val write = WriteThrough(store)
+        val s0 = synced("2026-05-21T09:00:00.000000+00:00")
+        store.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+        write.upsertTask(s0.copy(name = "Call mom re: birthday", updatedAt = "2026-05-21T09:10:00.000Z"))
+        remote.serverRows[Tables.TASKS] = listOf(serverRow(s0.copy(done = true, updatedAt = "2026-05-21T09:30:00.000000+00:00")))
+        remote.onFetchAll = { table -> if (table == Tables.TASKS) write.deleteTask("t1") }
+
+        hydrator.pruneStaleTaskOps()
+
+        assertTrue(store.tasks().first().isEmpty())
+        assertEquals(listOf("delete"), store.pending().map { it.op })
+    }
+
+    // Android-only: a realtime echo (a newer server row) replaced a task that had
+    // a queued edit; the next edit, built on the echo, carried the server's old
+    // name, and the prune then merged the rename away.
+    @Test fun realtimeEcho_doesNotReplaceATaskWithAQueuedEdit() = runTest {
+        val remote = FakeRemote()
+        val hydrator = Hydrator(remote, store).apply { nowIso = { "2026-05-21T12:00:00.000Z" } }
+        val write = WriteThrough(store)
+        val s0 = synced("2026-05-21T09:00:00.000000+00:00")
+        store.upsert(Tables.TASKS, s0, ser, s0.id, s0.updatedAt)
+        write.upsertTask(s0.copy(name = "Call mom re: birthday", updatedAt = "2026-05-21T09:10:00.000Z"))
+        val webDone = serverRow(s0.copy(done = true, completedAt = "2026-05-21T09:10:05.000Z", updatedAt = "2026-05-21T09:10:05.000000+00:00"))
+
+        assertFalse("the echo is seen but not applied", RowApply.apply(Tables.TASKS, webDone, store, "u1"))
+        assertEquals("Call mom re: birthday", store.tasks().first().single().name)
+
+        // The next edit is built on the local row; the prune then brings the
+        // completion in, and both edits survive.
+        write.upsertTask(store.tasks().first().single().copy(estimateMin = 10, updatedAt = "2026-05-21T09:11:00.000Z"))
+        remote.serverRows[Tables.TASKS] = listOf(webDone)
+        hydrator.pruneStaleTaskOps()
+        val local = store.tasks().first().single()
+        assertEquals("Call mom re: birthday", local.name)
+        assertEquals(10, local.estimateMin)
+        assertTrue(local.done)
+        // Once the edit has flushed, the same echo applies again.
+        store.pending().forEach { store.dequeue(it.seq) }
+        val later = serverRow(s0.copy(name = "Web", updatedAt = "2026-05-21T13:00:00.000000+00:00"))
+        assertTrue(RowApply.apply(Tables.TASKS, later, store, "u1"))
+        assertEquals("Web", store.tasks().first().single().name)
+    }
+
+    // The sign-out drain's 5 s timeout cancels the prune's read. The prune used to
+    // swallow that and return normally, so the flush after it started with the
+    // ops unpruned; it now rethrows and nothing after it runs.
+    @Test fun prune_rethrowsTheCancellationOfItsRead() = runBlocking {
+        val remote = FakeRemote().apply { onFetchAll = { awaitCancellation() } }
+        val hydrator = Hydrator(remote, store)
+        WriteThrough(store).upsertTask(synced("2026-05-21T09:00:00.000Z"))
+        var flushed = false
+        withTimeoutOrNull(500) {
+            hydrator.pruneStaleTaskOps()
+            flushed = true   // what flushUnlocked does next
+        }
+        assertFalse("nothing after a cancelled prune may run", flushed)
+    }
+
     // --- shared-collection item RPCs through the OUTBOX (2026-09 round 2) -------
     // Item writes on SHARED lists used to be fire-and-forget: a failed RPC (offline,
     // 5xx, RLS no-op) left the optimistic row locally and the next echo/hydrate
@@ -510,6 +814,90 @@ class OfflineEngineTest {
         val c1 = store.collections().first().single()
         assertEquals(emptyList<String>(), c1.members)
         assertEquals("owner", c1.myRole)
+    }
+
+    // --- collections hydrate vs queued list ops (audit 2026-09-22 C8) ---
+    // It now runs on every membership event, not only after a flush, so what is
+    // still queued must survive it. Ported from the iOS
+    // HydratorPendingPreservationTests (build 81).
+
+    private fun memberRow(collectionId: String, userId: String, role: String = "editor") = JsonObject(
+        mapOf(
+            "id" to JsonPrimitive("$collectionId-$userId"), "collection_id" to JsonPrimitive(collectionId),
+            "user_id" to JsonPrimitive(userId), "role" to JsonPrimitive(role),
+        ),
+    )
+
+    private fun list(id: String, members: List<String> = emptyList(), items: List<CollectionItem> = emptyList()) =
+        ItemCollection(id = id, name = id, color = "indigo", items = items, sortOrder = 0, ownerId = "me", members = members, myRole = "owner")
+
+    @Test fun hydrateCollections_aQueuedListKeepsItsContentButTakesFreshMembership() = runTest {
+        // The owner's own edit is queued (1.5 s debounce) when a partner's join
+        // fires the members hydrate. Keeping the whole local row kept members = []
+        // too, so the list still read as unshared and nothing re-read it.
+        val eggs = CollectionItem(id = "i-local", body = "eggs", at = "2026-05-21T10:01:00.000Z")
+        WriteThrough(store).upsertCollection(list("c1", items = listOf(eggs)))
+        val remote = FakeRemote().apply {
+            serverRows[Tables.COLLECTIONS] = listOf(collectionServerRow(list("c1"), "me"))
+            serverRows["collection_members"] = listOf(memberRow("c1", "p1"))
+        }
+
+        Hydrator(remote, store).hydrateCollections("me")
+
+        val c1 = store.collections().first().single()
+        assertEquals("the queued edit's content is kept", listOf("i-local"), c1.items.map { it.id })
+        assertEquals("but membership is server truth, not a local edit", listOf("p1"), c1.members)
+        assertEquals("owner", c1.myRole)
+    }
+
+    @Test fun hydrateCollections_aQueuedItemRpcKeepsItsOptimisticItem() = runTest {
+        val milk = CollectionItem(id = "i1", body = "Milk", at = "2026-05-21T10:00:00.000Z")
+        store.upsert(Tables.COLLECTIONS, list("c1", members = listOf("p1"), items = listOf(milk)), ItemCollection.serializer(), "c1")
+        WriteThrough(store).enqueueCollectionRpc("c1", CollectionRpcs.addItem("c1", "i1", "Milk", milk.at))
+        val remote = FakeRemote().apply {
+            serverRows[Tables.COLLECTIONS] = listOf(collectionServerRow(list("c1"), "me"))
+            serverRows["collection_members"] = listOf(memberRow("c1", "p1"))
+        }
+
+        Hydrator(remote, store).hydrateCollections("me")
+
+        val c1 = store.collections().first().single()
+        assertEquals("the item still waiting on its rpc is not reverted", listOf("i1"), c1.items.map { it.id })
+        assertEquals(listOf("p1"), c1.members)
+    }
+
+    @Test fun hydrateCollections_aListWithAQueuedDeleteIsNotResurrected() = runTest {
+        store.upsert(Tables.COLLECTIONS, list("c1"), ItemCollection.serializer(), "c1")
+        WriteThrough(store).deleteCollection("c1")
+        val remote = FakeRemote().apply { serverRows[Tables.COLLECTIONS] = listOf(collectionServerRow(list("c1"), "me")) }
+
+        Hydrator(remote, store).hydrateCollections("me")
+
+        assertTrue(store.collections().first().isEmpty())
+    }
+
+    // The debounced flush acks a list edit and a list delete BETWEEN the hydrate's
+    // collections read and its replace: the snapshot predates both and nothing is
+    // queued any more. The edit must not revert (the owner's next whole-row
+    // upsert would be built on the reverted row and delete it on the server), and
+    // the list must not come back.
+    @Test fun hydrateCollections_aListWriteAckedWhileTheHydrateReadsIsNotReverted() = runTest {
+        val milk = CollectionItem(id = "i-milk", body = "milk", at = "2026-05-21T10:01:00.000Z")
+        store.upsert(Tables.COLLECTIONS, list("c2"), ItemCollection.serializer(), "c2")
+        val write = WriteThrough(store)
+        write.upsertCollection(list("c1", items = listOf(milk)))
+        write.deleteCollection("c2")
+        val remote = FakeRemote().apply {
+            serverRows[Tables.COLLECTIONS] = listOf(collectionServerRow(list("c1"), "me"), collectionServerRow(list("c2"), "me"))
+            onFetchAll = { table -> if (table == "collection_members") store.pending().forEach { store.dequeue(it.seq) } }
+        }
+
+        Hydrator(remote, store).hydrateCollections("me")
+
+        assertTrue("both ops were acked mid-hydrate", store.pending().isEmpty())
+        val byId = store.collections().first().associateBy { it.id }
+        assertEquals("an edit acked mid-read is not reverted to the older snapshot", listOf("i-milk"), byId["c1"]?.items?.map { it.id })
+        assertNull("a delete acked mid-read stays deleted", byId["c2"])
     }
 
     // Build a server-shaped row JsonObject (DbRowCodec encodes the row; decodeTask

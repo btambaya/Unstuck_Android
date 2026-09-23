@@ -84,7 +84,13 @@ class SyncCoordinator(
     // being permanently deaf), so what keeps this device in step is a bounded pull
     // of everything newer than the per-table high-water mark.
     private val cursors = PrefsSyncCursors(context.getSharedPreferences("unstuck.sync", Context.MODE_PRIVATE))
-    private val catchUp = CatchUpPuller(gateway, store, cursors, log = { Log.i(TAG, it) })
+    // refreshMembership: the owner's phone learns a list became shared (or lost a
+    // member) from the catch-up alone, the path that survives a missed realtime
+    // event and a relaunch (audit 2026-09-22 C8).
+    private val catchUp = CatchUpPuller(
+        gateway, store, cursors, log = { Log.i(TAG, it) },
+        refreshMembership = { uid, changed -> hydrator.refreshCollectionMembership(uid, changed) },
+    )
     // onChannelClosed: a single channel closing server-side while the socket stays
     // CONNECTED (so startHealthObserver never fires) — self-heal by rebuilding the
     // mirror + a coalesced backfill pull. See healClosedChannel (BUG 4).

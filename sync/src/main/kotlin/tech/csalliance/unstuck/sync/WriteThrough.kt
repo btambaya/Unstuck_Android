@@ -47,18 +47,24 @@ class WriteThrough(private val store: LocalStore) {
         // base carries forward (the flusher coalesces the older op away, so the base
         // must stay the last SYNCED state, not the intermediate local one). Null for
         // a brand-new row. Hydrator.pruneStaleTaskOps 3-way merges against it.
-        val base = mergeBaseFor(Tables.TASKS, t.id) {
-            store.getOne(Tables.TASKS, t.id, TaskItem.serializer())?.let { DbRowCodec.encodeTask(it).toString() }
+        // The base read, the local write and the enqueue are ONE transaction, so
+        // the prune's re-read sees this edit whole (it joins the row's chain) or
+        // not at all (parity with iOS build 81, audit 2026-09-22 C9).
+        store.transaction {
+            val base = mergeBaseFor(Tables.TASKS, t.id) {
+                getOne(Tables.TASKS, t.id, TaskItem.serializer())?.let { DbRowCodec.encodeTask(it).toString() }
+            }
+            upsert(Tables.TASKS, t, TaskItem.serializer(), t.id, t.updatedAt)
+            enqueue(outboxOp("tasks", t.id, "upsert", DbRowCodec.encodeTask(t).toString(), base = base))
         }
-        store.upsert(Tables.TASKS, t, TaskItem.serializer(), t.id, t.updatedAt)
-        enqueue("tasks", t.id, "upsert", DbRowCodec.encodeTask(t).toString(), base = base)
+        runCatching { onEnqueue?.invoke() }
     }
 
     /** The base for a new upsert of (table,id): the still-queued upsert's base when
      *  one exists (even if that is null — a local create stays a create), else the
      *  current local row encoded by [current]. */
-    private suspend fun mergeBaseFor(table: String, id: String, current: suspend () -> String?): String? {
-        val queued = store.latestPendingUpsert(table, id)
+    private suspend fun LocalStore.Tx.mergeBaseFor(table: String, id: String, current: suspend () -> String?): String? {
+        val queued = latestPendingUpsert(table, id)
         return if (queued != null) queued.base else current()
     }
 
@@ -193,12 +199,13 @@ class WriteThrough(private val store: LocalStore) {
     }
 
     private suspend fun enqueue(table: String, id: String, op: String, payload: String?, dependsOn: String? = null, base: String? = null) {
-        store.enqueue(
-            OutboxEntity(op = op, recordTable = table, recordId = id, payload = payload, dependsOn = dependsOn, createdAt = nowMillis(), base = base),
-        )
+        store.enqueue(outboxOp(table, id, op, payload, dependsOn, base))
         // Outside the store write so a hook failure can never lose the local edit.
         runCatching { onEnqueue?.invoke() }
     }
+
+    private fun outboxOp(table: String, id: String, op: String, payload: String?, dependsOn: String? = null, base: String? = null) =
+        OutboxEntity(op = op, recordTable = table, recordId = id, payload = payload, dependsOn = dependsOn, createdAt = nowMillis(), base = base)
 
     // Injectable seam — overridable in tests (Date.now() is non-deterministic).
     internal var nowMillis: () -> Long = { System.currentTimeMillis() }

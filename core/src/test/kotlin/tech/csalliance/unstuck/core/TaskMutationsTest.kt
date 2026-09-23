@@ -7,6 +7,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.applyCompletion
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
+import tech.csalliance.unstuck.core.logic.clampDurationMin
+import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.clearLaterOnSchedule
 import tech.csalliance.unstuck.core.logic.isCompletedToday
 import tech.csalliance.unstuck.core.model.Recurrence
@@ -96,5 +98,19 @@ class TaskMutationsTest {
         // A template's blocks are generated horizon fill, not a scheduling decision.
         val template = mkTask(id = "t", later = true).copy(recurrence = Recurrence.Daily())
         assertNull(clearLaterOnSchedule(template, now))
+    }
+
+    // The server CHECKs (migration 001) live in core so every writer shares
+    // them (audit 2026-09-22, C4; iOS ServerCheckClampTests).
+    @Test fun serverCheckClampsLiveInCore() {
+        assertEquals(25, clampEstimateMin(null))
+        assertEquals(1, clampEstimateMin(0))
+        assertEquals(1, clampEstimateMin(-5))
+        assertEquals("a 1-4 minute task keeps its estimate", 2, clampEstimateMin(2))
+        assertEquals(1440, clampEstimateMin(5000))
+        assertEquals("its block floors at 5", 5, clampDurationMin(2))
+        assertEquals(60, clampDurationMin(null, fallback = 60))
+        assertEquals(25, clampDurationMin(null))
+        assertEquals(1440, clampDurationMin(99999))
     }
 }

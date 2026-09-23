@@ -112,6 +112,8 @@ class AssistantToolsTest {
         // Defaults chosen so the pre-rewrite set_ritual assertions still change something.
         val rituals = mutableMapOf("morning" to false, "evening" to true, "friday" to false, "sunday" to true)
         var settingsSaveOk = true
+        /** Pins api.todayIso() for a case that needs a particular day of the month. */
+        var today: String? = null
     }
 
     inner class FakeApi(val state: FakeState = FakeState()) : AssistantApi {
@@ -123,7 +125,7 @@ class AssistantToolsTest {
         override suspend fun getAreaRows() = state.areas.toList()
         override suspend fun getTagRows() = state.tags.toList()
         override fun currentUserName() = "Maya"
-        override fun todayIso() = TODAY
+        override fun todayIso() = state.today ?: TODAY
         override fun nowHM() = "10:00"
         override fun nowMs() = NOW_MS
         override fun nowIso(): String = Instant.ofEpochMilli(NOW_MS).toString()
@@ -420,6 +422,193 @@ class AssistantToolsTest {
         assertEquals(1, h.state.tasks.size)
     }
 
+    // ── repeating tasks on the calendar (audit 2026-09-22, C1 / C7; iOS AssistantToolsTests) ──
+
+    /** A daily series' blocks at `time` on TODAY + each offset (ids "<task><offset>"). */
+    private fun dailySeries(taskId: String, offsets: IntRange, time: String = "07:00") =
+        offsets.map { block("$taskId$it", taskId, addDaysIso(TODAY, it), time) }
+
+    /** With the repeat left on, the removed slots came back although the result
+     *  said they were gone. Refused — even with no upcoming slot left — and the
+     *  model asks which the user means (owner decision). */
+    @Test fun `unschedule_task refuses a repeating task and says what to ask`() = runTest {
+        val h = makeApi {
+            tasks += task("r", "Gym", recurrence = Recurrence.Daily())
+            blocks += listOf(block("past", "r", YESTERDAY, done = true), block("td", "r", TODAY), block("tm", "r", TOMORROW), block("nw", "r", NEXT_WEEK))
+        }
+        val refusal = "error: \"Gym\" repeats — nothing changed. Ask the user which they mean: stop the whole series (set_task_recurrence kind none) or skip just one day (skip_occurrence with the date)."
+        val before = h.state.tasks.toList() to h.state.blocks.toList()
+        assertEquals(refusal, h.run("unschedule_task", "taskId" to "r"))
+        assertEquals("an error changes nothing", before, h.state.tasks.toList() to h.state.blocks.toList())
+        h.state.blocks.clear(); h.state.blocks += block("past", "r", YESTERDAY, done = true)
+        assertEquals(refusal, h.run("unschedule_task", "taskId" to "r"))
+        assertEquals(Recurrence.Daily(), h.state.tasks[0].recurrence)
+    }
+
+    /** "Move tomorrow's gym to 7pm" retimes TOMORROW's occurrence. It used to take
+     *  TODAY's to tomorrow and refill every open date at 19:00, bringing back a
+     *  deleted one and stretching the tail at the one-off time. */
+    @Test fun `schedule_task moves one occurrence without refilling the series`() = runTest {
+        val deleted = addDaysIso(TODAY, 10)
+        val h = makeApi { tasks += task("r", "Gym", recurrence = Recurrence.Daily()); blocks += dailySeries("r", 0..55).filter { it.date != deleted } }
+        assertEquals("ok: scheduled \"Gym\" $TOMORROW 19:00", h.run("schedule_task", "taskId" to "r", "date" to TOMORROW, "startTime" to "19:00"))
+        assertEquals(55, h.state.blocks.size)
+        assertEquals("tomorrow's own occurrence moved", listOf("r1"), h.state.blocks.filter { it.startTime == "19:00" }.map { it.id })
+        assertEquals("today keeps its occurrence", "07:00", h.state.blocks.first { it.id == "r0" }.startTime)
+        assertEquals(1, h.state.blocks.count { it.date == TOMORROW })
+        assertFalse("a deleted occurrence stays gone", h.state.blocks.any { it.date == deleted })
+        assertFalse(h.state.blocks.any { it.date > addDaysIso(TODAY, 55) })
+        assertNull("a same-day re-time is not a slip", h.state.tasks[0].moveCount)
+    }
+
+    @Test fun `schedule_task on a first placement still materializes the series`() = runTest {
+        val h = makeApi { tasks += task("r", "Gym", recurrence = Recurrence.Daily()) }
+        assertEquals("ok: scheduled \"Gym\" $TOMORROW 07:00", h.run("schedule_task", "taskId" to "r", "date" to TOMORROW, "startTime" to "07:00"))
+        assertEquals((1..55).map { addDaysIso(TODAY, it) }, h.state.blocks.map { it.date }.sorted())
+        assertTrue(h.state.blocks.all { it.startTime == "07:00" && it.taskId == "r" })
+    }
+
+    /** A lapsed series re-placed at an explicit time takes THAT time for the
+     *  series — the history's 07:00 must not silently win. */
+    @Test fun `schedule_task re-placing a lapsed series sets the series time`() = runTest {
+        val h = makeApi {
+            tasks += task("r", "Gym", recurrence = Recurrence.Daily())
+            blocks += (1..29).map { block("h$it", "r", addDaysIso(TODAY, -it), "07:00", done = true) }
+        }
+        assertEquals("ok: scheduled \"Gym\" $TOMORROW 19:00", h.run("schedule_task", "taskId" to "r", "date" to TOMORROW, "startTime" to "19:00"))
+        val upcoming = h.state.blocks.filter { it.date > TODAY }
+        assertEquals(55, upcoming.size)
+        assertTrue(upcoming.all { it.startTime == "19:00" })
+    }
+
+    /** A skipped day scheduled again comes back at the new time; the rest of the
+     *  series stays where it is (C7). A day already ticked has nothing to place. */
+    @Test fun `schedule_task on a repeating task's skipped day un-skips it`() = runTest {
+        val h = makeApi { tasks += task("r", "Walk", recurrence = Recurrence.Daily()); blocks += dailySeries("r", 0..55) }
+        h.state.blocks[0] = h.state.blocks[0].copy(skipped = true)
+        assertEquals("ok: scheduled \"Walk\" $TODAY 16:00", h.run("schedule_task", "taskId" to "r", "date" to TODAY, "startTime" to "16:00"))
+        val today = h.state.blocks.first { it.id == "r0" }
+        assertEquals("16:00", today.startTime)
+        assertFalse(today.skipped)
+        assertEquals("tomorrow's occurrence is not pulled onto today", TOMORROW, h.state.blocks.first { it.id == "r1" }.date)
+        assertEquals(56, h.state.blocks.size)
+
+        h.state.blocks.clear(); h.state.blocks += dailySeries("r", 0..55)
+        h.state.blocks[0] = h.state.blocks[0].copy(done = true)
+        val before = h.state.blocks.toList()
+        assertEquals("error: \"Walk\" is already done on $TODAY — nothing changed",
+            h.run("schedule_task", "taskId" to "r", "date" to TODAY, "startTime" to "16:00"))
+        assertEquals(before, h.state.blocks)
+    }
+
+    /** An end-date edit on a day when the next occurrence was moved by hand used
+     *  to delete the whole series and rebuild it at the moved time. */
+    @Test fun `set_task_recurrence keeps the series time over a moved occurrence`() = runTest {
+        val h = makeApi { tasks += task("r", "Gym", recurrence = Recurrence.Daily()); blocks += dailySeries("r", 1..55) }
+        h.state.blocks[0] = h.state.blocks[0].copy(startTime = "18:00")
+        val until = addDaysIso(TODAY, 90)
+        assertEquals("ok: \"Gym\" now repeats daily at 07:00 until $until", h.run("set_task_recurrence", "taskId" to "r", "kind" to "daily", "until" to until))
+        val ids = h.state.blocks.map { it.id }.toSet()
+        assertTrue("no 07:00 occurrence was deleted", (2..55).all { "r$it" in ids })
+        assertTrue("the series is not rebuilt at 18:00", h.state.blocks.all { it.startTime == "07:00" })
+    }
+
+    /** "Make Office every Monday at 11" on a series at 09:15 is schedule_task on
+     *  the next Monday, then set_task_recurrence: the occurrence placed this turn
+     *  sets the series' time (C1). A later turn (a fresh scratch) is an edit again. */
+    @Test fun `schedule_task then set_task_recurrence re-times the whole series`() = runTest {
+        val mondays = (0..55).map { addDaysIso(TODAY, it) }.filter { jsDayOfWeek(it) == 1 }
+        val h = makeApi { tasks += task("o", "Office", recurrence = Recurrence.Weekly(listOf(1))); blocks += mondays.map { block("o$it", "o", it, "09:15") } }
+        val next = mondays.first { it > TODAY }
+        assertEquals("ok: scheduled \"Office\" $next 11:00", h.run("schedule_task", "taskId" to "o", "date" to next, "startTime" to "11:00"))
+        assertEquals("ok: \"Office\" now repeats weekly on Mon at 11:00", h.run("set_task_recurrence", "taskId" to "o", "kind" to "weekly", "daysOfWeek" to listOf(1)))
+        val upcoming = h.state.blocks.filter { it.date > TODAY }
+        assertTrue("every Monday at 11", upcoming.all { it.startTime == "11:00" && jsDayOfWeek(it.date) == 1 })
+        assertEquals("one per Monday", upcoming.size, upcoming.map { it.date }.toSet().size)
+        assertTrue(mondays.filter { it > TODAY }.all { d -> upcoming.any { it.date == d } })
+        val i = h.state.blocks.indexOfFirst { it.date == next }
+        h.state.blocks[i] = h.state.blocks[i].copy(startTime = "18:00")
+        assertEquals("ok: \"Office\" now repeats weekly on Mon at 11:00",
+            runAssistantTool("set_task_recurrence", ToolArgs(json("taskId" to "o", "kind" to "weekly", "daysOfWeek" to listOf(1))), h.api, TurnScratch()))
+    }
+
+    /** October's rent pushed from the 15th to the 20th, then only the end date
+     *  edited on the 16th: the series day had passed, so the 20th was deleted and
+     *  the month lost its occurrence (C1). */
+    @Test fun `set_task_recurrence keeps this month's moved occurrence`() = runTest {
+        val h = makeApi {
+            today = "2026-10-16"
+            tasks += task("m", "Rent", recurrence = Recurrence.Monthly())
+            blocks += listOf(block("aug", "m", "2026-08-15", "07:00", done = true), block("sep", "m", "2026-09-15", "07:00", done = true),
+                block("oct", "m", "2026-10-20", "18:00"), block("nov", "m", "2026-11-15", "07:00"))
+        }
+        val before = h.state.blocks.toList()
+        assertEquals("ok: \"Rent\" now repeats monthly at 07:00 until 2027-06-30",
+            h.run("set_task_recurrence", "taskId" to "m", "kind" to "monthly", "until" to "2027-06-30"))
+        assertEquals("Oct 20 and Nov 15 both stay", before, h.state.blocks)
+    }
+
+    /** Only a TIMED block anchors a series: a timeless one used to read as
+     *  "regenerated" over a rule that materialised nothing (C7). */
+    @Test fun `set_task_recurrence on a timeless task nudges for a slot`() = runTest {
+        val h = makeApi { tasks += task("a", "Alpha"); blocks += block("t1", "a", TOMORROW, "") }
+        assertEquals("ok: \"Alpha\" now repeats daily — it has no calendar slot yet; schedule_task it to place the first one",
+            h.run("set_task_recurrence", "taskId" to "a", "kind" to "daily"))
+        assertEquals("ok: \"Alpha\" no longer repeats", h.run("set_task_recurrence", "taskId" to "a", "kind" to "none"))
+    }
+
+    /** The replies read the same as on web (lib/assistant/tools.ts) and iOS. */
+    @Test fun `set_task_recurrence replies in the web and iOS wording`() = runTest {
+        val h = makeApi { tasks += task("a", "Gym"); blocks += block("b1", "a", TOMORROW, "07:00") }
+        assertEquals("ok: \"Gym\" now repeats daily at 07:00", h.run("set_task_recurrence", "taskId" to "a", "kind" to "daily"))
+        assertEquals("ok: \"Gym\" no longer repeats (future occurrences removed)", h.run("set_task_recurrence", "taskId" to "a", "kind" to "none"))
+    }
+
+    // ── the server's CHECKs (migration 001), audit 2026-09-22 C4 ──
+
+    @Test fun `estimates and durations are clamped to what the server accepts`() = runTest {
+        val h = makeApi()
+        h.run("create_task", "name" to "Tiny", "estimateMin" to 0)
+        assertEquals(1, h.state.tasks.first { it.name == "Tiny" }.estimateMin)
+        h.run("create_task", "name" to "Huge", "estimateMin" to 99999)
+        assertEquals(1440, h.state.tasks.first { it.name == "Huge" }.estimateMin)
+        h.run("block_time", "name" to "Deep work", "date" to TOMORROW, "startTime" to "09:00", "durationMin" to 1)
+        assertEquals(5, h.state.blocks.first { it.taskName == "Deep work" }.durationMinutes)
+    }
+
+    /** Every block the assistant mints or resizes is floored at the server's 5
+     *  minutes and every estimate held to 1…1440: a "2-minute take meds" block
+     *  was refused and quarantined, living on this phone only. */
+    @Test fun `short and huge estimates never mint blocks the server refuses`() = runTest {
+        val h = makeApi()
+        h.run("create_task", "name" to "Meds", "estimateMin" to 2, "date" to TOMORROW, "startTime" to "08:00")
+        val meds = h.state.tasks.first { it.name == "Meds" }
+        assertEquals("a short task keeps its estimate", 2, meds.estimateMin)
+        assertEquals(5, h.state.blocks.first { it.taskId == meds.id }.durationMinutes)
+
+        h.state.tasks += task("r", "Stretch", estimateMin = 3, recurrence = Recurrence.Daily())
+        h.run("schedule_task", "taskId" to "r", "date" to TOMORROW, "startTime" to "07:00")
+        val stretch = h.state.blocks.filter { it.taskId == "r" }
+        assertTrue(stretch.size > 1)
+        assertTrue(stretch.all { it.durationMinutes == 5 })
+
+        h.state.tasks += task("a", "Alpha")
+        h.state.blocks += block("live", "a", TOMORROW, "09:00")
+        assertEquals("ok: updated \"Alpha\" — estimate 3m", h.run("update_task", "taskId" to "a", "estimateMin" to 3))
+        assertEquals(3, h.state.tasks.first { it.id == "a" }.estimateMin)
+        assertEquals(5, h.state.blocks.first { it.id == "live" }.durationMinutes)
+        assertEquals("ok: updated \"Alpha\" — estimate 1440m", h.run("update_task", "taskId" to "a", "estimateMin" to 99999))
+        assertEquals(1440, h.state.tasks.first { it.id == "a" }.estimateMin)
+        assertEquals(1440, h.state.blocks.first { it.id == "live" }.durationMinutes)
+        assertTrue(h.run("update_task", "taskId" to "a", "estimateMin" to 5000).startsWith("error: nothing to change"))
+
+        h.run("create_tasks", "tasks" to listOf(mapOf("name" to "Zero", "estimateMin" to 0), mapOf("name" to "Big", "estimateMin" to 99999, "date" to TOMORROW, "startTime" to "10:00")))
+        assertEquals(1, h.state.tasks.first { it.name == "Zero" }.estimateMin)
+        val big = h.state.tasks.first { it.name == "Big" }
+        assertEquals(1440, big.estimateMin)
+        assertEquals(1440, h.state.blocks.first { it.taskId == big.id }.durationMinutes)
+    }
+
     @Test fun `unschedule_task errors when there is nothing upcoming`() = runTest {
         val h = makeApi { tasks += task("a", "Alpha"); blocks += block("past", "a", YESTERDAY) }
         assertEquals("error: \"Alpha\" has no upcoming slot to remove", h.run("unschedule_task", "taskId" to "a"))
@@ -603,7 +792,7 @@ class AssistantToolsTest {
         val h = makeApi { tasks += task("a", "Gym", recurrence = Recurrence.Weekly(listOf(1, 3))) }
         assertEquals("error: unknown recurrence kind \"fortnightly\" — use daily, weekly, monthly, or none", h.run("set_task_recurrence", "taskId" to "a", "kind" to "fortnightly"))
         assertEquals(Recurrence.Weekly(listOf(1, 3)), h.state.tasks[0].recurrence)
-        assertEquals("ok: \"Gym\" now repeats daily (not on the calendar yet — schedule_task it to place the series)", h.run("set_task_recurrence", "taskId" to "a", "kind" to "daily"))
+        assertEquals("ok: \"Gym\" now repeats daily — it has no calendar slot yet; schedule_task it to place the first one", h.run("set_task_recurrence", "taskId" to "a", "kind" to "daily"))
         assertEquals(Recurrence.Daily(), h.state.tasks[0].recurrence)
         assertEquals("ok: \"Gym\" no longer repeats", h.run("set_task_recurrence", "taskId" to "a", "kind" to "none"))
         assertNull(h.state.tasks[0].recurrence)
@@ -1364,7 +1553,7 @@ class AssistantToolsTest {
         assertEquals("error: weekly needs daysOfWeek (0=Sunday … 6=Saturday) — ask which days", h.run("set_task_recurrence", "taskId" to "a", "kind" to "weekly"))
         assertEquals("error: daysOfWeek must be 0=Sunday … 6=Saturday", h.run("set_task_recurrence", "taskId" to "a", "kind" to "weekly", "daysOfWeek" to listOf(1, 9)))
         assertNull(h.state.tasks[0].recurrence)
-        assertEquals("ok: \"Gym\" now repeats weekly on Mon, Wed until 2026-12-01 (calendar slots regenerated from its next slot)",
+        assertEquals("ok: \"Gym\" now repeats weekly on Mon, Wed at 07:00 until 2026-12-01",
             h.run("set_task_recurrence", "taskId" to "a", "kind" to "weekly", "daysOfWeek" to listOf(3, 1), "until" to "2026-12-01"))
         assertEquals(Recurrence.Weekly(listOf(1, 3), "2026-12-01"), h.state.tasks[0].recurrence)
         assertEquals("error: kind required — daily, weekly, monthly, or none", h.run("set_task_recurrence", "taskId" to "a"))

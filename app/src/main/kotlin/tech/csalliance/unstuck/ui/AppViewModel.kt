@@ -565,22 +565,56 @@ class AppViewModel(
         write?.deleteTask(id)
     }
 
-    /** Set/clear a task's recurrence and realign its future cal_blocks. */
-    fun setRecurrence(task: TaskItem, recurrence: Recurrence?) = launchWrite {
-        val updated = task.copy(recurrence = recurrence, updatedAt = isoNow())
-        write?.upsertTask(updated)
+    /**
+     * Set/clear a task's recurrence and realign its future cal_blocks, from the
+     * series' OWN time and day (recurrenceEditStart: its earliest LIVE timed block,
+     * the time most of its live occurrences share). The old anchor was the task's
+     * OLDEST block of any kind: "every Monday at 11" rebuilt the series at a
+     * history time, and on a series started 56+ days ago any repeat edit deleted
+     * every future occurrence and added none (parity with iOS builds 79 and 81,
+     * audit 2026-09-22 B79.1 C1).
+     *
+     * Returns false and writes NOTHING when a repeat is set on a task with no timed
+     * block: a series needs a time of day, and the old 09:00 fallback built it from
+     * TOMORROW (regenerate skips today), so the task left Today and came back at a
+     * time the user never chose. The caller asks for a day and a time and starts
+     * the series with [startRepeating] (parity with iOS build 81, audit 2026-09-22 C7).
+     */
+    fun setRecurrence(task: TaskItem, recurrence: Recurrence?): Boolean {
         val existing = blocks.value
-        val anchor = existing.filter { it.taskId == task.id && tech.csalliance.unstuck.core.logic.isTaskBlock(it) }
-            .minWithOrNull(compareBy({ it.date }, { it.startTime }))
-        val startTime = anchor?.startTime ?: "09:00"
-        val startDate = anchor?.date?.split("-")?.mapNotNull { it.toIntOrNull() }?.takeIf { it.size == 3 }
-            ?.let { tech.csalliance.unstuck.core.time.Time.civil(it[0], it[1], it[2]) }
-            ?: tech.csalliance.unstuck.core.time.Time.startOfDayMillis(nowMs())
-        val plan = tech.csalliance.unstuck.core.logic.regenerateForTask(
-            updated, recurrence, existing, tech.csalliance.unstuck.core.time.Clock.todayIso(), startTime, startDate,
-        )
-        plan.toDelete.forEach { write?.deleteCalBlock(it) }
-        plan.toUpsert.forEach { write?.upsertCalBlock(it) }
+        val today = tech.csalliance.unstuck.core.time.Clock.todayIso()
+        val start = tech.csalliance.unstuck.core.logic.recurrenceEditStart(task.id, recurrence, existing, today)
+        if (recurrence != null && start == null) return false
+        launchWrite {
+            val updated = task.copy(recurrence = recurrence, updatedAt = isoNow())
+            write?.upsertTask(updated)
+            // Without a start we are clearing the repeat, where regenerateForTask
+            // ignores the time and date (it only deletes the future).
+            val startDate = start?.date?.split("-")?.mapNotNull { it.toIntOrNull() }?.takeIf { it.size == 3 }
+                ?.let { tech.csalliance.unstuck.core.time.Time.civil(it[0], it[1], it[2]) }
+                ?: tech.csalliance.unstuck.core.time.Time.startOfDayMillis(nowMs())
+            val plan = tech.csalliance.unstuck.core.logic.regenerateForTask(
+                updated, recurrence, existing, today, start?.startTime ?: "09:00", startDate,
+                start?.horizonDays ?: tech.csalliance.unstuck.core.logic.RECURRENCE_HORIZON_DAYS,
+            )
+            // This month's occurrence moved later off a series day that has passed
+            // stays (see RecurrenceStart.keepId).
+            plan.toDelete.filter { it != start?.keepId }.forEach { write?.deleteCalBlock(it) }
+            plan.toUpsert.forEach { write?.upsertCalBlock(it) }
+        }
+        return true
+    }
+
+    /** "Start repeating" — the task editor's answer when [setRecurrence] refused a
+     *  task with no timed block: the rule is saved FIRST, then [scheduleTaskNow]
+     *  builds the series plus the chosen day's occurrence, today's too when today
+     *  is picked. The Later un-park rides in the same row, because scheduling
+     *  never clears Later on a repeating task (parity with iOS build 81, audit
+     *  2026-09-22 C7). */
+    fun startRepeating(task: TaskItem, recurrence: Recurrence, date: String, startTime: String) = launchWrite {
+        val next = task.copy(recurrence = recurrence, later = if (task.later == true) false else task.later, updatedAt = isoNow())
+        write?.upsertTask(next)
+        scheduleTaskNow(next, date, startTime)
     }
 
     // --- scheduling (cal blocks) ---
@@ -611,29 +645,36 @@ class AppViewModel(
         val recurrence = task.recurrence
         val existing = blocks.value.filter { it.taskId == task.id && tech.csalliance.unstuck.core.logic.isTaskBlock(it) }
         if (recurrence != null) {
+            val today = tech.csalliance.unstuck.core.time.Clock.todayIso()
             val parts = date.split("-").mapNotNull { it.toIntOrNull() }
             val startDate = if (parts.size == 3) tech.csalliance.unstuck.core.time.Time.civil(parts[0], parts[1], parts[2])
             else tech.csalliance.unstuck.core.time.Time.startOfDayMillis(nowMs())
-            val plan = tech.csalliance.unstuck.core.logic.regenerateForTask(task, recurrence, blocks.value, tech.csalliance.unstuck.core.time.Clock.todayIso(), startTime, startDate)
+            val plan = tech.csalliance.unstuck.core.logic.regenerateForTask(task, recurrence, blocks.value, today, startTime, startDate)
             plan.toDelete.forEach { write?.deleteCalBlock(it) }
             plan.toUpsert.forEach { write?.upsertCalBlock(it) }
             // Guarantee the user's CHOSEN slot is materialized. The horizon regen skips
             // the chosen date when it's today or off-pattern (e.g. a Tue pick on a
             // Mon/Wed/Fri weekly), so without this the task vanishes from that date —
-            // despite the "Scheduled" confirmation. Only add when nothing covers it.
-            // Coverage is computed POST-plan: a pre-regen block on the chosen date that
-            // the plan is about to delete (the old off-pattern anchor, or the same date
-            // at the old time) must NOT count — counting it skipped this upsert while
-            // the deletes still ran, leaving the chosen date with no block at all.
-            val deleting = plan.toDelete.toSet()
-            val coversChosen = existing.any { it.date == date && it.id !in deleting } || plan.toUpsert.any { it.date == date }
-            if (!coversChosen) {
-                write?.upsertCalBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = startTime, durationMinutes = task.estimateMin, date = date, kind = CalBlockKind.TASK))
+            // despite the "Scheduled" confirmation. Decided POST-plan (a block the plan
+            // is about to delete must not count) by recurrenceChosenDateAction: an open
+            // occurrence at another time (today's — regenerate never touches it) is
+            // moved, a skipped one is moved and un-skipped, and a done one leaves the
+            // day alone. "Any block on the day covers it" left today at its old time
+            // and a skipped day hidden (parity with iOS build 81, audit 2026-09-22 C7).
+            when (val action = tech.csalliance.unstuck.core.logic.recurrenceChosenDateAction(existing, plan, date, startTime)) {
+                tech.csalliance.unstuck.core.logic.ChosenDateAction.Covered -> Unit
+                is tech.csalliance.unstuck.core.logic.ChosenDateAction.Retime ->
+                    write?.upsertCalBlock(action.block.copy(startTime = startTime, skipped = false))
+                tech.csalliance.unstuck.core.logic.ChosenDateAction.Mint ->
+                    write?.upsertCalBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = startTime, durationMinutes = tech.csalliance.unstuck.core.logic.clampDurationMin(task.estimateMin), date = date, kind = CalBlockKind.TASK))
             }
-            // Only count a "move" if the anchor (earliest existing block) actually
-            // changed — re-tapping Schedule at the same date/time shouldn't inflate
-            // moveCount + falsely trip the slip detector (parity with the else branch).
-            val anchor = existing.minWithOrNull(compareBy({ it.date }, { it.startTime }))
+            // Only count a "move" if the series' next occurrence actually changed —
+            // re-tapping Schedule at the same date/time shouldn't inflate moveCount +
+            // falsely trip the slip detector. Compared with recurrenceAnchor, not the
+            // earliest block: a template's earliest block is weeks-old history, so
+            // every re-schedule, even a no-op, bumped it (parity with iOS build 81,
+            // audit 2026-09-22 C7).
+            val anchor = tech.csalliance.unstuck.core.logic.recurrenceAnchor(task.id, existing, today)
             if (anchor != null && (anchor.date != date || anchor.startTime != startTime)) write?.upsertTask(bumpMoveCount(task, isoNow()))
         } else {
             val cur = existing.minWithOrNull(compareBy({ it.date }, { it.startTime }))
@@ -643,7 +684,7 @@ class AppViewModel(
                     write?.upsertTask(bumpMoveCount(task, isoNow()))
                 }
             } else {
-                write?.upsertCalBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = startTime, durationMinutes = task.estimateMin, date = date, kind = CalBlockKind.TASK))
+                write?.upsertCalBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = startTime, durationMinutes = tech.csalliance.unstuck.core.logic.clampDurationMin(task.estimateMin), date = date, kind = CalBlockKind.TASK))
             }
         }
     }

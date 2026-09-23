@@ -4,6 +4,7 @@ import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.InsightsWindow
 import tech.csalliance.unstuck.core.logic.addDaysIso
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
+import tech.csalliance.unstuck.core.logic.clampDurationMin
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.newUuid
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
@@ -171,6 +172,14 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
         // ── CALENDAR ──
         "unschedule_task" -> {
             val t = findTask(args.str("taskId"), api, scratch) ?: return "error: task not found"
+            // A repeating task is refused, even with no upcoming slot left: with the
+            // repeat still on, the slots came back (a horizon top-up on another
+            // device rebuilt every removed one) although the result said they were
+            // gone. Which one the user means is theirs to say (owner decision;
+            // parity with iOS build 81, audit 2026-09-22 C1).
+            if (t.recurrence != null) {
+                return "error: \"${t.name}\" repeats — nothing changed. Ask the user which they mean: stop the whole series (set_task_recurrence kind none) or skip just one day (skip_occurrence with the date)."
+            }
             val today = api.todayIso()
             val live = api.getBlocks().filter { it.taskId == t.id && !it.done && !it.skipped && it.date >= today }
             if (live.isEmpty()) return "error: \"${t.name}\" has no upcoming slot to remove"
@@ -209,7 +218,9 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             val nm = args.str("name")
             val date = args.str("date")
             val startTime = args.str("startTime")
-            val dur = args.int("durationMin") ?: 60
+            // Clamped to the server's CHECK (5…1440, audit 2026-09-22 C4): an
+            // out-of-range block was accepted here, refused on flush and quarantined.
+            val dur = clampDurationMin(args.int("durationMin"), fallback = 60)
             if (nm == null || date == null || startTime == null) return "error: name, date and startTime are all required for block_time"
             (rejectPastDate(api.todayIso(), date)
                 ?: rejectPastTime(api.getBlocks(), api.todayIso(), date, startTime, api.nowHM()))?.let { return it }

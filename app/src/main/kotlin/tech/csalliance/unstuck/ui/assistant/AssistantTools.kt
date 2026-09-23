@@ -19,11 +19,19 @@ import tech.csalliance.unstuck.core.logic.jsDayOfWeek
 import tech.csalliance.unstuck.core.logic.rejectPastDate
 import tech.csalliance.unstuck.core.logic.rejectPastTime
 import tech.csalliance.unstuck.core.logic.ReceiptArgs
+import tech.csalliance.unstuck.core.logic.ChosenDateAction
+import tech.csalliance.unstuck.core.logic.RECURRENCE_HORIZON_DAYS
+import tech.csalliance.unstuck.core.logic.RecurrenceStart
+import tech.csalliance.unstuck.core.logic.RegenPlan
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
+import tech.csalliance.unstuck.core.logic.clampDurationMin
+import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.clearLaterOnSchedule
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.materializeOccurrences
 import tech.csalliance.unstuck.core.logic.newUuid
+import tech.csalliance.unstuck.core.logic.recurrenceChosenDateAction
+import tech.csalliance.unstuck.core.logic.recurrenceEditStart
 import tech.csalliance.unstuck.core.logic.regenerateForTask
 import tech.csalliance.unstuck.core.logic.resolveShareRequest
 import tech.csalliance.unstuck.core.model.CalBlock
@@ -76,7 +84,10 @@ const val MAX_CREATE_TASKS = 50
 class TurnScratch {
     val newTasks = HashMap<String, TaskItem>()
     val newLists = HashMap<String, ItemCollection>()
-    fun clear() { newTasks.clear(); newLists.clear() }
+    /** Task id → the block schedule_task placed for it, which a
+     *  set_task_recurrence after it takes as the series' day and time. */
+    val placedBlocks = HashMap<String, String>()
+    fun clear() { newTasks.clear(); newLists.clear(); placedBlocks.clear() }
 }
 
 /** Typed accessors over the model's JSON arguments. `str` treats blank as
@@ -146,9 +157,11 @@ private fun localMidnightMs(iso: String): Long =
         .getOrDefault(Time.startOfDayMillis(System.currentTimeMillis()))
 
 /** Place (or move) the anchor block for a task at date+time, materialising the
- *  recurrence horizon when the task repeats. Returns the time the block landed
- *  on (callers report it honestly). */
-private suspend fun scheduleTask(api: AssistantApi, task: TaskItem, date: String, startTime: String?): String {
+ *  recurrence horizon when a repeating task is being placed. Returns the time
+ *  the block landed on (callers report it honestly), or null when a repeating
+ *  task's occurrence on `date` is already done — nothing was placed. The placed
+ *  block is noted in `scratch.placedBlocks`. */
+private suspend fun scheduleTask(api: AssistantApi, task: TaskItem, date: String, startTime: String?, scratch: TurnScratch): String? {
     val blocks = api.getBlocks()
     val today = api.todayIso()
     // Scheduling ends a task's "Later" parking — the same rule AppViewModel
@@ -158,31 +171,66 @@ private suspend fun scheduleTask(api: AssistantApi, task: TaskItem, date: String
     clearLaterOnSchedule(task, api.nowIso())?.let { api.upsertTask(it) }
     // The anchor to move is the task's NEXT LIVE block — first-in-array grabbed
     // an old done/skipped occurrence on real accounts (tester round, 2026-09-01).
+    // A repeating task moves its occurrence ON the target date: "move tomorrow's
+    // gym to 7pm" took TODAY's occurrence to tomorrow, so today lost it and
+    // tomorrow showed Gym twice (parity with iOS build 81, audit 2026-09-22 C1).
     val live = blocks.filter { it.taskId == task.id && !it.done && !it.skipped }.sortedBy { it.date + it.startTime }
-    val anchor = live.firstOrNull { it.date >= today } ?: live.lastOrNull()
+    val anchor = (if (task.recurrence != null) live.firstOrNull { it.date == date } else null)
+        ?: live.firstOrNull { it.date >= today } ?: live.lastOrNull()
     // Moving keeps the task's current time; a FIRST-EVER scheduling with no
     // time is refused upstream (the caller asks the user instead of guessing).
     val anchorTime = anchor?.startTime?.takeIf { it.isNotEmpty() }
     val time = startTime ?: anchorTime ?: "09:00"
-    if (anchor != null) {
-        api.upsertBlock(anchor.copy(date = date, startTime = time))
-        // Every UI reschedule bumps move_count (the slip detector's input).
-        if (anchor.date != date) {
-            val fresh = api.getTasks().firstOrNull { it.id == task.id } ?: task
-            api.upsertTask(bumpMoveCount(fresh, api.nowIso()))
+    // A series with nothing live after today (a first placement, or one that
+    // lapsed) is being placed, so the time given sets the series' time.
+    val placesSeries = live.none { it.date > today }
+    // The target day of a series: an occurrence already there is retimed (and
+    // un-skipped), a done one leaves the day alone; only an empty day moves the
+    // next occurrence onto it (parity with iOS build 81, audit 2026-09-22 C7).
+    val action = if (task.recurrence == null) ChosenDateAction.Mint
+        else recurrenceChosenDateAction(blocks.filter { it.taskId == task.id }, RegenPlan(emptyList(), emptyList()), date, time)
+    when (action) {
+        ChosenDateAction.Covered -> {
+            val open = blocks.firstOrNull { it.taskId == task.id && isTaskBlock(it) && it.date == date && !it.done && !it.skipped }
+                ?: return null
+            scratch.placedBlocks[task.id] = open.id
         }
-    } else {
-        api.upsertBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = time,
-            durationMinutes = task.estimateMin, date = date, kind = CalBlockKind.TASK))
+        is ChosenDateAction.Retime -> {
+            val moved = action.block.copy(startTime = time, skipped = false)
+            api.upsertBlock(moved)
+            scratch.placedBlocks[task.id] = moved.id
+        }
+        ChosenDateAction.Mint -> if (anchor != null) {
+            val moved = anchor.copy(date = date, startTime = time)
+            api.upsertBlock(moved)
+            scratch.placedBlocks[task.id] = moved.id
+            // Every UI reschedule bumps move_count (the slip detector's input).
+            if (anchor.date != date) {
+                val fresh = api.getTasks().firstOrNull { it.id == task.id } ?: task
+                api.upsertTask(bumpMoveCount(fresh, api.nowIso()))
+            }
+        } else {
+            // Clamped to the server's 5…1440 (audit 2026-09-22, C4) — also enforced
+            // in WriteThrough; here so the receipts match what is stored.
+            val placed = CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = time,
+                durationMinutes = clampDurationMin(task.estimateMin), date = date, kind = CalBlockKind.TASK)
+            api.upsertBlock(placed)
+            scratch.placedBlocks[task.id] = placed.id
+        }
     }
     val rec = task.recurrence
-    if (rec != null) {
-        // Only fill dates that DON'T already carry a block for this task.
+    if (rec != null && placesSeries) {
+        // Only a series being PLACED is materialised, from the placed date at the
+        // placed time up to the horizon, on dates that don't already carry one of
+        // its blocks. Refilling a live series from the moved date at the moved
+        // time brought back occurrences the user had deleted and stretched the
+        // series at a one-off time (parity with iOS build 81, audit 2026-09-22 C1).
         val taken = blocks.filter { it.taskId == task.id }.map { it.date }.toSet()
-        for (occ in materializeOccurrences(rec, localMidnightMs(date), time)) {
-            if (occ.date == date || occ.date in taken) continue
+        val lastIso = IsoDate.addDays(today, RECURRENCE_HORIZON_DAYS - 1)
+        for (occ in materializeOccurrences(rec, localMidnightMs(date), time, IsoDate.daysUntil(date, lastIso) + 1)) {
+            if (occ.date <= date || occ.date in taken) continue
             api.upsertBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = occ.startTime,
-                durationMinutes = task.estimateMin, date = occ.date, kind = CalBlockKind.TASK))
+                durationMinutes = clampDurationMin(task.estimateMin), date = occ.date, kind = CalBlockKind.TASK))
         }
     }
     return time
@@ -266,7 +314,7 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             }
             val later = args.bool("later") ?: false
             val t = TaskItem(
-                id = newUuid(), name = nm, estimateMin = args.int("estimateMin") ?: 25, totalFocused = 0, done = false,
+                id = newUuid(), name = nm, estimateMin = clampEstimateMin(args.int("estimateMin")), totalFocused = 0, done = false,
                 tags = cleanTags(args.strList("tags")), lifeArea = args.str("lifeArea"),
                 firstPhysicalAction = args.str("firstPhysicalAction"),
                 // A dated task is on the calendar, not parked — the two exclude each other.
@@ -278,7 +326,7 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             val sb = StringBuilder("ok: created task id=${t.id} name=\"${t.name}\"")
             when {
                 date != null && startTime != null -> {
-                    val landed = scheduleTask(api, t, date, startTime)
+                    val landed = scheduleTask(api, t, date, startTime, scratch) ?: startTime
                     sb.append(" — scheduled $date $landed")
                     if (later) sb.append(" (not parked in Later: it has a date)")
                 }
@@ -301,7 +349,8 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 return "error: needs a time — \"${t.name}\" has no time yet and the user gave none. Do NOT pick one: ask ONE short question offering a suggestion (e.g. \"Friday — 9am, or a time you prefer?\"), then schedule when they answer."
             }
             rejectPastTime(api, date, startTime ?: own?.startTime)?.let { return it }
-            val landed = scheduleTask(api, t, date, startTime)
+            val landed = scheduleTask(api, t, date, startTime, scratch)
+                ?: return "error: \"${t.name}\" is already done on $date — nothing changed"
             "ok: scheduled \"${t.name}\" $date $landed${if (startTime == null) " (kept its existing time — say so)" else ""}"
         }
 
@@ -317,7 +366,9 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             val changed = ArrayList<String>()
             var upd = t
             args.str("name")?.let { if (it != t.name) { upd = upd.copy(name = it); changed += "name" } }
-            args.int("estimateMin")?.let { if (it != t.estimateMin) { upd = upd.copy(estimateMin = it); changed += "estimate ${it}m" } }
+            // Clamped BEFORE the no-op test (audit 2026-09-22, C4): the store holds
+            // 1…1440, so "5000" twice was two "updated" receipts over one stored value.
+            args.int("estimateMin")?.let(::clampEstimateMin)?.let { if (it != t.estimateMin) { upd = upd.copy(estimateMin = it); changed += "estimate ${it}m" } }
             if (args.has("lifeArea")) {
                 val (cleared, v) = args.clearableStr("lifeArea")
                 if (v != t.lifeArea) { upd = upd.copy(lifeArea = v); changed += if (cleared) "area cleared" else "area $v" }
@@ -342,7 +393,7 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             scratch.newTasks[upd.id] = upd
             // A new estimate resizes the live block, like the calendar editor does.
             if (upd.estimateMin != t.estimateMin) {
-                nextLiveBlock(api, t.id)?.let { api.upsertBlock(it.copy(durationMinutes = upd.estimateMin)) }
+                nextLiveBlock(api, t.id)?.let { api.upsertBlock(it.copy(durationMinutes = clampDurationMin(upd.estimateMin))) }
             }
             "ok: updated \"${upd.name}\" — ${changed.joinToString(", ")}"
         }
@@ -387,21 +438,43 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             scratch.newTasks[t.id] = upd
             // Regenerate future blocks off the existing anchor, if scheduled.
             val blocks = api.getBlocks()
-            val anchor = blocks.filter { it.taskId == t.id && isTaskBlock(it) }.minWithOrNull(compareBy({ it.date }, { it.startTime }))
-            if (anchor != null) {
-                val plan = regenerateForTask(upd, rec, blocks, api.todayIso(), anchor.startTime, localMidnightMs(anchor.date))
-                for (b in plan.toUpsert) api.upsertBlock(b)
-                for (id in plan.toDelete) api.deleteBlock(id)
+            val today = api.todayIso()
+            // An occurrence schedule_task placed earlier in this turn sets the
+            // series' day and time: "make Office every Monday at 11" on a series at
+            // 09:15 is schedule_task(Mon, 11:00) then this call, and the vote below
+            // would keep 09:15 and put the new 11:00 back while replying ok.
+            val placed = scratch.placedBlocks[t.id]?.let { id ->
+                blocks.firstOrNull { it.id == id && !it.done && !it.skipped && it.startTime.isNotEmpty() && it.date >= today }
             }
+            // Otherwise the earliest LIVE timed block — never the oldest block of any
+            // kind, which rebuilt the series at a history time and, on a series
+            // started 56+ days ago, deleted its whole future — at the series' own
+            // time and day, never a one-off moved occurrence's (parity with iOS
+            // builds 79 and 81, audit 2026-09-22 B79.1 C1).
+            val start = placed?.let { RecurrenceStart(it.date, it.startTime, RECURRENCE_HORIZON_DAYS) }
+                ?: recurrenceEditStart(t.id, rec, blocks, today)
+            if (start != null) {
+                val plan = regenerateForTask(upd, rec, blocks, today, start.startTime, localMidnightMs(start.date), start.horizonDays)
+                for (b in plan.toUpsert) api.upsertBlock(b)
+                // This month's occurrence moved later off a series day that has
+                // passed stays (see RecurrenceStart.keepId).
+                for (id in plan.toDelete) if (id != start.keepId) api.deleteBlock(id)
+            }
+            // Only a TIMED block anchors a series: a timeless one used to read as
+            // "regenerated" over a rule that materialised nothing (audit 2026-09-22, C7).
+            val anchored = start != null
+            // Worded as on web (lib/assistant/tools.ts) and iOS build 81.
             if (rec == null) {
-                "ok: \"${t.name}\" no longer repeats${if (anchor != null) " (its future slots were removed)" else ""}"
+                "ok: \"${t.name}\" no longer repeats${if (anchored) " (future occurrences removed)" else ""}"
             } else {
                 val how = when (kind) {
                     "weekly" -> "weekly on " + (days ?: emptyList()).joinToString(", ") { WEEKDAY_NAMES_CAP[it].take(3) }
                     else -> kind
                 }
-                "ok: \"${t.name}\" now repeats $how${if (until != null) " until $until" else ""}" +
-                    if (anchor != null) " (calendar slots regenerated from its next slot)" else " (not on the calendar yet — schedule_task it to place the series)"
+                // The time the series now runs at, so the reply can't claim a
+                // re-time that didn't happen (audit 2026-09-22, C1).
+                "ok: \"${t.name}\" now repeats $how${start?.let { " at ${it.startTime}" } ?: ""}${if (until != null) " until $until" else ""}" +
+                    if (anchored) "" else " — it has no calendar slot yet; schedule_task it to place the first one"
             }
         }
 
@@ -433,7 +506,7 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 val date = it.str("date")
                 val startTime = it.str("startTime")
                 val later = it.bool("later") ?: false
-                val t = TaskItem(id = newUuid(), name = nm, estimateMin = it.int("estimateMin") ?: 25, totalFocused = 0, done = false,
+                val t = TaskItem(id = newUuid(), name = nm, estimateMin = clampEstimateMin(it.int("estimateMin")), totalFocused = 0, done = false,
                     tags = cleanTags(it.strList("tags")), lifeArea = it.str("lifeArea"), firstPhysicalAction = it.str("firstPhysicalAction"),
                     later = later && date == null, dueAt = it.str("dueAt"), createdAt = now(), updatedAt = now())
                 api.upsertTask(t)
@@ -443,7 +516,7 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 val past = date?.let { d -> rejectPastDate(api, d) ?: rejectPastTime(api, d, startTime) }
                 when {
                     past != null -> needsTime += "\"${t.name}\" — " + past.removePrefix("error: ")
-                    date != null && startTime != null -> scheduleTask(api, t, date, startTime)
+                    date != null && startTime != null -> scheduleTask(api, t, date, startTime, scratch)
                     date != null -> needsTime += "\"${t.name}\" ($date)"
                 }
                 made += t.id to t.name

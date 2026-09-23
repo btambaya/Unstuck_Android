@@ -64,9 +64,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.findConflicts
 import tech.csalliance.unstuck.core.logic.findFreeSlotsForDate
 import tech.csalliance.unstuck.core.logic.formatTime
+import tech.csalliance.unstuck.core.logic.newTaskNeedsTime
 import tech.csalliance.unstuck.core.model.CircleStatus
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.ShareLevel
@@ -213,7 +215,13 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
         else if (autoTime) pickedTime = slots.firstOrNull()?.startTime
     }
     val conflicts = if (effectiveDate != null && pickedTime != null) findConflicts(effectiveDate, pickedTime!!, estimate, blocks) else emptyList()
-    val canSubmit = name.isNotBlank()
+    // A repeating task needs a day and a time, and a one-off for a later day a
+    // time: every occurrence is a timed block and nothing can invent the time
+    // later, so an evening (the free-slot finder stops at 18:00) or Later repeat
+    // was saved with no occurrences at all (parity with iOS build 81, audit
+    // 2026-09-22 C7).
+    val needsTime = newTaskNeedsTime(repeats = recurrence != null, date = effectiveDate, todayIso = todayIso, pickedTime = pickedTime)
+    val canSubmit = name.isNotBlank() && !needsTime
     val focusManager = LocalFocusManager.current
 
     // Shared by the "Add task" button AND the name field's IME Done.
@@ -291,7 +299,12 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                         slots.forEach { s -> SelectableChip(formatTime(s.startTime), selected = pickedTime == s.startTime) { pickedTime = s.startTime; autoTime = false } }
                     }
                     if (slots.isEmpty() && pickedTime == null) {
-                        Text("No free slots that day — pick a custom time, or it'll be added without one.", style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink3)
+                        // "…added without one" is only true for a one-off today (C7).
+                        Text(
+                            if (needsTime) "No free slots that day — pick a custom time."
+                            else "No free slots that day — pick a custom time, or it'll be added without one.",
+                            style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink3,
+                        )
                     }
                     if (conflicts.isNotEmpty()) {
                         Box(Modifier.clip(RoundedCornerShape(8.dp)).background(c.amberSoft).padding(horizontal = 10.dp, vertical = 6.dp)) {
@@ -411,7 +424,15 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                 }
             }
 
-            // Coral accent once the form is valid (a name is entered); muted dark until then.
+            if (needsTime) {
+                Text(
+                    if (whenSel == "Later" && recurrence != null) "A repeating task needs a day and a time — pick Today, Tomorrow or a date."
+                    else "Pick a time to add this task.",
+                    style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink3,
+                )
+            }
+            // Coral accent once the form is valid (a name, and a time where one is
+            // needed); muted dark until then.
             UButton("Add task", kind = if (canSubmit) ButtonKind.CORAL else ButtonKind.DARK, enabled = canSubmit) { submit() }
         }
     }
@@ -458,7 +479,8 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
 
     if (showEstimate) {
         var v by rememberSaveable { mutableStateOf(estimate.toString()) }
-        fun saveEstimate() { v.toIntOrNull()?.takeIf { it > 0 }?.let { estimate = it }; showEstimate = false }
+        // Held to the server's 1…1440 (audit 2026-09-22, C4) so the chip shows what is stored.
+        fun saveEstimate() { v.toIntOrNull()?.takeIf { it > 0 }?.let { estimate = clampEstimateMin(it) }; showEstimate = false }
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { showEstimate = false },
             title = { Text("Estimate (minutes)") },

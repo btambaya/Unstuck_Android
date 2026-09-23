@@ -7,7 +7,12 @@ import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonObject
+import tech.csalliance.unstuck.core.model.CalBlock
+import tech.csalliance.unstuck.core.model.Capture
+import tech.csalliance.unstuck.core.model.ProfileFact
 import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.time.Time
+import java.security.MessageDigest
 
 // Port of lib/assistant/receipts.ts (+ AssistantReceipts.swift). Action
 // receipts — deterministic ✓-cards for what the agent ACTUALLY did. Derived
@@ -27,13 +32,24 @@ import tech.csalliance.unstuck.core.model.TaskItem
 @Serializable
 enum class ReceiptIcon { PLUS, CALENDAR, CHECK, PENCIL, TRASH, LIST }
 
-/** What tapping Undo reverses. Cases mirror the web's `ReceiptUndo.kind` one for one. */
+/** What tapping Undo reverses. Cases mirror the web's `ReceiptUndo.kind` one for one,
+ *  bar the two Android-only exact undos at the end (Android audit 2026-09-23, A17). */
 @Serializable
 enum class ReceiptUndoKind {
     DELETE_TASK, UNCOMPLETE_TASK,
     UNCOMPLETE_TASKS, DELETE_TASKS, FORGET_FACT, DELETE_CAPTURE, COMPLETE_TASK,
     /** Part B ("Unstuck calls you"): undo of `request_call` — a NETWORK write. */
     CANCEL_CALL,
+    /** Undo of `promote_capture` (Android only): the task it made goes, and the
+     *  capture goes back as it was — unlinked if the promote linked it, back in
+     *  the inbox if the promote took it out. Its old DELETE_TASK undo cascaded
+     *  into the capture itself and hard-deleted the user's note on every device
+     *  (Android audit 2026-09-23, A17). */
+    UNPROMOTE_CAPTURE,
+    /** Undo of a fact save that REFINED an existing fact in place (Android only):
+     *  the old wording comes back. Forgetting the id deleted a fact the user had
+     *  long before the turn (Android audit 2026-09-23, A17). */
+    RESTORE_FACT,
 }
 
 /** What tapping Undo reverses. A plain data class (not a sealed hierarchy)
@@ -42,14 +58,43 @@ enum class ReceiptUndoKind {
  *  use [ids]. Both fields default so pre-2026-09 persisted receipts
  *  (`{kind, id}`) still decode. */
 @Serializable
-data class ReceiptUndo(val kind: ReceiptUndoKind, val id: String = "", val ids: List<String> = emptyList()) {
+data class ReceiptUndo(
+    val kind: ReceiptUndoKind,
+    val id: String = "",
+    val ids: List<String> = emptyList(),
+    /** UNPROMOTE_CAPTURE: the promoted capture ([id] is the task it made). */
+    val captureId: String = "",
+    /** UNPROMOTE_CAPTURE: the capture was in the inbox before the promote archived it. */
+    val unarchive: Boolean = false,
+    /** RESTORE_FACT: the fact as it stood before the turn refined it. */
+    val prior: ProfileFact? = null,
+    /** Fingerprints of the rows this undo writes, as the turn LEFT them
+     *  ([stampReceiptUndo]) — checked at tap time by [receiptUndoRefusal]. */
+    val stamps: Map<String, String> = emptyMap(),
+    /** [stamps] were taken. False on receipts persisted before exact Undo. */
+    val stamped: Boolean = false,
+) {
     /** The task ids this undo touches (empty for a fact / capture / call undo). */
     val taskIds: List<String>
         get() = when (kind) {
-            ReceiptUndoKind.DELETE_TASK, ReceiptUndoKind.UNCOMPLETE_TASK, ReceiptUndoKind.COMPLETE_TASK -> listOf(id)
+            ReceiptUndoKind.DELETE_TASK, ReceiptUndoKind.UNCOMPLETE_TASK, ReceiptUndoKind.COMPLETE_TASK,
+            ReceiptUndoKind.UNPROMOTE_CAPTURE -> listOf(id)
             ReceiptUndoKind.DELETE_TASKS, ReceiptUndoKind.UNCOMPLETE_TASKS -> ids
-            ReceiptUndoKind.FORGET_FACT, ReceiptUndoKind.DELETE_CAPTURE, ReceiptUndoKind.CANCEL_CALL -> emptyList()
+            ReceiptUndoKind.FORGET_FACT, ReceiptUndoKind.DELETE_CAPTURE, ReceiptUndoKind.CANCEL_CALL,
+            ReceiptUndoKind.RESTORE_FACT -> emptyList()
         }
+
+    /** The capture this undo writes, if any. */
+    val captureTarget: String?
+        get() = when (kind) {
+            ReceiptUndoKind.DELETE_CAPTURE -> id
+            ReceiptUndoKind.UNPROMOTE_CAPTURE -> captureId.ifEmpty { null }
+            else -> null
+        }
+
+    /** The profile fact this undo writes, if any. */
+    val factTarget: String?
+        get() = if (kind == ReceiptUndoKind.FORGET_FACT || kind == ReceiptUndoKind.RESTORE_FACT) id else null
 
     companion object {
         fun deleteTask(id: String) = ReceiptUndo(ReceiptUndoKind.DELETE_TASK, id)
@@ -60,6 +105,9 @@ data class ReceiptUndo(val kind: ReceiptUndoKind, val id: String = "", val ids: 
         fun cancelCall(id: String) = ReceiptUndo(ReceiptUndoKind.CANCEL_CALL, id)
         fun deleteTasks(ids: List<String>) = ReceiptUndo(ReceiptUndoKind.DELETE_TASKS, ids = ids)
         fun uncompleteTasks(ids: List<String>) = ReceiptUndo(ReceiptUndoKind.UNCOMPLETE_TASKS, ids = ids)
+        fun unpromoteCapture(taskId: String, captureId: String, unarchive: Boolean = false) =
+            ReceiptUndo(ReceiptUndoKind.UNPROMOTE_CAPTURE, taskId, captureId = captureId, unarchive = unarchive)
+        fun restoreFact(prior: ProfileFact) = ReceiptUndo(ReceiptUndoKind.RESTORE_FACT, prior.id, prior = prior)
     }
 }
 
@@ -85,6 +133,8 @@ data class ReceiptArgs(
     val startTime: String? = null,
     val later: Boolean? = null,
     val kind: String? = null,
+    /** promote_capture's capture — its receipt's undo puts that capture back. */
+    val captureId: String? = null,
 )
 
 private val LENIENT_JSON = Json { ignoreUnknownKeys = true; isLenient = true }
@@ -95,7 +145,7 @@ fun receiptArgsFromJson(argumentsJson: String): ReceiptArgs {
     fun str(k: String): String? = (obj[k]?.takeIf { it !is JsonNull } as? JsonPrimitive)?.contentOrNull
     return ReceiptArgs(
         taskId = str("taskId"), date = str("date"), startTime = str("startTime"),
-        later = (obj["later"] as? JsonPrimitive)?.booleanOrNull, kind = str("kind"),
+        later = (obj["later"] as? JsonPrimitive)?.booleanOrNull, kind = str("kind"), captureId = str("captureId"),
     )
 }
 
@@ -242,8 +292,18 @@ fun deriveReceipt(name: String, args: ReceiptArgs, result: String, tasks: List<T
         "cancel_focus" -> Receipt(ReceiptIcon.PENCIL, "Focus cancelled")
         "add_capture" ->
             Receipt(ReceiptIcon.PLUS, "Captured: ${quotedFragment(result) ?: ""}", idFragment(result)?.let { ReceiptUndo.deleteCapture(it) })
-        "promote_capture" ->
-            Receipt(ReceiptIcon.PLUS, "Task from capture: ${quotedFragment(result) ?: ""}", idFragment(result)?.let { ReceiptUndo.deleteTask(it) })
+        "promote_capture" -> {
+            // Its own undo, never DELETE_TASK: that left the capture archived out
+            // of the inbox (and the old cascade deleted it outright). Without the
+            // capture's id there is no Undo, never a wrong one (Android audit
+            // 2026-09-23, A17).
+            val taskId = idFragment(result)
+            val capId = args.captureId
+            Receipt(
+                ReceiptIcon.PLUS, "Task from capture: ${quotedFragment(result) ?: ""}",
+                if (taskId != null && capId != null) ReceiptUndo.unpromoteCapture(taskId, capId) else null,
+            )
+        }
         "resolve_capture" -> Receipt(ReceiptIcon.CHECK, "Resolved: ${quotedFragment(result) ?: "capture"}")
         "delete_capture" -> Receipt(ReceiptIcon.PENCIL, "Deleted capture")
         in ECHO_TOOLS -> {
@@ -315,6 +375,10 @@ sealed class ReceiptUndoPlan {
     /** Cancel the booked call — undo of `request_call` (a NETWORK write:
      *  the app marks the receipt undone only once the server accepted). */
     data class CancelCall(val callId: String) : ReceiptUndoPlan()
+    /** Remove the promoted task (+ blocks) and put its capture back — undo of `promote_capture`. */
+    data class Unpromote(val taskId: String, val captureId: String, val unarchive: Boolean) : ReceiptUndoPlan()
+    /** Put the refined fact's old wording back — undo of a refine-in-place save. */
+    data class RestoreFact(val prior: ProfileFact) : ReceiptUndoPlan()
 }
 
 /** Plan a receipt's undo against the live task list. Null when it can't be
@@ -340,5 +404,137 @@ fun planReceiptUndo(undo: ReceiptUndo, tasks: List<TaskItem>, nowIso: String): R
         ReceiptUndoKind.COMPLETE_TASK -> tasks.firstOrNull { it.id == undo.id && it.recurrence == null }
             ?.let { ReceiptUndoPlan.Complete(it.copy(done = true, completedAt = nowIso, updatedAt = nowIso)) }
         ReceiptUndoKind.CANCEL_CALL -> ReceiptUndoPlan.CancelCall(undo.id)
+        ReceiptUndoKind.UNPROMOTE_CAPTURE -> ReceiptUndoPlan.Unpromote(undo.id, undo.captureId, undo.unarchive)
+        ReceiptUndoKind.RESTORE_FACT -> undo.prior?.let { ReceiptUndoPlan.RestoreFact(it) }
     }
+}
+
+// ── Exact Undo (Android audit 2026-09-23, A17) ──────────────────────────────
+// An Undo puts back EXACTLY what its turn did, or nothing — and says so. When a
+// turn ends, each receipt's undo is stamped with fingerprints of the rows it
+// would write, as the turn left them; at tap time a row that no longer matches
+// (renamed, scheduled, worked on, noted, edited in Settings, changed on another
+// device) refuses the undo. `updatedAt` is never part of a fingerprint: the
+// server re-stamps it on every UPDATE (touch_updated_at), so the echo of the
+// turn's own write would read as a change. The server's column defaults are
+// folded in and timestamps compared as instants for the same reason.
+
+/** The store rows an Undo is checked against, read fresh at that moment.
+ *  [facts] are the ACTIVE facts; [archivedCaptureIds] the captures out of the inbox. */
+data class UndoState(
+    val tasks: List<TaskItem>,
+    val blocks: List<CalBlock>,
+    val captures: List<Capture>,
+    val archivedCaptureIds: Set<String>,
+    val facts: List<ProfileFact>,
+)
+
+/** What the receipt card says when an Undo can't be exact. */
+object ReceiptUndoRefusal {
+    const val CHANGED = "Not undone — it's changed since, so it was left as it is."
+    const val CHANGED_SOME = "Not undone — some of these have changed since, so they were left as they are."
+    const val NOTES = "Not undone — it has notes you've added since, so it was left as it is."
+    const val NOTES_SOME = "Not undone — some of these have notes you've added since, so they were left as they are."
+    /** Persisted before exact Undo existed: there is nothing to check it against. */
+    const val TOO_OLD = "Not undone — it's too old to check safely, so it was left as it is."
+}
+
+/** The undos that remove or overwrite something — never run without a stamp. */
+private val DESTRUCTIVE_UNDOS = setOf(
+    ReceiptUndoKind.DELETE_TASK, ReceiptUndoKind.DELETE_TASKS, ReceiptUndoKind.UNPROMOTE_CAPTURE,
+    ReceiptUndoKind.DELETE_CAPTURE, ReceiptUndoKind.FORGET_FACT, ReceiptUndoKind.RESTORE_FACT,
+)
+
+private fun digest(s: String): String =
+    MessageDigest.getInstance("SHA-256").digest(s.toByteArray()).take(8).joinToString("") { "%02x".format(it) }
+
+private fun instantKey(iso: String): String = Time.parseMillis(iso)?.toString() ?: iso
+
+/** A task's content and its calendar slots as the user sees them. The server
+ *  writes `[]` / `0` / `false` where the phone may hold null (DbRowCodec.TaskRow),
+ *  so those are folded in; Google's event ids on a block are the push's, not the user's. */
+fun taskUndoStamp(t: TaskItem, blocks: List<CalBlock>): String {
+    val row = t.copy(
+        tags = t.tags.orEmpty(), objectives = t.objectives.orEmpty(), comments = t.comments.orEmpty(),
+        moveCount = t.moveCount ?: 0, later = t.later ?: false,
+        completedAt = t.completedAt?.let(::instantKey), dueAt = t.dueAt?.let(::instantKey),
+        createdAt = "", updatedAt = "",
+    )
+    val slots = blocks.filter { it.taskId == t.id }.sortedBy { it.id }
+        .joinToString(";") { "${it.id}|${it.date}|${it.startTime}|${it.durationMinutes}|${it.done}|${it.skipped}" }
+    return digest("$row#$slots")
+}
+
+/** The captures (the user's notes) filed on a task. */
+fun notesUndoStamp(taskId: String, captures: List<Capture>): String =
+    digest(captures.filter { it.taskId == taskId }.map { it.id }.sorted().joinToString(","))
+
+fun captureUndoStamp(c: Capture, archived: Boolean): String = digest("${c.body}|${c.tag}|${c.taskId}|$archived")
+
+fun factUndoStamp(f: ProfileFact): String = digest("${f.category}|${f.fact}|${f.source}|${f.whenIso}")
+
+/** [undo] with the fingerprints of every row it would write, as they stand in
+ *  [s] — taken when the turn (or voice session) ENDS, so the turn's own later
+ *  writes (create_task, then schedule_task on it) are part of what it left. */
+fun stampReceiptUndo(undo: ReceiptUndo, s: UndoState): ReceiptUndo {
+    val stamps = HashMap<String, String>()
+    for (id in undo.taskIds) s.tasks.firstOrNull { it.id == id }?.let {
+        stamps["t:$id"] = taskUndoStamp(it, s.blocks)
+        stamps["n:$id"] = notesUndoStamp(id, s.captures)
+    }
+    undo.captureTarget?.let { id -> s.captures.firstOrNull { it.id == id } }
+        ?.let { stamps["c:${it.id}"] = captureUndoStamp(it, it.id in s.archivedCaptureIds) }
+    undo.factTarget?.let { id -> s.facts.firstOrNull { it.id == id } }?.let { stamps["f:${it.id}"] = factUndoStamp(it) }
+    return undo.copy(stamps = stamps, stamped = true)
+}
+
+/** After a later receipt of the SAME turn was undone, an earlier one on the
+ *  same rows is re-stamped for [keys]: the turn left those rows in the state
+ *  that undo just reverted, so "Created X" + "Completed X" undo in turn. */
+fun restampReceiptUndo(undo: ReceiptUndo, keys: Set<String>, s: UndoState): ReceiptUndo {
+    val fresh = stampReceiptUndo(undo, s).stamps
+    return undo.copy(stamps = undo.stamps.filterKeys { it !in keys } + fresh.filterKeys { it in keys })
+}
+
+/** Why [undo] can't put back exactly what its turn did (the card's line), or
+ *  null to go ahead. Only rows the undo would WRITE are checked — one already
+ *  gone, or already in the undo's target state, is the caller's no-op. All or
+ *  nothing: one changed row refuses the whole receipt. */
+fun receiptUndoRefusal(undo: ReceiptUndo, s: UndoState): String? {
+    if (undo.kind == ReceiptUndoKind.CANCEL_CALL) return null
+    val destructive = undo.kind in DESTRUCTIVE_UNDOS
+    if (!undo.stamped) return if (destructive) ReceiptUndoRefusal.TOO_OLD else null
+    val many = undo.taskIds.size > 1
+    val written = undo.taskIds.mapNotNull { id -> s.tasks.firstOrNull { it.id == id } }.filter { t ->
+        when (undo.kind) {
+            ReceiptUndoKind.UNCOMPLETE_TASK, ReceiptUndoKind.UNCOMPLETE_TASKS -> t.done
+            ReceiptUndoKind.COMPLETE_TASK -> !t.done && t.recurrence == null
+            else -> true
+        }
+    }
+    if (written.any { undo.stamps["t:${it.id}"] != taskUndoStamp(it, s.blocks) }) {
+        return if (many) ReceiptUndoRefusal.CHANGED_SOME else ReceiptUndoRefusal.CHANGED
+    }
+    // Notes filed on a task since: deleting it would strand them.
+    if (destructive && written.any { undo.stamps["n:${it.id}"] != notesUndoStamp(it.id, s.captures) }) {
+        return if (many) ReceiptUndoRefusal.NOTES_SOME else ReceiptUndoRefusal.NOTES
+    }
+    val capture = undo.captureTarget?.let { id -> s.captures.firstOrNull { it.id == id } }
+    if (capture != null && undo.stamps["c:${capture.id}"] != captureUndoStamp(capture, capture.id in s.archivedCaptureIds)) {
+        return ReceiptUndoRefusal.CHANGED
+    }
+    val fact = undo.factTarget?.let { id -> s.facts.firstOrNull { it.id == id } }
+    if (fact != null && undo.stamps["f:${fact.id}"] != factUndoStamp(fact)) return ReceiptUndoRefusal.CHANGED
+    return null
+}
+
+/** A fact save's receipt undo, given the fact as it stood BEFORE the save
+ *  ([prior], null when the save created it) and after it ([saved]). A save
+ *  that refined an existing fact keeps its id, so FORGET_FACT would delete a
+ *  fact the user had before this turn: the undo restores [prior] instead, and
+ *  a save that changed nothing offers no Undo at all. */
+fun factSaveUndo(undo: ReceiptUndo, prior: ProfileFact?, saved: ProfileFact?): ReceiptUndo? {
+    if (undo.kind != ReceiptUndoKind.FORGET_FACT || prior == null || prior.id != undo.id) return undo
+    if (saved != null && factUndoStamp(saved) == factUndoStamp(prior)) return null
+    return ReceiptUndo.restoreFact(prior)
 }

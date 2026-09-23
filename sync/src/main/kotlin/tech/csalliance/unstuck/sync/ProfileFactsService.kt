@@ -161,6 +161,19 @@ class ProfileFactsService(
     suspend fun saveStylePreference(pref: StylePreference): ProfileFact? =
         save(pref.category, pref.fact, ProfileFactSource.CHAT)
 
+    /** Put a fact back as [prior] had it — the Undo of an assistant save that
+     *  refined it in place, which keeps the id (Android audit 2026-09-23, A17).
+     *  The SAME row: [prior]'s wording, category, source and date, `updatedAt`
+     *  bumped so the server's last-write-wins takes it. False when the row is
+     *  gone or was forgotten since (never resurrected), or the write failed. */
+    suspend fun restore(prior: ProfileFact): Boolean {
+        val row = store.getOne(Tables.PROFILE_FACTS, prior.id, ProfileFact.serializer()) ?: return false
+        if (!row.active) return false
+        val next = row.copy(category = prior.category, fact = prior.fact, source = prior.source, whenIso = prior.whenIso, updatedAt = now())
+        runCatching { persist(next) }.getOrElse { return false }
+        return true
+    }
+
     /** Forget one fact (web `removeProfileFact`): a soft delete — the row
      *  becomes a tombstone here and on the server so no device's cache can
      *  resurrect it. False when there is no active fact with that id. */

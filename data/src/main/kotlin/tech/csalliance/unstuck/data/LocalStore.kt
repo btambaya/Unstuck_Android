@@ -198,6 +198,11 @@ class LocalStore(private val db: UnstuckDatabase) {
      *  "is the server's empty answer plausible?" guard reads it. */
     suspend fun countRows(table: String): Int = records.get(table).size
 
+    /** Every row id of [table] with the stamp it was stored with (null when the
+     *  table keeps none) — the catch-up's id sweep diffs the server's ids and
+     *  stamps against it to take rows its cursor could not see. */
+    suspend fun rowStamps(table: String): Map<String, String?> = records.get(table).associate { it.id to it.updatedAt }
+
     /** Sign-out / user-switch wipe. Deliberately leaves `parked_outbox` alone: those
      *  are another (or the same, returning) user's un-pushed edits. */
     suspend fun clearAll() {

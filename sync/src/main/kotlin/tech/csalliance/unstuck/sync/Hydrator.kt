@@ -274,11 +274,9 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
      *  filled its lists with no members and the owner's edits would route as
      *  unshared (audit 2026-09-22 C8).
      *
-     *  It starts TRUE: a relaunch resumes from the persisted cursors with no full
-     *  hydrate, so a read that failed before the process died was never retried
-     *  until some list changed. iOS re-reads membership on every launch through
-     *  its full hydrate; here the first catch-up of a process does (one
-     *  collection_members read per launch). */
+     *  It starts TRUE, so a process whose first pull is a catch-up still re-reads
+     *  membership once; each launch's full hydrate (Android audit 2026-09-23, A11)
+     *  settles it too, as iOS's does. */
     @Volatile private var membershipUnresolved = true
 
     /** Collections + their membership. RLS returns own AND shared-with-me rows;

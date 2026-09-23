@@ -31,15 +31,43 @@ interface SyncRemote {
 
     /** CATCH-UP READ — the correctness path (see [CatchUpPuller]). Rows of
      *  [table] whose [column] (`updated_at`, or the table's monotonic stand-in)
-     *  is STRICTLY GREATER than [since], oldest first, at most [limit] of them.
-     *  Ordered and bounded so the caller can page and advance its high-water
-     *  mark row by row. */
+     *  is STRICTLY GREATER than [since], ordered by ([column], id), at most
+     *  [limit] of them. Ordered and bounded so the caller can page and advance
+     *  its high-water mark row by row. */
     suspend fun fetchSince(table: String, column: String, since: String, limit: Int): List<JsonObject>
+
+    /** The rest of a run of rows that share one stamp: rows of [table] whose
+     *  [column] equals [stamp] and whose id sorts after [afterId], by id, at most
+     *  [limit]. A page of [fetchSince] can end part-way through such a run, and
+     *  "strictly after the last stamp" would skip its tail (Android audit
+     *  2026-09-23, A11). The default reads the whole table; the gateway overrides
+     *  it with a bounded query. */
+    suspend fun fetchTie(table: String, column: String, stamp: String, afterId: String, limit: Int): List<JsonObject> {
+        val at = CatchUpPuller.normalizeStamp(stamp)
+        return fetchAll(table)
+            .filter { r -> CatchUpPuller.stampOf(r, column) == at && ((r["id"] as? JsonPrimitive)?.contentOrNull ?: "") > afterId }
+            .sortedBy { (it["id"] as? JsonPrimitive)?.contentOrNull }
+            .take(limit)
+    }
 
     /** DELETION-RECONCILE READ: just the ids of the user's rows in [table], one
      *  page at a time. A hard delete is invisible to a cursor pull, and an
      *  id-only page is the cheapest thing that can see it. */
     suspend fun fetchIds(table: String, offset: Int, limit: Int): List<String>
+
+    /** [fetchIds] with each row's [column] alongside (null [column] = ids only),
+     *  so the sweep can also spot a row whose stamp moved past this device's copy
+     *  without the cursor seeing it (Android audit 2026-09-23, A11). The default
+     *  carries no stamps; the gateway overrides it. */
+    suspend fun fetchIdStamps(table: String, column: String?, offset: Int, limit: Int): List<Pair<String, String?>> =
+        fetchIds(table, offset, limit).map { it to null }
+
+    /** The rows of [table] with these ids — the sweep's repair read. The default
+     *  reads the whole table; the gateway overrides it with an `in` filter. */
+    suspend fun fetchByIds(table: String, ids: Collection<String>): List<JsonObject> {
+        val want = ids.toSet()
+        return fetchAll(table).filter { (it["id"] as? JsonPrimitive)?.contentOrNull in want }
+    }
 }
 
 /** A server-side refusal of an outbox `rpc` op — terminal (retrying can't change
@@ -56,8 +84,33 @@ class SyncGateway(private val client: SupabaseClient) : SyncRemote {
         client.from(table).select(Columns.ALL) {
             filter { gt(column, since) }
             order(column, Order.ASCENDING)
+            // id breaks ties, so a page that ends mid-run can be finished by fetchTie.
+            order("id", Order.ASCENDING)
             limit(limit.toLong())
         }.decodeList<JsonObject>()
+
+    override suspend fun fetchTie(table: String, column: String, stamp: String, afterId: String, limit: Int): List<JsonObject> =
+        client.from(table).select(Columns.ALL) {
+            filter {
+                eq(column, stamp)
+                gt("id", afterId)
+            }
+            order("id", Order.ASCENDING)
+            limit(limit.toLong())
+        }.decodeList<JsonObject>()
+
+    override suspend fun fetchIdStamps(table: String, column: String?, offset: Int, limit: Int): List<Pair<String, String?>> =
+        client.from(table).select(Columns.list(*listOfNotNull("id", column).toTypedArray())) {
+            order("id", Order.ASCENDING)
+            range(offset.toLong(), (offset + limit - 1).toLong())
+        }.decodeList<JsonObject>().mapNotNull { o ->
+            val id = o["id"]?.jsonPrimitive?.contentOrNull ?: return@mapNotNull null
+            id to column?.let { (o[it] as? JsonPrimitive)?.contentOrNull }
+        }
+
+    override suspend fun fetchByIds(table: String, ids: Collection<String>): List<JsonObject> =
+        if (ids.isEmpty()) emptyList()
+        else client.from(table).select(Columns.ALL) { filter { isIn("id", ids.toList()) } }.decodeList<JsonObject>()
 
     override suspend fun fetchIds(table: String, offset: Int, limit: Int): List<String> =
         client.from(table).select(Columns.list("id")) {

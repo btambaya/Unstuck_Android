@@ -58,11 +58,24 @@ class InterviewVoiceHostTest {
 
     @Test fun `not pending - a plain by-name hello, no intro, no finish_interview`() = runTest {
         val opening = buildVoiceOpening(api(pending = false))
-        assertTrue(opening.contains("\"Hey Maya. What's on your plate?\""))
+        // One-shot, natural and varied — the name once, no stock line, and never
+        // the old "What's on your plate?" (iOS 6f2da50, 2026-09-19).
+        assertTrue(opening.contains("Use \"Maya\" once, here, and not again"))
+        assertTrue(opening.contains("different every time"))
+        assertFalse(opening.contains("What's on your plate"))
         assertFalse(opening.contains("finish_interview"))
         assertFalse(opening.contains("head clearest"))
         // Facts or not: the interview flag decides, not the fact count.
         assertEquals(opening, buildVoiceOpening(api(pending = false, facts = listOf(fact("Works shifts")))))
+    }
+
+    @Test fun `the standing instructions carry the name rule, never a greeting script`() = runTest {
+        // The greeting sat in session.instructions too, so the model kept
+        // producing it after the primer was deleted (iOS 6f2da50).
+        val instructions = buildVoiceInstructions(api(pending = false))
+        assertTrue(instructions.contains("Their name is \"Maya\" (what they want to be called): say it once, in your hello, and not again — ending sentences with someone's name sounds like a telemarketer. "))
+        assertFalse(instructions.contains("What's on your plate"))
+        assertFalse(instructions.contains("The session just opened"))
     }
 
     @Test fun `the no-name preference beats everything, pending or not`() = runTest {

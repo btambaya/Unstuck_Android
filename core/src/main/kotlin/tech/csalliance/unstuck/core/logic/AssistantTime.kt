@@ -5,6 +5,8 @@ import tech.csalliance.unstuck.core.time.Time
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 
 // Assistant time cognisance — the local-clock helpers the executor and the
 // context builder reason from. Port of the time section of
@@ -61,6 +63,20 @@ object IsoDate {
 
 /** JS `getDay()` of a 'YYYY-MM-DD' (0=Sun … 6=Sat), 0 when unparseable. */
 fun jsDayOfWeek(iso: String): Int = IsoDate.dayOfWeek(iso)
+
+private val DONE_WHEN_FORMAT: DateTimeFormatter = DateTimeFormatter.ofPattern("EEE d MMM", Locale.US)
+
+/** "today" / "yesterday" / "Fri 19 Sep" for a stamp (a completedAt or a
+ *  createdAt), in the device's zone against the app's local [today]; null when
+ *  there is no stamp. get_tasks dates its lines with it, so an all-time
+ *  completed list is never read back as "today" (parity with iOS build 75,
+ *  f125845 `doneWhenLabel`). */
+fun doneWhenLabel(stamp: String?, today: String, zone: ZoneId = ZoneId.systemDefault()): String? {
+    val day = IsoDate.dateOfStamp(stamp, zone) ?: return null
+    if (day == today) return "today"
+    if (day == IsoDate.addDays(today, -1)) return "yesterday"
+    return IsoDate.parse(day)?.format(DONE_WHEN_FORMAT) ?: day
+}
 
 // ---- HH:MM helpers
 

@@ -22,6 +22,7 @@ import tech.csalliance.unstuck.core.logic.upcomingDates
 import tech.csalliance.unstuck.core.logic.weekdayName
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.time.Time
 
 // The assistant's live context (the contract's `buildAssistantContext` shape),
 // the voice session's opening primer + instructions. 1:1 with
@@ -143,8 +144,13 @@ suspend fun buildAssistantContext(api: AssistantApi): JsonObject {
                 put("minutesIn", mins); put("paused", live.paused); put("estimateMin", live.sessionEstimateMin)
             }
         }
+        // NEWEST first. The store returns rows in primary-key (UUID) order, so
+        // past 60 open tasks a task made seconds ago was in the context only by
+        // chance — how the model concluded a task it had just made still needed
+        // making (audit 2026-09-21; parity with iOS build 79, 2c4b723). Keyed on
+        // the parsed instant: local rows stamp `…Z`, server rows `…+00:00`.
         putJsonArray("tasks") {
-            tasks.asSequence().filter { !it.done }.take(60).forEach { t ->
+            topByDescendingStable(tasks.filter { !it.done }, 60) { Time.parseMillis(it.createdAt) ?: Long.MIN_VALUE }.forEach { t ->
                 addJsonObject {
                     put("id", t.id); put("name", t.name); put("estimateMin", t.estimateMin)
                     t.lifeArea?.takeIf { it.isNotEmpty() }?.let { put("lifeArea", it) }
@@ -242,8 +248,11 @@ suspend fun buildVoiceOpening(api: AssistantApi): String {
     if (ProfileFactsLogic.noNamePreference(facts)) {
         return "(Voice session just opened. They have asked NOT to be addressed by name — greet them warmly WITHOUT any name, one short sentence, ask what's on their mind, then listen. Greeting happens ONCE — never repeat it after an interruption.)"
     }
+    // A hello in its own words, different every time: the stock "Hey <name>.
+    // What's on your plate?" was the same line every session (parity with iOS
+    // 6f2da50, 2026-09-19).
     if (!api.interviewPending()) {
-        return "(Voice session just opened. One short hello using \"$first\" and a plain question — \"Hey $first. What's on your plate?\" — then listen. That's the only time you say their name this conversation. This greeting happens ONCE — after any interruption, continue the conversation naturally; never greet again or start over.)"
+        return "(Voice session just opened. Say hello the way a person you know would — one short, warm line in your own words, different every time, never a stock phrase and never \"what's on your plate\". Use \"$first\" once, here, and not again. You don't have to ask anything; if you do, make it one easy, natural question. Then stop and listen. This greeting happens ONCE — after any interruption, continue the conversation naturally; never greet again or start over.)"
     }
     val met = if (knowsThem)
         "you know a little about this person already (the profile facts) but they have not been through your get-to-know-you questions — skip any question the facts already answer"
@@ -262,10 +271,13 @@ suspend fun buildVoiceInstructions(api: AssistantApi): String {
     val nowHM = api.nowHM()
     return "You are $name's PERSONAL assistant in Unstuck — you know them (the profile facts in the state below are for planning around, not for saying) " +
         "and you sound like it: calm, warm, brief, a person not a bot. " +
+        // No greeting script in the standing instructions: it sat here and the
+        // model kept producing it after the primer was deleted (parity with iOS
+        // 6f2da50 — the name rule only).
         (if (noName)
             "They have asked you NOT to address them by name — never say their name, not even once. Open with a warm hello (no name) and ask what's on their mind — then listen. "
         else
-            "The session just opened: one short hello using \"$name\" (what they want to be called), and a plain question — \"Hey $name. What's on your plate?\" — then listen. That's the only time you say their name this conversation; ending sentences with someone's name sounds like a telemarketer. ") +
+            "Their name is \"$name\" (what they want to be called): say it once, in your hello, and not again — ending sentences with someone's name sounds like a telemarketer. ") +
         "If they tell you what to call them, or to stop using their name: obey from your very next sentence AND save it with save_profile_fact (category preference, e.g. \"Call them Ari\" or \"Don't use their name\") in that same moment — saying you'll note it without calling the tool means it is NOT noted and you will get it wrong next session. " +
         "When they say \"all my tasks\" or \"everything\", use complete_tasks with EVERY matching id in one call — never do a partial job or claim it without the call. " +
         // FACTS ARE FOR DECIDING, NOT FOR SAYING (2026-09-19). The previous wording

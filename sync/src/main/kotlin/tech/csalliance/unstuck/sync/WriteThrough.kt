@@ -3,6 +3,7 @@ package tech.csalliance.unstuck.sync
 import tech.csalliance.unstuck.core.logic.clampDurationMin
 import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.isUuid
+import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.Capture
@@ -128,9 +129,10 @@ class WriteThrough(private val store: LocalStore) {
         // session end. OutboxFlusher holds a dependsOn op while the parent row has a
         // pending op OR doesn't exist in local records yet (the live-session case), so
         // the capture can't push ahead, hit the FK, and be poison-dropped.
-        val dependsOn = c.sessionId?.let { if (isUuid(it)) it else null }
-        enqueue("captures", c.id, "upsert", DbRowCodec.encodeCapture(c).toString(), dependsOn)
+        enqueue("captures", c.id, "upsert", DbRowCodec.encodeCapture(c).toString(), captureParent(c))
     }
+
+    private fun captureParent(c: Capture): String? = c.sessionId?.let { if (isUuid(it)) it else null }
 
     /** A focus session ended WITHOUT a Session row (cancel_focus, its task deleted
      *  meanwhile, a session on a task shared with me): the captures queued behind
@@ -138,20 +140,72 @@ class WriteThrough(private val store: LocalStore) {
      *  phone. Re-queue each still-pending one with session_id = null, replacing
      *  its held op, in one transaction (Android audit 2026-09-23, A14). */
     suspend fun detachCapturesFromSession(sessionId: String) {
-        val detached = store.transaction {
-            val held = pending().filter { it.recordTable == Tables.CAPTURES && it.op == "upsert" && it.dependsOn == sessionId }
+        requeueCaptures {
+            val detach: (Capture, List<OutboxEntity>) -> Capture? = { c, _ -> if (c.sessionId == sessionId) c.copy(sessionId = null) else null }
+            detach
+        }
+    }
+
+    /** Task [taskId] was deleted on another device while this phone still queued
+     *  captures filed on it (focus on it went on meanwhile). captures.task_id
+     *  references tasks(id), so each was refused (23503) and quarantined on every
+     *  launch. Re-queue them without the task, still waiting on their session's
+     *  row. A task still stored here is left alone (Android audit 2026-09-23, A14). */
+    suspend fun unlinkCapturesFromTask(taskId: String) {
+        requeueCaptures {
+            val unlink: (Capture, List<OutboxEntity>) -> Capture? = { c, _ -> if (c.taskId == taskId) c.copy(taskId = null) else null }
+            if (getOne(Tables.TASKS, taskId, TaskItem.serializer()) != null) null else unlink
+        }
+    }
+
+    /** Captures an earlier build left stuck in the outbox (Android audit 2026-09-23,
+     *  A14): filed on a repeating task's DAY, whose id is a cal_block id (refused
+     *  by captures_task_id_fkey and quarantined on every launch), or held behind a
+     *  session that ended without a Session row. The day's id becomes its series;
+     *  a session that is neither queued, stored nor live is dropped from the
+     *  capture. Only captures still stored here and queued before [queuedBefore]
+     *  (before this app run) are touched, so a session ending right now is never
+     *  misread as one that never will; after a sign-out the parked ones come back
+     *  without their rows and are left alone. Returns how many were re-queued. */
+    suspend fun healStrandedCaptures(queuedBefore: Long): Int = requeueCaptures {
+        // Nothing an earlier run queued (the usual start): no row reads at all.
+        if (pending().none { it.recordTable == Tables.CAPTURES && it.op == "upsert" && it.createdAt < queuedBefore }) return@requeueCaptures null
+        val tasks = snapshot(Tables.TASKS, TaskItem.serializer())
+        val blocks = snapshot(Tables.CAL_BLOCKS, CalBlock.serializer())
+        val sessions = snapshot(Tables.SESSIONS, Session.serializer()).map { it.id }.toSet() +
+            pending().filter { it.recordTable == Tables.SESSIONS }.map { it.recordId } +
+            listOfNotNull(store.getLiveSession()?.id)
+        val heal: (Capture, List<OutboxEntity>) -> Capture? = { c, ops ->
+            if (ops.any { it.createdAt >= queuedBefore }) null
+            else c.copy(
+                taskId = c.taskId?.takeIf { id -> tasks.none { it.id == id } }?.let { occurrenceBlockFor(it, tasks, blocks)?.taskId } ?: c.taskId,
+                sessionId = c.sessionId?.takeIf { captureParent(c) == null || it in sessions },
+            )
+        }
+        heal
+    }
+
+    /** Re-queue each capture with a queued upsert that [plan]'s edit changes (null
+     *  = leave it): its queued upserts are replaced by one carrying the edited row,
+     *  waiting on the session that row names, as [upsertCapture] queues it. [plan]
+     *  runs once inside the transaction; a null plan changes nothing. */
+    private suspend fun requeueCaptures(plan: suspend LocalStore.Tx.() -> ((Capture, List<OutboxEntity>) -> Capture?)?): Int {
+        val n = store.transaction {
+            val edit = plan() ?: return@transaction 0
             var n = 0
-            for (id in held.map { it.recordId }.distinct()) {
-                val c = getOne(Tables.CAPTURES, id, Capture.serializer())?.takeIf { it.sessionId == sessionId } ?: continue
-                held.filter { it.recordId == id }.forEach { dequeue(it.seq) }
-                val freed = c.copy(sessionId = null)
-                upsert(Tables.CAPTURES, freed, Capture.serializer(), freed.id, freed.at)
-                enqueue(outboxOp(Tables.CAPTURES, freed.id, "upsert", DbRowCodec.encodeCapture(freed).toString()))
+            val queued = pending().filter { it.recordTable == Tables.CAPTURES && it.op == "upsert" }.groupBy { it.recordId }
+            for ((id, ops) in queued) {
+                val c = getOne(Tables.CAPTURES, id, Capture.serializer()) ?: continue
+                val next = edit(c, ops)?.takeIf { it != c } ?: continue
+                ops.forEach { dequeue(it.seq) }
+                upsert(Tables.CAPTURES, next, Capture.serializer(), next.id, next.at)
+                enqueue(outboxOp(Tables.CAPTURES, next.id, "upsert", DbRowCodec.encodeCapture(next).toString(), captureParent(next)))
                 n++
             }
             n
         }
-        if (detached > 0) runCatching { onEnqueue?.invoke() }
+        if (n > 0) runCatching { onEnqueue?.invoke() }
+        return n
     }
 
     suspend fun upsertReasonLog(r: ReasonLog) {

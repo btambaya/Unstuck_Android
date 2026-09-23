@@ -15,6 +15,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.serialization.json.jsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -670,9 +671,12 @@ class AppViewModelTest {
         vm.finishFocus(task("owners-task", name = "Their brief"), markDone = false)
         advanceUntilIdle()
 
-        // Live session cleared + a recap surfaced with the shared title.
+        // Live session cleared + a recap surfaced with the shared title. The finish
+        // writes more after clearing the live session (its captures are released,
+        // Android audit 2026-09-23 A14), so wait for the recap, don't read it on the
+        // live session's emission.
         awaitLiveSession { it == null }
-        assertEquals("Their brief", vm.lastRecap.value?.taskName)
+        assertEquals("Their brief", vm.lastRecap.first { it != null }?.taskName)
         // Crucially: NO own Session row + NO own task row for the foreign task.
         assertTrue("no own Session row for a foreign task", store.sessions().first().isEmpty())
         assertTrue("no own task row for a foreign task", store.tasks().first().none { it.id == "owners-task" })
@@ -840,20 +844,83 @@ class AppViewModelTest {
 
     @Test fun displacingASessionWhoseTaskWasDeleted_releasesItsCaptures() = runTest(dispatcher) {
         // The task went away elsewhere mid-session: finalizeDisplaced writes no
-        // Session row for it, so its captures must not wait on one.
+        // Session row for it, so its captures must not wait on one, nor name the
+        // dead task (captures.task_id references tasks(id)).
         seedTask(task("b", name = "Second"))
         val vm = vm()
         subscribeReads(vm, vm.tasks, vm.blocks)
-        val sid = uuid()
-        store.setLiveSession(LiveSession(id = sid, taskId = "gone", sessionStart = nowMs - 300_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT))
-        write.upsertCapture(capture(sid))
+        val sid = uuid(); val gone = uuid()
+        store.setLiveSession(LiveSession(id = sid, taskId = gone, sessionStart = nowMs - 300_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT))
+        write.upsertCapture(capture(sid, taskId = gone))
 
         vm.startFocus(task("b", name = "Second"))
         advanceUntilIdle()
 
         awaitLiveSession { it?.taskId == "b" }
         val ops = awaitPending { ops -> ops.any { it.recordTable == Tables.CAPTURES } && ops.none { it.dependsOn == sid } }
+        val op = ops.single { it.recordTable == Tables.CAPTURES }
+        assertNull(op.dependsOn)
+        assertEquals(kotlinx.serialization.json.JsonNull, kotlinx.serialization.json.Json.parseToJsonElement(op.payload!!).jsonObject["task_id"])
+        assertNull(awaitCaptures { it.isNotEmpty() }.single().taskId)
+    }
+
+    @Test fun finishingASessionWhoseTaskWasDeletedElsewhere_sendsItsCapturesWithoutTheDeadTask() = runTest(dispatcher) {
+        // The Session goes up without the dead task id (C5); its captures did not,
+        // and the server refused each one.
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        val sid = uuid(); val gone = uuid()
+        store.setLiveSession(LiveSession(id = sid, taskId = gone, sessionStart = nowMs - 300_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT))
+        write.upsertCapture(capture(sid, taskId = gone))
+
+        assertTrue(vm.finishFocusNow(task(gone, name = "Deleted"), markDone = false))
+
+        val cap = awaitCaptures { l -> l.singleOrNull()?.taskId == null }.single()
+        assertEquals("still joined to its Session row", sid, cap.sessionId)
+        assertNull(awaitSessions { it.isNotEmpty() }.single().taskId)
+        val op = awaitPending { ops -> ops.any { it.recordTable == Tables.CAPTURES } }.single { it.recordTable == Tables.CAPTURES }
+        assertEquals("waits for that row", sid, op.dependsOn)
+        assertEquals(kotlinx.serialization.json.JsonNull, kotlinx.serialization.json.Json.parseToJsonElement(op.payload!!).jsonObject["task_id"])
+    }
+
+    @Test fun signingOutDuringASharedSession_releasesItsCaptures() = runTest(dispatcher) {
+        // Sign-out leaves a partner session running and wipes the live blob: no
+        // Session row ever comes from this phone, so the captures would wait for ever
+        // (parked, then still held after the next sign-in).
+        seedTask(task("t1", name = "Brief"))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        val sid = uuid()
+        store.setLiveSession(LiveSession(id = sid, taskId = "t1", sessionStart = nowMs - 300_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT, sharedSessionRev = 2, sharedSessionAtMs = nowMs - 300_000L))
+        write.upsertCapture(capture(sid, taskId = "t1"))
+        advanceUntilIdle()
+
+        vm.signOut()
+        advanceUntilIdle()
+
+        val ops = awaitPending { ops -> ops.any { it.recordTable == Tables.CAPTURES } && ops.none { it.dependsOn == sid } }
         assertNull(ops.single { it.recordTable == Tables.CAPTURES }.dependsOn)
+        assertTrue("still no Session row for the partner's session", store.sessions().first().isEmpty())
+    }
+
+    @Test fun startingTheApp_healsCapturesAnEarlierBuildStranded() = runTest(dispatcher) {
+        // vc100 and earlier filed a habit day's captures on its cal_block id (refused
+        // by captures_task_id_fkey on every launch) and held others behind a session
+        // that never wrote its row. The next start re-files and releases them.
+        seedTask(task("tpl", name = "Stretch", recurrence = Recurrence.Daily()))
+        seedBlock(CalBlock(id = "occ1", taskId = "tpl", taskName = "Stretch", startTime = "09:00", durationMinutes = 25, date = Clock.todayIso(), kind = CalBlockKind.TASK))
+        val neverWritten = uuid()
+        val stuck = capture(neverWritten, taskId = "occ1")
+        store.upsert(Tables.CAPTURES, stuck, tech.csalliance.unstuck.core.model.Capture.serializer(), stuck.id, stuck.at)
+        store.enqueue(OutboxEntity(op = "upsert", recordTable = Tables.CAPTURES, recordId = stuck.id, payload = "{}", dependsOn = neverWritten, createdAt = 1L))
+
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        advanceUntilIdle()
+
+        val healed = awaitCaptures { l -> l.singleOrNull()?.taskId == "tpl" }.single()
+        assertNull(healed.sessionId)
+        assertNull(awaitPending { ops -> ops.none { it.dependsOn == neverWritten } }.single { it.recordTable == Tables.CAPTURES }.dependsOn)
     }
 
     @Test fun finishingASessionOnATaskSharedWithMe_releasesItsCaptures() = runTest(dispatcher) {

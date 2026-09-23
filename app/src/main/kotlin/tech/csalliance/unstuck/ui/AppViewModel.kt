@@ -2357,8 +2357,8 @@ class AppViewModel(
         viewModelScope.async {
             val wasConnection = m.memberUserId != null
             val ok = circleClient?.circleRemove(m.id) ?: false
+            refreshCircle()   // first: the roster re-read needn't wait for the lists
             if (ok && wasConnection) refreshAfterSevering()
-            refreshCircle()
             ok
         }.await()
 
@@ -2376,7 +2376,7 @@ class AppViewModel(
         if (userId.isBlank()) return false
         return viewModelScope.async {
             val ok = circleClient?.blockUser(userId) ?: false
-            if (ok) { refreshAfterSevering(); refreshCircle() }
+            if (ok) { refreshCircle(); refreshAfterSevering() }
             ok
         }.await()
     }
@@ -2386,7 +2386,7 @@ class AppViewModel(
         if (shareId.isBlank()) return false
         return viewModelScope.async {
             val ok = circleClient?.blockTaskSharer(shareId) ?: false
-            if (ok) { refreshAfterSevering(); refreshCircle() }
+            if (ok) { refreshCircle(); refreshAfterSevering() }
             ok
         }.await()
     }

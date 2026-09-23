@@ -3,9 +3,15 @@ package tech.csalliance.unstuck.sync
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withContext
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -73,13 +79,14 @@ class GoogleCalendarPullTest {
         externalEventId = id.removePrefix("g_"), externalConnectionId = connectionId, kind = CalBlockKind.EXTERNAL,
     )
 
-    private fun newPull() = GoogleCalendarPull(
+    private fun newPull(hydrateLock: Mutex = Mutex()) = GoogleCalendarPull(
         store = store,
         currentUserId = { uid },
         listConnections = { listCalls++; if (listFails) throw IOException("offline"); connections },
         pullEvents = { _, _ -> events() },
         upsertBlock = { upserts += it.id; write.upsertCalBlock(it) },
         deleteBlock = { deletes += it; write.deleteCalBlock(it) },
+        hydrateLock = hydrateLock,
         nowMs = { nowMs },
         zone = { ZoneOffset.UTC },
     )
@@ -252,5 +259,28 @@ class GoogleCalendarPullTest {
         release.complete(Unit)
         older.join()
         assertEquals("the older answer changed nothing", setOf("g_new"), ids())
+    }
+
+    /** A catch-up's hydrateCalBlocks snapshots the local g_ rows, then replaces cal_blocks
+     *  with them. A pull answering in between waits for the replace, so its import lands
+     *  after it instead of being dropped by it (and a purge is not undone by it). */
+    @Test fun aPullNeverWritesBetweenACatchUpsSnapshotAndItsReplace() = runTest {
+        val hydrate = Mutex()
+        val answered = CompletableDeferred<Unit>()
+        events = { answered.complete(Unit); CalendarClient.EventsResponse(listOf(event("e1")), emptyList()) }
+        val pull = newPull(hydrate)
+        lateinit var pulling: Job
+        hydrate.withLock {
+            val snapshot = store.snapshot(Tables.CAL_BLOCKS, CalBlock.serializer())
+            pulling = launch { pull.pull() }
+            answered.await()
+            // Its Room reads run on real threads: give it real time to write, as it did
+            // before it took the lock.
+            withContext(Dispatchers.Default) { delay(300) }
+            assertTrue("the answer is in, but the pull waits for the catch-up", upserts.isEmpty())
+            store.replace(Tables.CAL_BLOCKS, snapshot, CalBlock.serializer(), { it.id }, keepPendingUpserts = true)
+        }
+        pulling.join()
+        assertEquals("the import lands after the replace, not inside it", setOf("g_e1"), ids())
     }
 }

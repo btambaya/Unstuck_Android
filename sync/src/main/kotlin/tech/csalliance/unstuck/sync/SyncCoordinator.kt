@@ -14,7 +14,6 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
@@ -500,53 +499,35 @@ class SyncCoordinator(
 
     // --- Google Calendar (consent + pull). Push of local blocks is a later step. ---
 
-    private var pendingCalState: String? = null
+    private val calendarConnect = GoogleCalendarConnect(
+        store = store,
+        currentUserId = { auth.currentUserId },
+        authorize = { calendar.authorize(CAL_REDIRECT) },
+        exchange = { code, state -> calendar.connectGoogle(code, CAL_REDIRECT, state) },
+        // Push-then-pull through the serialized path: pulls the new calendar_connections
+        // row so the UI flips to "Synced" now, not on next launch (and never races the
+        // foreground pull into a double replace). The first Google pull drops any old
+        // back-off, as iOS calendarDidConnect does.
+        firstSync = {
+            freshness.requestAndWait(FreshnessTrigger.MANUAL)
+            pullCalendar(manual = true)
+        },
+        hydrateLock = hydrateMutex,
+    )
 
     /** Start the OAuth consent: returns the Google authorize URL to open in a Custom Tab. */
-    suspend fun beginGoogleConnect(): String? = runCatching {
-        val r = calendar.authorize(CAL_REDIRECT)
-        pendingCalState = r.state
-        r.url
-    }.onFailure { Log.w(TAG, "calendar authorize failed", it) }.getOrNull()
+    suspend fun beginGoogleConnect(): String? = calendarConnect.begin()
 
-    // The consent tab stops MainActivity, whose ON_STOP sends the app back to Today, so
-    // the calendar bar is usually off screen when the callback lands: the outcome is
-    // HELD until the bar shows it (a failed connect used to show nothing at all —
-    // parity with iOS build 81, audit 2026-09-22 C18).
-    private val _calendarConnectOutcome = MutableStateFlow<CalendarConnectOutcome?>(null)
-    val calendarConnectOutcome: StateFlow<CalendarConnectOutcome?> = _calendarConnectOutcome
-    fun consumeCalendarConnectOutcome() { _calendarConnectOutcome.value = null }
+    /** How the last in-app connect ended, held until the calendar bar shows it (see
+     *  [GoogleCalendarConnect]; parity with iOS build 81, audit 2026-09-22 C18). */
+    val calendarConnectOutcome: StateFlow<CalendarConnectOutcome?> = calendarConnect.outcome
+    fun consumeCalendarConnectOutcome() = calendarConnect.consume()
 
-    /** Finish consent from the `unstuck://calendar-callback?code&state` deep link. Null
-     *  when the callback was not ours (nothing is reported for it). */
-    suspend fun completeGoogleConnect(code: String, state: String): CalendarConnectOutcome? {
-        // CSRF guard: only honor a callback when WE initiated the consent flow AND
-        // the returned state matches the one minted for it. A null pendingCalState
-        // means no connect is in flight — an unsolicited deep link (the callback is
-        // BROWSABLE, reachable from any web page/app) must be rejected, not processed.
-        val expected = pendingCalState
-        if (expected == null || expected != state) {
-            Log.w(TAG, "calendar connect: no pending consent or state mismatch — ignoring callback")
-            return null
-        }
-        pendingCalState = null   // single-use: a replayed deep link can't be honored twice
-        val outcome = try {
-            calendar.connectGoogle(code, CAL_REDIRECT, state)
-            // Push-then-pull through the serialized path: pulls the new calendar_connections
-            // row so the UI flips to "Synced" now, not on next launch (and never races the
-            // foreground pull into a double replace). The first Google pull drops any old
-            // back-off, as iOS calendarDidConnect does.
-            freshness.requestAndWait(FreshnessTrigger.MANUAL)
-            if (pullCalendar(manual = true)) CalendarConnectOutcome.CONNECTED else CalendarConnectOutcome.FIRST_SYNC_FAILED
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Throwable) {
-            Log.w(TAG, "calendar connect failed", e)
-            CalendarConnectOutcome.FAILED
-        }
-        _calendarConnectOutcome.value = outcome
-        return outcome
-    }
+    /** Finish consent from the `unstuck://calendar-callback` deep link, with or without
+     *  a code (a denied consent has none). Every callback reports an outcome; only ours,
+     *  with a matching state, has its code exchanged. */
+    suspend fun completeGoogleConnect(code: String?, state: String?): CalendarConnectOutcome =
+        calendarConnect.complete(code, state)
 
     private val calendarPull = GoogleCalendarPull(
         store = store,
@@ -555,6 +536,7 @@ class SyncCoordinator(
         pullEvents = { from, to -> calendar.pullEvents(from, to) },
         upsertBlock = { write.upsertCalBlock(it) },
         deleteBlock = { write.deleteCalBlock(it) },
+        hydrateLock = hydrateMutex,
     )
 
     /** A Google 429 is being waited out (the "Sync now" caption says "busy"). */
@@ -744,7 +726,7 @@ class SyncCoordinator(
                 store.clearAll()   // leaves parked_outbox alone (per-user, see LocalStore)
                 goneUid?.let { catchUp.clearCursors(it) }   // no marks without the rows they describe
                 freshness.reset()
-                _calendarConnectOutcome.value = null   // the next account never sees it
+                calendarConnect.signedOut()   // the next account never sees its result
                 prefs.edit().remove(KEY_PREV_USER).apply()
                 runCatching { onSignedOut?.invoke() }.onFailure { Log.w(TAG, "onSignedOut hook failed", it) }
             }

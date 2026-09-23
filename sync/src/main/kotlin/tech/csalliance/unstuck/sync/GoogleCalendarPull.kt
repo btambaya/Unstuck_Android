@@ -17,10 +17,6 @@ import java.time.Instant
 import java.time.ZoneId
 import java.util.concurrent.atomic.AtomicInteger
 
-/** How the in-app Google connect ended. The calendar bar shows nothing for
- *  [CONNECTED]; the other two get the iOS captions. */
-enum class CalendarConnectOutcome { CONNECTED, FIRST_SYNC_FAILED, FAILED }
-
 /**
  * The Google Calendar pull: /connections, then /events for [-7d, +30d], reconciled into
  * local EXTERNAL `g_` blocks. SyncCoordinator owns one and delegates to it; it lives apart
@@ -39,6 +35,11 @@ enum class CalendarConnectOutcome { CONNECTED, FIRST_SYNC_FAILED, FAILED }
  * before the revoke put the account's meetings back after the purge. This is iOS's
  * CalendarConnectionsReadGate, checked at write time so it covers the meeting writes
  * too; the reads themselves never hold the lock (C18f).
+ *
+ * The write phase also holds the catch-up's lock ([hydrateLock]): hydrateCalBlocks
+ * snapshots the local g_ rows, then replaces cal_blocks with them, so a pull write
+ * landing in between was undone (a purged meeting back, a fresh import dropped) until
+ * the next pull.
  */
 internal class GoogleCalendarPull(
     private val store: LocalStore,
@@ -47,6 +48,8 @@ internal class GoogleCalendarPull(
     private val pullEvents: suspend (from: String, to: String) -> CalendarClient.EventsResponse,
     private val upsertBlock: suspend (CalBlock) -> Unit,
     private val deleteBlock: suspend (String) -> Unit,
+    /** SyncCoordinator's hydrateMutex, taken inside [writeLock] (the disconnect's order). */
+    private val hydrateLock: Mutex = Mutex(),
     private val nowMs: () -> Long = { System.currentTimeMillis() },
     private val zone: () -> ZoneId = { ZoneId.systemDefault() },
 ) {
@@ -80,7 +83,7 @@ internal class GoogleCalendarPull(
         writeLock.withLock {
             if (generation <= applied) return
             applied = generation
-            writes()
+            hydrateLock.withLock { writes() }
         }
     }
 

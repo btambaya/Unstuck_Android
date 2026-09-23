@@ -30,7 +30,17 @@ class CalendarClient(private val client: SupabaseClient) {
 
     @Serializable data class AuthorizeResponse(val url: String, val state: String)
     @Serializable data class GoogleCalendar(val id: String, val summary: String, val primary: Boolean? = null)
-    @Serializable data class ConnectResponse(val id: String, val accountEmail: String, val calendars: List<GoogleCalendar>, val colorSlot: Int? = null)
+    @Serializable data class ConnectResponse(val id: String, val accountEmail: String, val calendars: List<GoogleCalendar>, val colorSlot: Int? = null) {
+        /** The row /connect just stored, as far as its answer tells: seeded locally until
+         *  the catch-up brings the server's own (iOS ConnectResponse.localConnection, build
+         *  81, audit 2026-09-22 C18). The server selects every readable calendar, or
+         *  "primary" when Google listed none. */
+        fun localConnection(connectedAt: String) = CalendarConnection(
+            id = id, provider = CalendarProvider.GOOGLE, accountEmail = accountEmail, displayName = accountEmail,
+            selectedCalendarIds = calendars.map { it.id }.ifEmpty { listOf("primary") },
+            colorSlot = colorSlot ?: 0, connectedAt = connectedAt,
+        )
+    }
     /** One connection whose fetch failed inside /events (contract 2026-09): the
      *  clients must NOT treat its missing events as deletions. `status` is the
      *  provider's HTTP status (401 revoked / 429 rate limit / 5xx); `reason` a short

@@ -85,12 +85,18 @@ object AssistantGuard {
             "|forgot|forgotten|remembered|promoted|started|set|turned|noted|archived|unarchived|resolved|captured|shared|unshared" +
             // 2026-09-20 tooling rewrite: the new write tools' past tenses
             // (restore_capture, pin_list_item, recolor_list) — same list on web + iOS.
-            "|restored|pinned|recoloured|recolored"
+            "|restored|pinned|recoloured|recolored" +
+            // …and the four iOS + web already had (pin_list_item off,
+            // finish_focus, leave_list, set_theme): "I've switched it to dark"
+            // with no tool behind it went unbounced here (parity with iOS
+            // build 71, 56f1f60).
+            "|unpinned|finished|left|switched"
 
     // The leads that open honest sentences ("Set aside 20 minutes for it?",
-    // "Shared tasks show up under…", "Turned out…", "Started already?").
+    // "Shared tasks show up under…", "Turned out…", "Started already?",
+    // "Left to do: …", "Finished with that one?").
     private val LEAD_VERBS: String = CLAIM_VERBS.split("|")
-        .filter { it !in setOf("set", "turned", "shared", "started") }
+        .filter { it !in setOf("set", "turned", "shared", "started", "left", "finished") }
         .joinToString("|")
 
     private val EARLIER_TURN = re(

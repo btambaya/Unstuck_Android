@@ -196,13 +196,17 @@ object CallScript {
      *  tool's rules). Line 1 (the verbatim opening) and the "never claim an
      *  action without its tool result" rule hold for every kind; line 2 is
      *  the kind's own shape of conversation; line 3 the manner, including the
-     *  name-once rule. */
+     *  name-once rule. `dayContext`: lines read from the local store as the
+     *  call connects ([CallDayContext.lines]) — what got done today, what is
+     *  still open, today's plan, tomorrow's first thing — so the model answers
+     *  from facts, not from a tool call it may skip (parity with iOS build 75). */
     fun instructions(
         p: IncomingCallPayload,
         preferredName: String? = p.preferredName,
         nowMs: Long = System.currentTimeMillis(),
         receivedAtMs: Long = nowMs,
         zone: ZoneId = ZoneId.systemDefault(),
+        dayContext: List<String> = emptyList(),
     ): String {
         val kind = p.resolvedKind
         val ctx = ArrayList<String>()
@@ -221,6 +225,7 @@ object CallScript {
         if (p.captures.isNotEmpty()) {
             ctx.add("- recent captures on it: " + p.captures.joinToString(", ") { "\"$it\"" })
         }
+        for (line in dayContext) ctx.add("- $line")
         val open = opening(p, preferredName, nowMs, receivedAtMs, zone)
         val openingRule = when (kind) {
             CallKind.REQUESTED -> "read the notes word for word, do not summarise or reorder them"
@@ -232,7 +237,7 @@ ${headline(p)} Speak English, calm and brief, like a friend on the phone.
 "$open"
 2. ${conversationRule(kind)} You have every tool you have in Talk — reschedule, add tasks, tick things off, capture, share, plus update_call (changes this call's notes for later) and snooze_call ("call me back in ten" — say the minutes). Never claim an action happened without its tool result; if a tool errors, say so plainly.
 3. One or two sentences a turn, one question at a time, times the way people say them. $NAME_ONCE_RULE When they're done, say bye — they hang up from the screen.
-Call context:
+Call context (read from the app as the call connected — answer "what got done" / "what's on today" from it; call get_schedule / get_tasks only for what it doesn't cover):
 ${ctx.joinToString("\n")}
 """.trim()
     }
@@ -252,10 +257,13 @@ ${ctx.joinToString("\n")}
             "Then act ONLY through tools: complete_task ticks a task off, add_capture notes something they say, schedule_task moves it, start_focus starts the timer."
         CallKind.TEST ->
             "If they try something, do it for real through the tools (get_schedule / get_tasks answer \"what's on today\"); keep it light — this call proves the ring works."
+        // The morning / evening rules read the day from the call context
+        // (CallDayContext) — the evening one NEVER asks what got done (parity
+        // with iOS build 75: Zubair's evening call asked him).
         CallKind.MORNING ->
-            "If they say yes, call get_schedule and read today back briefly (times the way people say them), then plan with them: move things with schedule_task / block_time, add what's missing with create_task, drop what won't happen with set_task_later or carry_to_tomorrow. Act ONLY through tools."
+            "If they say yes, read today's plan from the call context below, briefly (times the way people say them) — call get_schedule only if the context has no plan — then plan with them: move things with schedule_task / block_time, add what's missing with create_task, drop what won't happen with set_task_later or carry_to_tomorrow. Act ONLY through tools."
         CallKind.EVENING ->
-            "If they say yes, call get_tasks(view: completed) and say what got done today in a sentence, then ask what moves to tomorrow — carry_to_tomorrow ONLY when they ask for it, complete_task for anything they finished, add_capture for a loose thought. Act ONLY through tools."
+            "If they say yes, say from the call context below what got done today and what is still open, in one sentence — NEVER ask them what got done, and call get_tasks(view: completed) only if the context has no such line — then ask what moves to tomorrow: carry_to_tomorrow ONLY when they ask for it, complete_task for anything they finished, add_capture for a loose thought. Act ONLY through tools."
         CallKind.AFTER_BLOCK ->
             "Listen, then settle it in one move: done → complete_task (or complete_occurrence for a recurring one); not now → skip_occurrence / set_task_later; needs another go → schedule_task or block_time for a new slot. Act ONLY through tools."
     }

@@ -245,4 +245,9 @@ interface AssistantApi {
     fun currentUserId(): String?
     /** Null when signed out / not configured → the call tools say so. */
     fun callStore(): AssistantCallStore?
+    /** THIS phone's Calls switch + allowed hours (Settings › Calls) — what
+     *  decides on receipt, so request_call / update_call refuse a time it would
+     *  decline (CallSettingsLogic.deviceGuard; parity with iOS build 81, audit
+     *  2026-09-22 C12). The defaults (on, 06:00–23:00) when not wired. */
+    fun callSettings(): tech.csalliance.unstuck.core.logic.CallSettings = tech.csalliance.unstuck.core.logic.CallSettings.DEFAULTS
 }

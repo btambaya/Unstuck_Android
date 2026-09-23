@@ -107,6 +107,41 @@ class IncomingCallActivityTest {
         assertEquals(listOf(payload), started)
     }
 
+    /** The mic prompt used to race the 30 s missed alarm armed at ring time: a
+     *  slow "Allow" found the call already `missed` (audit 2026-09-22 C13). */
+    @Test fun `a slow Allow under the mic prompt still answers - the missed alarm is held`() {
+        shadowOf(context as android.app.Application).denyPermissions(Manifest.permission.RECORD_AUDIO)
+        // The phone started ringing 20 s before the Answer tap.
+        val tapAt = System.currentTimeMillis()
+        val ringAt = tapAt - 20_000
+        NotificationChannels.ensureAll(context)
+        CallRinger.ring(context, payload, ringAt)
+        val a = launch()
+        val am = shadowOf(context.getSystemService(android.app.AlarmManager::class.java))
+        a.findViewById<android.view.View>(IncomingCallActivity.ID_ANSWER).performClick()
+        val alarm = am.nextScheduledAlarm!!
+        assertTrue("the missed alarm moved past the dialog", alarm.triggerAtTime >= tapAt + CallRinger.PERMISSION_HOLD_MS)
+        // 45 s after the ring (past the original alarm AND the stale grace) the
+        // record is still live — recover() must not retire it.
+        assertEquals(null, CallRinger.recover(context, ringAt + 45_000))
+        assertEquals(payload.callId, CallRinger.activeCallId(context, ringAt + 45_000))
+        a.onRequestPermissionsResult(
+            IncomingCallActivity.REQ_MIC, arrayOf(Manifest.permission.RECORD_AUDIO),
+            intArrayOf(PackageManager.PERMISSION_GRANTED),
+        )
+        assertEquals(listOf(CallOutcome.ANSWERED), queued().map { it.outcome })
+        assertEquals(listOf(payload), started)
+        assertTrue("answering took the alarm down", am.scheduledAlarms.isEmpty())
+    }
+
+    @Test fun `the hold is only for a ringing call`() {
+        assertEquals(false, CallRinger.holdForPermission(context, payload.callId))
+        ring()
+        assertEquals(false, CallRinger.holdForPermission(context, "another-call"))
+        CallRinger.settle(context, payload.callId, CallOutcome.ANSWERED)
+        assertEquals("answered: nothing left to hold", false, CallRinger.holdForPermission(context, payload.callId))
+    }
+
     @Test fun `a refused mic permission reports done with a voice-failed note and the notice`() {
         shadowOf(context as android.app.Application).denyPermissions(Manifest.permission.RECORD_AUDIO)
         ring()

@@ -214,9 +214,7 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
         // table, so an offline "Noted" can't vanish until the flush. Mirrors the
         // web hydrateProfileFacts (remote wins on shared ids, local-only pushed).
         replace(Tables.PROFILE_FACTS, ProfileFact.serializer(), { it.id }, { it.updatedAt }) { DbRowCodec.decodeProfileFact(it) }
-        // call_requests — the read-only bookings mirror (no outbox ops exist for the
-        // table, so keepPendingUpserts is a no-op here; server canonical, always).
-        replace(Tables.CALL_REQUESTS, CallRequest.serializer(), { it.id }, { it.updatedAt }) { DbRowCodec.decodeCallRequest(it) }
+        hydrateCallRequests()
         hydrateNonCursorTables()
         pushTimezone()
         return LinkedHashMap(serverMaxima)
@@ -229,6 +227,10 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
     suspend fun hydrateNonCursorTables() {
         replace(Tables.CALENDAR_CONNECTIONS, CalendarConnection.serializer(), { it.id }, { it.connectedAt }) { DbRowCodec.decodeConnection(it) }
         hydrateCalBlocks()
+        // Every catch-up pass, not only the rare full hydrate: a zone change the
+        // TIMEZONE_CHANGED receiver couldn't push (offline) lands on the next
+        // pull. A no-op until the zone changes (parity with iOS build 78).
+        pushTimezone()
     }
 
     // ── timezone (migration 053 C, android-gateway-plan risk 8) ─────────────────
@@ -468,6 +470,25 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
     private fun noteServerMax(table: String, rows: List<JsonObject>) {
         val column = CatchUpPuller.cursorColumn(table) ?: return
         serverMaxima[table] = CatchUpPuller.maxStamp(rows, column) ?: CatchUpPuller.EPOCH
+    }
+
+    /** call_requests — the read-only bookings mirror (no outbox ops exist for the
+     *  table). Server-canonical, with one preservation rule: a LOCAL-ONLY row
+     *  stamped newer than every server row is a booking absorbed after this
+     *  fetch started — kept until the next pull confirms it, instead of the call
+     *  list flickering empty right after booking (parity with iOS build 72,
+     *  CallRequestsMirror.mergeHydrated). The local read sits right before the
+     *  replace, after the fetch, so the gap it leaves is milliseconds, not the
+     *  round trip. */
+    private suspend fun hydrateCallRequests() {
+        runCatching {
+            val rows = gateway.fetchAll(Tables.CALL_REQUESTS)
+            noteServerMax(Tables.CALL_REQUESTS, rows)
+            val remote = rows.mapNotNull { runCatching { DbRowCodec.decodeCallRequest(it) }.getOrNull() }
+            val local = store.snapshot(Tables.CALL_REQUESTS, CallRequest.serializer())
+            val merged = CallRequestsMirror.mergeHydrated(remote, local)
+            store.replace(Tables.CALL_REQUESTS, merged, CallRequest.serializer(), { it.id }, { it.updatedAt }, keepPendingUpserts = true)
+        }.onFailure { println("[hydrate] ${Tables.CALL_REQUESTS} failed, leaving local intact: $it") }
     }
 
     private suspend fun hydrateCalBlocks() {

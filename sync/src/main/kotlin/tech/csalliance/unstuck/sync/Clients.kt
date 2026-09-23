@@ -80,6 +80,31 @@ class NotificationsClient(private val client: SupabaseClient) {
         client.functions.invoke("send-paused-checkin") { method = HttpMethod.Post; contentType(ContentType.Application.Json); setBody(Empty()) }
             .body<AllowedResponse>().allowed ?: false
     }.getOrDefault(false)
+
+    /** One `notification_queue` row as the bell reads it (the web's
+     *  useNotificationQueue / iOS NotificationQueueCard shape). */
+    @Serializable
+    data class QueueCard(
+        val id: String,
+        val moment: String? = null,
+        val title: String? = null,
+        val body: String? = null,
+        @kotlinx.serialization.SerialName("created_at") val createdAt: String? = null,
+    )
+
+    /** The server's own cards for one moment, newest first — owner-RLS
+     *  (`notification_queue_own`). The bell reads moment `call`, so a call the
+     *  server rang (answered, missed, or on a phone that couldn't take it)
+     *  shows up on every device (parity with iOS build 72). Throws on a
+     *  transport failure; the caller keeps what it had. */
+    suspend fun queueCards(moment: String, limit: Long = 30): List<QueueCard> =
+        client.from("notification_queue")
+            .select(Columns.list("id", "moment", "title", "body", "created_at")) {
+                filter { eq("moment", moment) }
+                order("created_at", io.github.jan.supabase.postgrest.query.Order.DESCENDING)
+                limit(limit)
+            }
+            .decodeList()
 }
 
 class LoginTrackerClient(private val client: SupabaseClient) {

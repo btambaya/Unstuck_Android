@@ -247,6 +247,10 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
             },
             // Already posted to the main thread by the client.
             onSuggestHoldToTalk = { if (current()) suggestHoldToTalk = true },
+            // Every dial — the start and each quiet reconnect — resolves a token
+            // that outlives the session; `token` is only the fallback (parity
+            // with iOS build 81, audit 2026-09-22 C14).
+            freshToken = { force -> vm.freshVoiceAccessToken(force) },
         )
         sessionDidEnd = { vm.endVoiceSession() }
         // Another app (most importantly an incoming phone call) took audio focus →

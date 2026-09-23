@@ -403,14 +403,37 @@ fun MainScaffold(vm: AppViewModel) {
                     }
                 }
             }
-            // The LIVE call's own notification (CallVoiceService.build) and the
-            // ring payload both carry `unstuck://call/<id>`. It used to fall
-            // through to the `else` branch and dump the user on Today with
-            // nothing on screen saying a call was running — and no way out but
-            // the shade. Land on Today with every overlay cleared, which is
-            // exactly where InCallBar shows its End.
+            // `unstuck://call/<id>`: the live call's own notification, the ring
+            // payload, a call-result notification, a bell row. Land on Today with
+            // every overlay cleared — where InCallBar shows End for the call this
+            // phone is running — then resolve the call and go where iOS goes
+            // (CallLink: the ring screen while it rings, else its task, else the
+            // assistant; X2). The read rides the scaffold's scope, not this
+            // effect: the link is consumed in this frame whatever happens.
             dl.startsWith(tech.csalliance.unstuck.core.logic.IncomingCallPayload.DEEP_LINK_PREFIX) -> {
                 tab = "today"; stack.clear()
+                val callId = tech.csalliance.unstuck.calls.CallLink.callId(dl)
+                navScope.launch {
+                    val ringing = tech.csalliance.unstuck.calls.CallRinger.ringing(fgsContext)
+                    val row = if (callId.isEmpty() || ringing?.callId == callId) null else runCatching { vm.callRequest(callId) }.getOrNull()
+                    val taskId = row?.taskId
+                    when (tech.csalliance.unstuck.calls.CallLink.route(
+                        callId = callId,
+                        activeCallId = tech.csalliance.unstuck.calls.CallVoiceService.activeCallId,
+                        ringingCallId = ringing?.callId,
+                        taskId = taskId,
+                        taskIsLocal = taskId != null && vm.tasks.value.any { it.id == taskId },
+                        assistantAllowed = assistantAllowed,
+                    )) {
+                        tech.csalliance.unstuck.calls.CallLink.Route.RING -> ringing?.let {
+                            runCatching { fgsContext.startActivity(tech.csalliance.unstuck.calls.CallRinger.activityIntent(fgsContext, it)) }
+                        }
+                        tech.csalliance.unstuck.calls.CallLink.Route.TASK ->
+                            if (tab == "today" && stack.isEmpty() && taskId != null) push(Route.Detail(taskId))
+                        tech.csalliance.unstuck.calls.CallLink.Route.ASSISTANT -> if (assistantAllowed) sheet = Sheet.Assistant
+                        else -> Unit
+                    }
+                }
             }
             dl == "unstuck://collections" -> { tab = "lists"; stack.clear() }   // a shared collection
             dl.startsWith("unstuck://collections/") -> {

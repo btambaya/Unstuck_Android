@@ -3850,7 +3850,35 @@ class AppViewModel(
      *  kill-switch has to reach EVERY assistant surface, voice included — the
      *  published privacy policy promises exactly that. */
     fun voiceConfigured(): Boolean = voiceProxyUrl.isNotBlank() && settings.value.assistantEnabled
+    /** The stored access token. It may be EXPIRED (supabase-kt refreshes only
+     *  while the app is in the foreground), so it is only the "signed in?" gate
+     *  and the fallback — a dial goes through [freshVoiceAccessToken]. */
     fun voiceAccessToken(): String? = graph.provider?.client?.auth?.currentSessionOrNull()?.accessToken
+
+    /** The token a voice dial sends: refreshed when it is expired OR would
+     *  expire before the session can end — a lock-screen call on an app idle
+     *  overnight otherwise dialled with a dead token and the proxy's 401 hung
+     *  it up. `forceRefresh` follows that 401 and never answers with the token
+     *  the proxy refused (parity with iOS build 81, audit 2026-09-22 C14/C15). */
+    suspend fun freshVoiceAccessToken(forceRefresh: Boolean = false): String? {
+        val auth = graph.provider?.client?.auth
+        val fresh = if (auth == null) null else tech.csalliance.unstuck.ui.assistant.VoiceToken.resolve(
+            forceRefresh = forceRefresh,
+            nowMs = { System.currentTimeMillis() },
+            stored = {
+                auth.currentSessionOrNull()?.let {
+                    tech.csalliance.unstuck.ui.assistant.VoiceToken.Stored(it.accessToken, it.expiresAt.toEpochMilliseconds())
+                }
+            },
+            // The refresh token is read at call time by the SDK; the new session
+            // is imported (and persisted) before this reads it back.
+            refresh = { auth.refreshCurrentSession(); auth.currentSessionOrNull()?.accessToken },
+            // Never viewModelScope: a refresh cut mid-flight can spend the refresh
+            // token without storing its successor.
+            scope = graph.scope,
+        )
+        return tech.csalliance.unstuck.ui.assistant.VoiceToken.dialToken(fresh, voiceAccessToken(), forceRefresh)
+    }
 
     private val voiceScratch = TurnScratch()
 
@@ -4028,6 +4056,27 @@ class AppViewModel(
         val client = assistantSupabaseClient ?: return null
         if (currentUid() == null) return null
         return runCatching { CallsClient(client, CallRequestsMirror(store)).forTask(taskId) }.getOrNull()
+    }
+
+    /** The live call anchored to [taskId] as the local `call_requests` mirror
+     *  changes (hydrate, realtime, catch-up, a booking's own row) — what the
+     *  task editor's "Call me about this" follows while it is open (parity with
+     *  iOS build 72). */
+    fun observeCallForTask(taskId: String): kotlinx.coroutines.flow.Flow<CallRequest?> =
+        CallRequestsMirror(store).observe()
+            .map { rows -> tech.csalliance.unstuck.ui.tasks.CallMeLogic.liveForTask(rows, taskId) }
+            .distinctUntilChanged()
+
+    /** The bell's "Unstuck called you about X" cards (notification_queue,
+     *  moment `call`), matched to the local call mirror. Null = couldn't read
+     *  (offline / signed out) — the bell keeps what it had (parity with iOS
+     *  build 72). */
+    suspend fun callQueueCards(): List<tech.csalliance.unstuck.surface.NotificationLog.Entry>? {
+        val n = graph.coordinator?.notifications ?: return null
+        if (currentUid() == null) return null
+        val cards = runCatching { n.queueCards(tech.csalliance.unstuck.ui.notifications.NotificationQueueCards.CALL_MOMENT) }.getOrNull() ?: return null
+        val calls = runCatching { CallRequestsMirror(store).all() }.getOrDefault(emptyList())
+        return cards.map { tech.csalliance.unstuck.ui.notifications.NotificationQueueCards.entry(it, calls) }
     }
 
     /** One call row by id (after a book, to show what the server stored). */
@@ -4326,7 +4375,10 @@ const val TEST_CALL_LABEL = TestCallLogic.LABEL
 const val TEST_CALL_NOTE = TestCallLogic.NOTE
 /** Calls are switched off on this phone — the test would be declined quietly (iOS wording). */
 const val TEST_CALL_CALLS_OFF = "error: calls are off on this phone — switch them on above to try it"
-/** The user's own hours refuse the test — widen them (iOS wording). */
+/** The user's own hours refuse the test — widen them (iOS wording). The end
+ *  minute itself names the last one that rings (hoursLabel, audit 2026-09-22 C12). */
 @Suppress("FunctionName")
-fun TEST_CALL_OUTSIDE_HOURS(hm: String, s: CallSettings): String =
-    "error: $hm is outside your allowed hours (${s.hoursStart}–${s.hoursEnd}) — the phone would decline it quietly. Widen the hours above to try it now."
+fun TEST_CALL_OUTSIDE_HOURS(hm: String, s: CallSettings): String {
+    val hours = CallSettingsLogic.hoursLabel(s.hoursStart, s.hoursEnd, CallSettingsLogic.minutesOfDay(hm) ?: -1)
+    return "error: $hm is outside your allowed hours ($hours) — the phone would decline it quietly. Widen the hours above to try it now."
+}

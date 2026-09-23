@@ -117,6 +117,9 @@ class IncomingCallActivity : Activity() {
         // system dialog shows, and the call is only settled once we know the answer.
         if (!hasMic()) {
             pendingAnswer = p
+            // The ring's 30 s missed alarm must not settle the call under the
+            // dialog: hold it while they decide (audit 2026-09-22 C13).
+            CallRinger.holdForPermission(this, p.callId)
             runCatching { requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), REQ_MIC) }
                 .onFailure { pendingAnswer = null; failVoice(p, "microphone permission") }
             return

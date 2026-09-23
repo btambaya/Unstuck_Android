@@ -29,6 +29,11 @@ class CallsSettingsCopyTest {
             testCallStateFrom(TEST_CALL_OUTSIDE_HOURS("23:10", s)),
         )
         assertEquals(TestCallState.Failed("Calls are off on this phone — switch them on above to try it."), testCallStateFrom(TEST_CALL_CALLS_OFF))
+        assertEquals(
+            "the end minute names the last one that rings (C12)",
+            TestCallState.Failed("21:00 is outside your allowed hours (08:00–21:00; the latest it rings is 20:59) — the phone would decline it quietly. Widen the hours above to try it now."),
+            testCallStateFrom(TEST_CALL_OUTSIDE_HOURS("21:00", s)),
+        )
     }
 
     @Test fun `the proactive calls and the ring nudge copy match iOS`() {
@@ -39,11 +44,24 @@ class CallsSettingsCopyTest {
         assertEquals("Rings to go over what got done and what moves to tomorrow.", CALLS_PROACTIVE_EVENING_SUB)
         assertEquals("Check in after a block", CALLS_PROACTIVE_AFTER_BLOCK)
         assertEquals("Rings when a block ends without its task marked done — how did it go?", CALLS_PROACTIVE_AFTER_BLOCK_SUB)
-        assertEquals("All off unless you switch them on. They ring within your allowed hours, on every phone where calls are on.", CALLS_PROACTIVE_HINT)
+        // The old "They ring within your allowed hours" was false (parity with iOS build 81, C12).
+        assertEquals("All off unless you switch them on. Unstuck books them between 06:00 and 23:00; this phone still declines one outside the allowed hours above, or while Calls is off.", CALLS_PROACTIVE_HINT)
+        assertEquals("Calls need microphone access — turn it on in Android Settings, or you'll ring but can't be heard.", CALLS_MIC_DENIED_HINT)
+        assertEquals("Calls need microphone access — turn it on for Unstuck in Android Settings.", CALLS_TEST_MIC_REFUSED)
         assertEquals("At", CALLS_PROACTIVE_AT)
         assertEquals("Calls need the full-screen permission on this phone — without it a call arrives as a notification you tap instead of a ring.", CALLS_FULL_SCREEN_NUDGE)
         assertEquals("Not now", CALLS_FULL_SCREEN_DISMISS)
         assertEquals("Allow full-screen calls", CALLS_FULL_SCREEN_ROW)
+    }
+
+    /** iOS shows the red mic line from the moment the screen opens when the mic
+     *  is denied; Android can tell only while it still offers the prompt. */
+    @Test fun `the mic line shows a refusal from before the screen opened, and a tap asks while Android still can`() {
+        assertEquals(MicHint.NONE, callsMicHint(granted = true, canAskAgain = false, refusedHere = true))
+        assertEquals("refused at a ring's Answer, before Settings opened", MicHint.ASK, callsMicHint(granted = false, canAskAgain = true, refusedHere = false))
+        assertEquals(MicHint.ASK, callsMicHint(granted = false, canAskAgain = true, refusedHere = true))
+        assertEquals("after don't-ask-again: the app's system page", MicHint.OPEN_SETTINGS, callsMicHint(granted = false, canAskAgain = false, refusedHere = true))
+        assertEquals("never asked is not a refusal (the ring asks at Answer)", MicHint.NONE, callsMicHint(granted = false, canAskAgain = false, refusedHere = false))
     }
 
     @Test fun `copy matches iOS`() {

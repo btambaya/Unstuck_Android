@@ -315,6 +315,7 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
 
     // ── calls ──
     override fun currentUserId(): String? = vm.currentUid()
+    override fun callSettings(): tech.csalliance.unstuck.core.logic.CallSettings = vm.callSettings.value
     override fun callStore(): AssistantCallStore? {
         val client = vm.assistantSupabaseClient ?: return null
         // With the local `call_requests` mirror attached, get_calls / the receipt's

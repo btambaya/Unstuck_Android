@@ -330,6 +330,30 @@ object CallRinger {
         else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, fireAtMs, pi)
     }
 
+    /** How long the Answer tap's microphone prompt may stay up before the call
+     *  counts as missed after all. */
+    const val PERMISSION_HOLD_MS: Long = 30_000
+
+    /**
+     * The user tapped Answer and the system microphone prompt is up. The 30 s
+     * missed alarm armed at ring time kept running under it, so a slow "Allow"
+     * found the call already settled `missed` and the answer was lost (audit
+     * 2026-09-22 C13, the Android-only race). Push the alarm out
+     * [PERMISSION_HOLD_MS] from now and restart the ringing record's clock (so
+     * [recover] doesn't retire it as stale meanwhile). True when the RINGING
+     * call is held; false when it is not this call, or is settled / answered.
+     */
+    fun holdForPermission(context: Context, callId: String, nowMs: Long = System.currentTimeMillis()): Boolean {
+        synchronized(lock) {
+            val p = prefs(context)
+            if (p.getString(K_CALL_ID, null) != callId || p.getBoolean(K_SETTLED, true)) return false
+            if (p.getString(K_PHASE, PHASE_RINGING) != PHASE_RINGING) return false
+            p.edit().putLong(K_PHASE_AT, nowMs).commit()
+        }
+        armMissedAlarm(context, callId, nowMs + PERMISSION_HOLD_MS)
+        return true
+    }
+
     private fun disarmMissedAlarm(context: Context, callId: String) {
         val am = context.getSystemService(AlarmManager::class.java) ?: return
         am.cancel(missedPendingIntent(context, callId))

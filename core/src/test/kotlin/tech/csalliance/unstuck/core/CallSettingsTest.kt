@@ -164,4 +164,147 @@ class CallSettingsTest {
         assertEquals("This is what a call from Unstuck sounds like", TestCallLogic.NOTE)
         assertEquals("test", TestCallLogic.KIND)
     }
+
+    // ── will it ring here? (parity with iOS build 81, audit 2026-09-22 C12) ──
+    // Vectors from iOS CallScriptTests, with "iPhone" → "phone".
+
+    private val london = ZoneId.of("Europe/London")
+    private fun at(h: Int, m: Int) = LocalDateTime.of(2026, 9, 2, h, m).atZone(london).toInstant().toEpochMilli()
+
+    @Test fun `deviceGuard refuses outside the phone's hours and when calls are off`() {
+        fun guardAt(h: Int, m: Int, enabled: Boolean = true, start: String = "08:00", end: String = "21:00") =
+            CallSettingsLogic.deviceGuard(at(h, m), CallSettings(enabled = enabled, hoursStart = start, hoursEnd = end), london)
+        assertNull(guardAt(20, 59))
+        assertEquals(
+            "error: 21:00 is outside this phone's call hours (08:00–21:00; the latest it rings is 20:59), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Calls",
+            guardAt(21, 0),
+        )
+        assertEquals(
+            "error: 07:59 is outside this phone's call hours (08:00–21:00), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Calls",
+            guardAt(7, 59),
+        )
+        assertNull(guardAt(8, 0))
+        assertNull("overnight window", guardAt(23, 30, start = "22:00", end = "02:00"))
+        assertNull("start == end → always", guardAt(3, 0, start = "09:00", end = "09:00"))
+        // The switch is checked before the hours.
+        assertEquals(
+            "error: calls are off on this phone, so it would decline this call — tell them to switch Calls on in Settings › Calls first",
+            guardAt(12, 0, enabled = false),
+        )
+        assertEquals(guardAt(12, 0, enabled = false), guardAt(22, 0, enabled = false))
+        // The default hours: the server's window, end exclusive on the phone.
+        assertNull(guardAt(6, 0, start = "06:00", end = "23:00"))
+        assertNull(guardAt(22, 59, start = "06:00", end = "23:00"))
+        assertEquals(
+            "the server takes 23:00, the phone doesn't — never '23:00 is outside 06:00–23:00' alone",
+            "error: 23:00 is outside this phone's call hours (06:00–23:00; the latest it rings is 22:59), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Calls",
+            guardAt(23, 0, start = "06:00", end = "23:00"),
+        )
+    }
+
+    @Test fun `hoursLabel names the last minute only when the end itself is refused`() {
+        assertEquals("06:00–23:00; the latest it rings is 22:59", CallSettingsLogic.hoursLabel("06:00", "23:00", 23 * 60))
+        assertEquals("06:00–23:00", CallSettingsLogic.hoursLabel("06:00", "23:00", 23 * 60 + 30))
+        assertEquals("06:00–23:00", CallSettingsLogic.hoursLabel("06:00", "23:00", 5 * 60 + 59))
+        assertEquals("overnight", "22:00–02:00; the latest it rings is 01:59", CallSettingsLogic.hoursLabel("22:00", "02:00", 2 * 60))
+        assertEquals("an end at midnight", "08:00–00:00; the latest it rings is 23:59", CallSettingsLogic.hoursLabel("08:00", "00:00", 0))
+        assertEquals("08:00–junk", CallSettingsLogic.hoursLabel("08:00", "junk", 0))
+        assertTrue(CallSettingsLogic.withinWindow(1259, "08:00", "21:00"))
+        assertFalse(CallSettingsLogic.withinWindow(1260, "08:00", "21:00"))
+        assertTrue(CallSettingsLogic.withinWindow(60, "22:00", "02:00"))
+        assertTrue(CallSettingsLogic.withinWindow(180, "09:00", "09:00"))
+    }
+
+    /** dispatch_proactive_calls (072) books at the first 5-minute tick in
+     *  [time, time+10) inside 06:00–23:00 inclusive. */
+    @Test fun `proactiveRingMinute is the dispatcher's tick`() {
+        assertEquals(8 * 60 + 30, CallSettingsLogic.proactiveRingMinute(8 * 60 + 30))
+        assertEquals(7 * 60 + 35, CallSettingsLogic.proactiveRingMinute(7 * 60 + 32))
+        assertEquals("booked at the 06:00 tick", 6 * 60, CallSettingsLogic.proactiveRingMinute(5 * 60 + 51))
+        assertEquals(6 * 60, CallSettingsLogic.proactiveRingMinute(5 * 60 + 55))
+        assertNull("05:50 and 05:55 ticks are both before 06:00", CallSettingsLogic.proactiveRingMinute(5 * 60 + 50))
+        assertNull(CallSettingsLogic.proactiveRingMinute(5 * 60 + 45))
+        assertEquals(23 * 60, CallSettingsLogic.proactiveRingMinute(22 * 60 + 56))
+        assertEquals("inclusive", 23 * 60, CallSettingsLogic.proactiveRingMinute(23 * 60))
+        assertNull(CallSettingsLogic.proactiveRingMinute(23 * 60 + 1))
+        assertNull(CallSettingsLogic.proactiveRingMinute(23 * 60 + 59))
+    }
+
+    @Test fun `proactiveTimeWarning covers the server window, the phone's hours and the switch`() {
+        fun warn(t: String, enabled: Boolean = true, start: String = "08:00", end: String = "21:00") =
+            CallSettingsLogic.proactiveTimeWarning(t, enabled, start, end)
+        // Never booked at all — even with Calls off, that's the first thing to say.
+        assertEquals("Unstuck only calls between 06:00 and 23:00, so a call at 05:45 never rings.", warn("05:45"))
+        assertEquals(warn("05:45"), warn("05:45", enabled = false))
+        assertEquals("Unstuck only calls between 06:00 and 23:00, so a call at 23:15 never rings.", warn("23:15"))
+        assertEquals("Unstuck only calls between 06:00 and 23:00, so a call at 23:01 never rings.", warn("23:01"))
+        // Booked by the server — judged at the minute it really rings.
+        assertNull(warn("23:00", start = "00:00", end = "00:00"))
+        assertNull(warn("22:58", start = "00:00", end = "00:00"))
+        assertNull(warn("06:00", start = "00:00", end = "00:00"))
+        assertEquals(
+            "booked at 06:00, not 'never'",
+            "Unstuck rings this call at about 06:00, outside this phone's allowed hours (08:00–21:00), so it's declined here — widen the hours above or pick another time.",
+            warn("05:55"),
+        )
+        assertNull(warn("05:55", start = "06:00", end = "23:00"))
+        assertEquals(
+            "Unstuck rings this call at about 07:30, outside this phone's allowed hours (08:00–21:00), so it's declined here — widen the hours above or pick another time.",
+            warn("07:30"),
+        )
+        assertNull("rings at the 08:00 tick", warn("07:58"))
+        assertEquals(
+            "booked at the 21:00 tick, declined every day",
+            "Unstuck rings this call at about 21:00, outside this phone's allowed hours (08:00–21:00; the latest it rings is 20:59), so it's declined here — widen the hours above or pick another time.",
+            warn("20:58"),
+        )
+        assertTrue(warn("21:30")?.contains("at about 21:30") == true)
+        assertTrue(
+            "call-dispatch may ring a minute later",
+            warn("20:55", end = "20:56")?.contains("at about 20:56, outside this phone's allowed hours (08:00–20:56; the latest it rings is 20:55)") == true,
+        )
+        assertEquals(
+            "the default end is exclusive",
+            "Unstuck rings this call at about 23:00, outside this phone's allowed hours (06:00–23:00; the latest it rings is 22:59), so it's declined here — widen the hours above or pick another time.",
+            warn("23:00", start = "06:00", end = "23:00"),
+        )
+        assertNull(warn("08:30"))
+        assertNull(warn("18:00"))
+        assertNull(warn("07:30", start = "07:00"))
+        assertEquals("Calls are off on this phone, so this call is declined here — switch them on above.", warn("08:30", enabled = false))
+        assertNull(warn("junk"))
+    }
+
+    @Test fun `afterBlockWarning when calls are off or the hours are narrower`() {
+        assertEquals(
+            "Calls are off on this phone, so these check-ins are declined here — switch them on above.",
+            CallSettingsLogic.afterBlockWarning(false, "06:00", "23:00"),
+        )
+        assertNull("the defaults", CallSettingsLogic.afterBlockWarning(true, "06:00", "23:00"))
+        assertNull(CallSettingsLogic.afterBlockWarning(true, "05:00", "23:30"))
+        assertNull(CallSettingsLogic.afterBlockWarning(true, "00:00", "00:00"))
+        assertEquals(
+            "This phone only takes calls 08:00–21:00, so a check-in after a block that ends outside those hours is declined here.",
+            CallSettingsLogic.afterBlockWarning(true, "08:00", "21:00"),
+        )
+        assertTrue("overnight misses the day", CallSettingsLogic.afterBlockWarning(true, "22:00", "07:00") != null)
+    }
+
+    /** "call me back in two hours" at 20:30 used to be answered ok, then
+     *  declined on receipt at 22:30 by the hours (iOS snoozeRefusal). */
+    @Test fun `a call-back outside the phone's hours is refused, one inside is not`() {
+        val s = CallSettings(hoursStart = "08:00", hoursEnd = "21:00")
+        assertEquals(
+            "error: a call-back in 120 minutes would ring at 22:30, outside this phone's call hours (08:00–21:00), so it would be declined — ask them for a shorter wait, or for a time inside those hours to book with request_call",
+            CallSettingsLogic.snoozeRefusal(120, at(20, 30), s, london),
+        )
+        assertEquals(
+            "the end minute names the last one that rings",
+            "error: a call-back in 30 minutes would ring at 21:00, outside this phone's call hours (08:00–21:00; the latest it rings is 20:59), so it would be declined — ask them for a shorter wait, or for a time inside those hours to book with request_call",
+            CallSettingsLogic.snoozeRefusal(30, at(20, 30), s, london),
+        )
+        assertNull(CallSettingsLogic.snoozeRefusal(10, at(20, 30), s, london))
+        assertNull("defaults: 22:50 still rings", CallSettingsLogic.snoozeRefusal(10, at(22, 40), CallSettings(), london))
+        assertTrue("clamped to 180", CallSettingsLogic.snoozeRefusal(999, at(19, 0), s, london)!!.startsWith("error: a call-back in 180 minutes would ring at 22:00"))
+    }
 }

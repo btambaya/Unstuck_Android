@@ -135,6 +135,17 @@
             </intent-filter>
         </receiver>
 
+        <!-- The phone changed time zone: re-push it for the server's call / brief
+             crons (surface/TimezoneReceiver). Exported for the system broadcast
+             (another UID); TIMEZONE_CHANGED is protected and it reads no extras. -->
+        <receiver
+            android:name=".surface.TimezoneReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.TIMEZONE_CHANGED" />
+            </intent-filter>
+        </receiver>
+
         <!-- FCM receiver (dormant until google-services.json is added). -->
         <service
             android:name=".surface.UnstuckMessagingService"

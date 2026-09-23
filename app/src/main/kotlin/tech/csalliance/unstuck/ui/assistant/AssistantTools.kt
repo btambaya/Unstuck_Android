@@ -11,6 +11,7 @@ import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
+import tech.csalliance.unstuck.core.logic.CallSettingsLogic
 import tech.csalliance.unstuck.core.logic.IsoDate
 import tech.csalliance.unstuck.core.logic.ProfileFactsLogic
 import tech.csalliance.unstuck.core.logic.WEEKDAY_NAMES_CAP
@@ -990,6 +991,9 @@ private suspend fun requestCall(args: ToolArgs, api: AssistantApi, scratch: Turn
     }
 
     CallToolLogic.timeGuard(callAt, api.todayIso(), api.nowHM(), api.getBlocks())?.let { return it }
+    // This phone declines on receipt outside its switch + hours — refuse here
+    // rather than answer "ok: call booked" (parity with iOS build 81, audit 2026-09-22 C12).
+    CallSettingsLogic.deviceGuard(callAt, api.callSettings())?.let { return it }
 
     val live = store.liveCalls()
     CallToolLogic.duplicate(live, task?.id, label)?.let { dup ->
@@ -1038,6 +1042,12 @@ private suspend fun updateCall(args: ToolArgs, api: AssistantApi, store: Assista
         blockPatch = CallsClient.Patch(block.id)
     }
     if (callAt != null) CallToolLogic.timeGuard(callAt, api.todayIso(), api.nowHM(), api.getBlocks())?.let { return it }
+    // Only a NEW time meets this phone's switch and hours; a notes- or
+    // label-only edit is never refused here (iOS build 81, audit 2026-09-22 C12).
+    // The task editor sends its lead with every Update, so a lead that lands on
+    // the time the row already has is no new time either — with Calls off
+    // here, a notes-only edit from the editor was refused.
+    if (callAt != null && callAt != row.callAtMs) CallSettingsLogic.deviceGuard(callAt, api.callSettings())?.let { return it }
 
     val r = store.patch(id, callAt, blockPatch, leadPatch, label, notes) ?: return CallToolLogic.CHANGED_UNDERNEATH
     return "ok: updated call \"${r.label}\" — ${CallToolLogic.fmt(r.callAtMs)}, ${CallToolLogic.notesCount(r.notes.size)} id=${r.id}"

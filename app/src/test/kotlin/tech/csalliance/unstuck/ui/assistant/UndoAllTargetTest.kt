@@ -24,7 +24,7 @@ class UndoAllTargetTest {
         val t = turn("m1", now - 2 * minute, created("Call mum", "a"), Receipt(ReceiptIcon.CALENDAR, "Scheduled “Call mum”"), created("Bins", "b"))
         val display = listOf(user("add call mum and bins", now - 3 * minute), t)
         assertEquals(t, undoAllTarget(display, now, emptySet()))
-        assertEquals(listOf("Created “Call mum”", "Created “Bins”"), undoAllReceipts(t, emptySet()).map { it.label })
+        assertEquals(listOf("Created “Call mum”", "Created “Bins”"), undoAllReceipts(t, emptySet()).map { it.value.label })
         // The sheet's clock ticks once a minute: a turn that landed after the
         // last tick still counts as just finished.
         val justNow = t.copy(at = now + 30_000)
@@ -44,7 +44,8 @@ class UndoAllTargetTest {
 
     @Test fun `used and refused undos are not counted`() {
         val t = turn("m1", now - minute, created("Call mum", "a").copy(undone = true), created("Bins", "b"))
-        assertEquals(listOf("Created “Bins”"), undoAllReceipts(t, emptySet()).map { it.label })
+        assertEquals(listOf("Created “Bins”"), undoAllReceipts(t, emptySet()).map { it.value.label })
+        assertEquals("by index — what its Undo then runs", listOf(1), undoAllReceipts(t, emptySet()).map { it.index })
         assertNull("its one live undo was refused", undoAllTarget(listOf(t), now, setOf(receiptUndoKey("m1", 1))))
     }
 }

@@ -50,6 +50,7 @@ import tech.csalliance.unstuck.sync.ToolCall
 import tech.csalliance.unstuck.sync.ToolFunction
 import tech.csalliance.unstuck.sync.WriteThrough
 import tech.csalliance.unstuck.ui.assistant.receiptUndoKey
+import tech.csalliance.unstuck.ui.assistant.undoAllReceipts
 
 /**
  * The gateway A0 hooks on [AppViewModel]: the deterministic style-preference save
@@ -396,14 +397,14 @@ class AssistantMemoryHooksTest {
         val r = vm.voiceReceipts.value.single()
         assertEquals("Created “Call the dentist”", r.label)
         assertEquals(ReceiptUndoKind.DELETE_TASK, r.undo?.kind)
+        assertTrue("stamped as its tool returned (A17)", r.undo!!.stamped)
         assertTrue("nothing lands mid-session", vm.assistantHistory.none { it.content == VOICE_SESSION_RECEIPTS })
 
         vm.endVoiceSession()
         settleUntil { vm.assistantHistory.any { it.content == VOICE_SESSION_RECEIPTS } }
         val turn = vm.assistantHistory.single { it.content == VOICE_SESSION_RECEIPTS }
         assertTrue("display-only — never re-sent to the model", turn.local)
-        assertEquals(listOf(r.label to r.undo), turn.receipts!!.map { it.label to it.undo!!.copy(stamps = emptyMap(), stamped = false) })
-        assertTrue("stamped as the session left its rows (A17)", turn.receipts!!.single().undo!!.stamped)
+        assertEquals("landed as they were, never re-stamped", listOf(r), turn.receipts)
         assertTrue("consumed", vm.voiceReceipts.value.isEmpty())
 
         // The Undo still works from the thread — the whole point of landing them.
@@ -574,11 +575,88 @@ class AssistantMemoryHooksTest {
         val turn = landVoice(vm)
         assertEquals(listOf(ReceiptUndoKind.DELETE_TASK, ReceiptUndoKind.UNCOMPLETE_TASK), turn.receipts!!.map { it.undo?.kind })
 
-        vm.undoAllAssistantReceipts(turn.id!!)
+        vm.undoAllAssistantReceipts(turn.id!!, undoAllReceipts(turn, emptySet()).map { it.index })
         settleUntil { vm.receipt(turn, 0).undone && vm.receipt(turn, 1).undone }
 
         assertTrue(vm.assistantApi.getTasks().none { it.id == id })
         assertTrue(vm.receiptUndoNotes.value.isEmpty())
+    }
+
+    /** Undoing "Completed X" reopens X, and "Created X" follows that revert —
+     *  but never for what the reopen didn't check: a note filed on X since must
+     *  still stop "Created X" from deleting it. Re-stamping every key baked the
+     *  note in, and the Undo deleted X and stranded the note (review, A17). */
+    @Test fun undoingACompletionNeverCarriesALaterNoteIntoTheCreatedUndo() = runTest {
+        val vm = vm()
+        vm.resetVoiceScratch()
+        val made = vm.runVoiceTool("create_task", buildJsonObject { put("name", "Post the parcel") })
+        val id = Regex("id=(\\S+)").find(made)!!.groupValues[1]
+        assertTrue(vm.runVoiceTool("complete_task", buildJsonObject { put("taskId", id) }).startsWith("ok"))
+        val turn = landVoice(vm)
+        val note = capture(taskId = id, body = "the post office shuts at 5")
+        vm.assistantApi.upsertCapture(note)
+
+        vm.undoAssistantReceipt(turn.id!!, 1)
+        settleUntil { vm.receipt(turn, 1).undone }
+        assertFalse("reopened", vm.assistantApi.getTasks().single { it.id == id }.done)
+
+        vm.undoAssistantReceipt(turn.id!!, 0)
+        settleUntil { receiptUndoKey(turn.id!!, 0) in vm.receiptUndoNotes.value }
+        assertEquals(ReceiptUndoRefusal.NOTES, vm.receiptUndoNotes.value[receiptUndoKey(turn.id!!, 0)])
+        assertTrue("the task survives", vm.assistantApi.getTasks().any { it.id == id })
+        assertTrue("and so does the note", vm.assistantApi.getCaptures().any { it.id == note.id })
+    }
+
+    /** Receipts are stamped as each tool returns, not when the session ends: the
+     *  app stays usable during a call, and an edit made there was baked into
+     *  the stamp — the Undo then deleted the task the user had just renamed. A
+     *  later tool of the same session doesn't carry the edit in either. */
+    @Test fun anEditMadeDuringAVoiceSessionIsNeverBakedIntoItsUndo() = runTest {
+        val vm = vm()
+        vm.resetVoiceScratch()
+        val r1 = vm.runVoiceTool("create_task", buildJsonObject { put("name", "Call the dentist") })
+        val renamed = Regex("id=(\\S+)").find(r1)!!.groupValues[1]
+        // Mid-call, in the app: the user renames it.
+        vm.assistantApi.upsertTask(vm.assistantApi.getTasks().single { it.id == renamed }.copy(name = "Call the dentist about the crown"))
+        // The assistant carries on with another write in the same session.
+        val r2 = vm.runVoiceTool("create_task", buildJsonObject { put("name", "Buy stamps") })
+        val other = Regex("id=(\\S+)").find(r2)!!.groupValues[1]
+        val turn = landVoice(vm)
+
+        vm.undoAssistantReceipt(turn.id!!, 0)
+        settleUntil { receiptUndoKey(turn.id!!, 0) in vm.receiptUndoNotes.value }
+        assertEquals(ReceiptUndoRefusal.CHANGED, vm.receiptUndoNotes.value[receiptUndoKey(turn.id!!, 0)])
+        assertEquals("Call the dentist about the crown", vm.assistantApi.getTasks().single { it.id == renamed }.name)
+        // What the session made and nobody touched still undoes.
+        vm.undoAssistantReceipt(turn.id!!, 1)
+        settleUntil { vm.receipt(turn, 1).undone }
+        assertTrue(vm.assistantApi.getTasks().none { it.id == other })
+    }
+
+    /** "Undo all" reverts exactly what its confirmation named. A receipt it left
+     *  out (refused earlier) whose check has since passed again — the note that
+     *  stopped it was removed — must not be reverted along with the rest. */
+    @Test fun undoAllRevertsOnlyWhatItsConfirmationNamed() = runTest {
+        val vm = vm()
+        vm.resetVoiceScratch()
+        val a = Regex("id=(\\S+)").find(vm.runVoiceTool("create_task", buildJsonObject { put("name", "Renew the lease") }))!!.groupValues[1]
+        val b = Regex("id=(\\S+)").find(vm.runVoiceTool("create_task", buildJsonObject { put("name", "Buy a doormat") }))!!.groupValues[1]
+        val turn = landVoice(vm)
+        val note = capture(taskId = a, body = "ask about the break clause")
+        vm.assistantApi.upsertCapture(note)
+        vm.undoAssistantReceipt(turn.id!!, 0)
+        settleUntil { receiptUndoKey(turn.id!!, 0) in vm.receiptUndoNotes.value }
+        vm.assistantApi.removeCapture(note.id)
+        assertTrue("the note is gone again", vm.assistantApi.getCaptures().none { it.id == note.id })
+
+        val named = undoAllReceipts(vm.assistantHistory.first { it.id == turn.id }, vm.receiptUndoNotes.value.keys)
+        assertEquals(listOf("Created “Buy a doormat”"), named.map { it.value.label })
+        vm.undoAllAssistantReceipts(turn.id!!, named.map { it.index })
+        settleUntil { vm.receipt(turn, 1).undone }
+
+        assertTrue(vm.assistantApi.getTasks().none { it.id == b })
+        assertTrue("not named, not reverted", vm.assistantApi.getTasks().any { it.id == a })
+        assertFalse(vm.receipt(turn, 0).undone)
     }
 
     @Test fun forgetProfileFact_tombstonesAndForgetAllClears() = runTest {

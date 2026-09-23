@@ -410,9 +410,9 @@ fun planReceiptUndo(undo: ReceiptUndo, tasks: List<TaskItem>, nowIso: String): R
 }
 
 // ── Exact Undo (Android audit 2026-09-23, A17) ──────────────────────────────
-// An Undo puts back EXACTLY what its turn did, or nothing — and says so. When a
-// turn ends, each receipt's undo is stamped with fingerprints of the rows it
-// would write, as the turn left them; at tap time a row that no longer matches
+// An Undo puts back EXACTLY what its turn did, or nothing — and says so. Each
+// receipt's undo is stamped with fingerprints of the rows it would write, as
+// the turn's own writes left them; at tap time a row that no longer matches
 // (renamed, scheduled, worked on, noted, edited in Settings, changed on another
 // device) refuses the undo. `updatedAt` is never part of a fingerprint: the
 // server re-stamps it on every UPDATE (touch_updated_at), so the echo of the
@@ -474,8 +474,9 @@ fun captureUndoStamp(c: Capture, archived: Boolean): String = digest("${c.body}|
 fun factUndoStamp(f: ProfileFact): String = digest("${f.category}|${f.fact}|${f.source}|${f.whenIso}")
 
 /** [undo] with the fingerprints of every row it would write, as they stand in
- *  [s] — taken when the turn (or voice session) ENDS, so the turn's own later
- *  writes (create_task, then schedule_task on it) are part of what it left. */
+ *  [s] — taken right after the write that made its receipt; the turn's own
+ *  later writes (create_task, then schedule_task on it) carry it forward
+ *  ([advanceReceiptUndo]). */
 fun stampReceiptUndo(undo: ReceiptUndo, s: UndoState): ReceiptUndo {
     val stamps = HashMap<String, String>()
     for (id in undo.taskIds) s.tasks.firstOrNull { it.id == id }?.let {
@@ -488,12 +489,22 @@ fun stampReceiptUndo(undo: ReceiptUndo, s: UndoState): ReceiptUndo {
     return undo.copy(stamps = stamps, stamped = true)
 }
 
-/** After a later receipt of the SAME turn was undone, an earlier one on the
- *  same rows is re-stamped for [keys]: the turn left those rows in the state
- *  that undo just reverted, so "Created X" + "Completed X" undo in turn. */
-fun restampReceiptUndo(undo: ReceiptUndo, keys: Set<String>, s: UndoState): ReceiptUndo {
-    val fresh = stampReceiptUndo(undo, s).stamps
-    return undo.copy(stamps = undo.stamps.filterKeys { it !in keys } + fresh.filterKeys { it in keys })
+/** [undo] carried across a write made by its OWN turn or voice session — a
+ *  later tool of it, or the Undo of a later receipt of it ("Created X" +
+ *  "Completed X" undo in turn) — given the rows read [before] and [after]
+ *  that write. Of [keys], only a row that read in [before] exactly as [undo]
+ *  last saw it takes its state in [after]. One changed in between by anyone
+ *  else (renamed or noted in the app during a call, edited on another device)
+ *  keeps its old stamp, so this Undo refuses it: re-stamping every key baked
+ *  such an edit in, and the Undo then deleted the edited task (Android audit
+ *  2026-09-23, A17). */
+fun advanceReceiptUndo(undo: ReceiptUndo, before: UndoState, after: UndoState, keys: Set<String> = undo.stamps.keys): ReceiptUndo {
+    if (!undo.stamped) return undo
+    val seen = stampReceiptUndo(undo, before).stamps
+    val follow = keys.filter { k -> undo.stamps[k] != null && seen[k] == undo.stamps[k] }.toSet()
+    if (follow.isEmpty()) return undo
+    val fresh = stampReceiptUndo(undo, after).stamps
+    return undo.copy(stamps = undo.stamps.filterKeys { it !in follow } + fresh.filterKeys { it in follow })
 }
 
 /** Why [undo] can't put back exactly what its turn did (the card's line), or

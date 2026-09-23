@@ -223,9 +223,9 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     // to reach back to the last turn with any unused Undo, however old — one tap
     // on Thursday deleted Monday's tasks (Android audit 2026-09-23, A17).
     val undoAllTurn = undoAllTarget(display, nowMs, undoNotes.keys)
-    val undoAllItems = undoAllTurn?.let { undoAllReceipts(it, undoNotes.keys) }.orEmpty()
-    val undoAllCount = undoAllItems.size
-    var confirmUndoAll by remember { mutableStateOf(false) }
+    val undoAllCount = undoAllTurn?.let { undoAllReceipts(it, undoNotes.keys).size } ?: 0
+    // The turn the confirmation was opened for — pinned (UndoAllConfirmDialog).
+    var confirmUndoAllFor by remember { mutableStateOf<String?>(null) }
 
     // Daily check-in: once per day, and ONLY when the sheet opens onto an
     // existing conversation (a fresh account gets the full hero instead). A send
@@ -312,30 +312,10 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     if (voiceOpen) VoiceModeScreen(vm) { voiceOpen = false }
 
     // Names every change it will revert before anything is deleted (A17).
-    val undoAllId = undoAllTurn?.id
-    if (confirmUndoAll && undoAllId != null && undoAllItems.isNotEmpty()) androidx.compose.material3.AlertDialog(
-        onDismissRequest = { confirmUndoAll = false },
-        title = {
-            Text(
-                if (undoAllCount == 1) "Undo this change?" else "Undo these $undoAllCount changes?",
-                style = UFont.sans(16, FontWeight.SemiBold), color = c.ink,
-            )
-        },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                undoAllItems.forEach { Text("• ${it.label}", style = UFont.sans(13), color = c.ink2) }
-            }
-        },
-        confirmButton = {
-            androidx.compose.material3.TextButton(onClick = { confirmUndoAll = false; vm.undoAllAssistantReceipts(undoAllId) }) {
-                Text("Undo", color = c.red)
-            }
-        },
-        dismissButton = {
-            androidx.compose.material3.TextButton(onClick = { confirmUndoAll = false }) { Text("Keep", color = c.ink2) }
-        },
-        containerColor = c.surface,
-    )
+    UndoAllConfirmDialog(
+        openFor = confirmUndoAllFor, target = undoAllTurn, refused = undoNotes.keys,
+        onDismiss = { confirmUndoAllFor = null },
+    ) { id, indices -> confirmUndoAllFor = null; vm.undoAllAssistantReceipts(id, indices) }
 
     Column(Modifier.fillMaxWidth().fillMaxHeight(0.86f).imePadding()) {
         // ── Header: title + eyebrow, Talk, ⋯ ─────────────────────────────────
@@ -390,7 +370,7 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                     AssistantHome(
                         ctx, onAsk = ::ask,
                         undoAllCount = undoAllCount,
-                        onUndoAll = { confirmUndoAll = true },
+                        onUndoAll = { confirmUndoAllFor = undoAllTurn?.id },
                     )
                 }
             }
@@ -447,7 +427,7 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                             AssistantHome(
                                 ctx, onAsk = ::ask, compact = true,
                                 undoAllCount = undoAllCount,
-                                onUndoAll = { confirmUndoAll = true },
+                                onUndoAll = { confirmUndoAllFor = undoAllTurn?.id },
                                 // At least a full viewport tall, so opening the
                                 // sheet parks this card at the top with the whole
                                 // conversation above the fold.
@@ -560,9 +540,53 @@ internal fun undoAllTarget(display: List<ChatMessage>, nowMs: Long, refused: Set
     return turn.takeIf { undoAllReceipts(it, refused).isNotEmpty() }
 }
 
-/** The receipts "Undo all" on [turn] would revert (what its confirmation names). */
-internal fun undoAllReceipts(turn: ChatMessage, refused: Set<String>): List<Receipt> =
-    turn.receipts.orEmpty().filterIndexed { i, r -> r.isUndoable && receiptUndoKey(turn.id.orEmpty(), i) !in refused }
+/** The receipts "Undo all" on [turn] would revert, by index (what its
+ *  confirmation names, and all that its Undo then runs). */
+internal fun undoAllReceipts(turn: ChatMessage, refused: Set<String>): List<IndexedValue<Receipt>> =
+    turn.receipts.orEmpty().withIndex().filter { (i, r) -> r.isUndoable && receiptUndoKey(turn.id.orEmpty(), i) !in refused }
+
+/** "Undo all"'s confirmation: names every change it will revert, and [onConfirm]
+ *  gets exactly those. PINNED to the turn it was opened for ([openFor]):
+ *  [target] is the turn Undo all would revert now, and when that lapses (the
+ *  15-minute window) or becomes another turn (a call ending in the background
+ *  lands its receipts) while this is open, it closes through [onDismiss]. A
+ *  plain open flag re-targeted the list under the user's finger, or popped up
+ *  later for a turn they never asked about (Android audit 2026-09-23, A17). */
+@Composable
+internal fun UndoAllConfirmDialog(
+    openFor: String?, target: ChatMessage?, refused: Set<String>,
+    onDismiss: () -> Unit, onConfirm: (messageId: String, indices: List<Int>) -> Unit,
+) {
+    val targetId = target?.id
+    LaunchedEffect(openFor, targetId) { if (openFor != null && openFor != targetId) onDismiss() }
+    if (openFor == null || target == null || openFor != targetId) return
+    val items = undoAllReceipts(target, refused)
+    if (items.isEmpty()) return
+    val c = UTheme.colors
+    androidx.compose.material3.AlertDialog(
+        onDismissRequest = onDismiss,
+        title = {
+            Text(
+                if (items.size == 1) "Undo this change?" else "Undo these ${items.size} changes?",
+                style = UFont.sans(16, FontWeight.SemiBold), color = c.ink,
+            )
+        },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                items.forEach { Text("• ${it.value.label}", style = UFont.sans(13), color = c.ink2) }
+            }
+        },
+        confirmButton = {
+            androidx.compose.material3.TextButton(onClick = { onConfirm(openFor, items.map { it.index }) }) {
+                Text("Undo", color = c.red)
+            }
+        },
+        dismissButton = {
+            androidx.compose.material3.TextButton(onClick = onDismiss) { Text("Keep", color = c.ink2) }
+        },
+        containerColor = c.surface,
+    )
+}
 
 @Composable
 private fun DayDivider(label: String) {

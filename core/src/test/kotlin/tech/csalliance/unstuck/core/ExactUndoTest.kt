@@ -20,7 +20,7 @@ import tech.csalliance.unstuck.core.logic.factSaveUndo
 import tech.csalliance.unstuck.core.logic.planReceiptUndo
 import tech.csalliance.unstuck.core.logic.receiptArgsFromJson
 import tech.csalliance.unstuck.core.logic.receiptUndoRefusal
-import tech.csalliance.unstuck.core.logic.restampReceiptUndo
+import tech.csalliance.unstuck.core.logic.advanceReceiptUndo
 import tech.csalliance.unstuck.core.logic.stampReceiptUndo
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.Capture
@@ -129,16 +129,55 @@ class ExactUndoTest {
         assertEquals(ReceiptUndoRefusal.CHANGED, receiptUndoRefusal(recomplete, state(listOf(task(name = "Renamed")))))
     }
 
-    @Test fun `create then complete in one turn undo in turn once re-stamped`() {
-        // The turn left t1 done; undoing "Completed" reopens it, and "Created"
-        // was stamped with the done row — re-stamping follows the revert.
+    @Test fun `create then complete in one turn undo in turn, each following the turn's own writes`() {
+        // "Created" is stamped right after the create; the turn's own complete
+        // carries it forward, so both match the row as the turn left it.
+        val made = state(listOf(task()))
         val left = state(listOf(task(done = true)))
-        val created = stampReceiptUndo(ReceiptUndo.deleteTask("t1"), left)
+        val created = advanceReceiptUndo(stampReceiptUndo(ReceiptUndo.deleteTask("t1"), made), before = made, after = left)
         val completed = stampReceiptUndo(ReceiptUndo.uncompleteTask("t1"), left)
+        assertNull(receiptUndoRefusal(created, left))
         assertNull(receiptUndoRefusal(completed, left))
+        // Undoing "Completed" reopens it; "Created" follows that revert.
         val reopened = state(listOf(task()))
         assertEquals(ReceiptUndoRefusal.CHANGED, receiptUndoRefusal(created, reopened))
-        assertNull(receiptUndoRefusal(restampReceiptUndo(created, completed.stamps.keys, reopened), reopened))
+        assertNull(receiptUndoRefusal(advanceReceiptUndo(created, before = left, after = reopened, keys = completed.stamps.keys), reopened))
+    }
+
+    @Test fun `an edit made between the turn's writes is never carried into an earlier receipt`() {
+        // During a call the assistant creates t1, the user renames it in the app,
+        // then the assistant schedules it: "Created" must not take the rename.
+        val made = state(listOf(task()))
+        val created = stampReceiptUndo(ReceiptUndo.deleteTask("t1"), made)
+        val renamed = state(listOf(task(name = "Lease letter to Sam")))
+        val scheduled = state(listOf(task(name = "Lease letter to Sam")), listOf(block("b1", "t1")))
+        assertEquals(ReceiptUndoRefusal.CHANGED, receiptUndoRefusal(advanceReceiptUndo(created, before = renamed, after = scheduled), scheduled))
+        // A receipt persisted before the stamps has nothing to carry.
+        assertEquals(ReceiptUndo.deleteTask("t1"), advanceReceiptUndo(ReceiptUndo.deleteTask("t1"), made, scheduled))
+    }
+
+    @Test fun `undoing a later receipt never carries a row it did not check into an earlier one`() {
+        // One turn: create_tasks [t1, t2], then complete_tasks [t1, t2].
+        val left = state(listOf(task(done = true), task("t2", done = true)))
+        val created = stampReceiptUndo(ReceiptUndo.deleteTasks(listOf("t1", "t2")), left)
+        val completed = stampReceiptUndo(ReceiptUndo.uncompleteTasks(listOf("t1", "t2")), left)
+        // The user reopens t2 by hand and renames it. Undo "Completed" only
+        // writes (and checks) t1, so it goes ahead...
+        val before = state(listOf(task(done = true), task("t2", name = "Book the dentist for May")))
+        assertNull(receiptUndoRefusal(completed, before))
+        val after = state(listOf(task(), task("t2", name = "Book the dentist for May")))
+        // ...but "Created" keeps t2's old stamp: its Undo must not delete it.
+        val follows = advanceReceiptUndo(created, before, after, keys = completed.stamps.keys)
+        assertEquals(ReceiptUndoRefusal.CHANGED_SOME, receiptUndoRefusal(follows, after))
+
+        // Same with a note filed since: reopening doesn't look at notes, deleting does.
+        val one = state(listOf(task(done = true)))
+        val made = stampReceiptUndo(ReceiptUndo.deleteTask("t1"), one)
+        val done = stampReceiptUndo(ReceiptUndo.uncompleteTask("t1"), one)
+        val noted = one.copy(captures = listOf(capture("n1", taskId = "t1")))
+        assertNull(receiptUndoRefusal(done, noted))
+        val reopened = noted.copy(tasks = listOf(task()))
+        assertEquals(ReceiptUndoRefusal.NOTES, receiptUndoRefusal(advanceReceiptUndo(made, noted, reopened, keys = done.stamps.keys), reopened))
     }
 
     // ── facts: a refine restores, a no-change save offers nothing ──

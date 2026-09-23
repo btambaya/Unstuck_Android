@@ -27,6 +27,8 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.runningFold
+import kotlinx.coroutines.flow.getAndUpdate
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -128,7 +130,7 @@ import tech.csalliance.unstuck.core.logic.ReceiptUndoKind
 import tech.csalliance.unstuck.core.logic.UndoState
 import tech.csalliance.unstuck.core.logic.factSaveUndo
 import tech.csalliance.unstuck.core.logic.receiptUndoRefusal
-import tech.csalliance.unstuck.core.logic.restampReceiptUndo
+import tech.csalliance.unstuck.core.logic.advanceReceiptUndo
 import tech.csalliance.unstuck.core.logic.stampReceiptUndo
 import tech.csalliance.unstuck.core.logic.resolveShareRequest
 import tech.csalliance.unstuck.core.logic.FocusTimer
@@ -3552,14 +3554,15 @@ class AppViewModel(
         viewModelScope.launch { undoReceiptNow(messageId, index) }
     }
 
-    /** "Undo all N changes" on [messageId]: every still-undoable receipt, newest
-     *  first, ONE AT A TIME. Launched side by side they interleaved, and a
-     *  "Completed X" undo could re-write a task its "Created X" undo had just
-     *  deleted (Android audit 2026-09-23, A17). Each one is checked on its own. */
-    fun undoAllAssistantReceipts(messageId: String) {
+    /** "Undo all N changes" on [messageId]: the receipts at [indices] — exactly
+     *  the ones its confirmation named, never one it left out (a refused Undo
+     *  that has since become possible again) — newest first, ONE AT A TIME.
+     *  Launched side by side they interleaved, and a "Completed X" undo could
+     *  re-write a task its "Created X" undo had just deleted (Android audit
+     *  2026-09-23, A17). Each one is checked on its own. */
+    fun undoAllAssistantReceipts(messageId: String, indices: List<Int>) {
         viewModelScope.launch {
-            val n = assistantHistory.firstOrNull { it.id == messageId }?.receipts?.size ?: return@launch
-            for (i in (0 until n).reversed()) undoReceiptNow(messageId, i)
+            for (i in indices.distinct().sortedDescending()) undoReceiptNow(messageId, i)
         }
     }
 
@@ -3575,15 +3578,17 @@ class AppViewModel(
         val outcome = try { runCatching { performReceiptUndo(undo) }.getOrDefault(UndoOutcome.NoOp) } finally {
             _receiptUndosInFlight.value = _receiptUndosInFlight.value - key
         }
-        when (outcome) {
+        val before = when (outcome) {
             is UndoOutcome.Refused -> { _receiptUndoNotes.value = _receiptUndoNotes.value + (key to outcome.reason); return }
             UndoOutcome.NoOp -> return
-            UndoOutcome.Done -> _receiptUndoNotes.value = _receiptUndoNotes.value - key
+            is UndoOutcome.Done -> { _receiptUndoNotes.value = _receiptUndoNotes.value - key; outcome.before }
         }
         // An EARLIER receipt of this turn on the same rows was stamped with the
-        // state this undo just reverted — re-stamp it so it can follow.
-        val touched = undo.stamps.keys
-        val fresh = if (touched.isEmpty()) null else runCatching { undoState() }.getOrNull()
+        // state this undo just reverted — it follows, but only for rows still as
+        // it last saw them. This undo checks only the rows it writes, so one the
+        // user reopened and renamed, or noted, since must keep its old stamp and
+        // refuse (Android audit 2026-09-23, A17).
+        val after = if (before == null || undo.stamps.isEmpty()) null else runCatching { undoState() }.getOrNull()
         val cur = assistantHistory.indexOfFirst { it.id == messageId }
         if (cur < 0) return
         val m = assistantHistory[cur]
@@ -3591,8 +3596,8 @@ class AppViewModel(
             val u = r.undo
             when {
                 i == index -> r.copy(undone = true)
-                i < index && fresh != null && u != null && r.isUndoable && u.stamps.keys.any { it in touched } ->
-                    r.copy(undo = restampReceiptUndo(u, touched, fresh))
+                i < index && before != null && after != null && u != null && r.isUndoable && u.stamps.keys.any { it in undo.stamps } ->
+                    r.copy(undo = advanceReceiptUndo(u, before, after, keys = undo.stamps.keys))
                 else -> r
             }
         } ?: return
@@ -3601,7 +3606,8 @@ class AppViewModel(
     }
 
     private sealed interface UndoOutcome {
-        data object Done : UndoOutcome
+        /** Reverted; [before] = the rows it was checked against (null for a call cancel). */
+        data class Done(val before: UndoState?) : UndoOutcome
         /** Nothing to revert (the target is gone / already reverted) — the receipt stays live. */
         data object NoOp : UndoOutcome
         data class Refused(val reason: String) : UndoOutcome
@@ -3613,14 +3619,46 @@ class AppViewModel(
         UndoState(api.getTasks(), api.getBlocks(), api.getCaptures(), api.getArchivedCaptureIds(), api.getProfileFacts())
     }
 
-    /** Stamp each receipt's undo with the rows it would write as the turn (or
-     *  voice session) LEFT them — what [receiptUndoRefusal] checks at tap time
-     *  (Android audit 2026-09-23, A17). Unstamped on a failed read: its
-     *  destructive Undo then refuses rather than guesses. */
-    private suspend fun stampReceipts(rs: List<Receipt>): List<Receipt> {
-        if (rs.none { it.undo != null }) return rs
-        val s = runCatching { undoState() }.getOrElse { return rs }
-        return rs.map { r -> r.undo?.let { r.copy(undo = stampReceiptUndo(it, s)) } ?: r }
+    /** A tool that can change a row an Undo covers — not a read or a navigation. */
+    private fun writesRows(name: String): Boolean =
+        name !in AssistantHarnessRules.READ_ONLY_TOOLS && name !in AssistantHarnessRules.NAVIGATION_TOOLS
+
+    /** Serialises [stampedWrite]: a voice session's tool calls run side by side
+     *  (VoiceRealtimeClient launches each), and one's write landing between
+     *  another's before / after reads would be taken for that one's. */
+    private val receiptStampLock = Mutex()
+
+    /** Run one assistant write — a tool of a text turn or voice session, or the
+     *  turn's style-preference save — and keep [session]'s receipts EXACT
+     *  (Android audit 2026-09-23, A17). The new receipt is stamped with the rows
+     *  as THIS write left them; each earlier receipt follows the write only for
+     *  rows still as it last saw them ([advanceReceiptUndo]). Stamping when the
+     *  session ENDED baked in whatever the user did meanwhile — a task renamed or
+     *  noted in the app during a call — and that Undo then deleted it. A
+     *  read-only tool ([writes] false) writes nothing to follow. Unstamped on a
+     *  failed read: its destructive Undo then refuses rather than guesses. */
+    private suspend fun <T> stampedWrite(
+        session: MutableStateFlow<List<Receipt>>, writes: Boolean = true, write: suspend () -> Pair<T, Receipt?>,
+    ): T = receiptStampLock.withLock {
+        val follow = writes && session.value.any { it.isUndoable && it.undo?.stamped == true }
+        val before = if (follow) runCatching { undoState() }.getOrNull() else null
+        val (value, receipt) = write()
+        if (receipt?.undo == null && before == null) {
+            receipt?.let { r -> session.update { it + r } }
+            return@withLock value
+        }
+        val after = runCatching { undoState() }.getOrNull()
+        val stamped = receipt?.let { r -> val u = r.undo; if (u != null && after != null) r.copy(undo = stampReceiptUndo(u, after)) else r }
+        // update{}: endVoiceSession may land (and clear) the session meanwhile —
+        // a late receipt then waits for the next one, as it always has.
+        session.update { cur ->
+            val advanced = if (before == null || after == null) cur else cur.map { r ->
+                val u = r.undo
+                if (u != null && r.isUndoable) r.copy(undo = advanceReceiptUndo(u, before, after)) else r
+            }
+            advanced + listOfNotNull(stamped)
+        }
+        value
     }
 
     /** Run one tool and derive its receipt — tool name + args + the executor's
@@ -3662,7 +3700,8 @@ class AppViewModel(
         val ids = undo.ids.ifEmpty { undo.id.split(",") }.map { it.trim() }.filter { it.isNotEmpty() }
         if (ids.isEmpty()) return UndoOutcome.NoOp
         // A call cancel is a network write with no local row to check.
-        if (undo.kind != ReceiptUndoKind.CANCEL_CALL) receiptUndoRefusal(undo, undoState())?.let { return UndoOutcome.Refused(it) }
+        val before = if (undo.kind == ReceiptUndoKind.CANCEL_CALL) null else undoState()
+        if (before != null) receiptUndoRefusal(undo, before)?.let { return UndoOutcome.Refused(it) }
         val done = when (undo.kind.name) {
             "DELETE_TASK", "DELETE_TASKS" -> {
                 var any = false
@@ -3711,7 +3750,7 @@ class AppViewModel(
                 // Re-ticked by hand meanwhile: the undo's target state already holds
                 // and that tick sent its own `done` — re-writing would only re-stamp
                 // the real completion time (parity with iOS build 81, audit 2026-09-22 C6).
-                if (t.done) return UndoOutcome.Done
+                if (t.done) return UndoOutcome.Done(before)
                 api.upsertTask(applyCompletion(t.copy(done = true), prior = t, nowISO = isoNow()))
                 // Undoing a "Reopened" re-completes — the shared-list `done` travels
                 // as the UI's tick sends it, since the reopen already went out
@@ -3727,7 +3766,7 @@ class AppViewModel(
             "CANCEL_CALL" -> api.callStore()?.cancelCall(ids[0]) != null
             else -> false
         }
-        return if (done) UndoOutcome.Done else UndoOutcome.NoOp
+        return if (done) UndoOutcome.Done(before) else UndoOutcome.NoOp
     }
 
     /** Clear the conversation — the ⋯ menu's "Clear conversation" and the
@@ -3824,8 +3863,9 @@ class AppViewModel(
         // "Don't use my name" / "call me X" are saved by the APP before the
         // model sees the message (web + iOS parity: the model kept promising
         // to remember without saving); the receipt makes it visible.
-        val receipts = mutableListOf<Receipt>()
-        saveStylePreference(text)?.let { receipts += it }
+        // Each receipt is stamped as its own write left the rows (A17).
+        val receipts = MutableStateFlow<List<Receipt>>(emptyList())
+        stampedWrite(receipts) { Unit to saveStylePreference(text) }
         val a = assistant ?: return AssistantTurn.Error("not_configured")
         val api = assistantApi
         val scratch = TurnScratch()
@@ -3864,9 +3904,7 @@ class AppViewModel(
                 // from the tool name + args + the executor's own result string, never
                 // from the model's prose. Scratch rows first so an in-flight
                 // completion resolves its undo target.
-                val (result, receipt) = runToolForReceipt(call.name, args, api, scratch)
-                receipt?.let { receipts += it }
-                result
+                stampedWrite(receipts, writes = writesRows(call.name)) { runToolForReceipt(call.name, args, api, scratch) }
             }
         }
         val outcome = try {
@@ -3881,7 +3919,7 @@ class AppViewModel(
             if (partial != null && epoch == assistantEpoch) {
                 val fresh = partial.messages.drop(base.size + 1).map { it.toChat(stamp = true) }.toMutableList()
                 val last = fresh.indexOfLast { it.role == "assistant" && it.toolCalls.isNullOrEmpty() }
-                if (last >= 0 && receipts.isNotEmpty()) fresh[last] = fresh[last].copy(receipts = stampReceipts(receipts.toList()))
+                if (last >= 0 && receipts.value.isNotEmpty()) fresh[last] = fresh[last].copy(receipts = receipts.value)
                 withContext(Dispatchers.Main.immediate) { assistantHistory.addAll(fresh) }
             }
             return AssistantTurn.Error(code)
@@ -3893,8 +3931,7 @@ class AppViewModel(
         val closing = outcome.text
         val fresh = outcome.messages.drop(base.size + 1).map { it.toChat(stamp = true) }.toMutableList()
         val last = fresh.indexOfLast { it.role == "assistant" }
-        // Stamped as the turn LEFT its rows — what each Undo is checked against (A17).
-        if (last >= 0) fresh[last] = fresh[last].copy(content = closing, receipts = stampReceipts(receipts.toList()).takeIf { it.isNotEmpty() })
+        if (last >= 0) fresh[last] = fresh[last].copy(content = closing, receipts = receipts.value.takeIf { it.isNotEmpty() })
         withContext(Dispatchers.Main.immediate) { assistantHistory.addAll(fresh) }
         return AssistantTurn.Reply(closing)
     }
@@ -4040,10 +4077,9 @@ class AppViewModel(
         val parsed = ToolArgs(args)
         // Derived exactly like the text harness: tool name + args + the executor's
         // own result string, never model prose. Scratch rows first so a task
-        // created earlier in the SAME session resolves its undo target.
-        val (result, receipt) = runToolForReceipt(name, parsed, assistantApi, voiceScratch)
-        receipt?.let { _voiceReceipts.value = _voiceReceipts.value + it }
-        return result
+        // created earlier in the SAME session resolves its undo target. Stamped
+        // as each tool returns (A17): the app stays usable during a call.
+        return stampedWrite(_voiceReceipts, writes = writesRows(name)) { runToolForReceipt(name, parsed, assistantApi, voiceScratch) }
     }
 
     /** The session ended (overlay closed / call hung up): its receipts — and
@@ -4051,13 +4087,15 @@ class AppViewModel(
      *  ONE local turn ("While we talked:"), which persists like any other.
      *  Safe from any thread (a call's `sessionDidEnd` fires off Main). */
     fun endVoiceSession() {
-        val rs = _voiceReceipts.value.filter { !it.undone }
-        _voiceReceipts.value = emptyList()
+        // Taken and cleared in one step: a tool still returning (stampedWrite)
+        // either lands in this batch or waits for the next — never wiped.
+        val rs = _voiceReceipts.getAndUpdate { emptyList() }.filter { !it.undone }
         if (rs.isEmpty()) return
         viewModelScope.launch(Dispatchers.Main.immediate) {
-            // Stamped as the session LEFT its rows — what each Undo is checked
-            // against once they are in the thread (Android audit 2026-09-23, A17).
-            appendLocalAssistant(VOICE_SESSION_RECEIPTS, stampReceipts(rs))
+            // Already stamped, tool by tool (runVoiceTool). Never re-stamped here:
+            // that baked in whatever the user changed in the app during the call,
+            // and the Undo then deleted the edited task (Android audit 2026-09-23, A17).
+            appendLocalAssistant(VOICE_SESSION_RECEIPTS, rs)
         }
     }
 

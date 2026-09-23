@@ -50,6 +50,9 @@ class AppGraph(
      *  the session observer reads the token's `amr`: a "recovery" session routes to
      *  set-new-password; magic-link / OAuth sign in normally. One-shot. */
     val pendingRecoveryProbe = MutableStateFlow(false)
+    /** Why an `unstuck://auth-callback` link couldn't sign the user in (expired, already
+     *  used, offline). Set by MainActivity while signed out; AuthScreen shows it once. */
+    val authLinkError = MutableStateFlow<String?>(null)
     /** Fires on every app FOREGROUND (UnstuckApp's ProcessLifecycle onStart). The
      *  co-focus reconnect re-exchange listens here as belt-and-braces alongside the
      *  realtime status flow: after a doze/backgrounded socket death the SDK can take

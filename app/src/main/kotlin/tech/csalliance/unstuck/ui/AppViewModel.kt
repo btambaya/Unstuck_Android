@@ -832,6 +832,9 @@ class AppViewModel(
     // --- password recovery (from a "forgot password" email deep link) ---
     val pendingPasswordRecovery: StateFlow<Boolean> get() = graph.pendingPasswordRecovery
     fun consumeRecovery() { graph.pendingPasswordRecovery.value = false }
+    /** Why the last auth-callback link couldn't sign in (MainActivity; AuthScreen shows it once). */
+    val authLinkError: StateFlow<String?> get() = graph.authLinkError
+    fun consumeAuthLinkError() { graph.authLinkError.value = null }
     /** A forgot-password session carries amr method "recovery" (GoTrue stamps it on
      *  the recovery verification). PKCE recovery deep links have no `type=recovery` in
      *  the URL, so this token read is how we tell a reset apart from a magic-link /

@@ -12,9 +12,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
 import io.github.jan.supabase.auth.auth
-import io.github.jan.supabase.auth.handleDeeplinks
 import io.github.jan.supabase.auth.status.SessionStatus
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import tech.csalliance.unstuck.surface.SyncWorker
 import tech.csalliance.unstuck.surface.registerFcmToken
 import tech.csalliance.unstuck.ui.AppRoot
@@ -109,10 +110,15 @@ class MainActivity : ComponentActivity() {
         handleAuthOrCalendar(intent)
     }
 
-    /** Route `unstuck://calendar-callback?code&state` to the calendar connect flow;
-     *  everything else goes to Supabase's PKCE deep-link handler. */
+    /** Route `unstuck://calendar-callback?code&state` to the calendar connect flow and
+     *  `unstuck://auth-callback?code` to the PKCE code exchange ([completeAuthLink]). */
     private fun handleAuthOrCalendar(intent: Intent?) {
         val data = intent?.data
+        // A Recents relaunch re-delivers the ORIGINAL launch intent: its auth code was
+        // spent when first tapped, so exchanging it again can only fail (A7 below).
+        if (data?.scheme == "unstuck" && data.host == "auth-callback" &&
+            ((intent?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
+        ) return
         if (data?.scheme == "unstuck" && data.host == "calendar-callback") {
             // With or without a code: a denied or cancelled consent comes back as
             // `?error=access_denied&state=…` and used to end here with no message. The
@@ -129,7 +135,7 @@ class MainActivity : ComponentActivity() {
             return
         }
         // Password-recovery link → flag it so AppRoot shows the set-new-password screen
-        // once Supabase establishes the recovery session (handleDeeplinks below). The
+        // once Supabase establishes the recovery session (completeAuthLink below). The
         // implicit/token flow carries `type=recovery` in the URL; the PKCE flow does
         // NOT (it comes back as `unstuck://auth-callback?code=…`), so for auth-callback
         // links we instead ARM a probe and let the session observer classify the
@@ -145,6 +151,34 @@ class MainActivity : ComponentActivity() {
             graph.pendingDeepLink.value = data.toString()
             return
         }
-        intent?.let { graph.provider?.client?.handleDeeplinks(it) }
+        if (data?.scheme == "unstuck" && data.host == "auth-callback") completeAuthLink(data)
+    }
+
+    /** Exchange an auth-callback link's PKCE code for a session HERE, not through
+     *  supabase-kt's handleDeeplinks: that ran the exchange on the SDK's own scope with
+     *  no handler, so a refused code (an older email after a second link / reset
+     *  request, a reused code, cleared app data) or a network drop crashed the app
+     *  (Android audit 2026-09-23, A7). On the process scope, so a rotation mid-exchange
+     *  can't cancel it. Signed out, the reason goes to AuthScreen; otherwise a toast. */
+    private fun completeAuthLink(data: android.net.Uri) {
+        val client = graph.provider?.client ?: return
+        val code = data.getQueryParameter("code")
+        val errorCode = data.getQueryParameter("error_code")
+        val errorDescription = data.getQueryParameter("error_description")
+        graph.scope.launch {
+            val failure = tech.csalliance.unstuck.ui.auth.AuthLink.complete(code, errorCode, errorDescription) {
+                client.auth.exchangeCodeForSession(it)
+            }
+            // No session came from this link, so it can't be the one the probe waits for.
+            if (failure != null || code.isNullOrBlank()) graph.pendingRecoveryProbe.value = false
+            if (failure == null) return@launch
+            if (client.auth.sessionStatus.value is SessionStatus.NotAuthenticated) {
+                graph.authLinkError.value = failure
+            } else {
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(graph.appContext, failure, android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 }

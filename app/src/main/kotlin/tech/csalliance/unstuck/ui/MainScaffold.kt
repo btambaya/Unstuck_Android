@@ -725,6 +725,8 @@ fun MainScaffold(vm: AppViewModel) {
             val fresh = if (focusShared != null) t else tasks.firstOrNull { it.id == t.id } ?: t
             FocusScreen(vm, fresh, onClose = { focusTask = null; focusAutoCapture = false; focusShared = null }, autoCapture = focusAutoCapture, sharedLevel = focusShared)
         }
+        // The one-time "Alarms & reminders" ask, on a quiet Today (Android audit 2026-09-23, A15).
+        ExactAlarmPrompt(vm, screenFree = tab == "today" && stack.isEmpty() && !sheetOpen && focusTask == null && sharedDetail == null)
         }   // end of the tour-lockable app content
 
         // ── Guided tour — mounted LAST so its spotlight + panel overlay every

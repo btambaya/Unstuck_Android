@@ -11,9 +11,11 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Punctual pre-task reminders ("5 min before") + reschedule after reboot.
-         SCHEDULE_EXACT_ALARM is user-grantable and we fall back to inexact alarms if
-         denied (ReminderScheduler.setAlarm). We deliberately do NOT request the
-         restricted USE_EXACT_ALARM — Play limits it to alarm-clock/calendar apps. -->
+         SCHEDULE_EXACT_ALARM is user-grantable (denied by default to a new install on
+         Android 14+: asked for on Today and in Settings › Focus) and we fall back to
+         inexact, Doze-allowed alarms while denied (ReminderScheduler.arm). We
+         deliberately do NOT request the restricted USE_EXACT_ALARM — Play limits it
+         to alarm-clock/calendar apps. -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <!-- Assistant voice: on-device speech-to-text dictation (TTS needs no perm). -->
@@ -132,6 +134,18 @@
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- The user allowed exact alarms (Alarms & reminders): re-arm every reminder
+             armed inexact before that (surface/ExactAlarms). The system sends it to
+             this package only (setPackage); exported like BootReceiver for a system
+             broadcast, and it reads no extras. -->
+        <receiver
+            android:name=".surface.ExactAlarmPermissionReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.app.action.SCHEDULE_EXACT_ALARM_PERMISSION_STATE_CHANGED" />
             </intent-filter>
         </receiver>
 

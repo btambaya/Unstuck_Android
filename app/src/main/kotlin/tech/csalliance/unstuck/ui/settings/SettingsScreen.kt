@@ -54,6 +54,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tech.csalliance.unstuck.surface.ExactAlarms
 import tech.csalliance.unstuck.SettingsStore
 import tech.csalliance.unstuck.core.logic.CallSettingsLogic
 import tech.csalliance.unstuck.core.logic.newUuid
@@ -173,6 +174,7 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
                             modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
                         )
                     }
+                    ExactAlarmRow(s)
                     ToggleRow("Hide right rail while focusing", s.focusCollapseRail) { v -> vm.updateSettings { it.copy(focusCollapseRail = v) } }
                     ToggleRow("Soft exit", s.focusSoftExit) { v -> vm.updateSettings { it.copy(focusSoftExit = v) } }
                     ToggleRow("Pause reasons", s.focusPauseReasons) { v -> vm.updateSettings { it.copy(focusPauseReasons = v) } }
@@ -1005,6 +1007,22 @@ private fun SettingRow(label: String, sub: String?, last: Boolean = false, enabl
         }
     }
     if (!last) Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
+}
+
+internal const val EXACT_ALARM_ROW = "Reminders may arrive late"
+internal const val EXACT_ALARM_ROW_SUB = "Allow “Alarms & reminders” so they arrive on time."
+
+/** Settings › Focus: the way back to "Alarms & reminders" after the one-time ask
+ *  on Today (ui/ExactAlarmPrompt). Shown while reminders are on and Android 14+
+ *  still withholds exact alarms; re-checked on return from the system page
+ *  (Android audit 2026-09-23, A15). */
+@Composable
+private fun ExactAlarmRow(s: tech.csalliance.unstuck.SettingsState) {
+    val context = LocalContext.current
+    var granted by remember { mutableStateOf(ExactAlarms.granted(context)) }
+    androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) { granted = ExactAlarms.granted(context) }
+    if (granted || !ExactAlarms.wanted(s)) return
+    SettingRow(EXACT_ALARM_ROW, EXACT_ALARM_ROW_SUB) { ExactAlarms.openSystemPage(context) }
 }
 
 /** The sub-line a tour-locked row shows in place of its own. */

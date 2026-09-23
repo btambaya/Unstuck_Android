@@ -4,6 +4,40 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
+## 2026-09-23 — vc100 / 0.5.16 (parity with iOS build 81) and vc101 / 0.5.17 (pre-launch audit P0 + P1)
+
+Both went to the 2 Firebase testers only.
+
+**vc100: parity port (cb72888).** Android caught up with iOS builds 75-81 and the 20 iOS pre-launch fixes, in 8 groups, each implemented, adversarially reviewed and fixed up. Gap report: `unstuck_ios/audit/parity-2026-09-23/android-gap.md`.
+- Recurrence: the anchor is recurrenceEditStart, not the oldest block. "Start repeating" replaces the invented 09:00, and unschedule_task on a series refuses and asks.
+- C4 clamps, including healing already-queued outbox payloads.
+- Completion: ticks on a series are today-only, writes use the stored row, and there is no tick on a repeating share.
+- Sync: C2 reminders; C8/C9 (membership re-read, chain reconcile).
+- Sharing: server-backed Block/Unblock/Report (migration 075).
+- Calls: deviceGuard with 06:00-23:00 hours, a quiet call-notes channel, and the call ends on error.
+- Voice: busy-retry, plain-words errors, a dial watchdog, one redial after a 401, and runtime tool compaction.
+- Settings: Clear Assistant history.
+
+**vc101: audit fixes (b70b593).** Read-only audit: `unstuck_ios/audit/parity-2026-09-23/android-audit/REPORT.md` (98 agents; 1 P0 + 18 P1 fixed; 50 P2 + 33 P3 left as a mostly unverified backlog).
+- P0 (A1-A3): supabase-kt 3.0.3 resets the session to Initializing on ON_STOP. As a result, call pushes, background sync and call outcomes acted signed-out. The new `sync/SessionGate.kt` (`SyncCoordinator.session`) never treats Initializing as signed out. It restores the stored session in the background.
+- Other fixes:
+  - A4: the ring loops for the whole 30 s.
+  - A5: End after an accepted call-back no longer cancels it.
+  - A6: calls about web/iOS tasks are no longer dropped as stale.
+  - A7: a failed auth link no longer crashes.
+  - A8/A9: no duplicate life areas; the onboarding gate uses the real uid.
+  - A10: transient failures no longer dead-letter writes.
+  - A11: the first pull of each launch is a full hydrate, as on iOS.
+  - A12: stored and wire dates always use ASCII digits.
+  - A13/A14: focus on an occurrence has the right prior, and its captures sync.
+  - A15: exact alarms on Android 14+, re-armed when granted.
+  - A16: sharing flows load after sign-in.
+  - A17: assistant Undo is exact or refuses.
+  - A18: Export everything is complete.
+  - A19: the Google connect copy is honest.
+- DEVICE GATE: before any release beyond the testers, test A1-A3 with the app backgrounded and with it killed: ask for a call, tick something then press Home, and say "call me back in ten" then lock. Use a real call for this, not the Settings test call.
+- Decisions I made while Ahmad slept: `unstuck_ios/audit/parity-2026-09-23/DECISIONS.md`.
+
 ## 2026-09-20 (night) — vc99 / 0.5.15: the echo verdict narrowed, the corrective forces the tool
 
 Mirror of iOS build 74 (evidence in `assistant_turns`, Ahmad's 15:21–15:37

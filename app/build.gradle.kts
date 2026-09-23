@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 103
-        versionName = "0.5.19"
+        versionCode = 104
+        versionName = "0.5.20"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.19 — Repeating tasks: each day of a repeating task now has one fixed identity shared by your phone, your other devices and the web, so two of them filling in the same day can no longer create a duplicate block, and a block you moved stays where you put it. The calendar now tops up future days only after a successful sync."
+    releaseNotes = "v0.5.20 — Sign-up and magic-link emails now open the app when you tap them on this phone, and the website when you open them on a computer (instead of a link a computer can't open). Signing up with an email that already has an account now says so, with Sign in and Forgot password buttons, instead of waiting for an email that never comes."
 }
 
 dependencies {

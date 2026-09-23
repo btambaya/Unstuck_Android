@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.transform
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.emitAll
@@ -303,7 +304,8 @@ class AppViewModel(
     // (myTaskShareBadges → row chips + the Delegated group). Each refetches on the
     // CollabRealtime `sharesChanged` signal (a task_shares row I can see changed — my
     // outgoing OR incoming) AND after my own writes (the manual pulse), exactly like
-    // `circle` on the circleChanged signal. Declared HERE (above the widget init that
+    // `circle` on the circleChanged signal — and on session edges and completed pulls
+    // ([shareRereads], Android audit 2026-09-23, A16). Declared HERE (above the widget init that
     // reads assignedOut) so property init order is safe. circleClient/collab are
     // custom getters (no backing field) → safe to reference before their textual decl.
     private val _sharesRefresh = MutableSharedFlow<Unit>(
@@ -335,12 +337,26 @@ class AppViewModel(
             ?.stateIn(viewModelScope, SharingStarted.Eagerly, null)
             ?: MutableStateFlow(null)
 
+    /** Re-reads for the sharing projections beyond their realtime signal and my own
+     *  writes: every session edge ([sessionRereads]: sign-in, cold-start restore,
+     *  the return from the SDK's background reset, a token that works again,
+     *  sign-out → empty) and every completed pull, which also lands after each
+     *  resume. Without them the badges read once, before the session had loaded,
+     *  and stayed empty for the whole process (Android audit 2026-09-23, A16).
+     *  Declared above the flows that use it (property init order). */
+    private val shareRereads: kotlinx.coroutines.flow.Flow<Unit> = merge(
+        graph.provider?.client?.auth?.sessionStatus
+            ?.let { tech.csalliance.unstuck.ui.sharing.sessionRereads(it, heldAccount) }
+            ?: kotlinx.coroutines.flow.emptyFlow(),
+        graph.coordinator?.hydrated ?: kotlinx.coroutines.flow.emptyFlow(),
+    )
+
     /** Tasks other people have shared WITH me — the "Shared with you" group. Read via
      *  the tasks_shared_with_me projection (raw task rows are RLS-forbidden). */
     val sharedWithMe: StateFlow<List<SharedWithMe>> =
-        merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
+        merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } }, shareRereads)
             .onStart { emit(Unit) }
-            .mapNotNull { sharedWithMeHold.refresh(currentUid(), heldAccount.value) { graph.coordinator?.circle?.tasksSharedWithMe() } }
+            .transform { sharedWithMeHold.refreshInto(this, currentUid(), heldAccount.value) { graph.coordinator?.circle?.tasksSharedWithMe() } }
             .combine(_sharedCompletedAt) { rows, stamps ->
                 if (stamps.isEmpty()) rows else rows.map { s ->
                     if (s.done && s.completedAt == null) s.copy(completedAt = stamps[s.taskId]) else s
@@ -351,9 +367,9 @@ class AppViewModel(
     /** My outgoing shares grouped by taskId → the row badges (mirrors the web
      *  useShareBadges().byTask). Drives the on-row "shared" chips + the Delegated group. */
     val shareBadges: StateFlow<Map<String, List<ShareBadge>>> =
-        merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
+        merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } }, shareRereads)
             .onStart { emit(Unit) }
-            .mapNotNull { shareBadgesHold.refresh(currentUid(), heldAccount.value) { graph.coordinator?.circle?.myTaskShareBadges() } }
+            .transform { shareBadgesHold.refreshInto(this, currentUid(), heldAccount.value) { graph.coordinator?.circle?.myTaskShareBadges() } }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     /** taskId → assignee name for tasks I've assigned away ('assign' level). These
@@ -369,10 +385,12 @@ class AppViewModel(
     private val _sharedBlockRange = MutableStateFlow<IsoRange?>(null)
 
     /** Per-window cache so flipping Day↔Week (same week) or paging back to a month
-     *  already seen is free. Dropped wholesale on every shares-changed tick — a share
-     *  added/removed/moved anywhere invalidates every window. Only touched from the
+     *  already seen is free. Invalidated on every shares-changed tick — a share
+     *  added/removed/moved anywhere invalidates every window — but a window keeps its
+     *  last good blocks until a read replaces them, so a failed re-read no longer
+     *  blanks the calendar (Android audit 2026-09-23, A16). Only touched from the
      *  [sharedBlocks] pipeline (viewModelScope → main thread), never elsewhere. */
-    private val sharedBlockCache = HashMap<IsoRange, List<SharedBlock>>()
+    private val sharedBlockWindows = tech.csalliance.unstuck.ui.sharing.SharedBlockWindows()
 
     /** Every block of every task shared WITH me inside the visible window — the
      *  read-only "shared" blocks on the calendars (Day / Week grids, the Month planned
@@ -384,15 +402,15 @@ class AppViewModel(
     val sharedBlocks: StateFlow<List<SharedBlock>> =
         combine(
             _sharedBlockRange,
-            merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
+            merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } }, shareRereads)
                 .onStart { emit(Unit) }
-                .map { sharedBlockCache.clear(); System.nanoTime() },   // a distinct value per tick → combine re-emits
+                .map { sharedBlockWindows.invalidate(); System.nanoTime() },   // a distinct value per tick → combine re-emits
         ) { range, _ -> range }
-            .map { range ->
-                if (range == null) emptyList()
-                else sharedBlockCache[range]
-                    ?: (graph.coordinator?.circle?.sharedTaskBlocks(range.from, range.to) ?: emptyList())
-                        .also { sharedBlockCache[range] = it }
+            .transform { range ->
+                if (range == null) emit(emptyList())
+                else sharedBlockWindows.readInto(this, range, currentUid(), heldAccount.value) {
+                    graph.coordinator?.circle?.sharedTaskBlocks(range.from, range.to)
+                }
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -2530,9 +2548,9 @@ class AppViewModel(
      *  code, so the link can be re-copied). Empty until first collected — the
      *  Connections screen drives it (WhileSubscribed, so it stops when off-screen). */
     val circle: StateFlow<List<CircleMember>> =
-        merge(_circleRefresh, flow { collab?.circleChanged?.let { emitAll(it) } })
+        merge(_circleRefresh, flow { collab?.circleChanged?.let { emitAll(it) } }, shareRereads)
             .onStart { emit(Unit) }
-            .mapNotNull { circleHold.refresh(currentUid(), heldAccount.value) { circleClient?.circleList() } }
+            .transform { circleHold.refreshInto(this, currentUid(), heldAccount.value) { circleClient?.circleList() } }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Force a roster refetch now (after a write). */
@@ -4408,15 +4426,74 @@ class AppViewModel(
         return runCatching { prefsClient.deleteAssistantHistory() }
     }
 
-    /** Serialise every user-owned collection into one JSON bundle (matches web exportAll). */
-    fun exportJson(): String = EXPORT_JSON.encodeToString(
-        ExportBundle(
+    /** Serialise every user-owned table into one JSON bundle (matches web exportAll).
+     *  Every table is read from the store, off the main thread — never the
+     *  WhileSubscribed flows, which read empty (or a stale snapshot) for any table no
+     *  screen is collecting: lists and tags went out as [] under an "Exported."
+     *  (Android audit 2026-09-23, A18). A table that can't be read, or rows of it that
+     *  won't decode, are left out AND named — in the file (`incomplete`) and in
+     *  [DataExport.missing], so the screen says so. */
+    suspend fun exportJson(): DataExport = withContext(Dispatchers.IO) {
+        val missing = mutableListOf<String>()
+        suspend fun <T> read(table: String, label: String, ser: kotlinx.serialization.KSerializer<T>): List<T> = try {
+            // Counted in the same read: a pull deleting rows between a count and
+            // the read made a complete table look short (Android audit 2026-09-23, A18).
+            store.snapshotChecked(table, ser).also { if (it.undecodable > 0) missing += label }.rows
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            android.util.Log.w("UnstuckExport", "couldn't read $table", e)
+            missing += label
+            emptyList()
+        }
+        val tasks = read(Tables.TASKS, "tasks", TaskItem.serializer())
+        val sessions = read(Tables.SESSIONS, "focus sessions", Session.serializer())
+        val calBlocks = read(Tables.CAL_BLOCKS, "calendar blocks", CalBlock.serializer())
+        val captures = read(Tables.CAPTURES, "captures", Capture.serializer())
+        val reasonLogs = read(Tables.REASON_LOGS, "stuck reasons", ReasonLog.serializer())
+        val collections = read(Tables.COLLECTIONS, "lists", ItemCollection.serializer())
+        val tags = read(Tables.TAGS, "tags", TagRow.serializer())
+        val lifeAreas = read(Tables.LIFE_AREAS, "areas", LifeArea.serializer())
+        val calendarConnections = read(Tables.CALENDAR_CONNECTIONS, "calendar connections", tech.csalliance.unstuck.core.model.CalendarConnection.serializer())
+        // Forgotten facts stay in the store as tombstones; only what Settings › What
+        // Unstuck knows shows goes out.
+        val profileFacts = read(Tables.PROFILE_FACTS, "what Unstuck knows", ProfileFact.serializer()).filter { it.active }
+        val callRequests = read(Tables.CALL_REQUESTS, "calls", CallRequest.serializer())
+        val bundle = ExportBundle(
             exportedAt = isoNow(), email = currentEmail,
-            tasks = tasks.value, sessions = sessions.value, calBlocks = blocks.value,
-            captures = captures.value, reasonLogs = reasonLogs.value,
-            collections = collections.value, tags = tags.value, lifeAreas = lifeAreas.value,
-        ),
-    )
+            tasks = tasks, sessions = sessions, calBlocks = calBlocks,
+            captures = captures, reasonLogs = reasonLogs,
+            collections = collections, tags = tags, lifeAreas = lifeAreas,
+            calendarConnections = calendarConnections, profileFacts = profileFacts, callRequests = callRequests,
+            incomplete = missing.toList(),
+        )
+        DataExport(EXPORT_JSON.encodeToString(bundle), missing.toList())
+    }
+
+    /** "Export everything" into [uri], the document the user just created. Runs on the
+     *  ViewModel's scope, not the screen's: the picker stops the activity and the
+     *  ON_STOP reset closes Settings, so a Settings coroutine would be cancelled before
+     *  the file is written (Android audit 2026-09-23, A18). [onDone] gets, on the main
+     *  thread, what to tell the user and whether it reports a failure. */
+    fun exportTo(uri: android.net.Uri, onDone: (message: String, failed: Boolean) -> Unit) {
+        viewModelScope.launch {
+            val missing = try {
+                val export = exportJson()
+                withContext(Dispatchers.IO) {
+                    (graph.appContext.contentResolver.openOutputStream(uri) ?: error("no output stream"))
+                        .use { it.write(export.json.toByteArray()) }
+                }
+                export.missing
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                android.util.Log.w("UnstuckExport", "export failed", e)
+                onDone(EXPORT_FAILED, true)
+                return@launch
+            }
+            onDone(exportOutcomeMessage(missing), missing.isNotEmpty())
+        }
+    }
 
     init {
         // Server-backed state that the engine can't own: after every completed pull,
@@ -4486,7 +4563,24 @@ data class ExportBundle(
     val collections: List<ItemCollection>,
     val tags: List<TagRow>,
     val lifeAreas: List<LifeArea>,
+    // Every other table this device holds (Android audit 2026-09-23, A18).
+    val calendarConnections: List<tech.csalliance.unstuck.core.model.CalendarConnection> = emptyList(),
+    val profileFacts: List<ProfileFact> = emptyList(),
+    val callRequests: List<CallRequest> = emptyList(),
+    /** What couldn't be read and is missing from this file (empty = complete). */
+    val incomplete: List<String> = emptyList(),
 )
+
+/** A built "Export everything" file and what, if anything, is missing from it. */
+data class DataExport(val json: String, val missing: List<String>)
+
+internal const val EXPORT_FAILED = "Export failed."
+
+/** What "Export everything" tells the user — a missing part is named, never
+ *  reported as a plain success (Android audit 2026-09-23, A18). */
+internal fun exportOutcomeMessage(missing: List<String>): String =
+    if (missing.isEmpty()) "Exported."
+    else "Exported, but some data couldn't be read and isn't in the file: ${missing.joinToString(", ")}."
 
 /** A just-finished focus session, surfaced as the Today recap card (B3).
  *  [endedBy] carries the partner's name when a REMOTE `ended` finalized a shared

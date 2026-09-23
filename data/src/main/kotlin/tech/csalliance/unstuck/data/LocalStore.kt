@@ -109,6 +109,19 @@ class LocalStore(private val db: UnstuckDatabase) {
     suspend fun <T> snapshot(table: String, ser: KSerializer<T>): List<T> =
         records.get(table).mapNotNull { runCatching { json.decodeFromString(ser, it.data) }.getOrNull() }
 
+    /** A table's rows that decode, and how many stored rows didn't. */
+    data class CheckedSnapshot<T>(val rows: List<T>, val undecodable: Int)
+
+    /** [snapshot] plus how many rows it had to skip, from the SAME read. Counting
+     *  in a separate read let a pull that deleted rows in between make a complete
+     *  table look short: "Export everything" then named it as missing (Android
+     *  audit 2026-09-23, A18). */
+    suspend fun <T> snapshotChecked(table: String, ser: KSerializer<T>): CheckedSnapshot<T> {
+        val stored = records.get(table)
+        val rows = stored.mapNotNull { runCatching { json.decodeFromString(ser, it.data) }.getOrNull() }
+        return CheckedSnapshot(rows, undecodable = stored.size - rows.size)
+    }
+
     /** Whether a row is held locally and what stamp it was stored with — O(1), no
      *  decode. The catch-up pull reads it to tell "this row is genuinely new to
      *  this device" (absent, or older than the server's) from "the live mirror

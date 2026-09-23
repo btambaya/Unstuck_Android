@@ -1007,6 +1007,34 @@ class AssistantToolsTest {
         assertEquals(listOf(TagRow("tg0", "deep", null, 0)), h.state.tags)
     }
 
+    /** Tasks key areas by name and the server has unique(user_id, name): a rename onto
+     *  another area's name was quarantined while its task relabels synced, and the tool
+     *  still said ok (iOS build 81, audit 2026-09-22 C19). */
+    @Test fun `rename_area refuses a taken name but allows a case-only change`() = runTest {
+        val h = makeApi { areas += LifeArea("ar0", "Work", "indigo", 0); areas += LifeArea("ar1", "Garden", "green", 1) }
+        assertEquals("error: area \"Work\" already exists — nothing changed", h.run("rename_area", "name" to "garden", "newName" to "WORK"))
+        assertEquals(listOf("Work", "Garden"), h.state.areas.map { it.name })
+        assertEquals("error: area \"Work\" already has that name — nothing changed", h.run("rename_area", "name" to "work", "newName" to "Work"))
+        assertEquals("ok: renamed area \"work\" → \"WORK\" (tasks updated)", h.run("rename_area", "name" to "work", "newName" to "WORK"))
+        assertEquals("a case-only rename of the same area is allowed", "WORK", h.state.areas[0].name)
+        assertEquals("ok: renamed area \"garden\" → \"Allotment\" (tasks updated)", h.run("rename_area", "name" to " garden ", "newName" to "  Allotment "))
+        assertEquals("stored trimmed", "Allotment", h.state.areas[1].name)
+        assertEquals("error: area \"allotment\" already exists", h.run("create_area", "name" to " allotment "))
+        assertEquals(2, h.state.areas.size)
+    }
+
+    @Test fun `rename_tag refuses a taken name`() = runTest {
+        val h = makeApi { tags += TagRow("tg0", "deep", null, 0); tags += TagRow("tg1", "focus", null, 1) }
+        assertEquals("error: tag \"focus\" already exists — nothing changed", h.run("rename_tag", "name" to "deep", "newName" to "FOCUS"))
+        assertEquals(listOf("deep", "focus"), h.state.tags.map { it.name })
+        assertEquals("ok: renamed tag \"deep\" → \"Deep\"", h.run("rename_tag", "name" to "deep", "newName" to "Deep"))
+        assertEquals("error: tag \"Deep\" already has that name — nothing changed", h.run("rename_tag", "name" to "Deep", "newName" to "Deep"))
+        assertEquals("ok: renamed tag \"deep\" → \"Shallow\"", h.run("rename_tag", "name" to "deep", "newName" to " Shallow "))
+        assertEquals(listOf("Shallow", "focus"), h.state.tags.map { it.name })
+        assertEquals("error: tag \"shallow\" already exists", h.run("create_tag", "name" to " shallow "))
+        assertEquals(2, h.state.tags.size)
+    }
+
     // ── PEOPLE ─────────────────────────────────────────────────────────────
 
     private fun seedShares() = makeApi {

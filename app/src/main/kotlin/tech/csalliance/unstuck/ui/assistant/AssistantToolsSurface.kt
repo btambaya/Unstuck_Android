@@ -523,18 +523,28 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
 
         // ── AREAS & TAGS ──
         "create_area" -> {
-            val nm = args.str("name") ?: return "error: name required"
+            // `str` hands back the untrimmed text: " Home " slipped past the duplicate
+            // check below (parity with iOS build 81, audit 2026-09-22 C19).
+            val nm = args.str("name")?.trim() ?: return "error: name required"
             if (api.getAreaRows().any { it.name.equals(nm, ignoreCase = true) }) return "error: area \"$nm\" already exists"
             if (!api.addArea(nm, args.str("color"))) return NOT_SAVED
             "ok: created area \"$nm\""
         }
 
         "rename_area" -> {
-            val from = args.str("name")
-            val to = args.str("newName")
+            val from = args.str("name")?.trim()
+            val to = args.str("newName")?.trim()
             val row = api.getAreaRows().firstOrNull { it.name.equals(from ?: "", ignoreCase = true) }
                 ?: return "error: no area named \"${from ?: ""}\" — areas: ${api.getAreas().joinToString(", ")}"
             if (to == null) return "error: newName required"
+            // Tasks key areas by name and the server has unique(user_id, name): a rename
+            // onto another area's name was quarantined by the outbox while the task
+            // relabels synced, and the tool still said ok. Refuse rather than merge; a
+            // case-only rename of the same area is fine (parity with iOS build 81, audit
+            // 2026-09-22 C19).
+            if (to == row.name) return "error: area \"${row.name}\" already has that name — nothing changed"
+            api.getAreaRows().firstOrNull { it.id != row.id && it.name.equals(to, ignoreCase = true) }
+                ?.let { return "error: area \"${it.name}\" already exists — nothing changed" }
             if (!api.updateArea(row.id, to, null)) return NOT_SAVED
             "ok: renamed area \"${from ?: ""}\" → \"$to\" (tasks updated)"
         }
@@ -548,7 +558,7 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
         }
 
         "create_tag" -> {
-            val nm = args.str("name") ?: return "error: name required"
+            val nm = args.str("name")?.trim() ?: return "error: name required"
             // "tag ready" over an existing one used to read as created (rules §1).
             if (api.getTagRows().any { it.name.equals(nm, ignoreCase = true) }) return "error: tag \"$nm\" already exists"
             if (!api.addTag(nm)) return NOT_SAVED
@@ -556,11 +566,15 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
         }
 
         "rename_tag" -> {
-            val from = args.str("name")
-            val to = args.str("newName")
+            val from = args.str("name")?.trim()
+            val to = args.str("newName")?.trim()
             val row = api.getTagRows().firstOrNull { it.name.equals(from ?: "", ignoreCase = true) }
                 ?: return "error: no tag named \"${from ?: ""}\""
             if (to == null) return "error: newName required"
+            // Same unique(user_id, name) quarantine as rename_area (audit 2026-09-22 C19).
+            if (to == row.name) return "error: tag \"${row.name}\" already has that name — nothing changed"
+            api.getTagRows().firstOrNull { it.id != row.id && it.name.equals(to, ignoreCase = true) }
+                ?.let { return "error: tag \"${it.name}\" already exists — nothing changed" }
             if (!api.updateTag(row.id, to)) return NOT_SAVED
             "ok: renamed tag \"${from ?: ""}\" → \"$to\""
         }

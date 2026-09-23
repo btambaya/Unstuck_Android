@@ -584,6 +584,18 @@ private fun ProactiveWarning(warning: String) {
     Text(warning, style = UFont.sans(12), color = UTheme.colors.amberInk, modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp))
 }
 
+/** "Export everything" into the document at [uri]. The ViewModel reads and writes it
+ *  off the main thread ([AppViewModel.exportTo]); the outcome goes to [show] and to a
+ *  toast, since returning from the picker has usually closed this screen (the ON_STOP
+ *  reset) and a message only here would never be seen (Android audit 2026-09-23, A18). */
+private fun startExport(vm: AppViewModel, context: android.content.Context, uri: android.net.Uri, show: (String, Boolean) -> Unit) {
+    val app = context.applicationContext
+    vm.exportTo(uri) { message, failed ->
+        show(message, failed)
+        android.widget.Toast.makeText(app, message, if (failed) android.widget.Toast.LENGTH_LONG else android.widget.Toast.LENGTH_SHORT).show()
+    }
+}
+
 @Composable
 private fun BackupContent(vm: AppViewModel) {
     val c = UTheme.colors
@@ -594,8 +606,7 @@ private fun BackupContent(vm: AppViewModel) {
     // toggle + "Export now" both no-ops). There's no scheduled-backup backend, so we
     // surface the one thing that actually works: an on-demand full JSON snapshot.
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        if (uri != null) runCatching { (context.contentResolver.openOutputStream(uri) ?: error("no output stream")).use { it.write(vm.exportJson().toByteArray()) } }
-            .fold({ msg = "Exported."; msgErr = false }, { msg = "Export failed."; msgErr = true })
+        if (uri != null) startExport(vm, context, uri) { m, failed -> msg = m; msgErr = failed }
     }
     // Guided tour: never reachable mid-run (the lockdown exemption is scoped to
     // the step's own section, and this row stays disabled even so).
@@ -662,10 +673,7 @@ private fun AccountContent(vm: AppViewModel) {
     var msg by remember { mutableStateOf<String?>(null) }
     var msgErr by remember { mutableStateOf(false) }   // render failures in red, not success-green
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        if (uri != null) {
-            runCatching { (context.contentResolver.openOutputStream(uri) ?: error("no output stream")).use { it.write(vm.exportJson().toByteArray()) } }
-                .fold({ msg = "Exported."; msgErr = false }, { msg = "Export failed."; msgErr = true })
-        }
+        if (uri != null) startExport(vm, context, uri) { m, failed -> msg = m; msgErr = failed }
     }
 
     // Guided tour lockdown: while a run is up, the account edits and the

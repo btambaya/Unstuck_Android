@@ -224,6 +224,7 @@ The must-pass set. If any item fails, do not ship.
 - [ ] Block edit: Unschedule removes block; task returns to unscheduled tray.
 - [ ] External/Google events render blue (blueSoft), read-only — no tap/drag, grid behind not tappable.
 - [ ] Google Calendar connect/sync/disconnect flow with busy state + offline error ("Couldn't reach Google…").
+- [ ] Dead Google connection (needs_reauth): the bar becomes the card "Google Calendar stopped syncing" + plain body naming the account, ink "Reconnect" pill (disclosure → consent) + quiet "Disconnect" (confirm); never a raw "invalid_grant (400)".
 - [ ] Week view: 7 cols Mon–Sun, today coral; side-by-side lanes; ‹/› nav + Today jump (hidden at offset 0).
 - [ ] Month view: focus-density heatmap (empty→light→teal by actualSec), today coral; ‹/› + Today nav.
 - [ ] Recurrence scheduling materializes blocks across 56-day horizon, visible in week/month.

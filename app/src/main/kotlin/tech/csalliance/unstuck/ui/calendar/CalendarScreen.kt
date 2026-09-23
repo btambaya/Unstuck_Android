@@ -127,22 +127,40 @@ fun CalendarScreen(
     }
 }
 
-/** What connecting Google Calendar does, said BEFORE Google's consent opens.
- *  Every task block is mirrored to the PRIMARY calendar with the task's name
- *  as the event title (SyncCoordinator.pushBlockUpsert), and nothing on
- *  Android said so — a work account's colleagues could read "therapy prep"
- *  (Android audit 2026-09-23, A19). Web's words (sync-flow.tsx, W14). */
-internal const val GOOGLE_CONNECT_DISCLOSURE =
-    "Unstuck shows your Google events here, so your plans fit around them.\n\n" +
-        "Each task you schedule becomes an event on your main Google Calendar, and moves or disappears " +
-        "when you change it here. Anyone who can see that calendar sees the task's name."
+/** Every word the calendar bar says about the Google connection, in one place
+ *  (iOS GoogleConnectCopy, GoogleConnectController.swift). */
+internal object GoogleConnectCopy {
+    /** What connecting Google Calendar does, said BEFORE Google's consent opens.
+     *  Every task block is mirrored to the PRIMARY calendar with the task's name
+     *  as the event title (SyncCoordinator.pushBlockUpsert), and nothing on
+     *  Android said so — a work account's colleagues could read "therapy prep"
+     *  (Android audit 2026-09-23, A19). Web's words (sync-flow.tsx, W14). */
+    const val DISCLOSURE =
+        "Unstuck shows your Google events here, so your plans fit around them.\n\n" +
+            "Each task you schedule becomes an event on your main Google Calendar, and moves or disappears " +
+            "when you change it here. Anyone who can see that calendar sees the task's name."
 
-/** The disclosure's title for a first connect or a [reconnect]. */
-internal fun googleConnectDisclosureTitle(reconnect: Boolean): String =
-    if (reconnect) "Reconnect Google Calendar?" else "Connect Google Calendar?"
+    /** The disclosure's title for a first connect or a [reconnect]. */
+    fun title(reconnect: Boolean): String =
+        if (reconnect) "Reconnect Google Calendar?" else "Connect Google Calendar?"
+
+    /** The bar once Google stopped accepting Unstuck's access (the server's
+     *  needs_reauth: a 401 / invalid_grant on the last pull). Plain words only —
+     *  the provider's reason ("invalid_grant (400)") tells a user nothing; it
+     *  stays in CalendarConnection.lastError for diagnostics and is never shown
+     *  (Ahmad 2026-09-23, parity with iOS b84). */
+    const val REAUTH_TITLE = "Google Calendar stopped syncing"
+
+    /** [account] is the connection's email; no email → no parentheses. */
+    fun reauthBody(account: String?): String {
+        val who = account?.trim()?.takeIf { it.isNotEmpty() }?.let { " ($it)" } ?: ""
+        return "Google signed Unstuck out of your calendar$who, so new events won’t show here " +
+            "and your scheduled tasks won’t reach it. Reconnect to pick up where you left off."
+    }
+}
 
 /** Connect / sync / disconnect Google Calendar. Opens consent in a Custom Tab
- *  — only after [GOOGLE_CONNECT_DISCLOSURE] was shown and accepted; the
+ *  — only after [GoogleConnectCopy.DISCLOSURE] was shown and accepted; the
  *  `unstuck://calendar-callback` return is handled in MainActivity. */
 @Composable
 private fun CalendarSyncBar(vm: AppViewModel) {
@@ -173,46 +191,64 @@ private fun CalendarSyncBar(vm: AppViewModel) {
     LaunchedEffect(connectOutcome) {
         connectOutcome?.let { error = calendarConnectCaption(it); vm.consumeCalendarConnectOutcome() }
     }
+    // A connection the server flagged needs_reauth (refresh token revoked / expired —
+    // pulls 401): "Sync now" can only fail, so the bar becomes a card that says so in
+    // plain words and offers the re-consent — the ordinary connect flow over the SAME
+    // account (the server returns the same connection id and clears the flag). Its
+    // meetings are kept meanwhile (never reconciled away).
+    val reauth = conns.firstOrNull { it.needsReauth }
     Column(Modifier.fillMaxWidth()) {
-        Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (conns.isEmpty()) {
-                Box(
-                    Modifier.clip(RoundedCornerShape(999.dp)).background(c.bg2).clickable(enabled = !busy) {
-                        disclose = false
-                    }.padding(horizontal = 12.dp, vertical = 8.dp),
-                ) { Text(if (busy) "Connecting…" else "＋ Connect Google Calendar", style = UFont.sans(12, FontWeight.Medium), color = c.ink2) }
-            } else {
-                // All connected accounts (not just the first); busy feedback on Sync now;
-                // Disconnect confirms first (it's destructive — drops all synced events).
-                // A connection the server flagged needs_reauth (refresh token revoked /
-                // expired — pulls 401) shows "Needs reconnect" + a Reconnect action that
-                // re-runs consent; its meetings are kept meanwhile (never reconciled away).
-                val needsReauth = conns.any { it.needsReauth }
-                Text(
-                    if (busy) "Syncing…" else conns.joinToString(", ") { (if (it.needsReauth) "Needs reconnect · " else "Synced · ") + it.accountEmail },
-                    style = UFont.sans(12), color = if (needsReauth) c.red else c.ink3, modifier = Modifier.weight(1f),
-                )
-                if (needsReauth) {
-                    Text("Reconnect Google", style = UFont.sans(12, FontWeight.Medium), color = if (busy) c.ink3 else c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(enabled = !busy) {
-                        disclose = true
-                    }.padding(horizontal = 8.dp, vertical = 4.dp))
+        if (reauth != null) {
+            Column(
+                Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 6.dp).clip(RoundedCornerShape(12.dp)).background(c.bg2).padding(12.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(GoogleConnectCopy.REAUTH_TITLE, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
+                Text(GoogleConnectCopy.reauthBody(reauth.accountEmail), style = UFont.sans(12), color = c.ink2)
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(14.dp)) {
+                    // The primary: the app's ink pill with bg text.
+                    Box(
+                        Modifier.clip(RoundedCornerShape(999.dp)).background(c.ink).clickable(enabled = !busy) { disclose = true }
+                            .padding(horizontal = 14.dp, vertical = 7.dp),
+                    ) { Text(if (busy) "Connecting…" else "Reconnect", style = UFont.sans(12, FontWeight.SemiBold), color = c.bg) }
+                    // Quiet, and destructive — confirm first (it drops all synced events).
+                    Text("Disconnect", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(enabled = !busy) { confirmDisconnect = true }.padding(horizontal = 6.dp, vertical = 4.dp))
+                }
+            }
+        } else {
+            Row(Modifier.fillMaxWidth().padding(horizontal = 18.dp, vertical = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                if (conns.isEmpty()) {
+                    Box(
+                        Modifier.clip(RoundedCornerShape(999.dp)).background(c.bg2).clickable(enabled = !busy) {
+                            disclose = false
+                        }.padding(horizontal = 12.dp, vertical = 8.dp),
+                    ) { Text(if (busy) "Connecting…" else "＋ Connect Google Calendar", style = UFont.sans(12, FontWeight.Medium), color = c.ink2) }
                 } else {
+                    // All connected accounts (not just the first); busy feedback on Sync now;
+                    // Disconnect confirms first (it's destructive — drops all synced events).
+                    Text(
+                        if (busy) "Syncing…" else conns.joinToString(", ") { "Synced · " + it.accountEmail },
+                        style = UFont.sans(12), color = c.ink3, modifier = Modifier.weight(1f),
+                    )
                     Text("Sync now", style = UFont.sans(12, FontWeight.Medium), color = if (busy) c.ink3 else c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(enabled = !busy) {
                         // A failed "Sync now" used to end silently: the pull never threw, so the
                         // old onFailure was dead (parity with iOS build 81, audit 2026-09-22 C18).
                         scope.launch { busy = true; error = null; error = calendarSyncCaption(vm.syncCalendar(), vm.calendarBackedOff); busy = false }
                     }.padding(horizontal = 8.dp, vertical = 4.dp))
+                    Text("Disconnect", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { confirmDisconnect = true }.padding(horizontal = 8.dp, vertical = 4.dp))
                 }
-                Text("Disconnect", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { confirmDisconnect = true }.padding(horizontal = 8.dp, vertical = 4.dp))
             }
         }
+        // Only this bar's own, plain-worded failures (calendarSyncCaption /
+        // calendarConnectCaption / the consent-launch ones above) — never the server's
+        // raw lastError; the card says what a dead connection means.
         error?.let { Text(it, style = UFont.sans(11), color = c.red, modifier = Modifier.padding(horizontal = 18.dp).padding(bottom = 6.dp)) }
     }
     disclose?.let { reconnect ->
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { disclose = null },
-            title = { Text(googleConnectDisclosureTitle(reconnect), style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
-            text = { Text(GOOGLE_CONNECT_DISCLOSURE, style = UFont.sans(13), color = c.ink2) },
+            title = { Text(GoogleConnectCopy.title(reconnect), style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+            text = { Text(GoogleConnectCopy.DISCLOSURE, style = UFont.sans(13), color = c.ink2) },
             confirmButton = { androidx.compose.material3.TextButton(onClick = { disclose = null; openConsent() }) { Text("Continue to Google", color = c.primaryDeep) } },
             dismissButton = { androidx.compose.material3.TextButton(onClick = { disclose = null }) { Text("Not now", color = c.ink2) } },
             containerColor = c.surface,

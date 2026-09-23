@@ -1659,15 +1659,22 @@ class AssistantToolsTest {
         // A server row (+00:00, microseconds) made two minutes ago IS one.
         h.state.tasks += task("srv", "Standup").copy(createdAt = serverIso(NOW_MS - 120_000))
         assertTrue(h.run("create_task", "name" to "Standup").contains("already exists (id=srv, created just now)"))
-        // Scratch counts only for what the store lacks: a stale open copy of a
-        // task the store has as done never blocks (iOS audit 2026-09-22, C5)…
+        // Judged on the committed row: a stale open scratch copy of a task the
+        // store has as done never blocks (iOS audit 2026-09-22, C5)…
         val fresh = Instant.ofEpochMilli(NOW_MS).toString()
         h.state.tasks += task("swim", "Swim", done = true).copy(createdAt = fresh)
         h.scratch.newTasks["swim"] = task("swim", "Swim").copy(createdAt = fresh)
         assertTrue(h.run("create_task", "name" to "Swim").startsWith("ok: created"))
-        // …while a task only this turn's scratch knows about does.
-        h.scratch.newTasks["pending"] = task("pending", "Read").copy(createdAt = fresh)
-        assertTrue(h.run("create_task", "name" to "Read").contains("already exists (id=pending, created just now)"))
+        // …nor does a task this session made and the user then deleted (in the
+        // app or on the web): only the session-long scratch still holds it, and
+        // steering the model to that id would schedule a block for a missing task.
+        assertTrue(h.run("create_task", "name" to "Read").startsWith("ok: created"))
+        val ghost = h.state.tasks.single { it.name == "Read" }.id
+        h.state.tasks.removeAll { it.id == ghost }
+        assertTrue("scratch still holds it", ghost in h.scratch.newTasks)
+        val again = h.run("create_task", "name" to "Read")
+        assertTrue(again, again.startsWith("ok: created"))
+        assertFalse(again, ghost in again)
         // create_tasks is not guarded (as on iOS).
         assertTrue(h.run("create_tasks", "tasks" to listOf(mapOf("name" to "Office"))).startsWith("ok: created 1 tasks"))
     }

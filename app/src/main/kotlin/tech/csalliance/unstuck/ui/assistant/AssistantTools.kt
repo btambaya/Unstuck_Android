@@ -137,17 +137,18 @@ fun nextLiveBlock(blocks: List<CalBlock>, today: String, taskId: String): CalBlo
 suspend fun nextLiveBlock(api: AssistantApi, taskId: String): CalBlock? = nextLiveBlock(api.getBlocks(), api.todayIso(), taskId)
 
 /** A task with this exact name (case- and space-insensitive), still open, made
- *  within the last [withinMs] — including one created earlier in THIS turn.
- *  The committed rows first, scratch only for what the store lacks, so a stale
- *  scratch copy of a task finished since never blocks a new one (parity with
- *  iOS build 79, 2c4b723, and its audit 2026-09-22 C5 refinement). */
-suspend fun recentDuplicateTask(name: String, api: AssistantApi, scratch: TurnScratch, nowMs: Long, withinMs: Long = 600_000L): TaskItem? {
+ *  within the last [withinMs] — including one created earlier in THIS turn
+ *  (parity with iOS build 79, 2c4b723). Judged on the committed rows only, so
+ *  a task finished since never blocks a new one (audit 2026-09-22 C5). Unlike
+ *  iOS there is no scratch fallback: [AssistantApi.upsertTask] commits to the
+ *  store before it returns, so this turn's creations are already there, and a
+ *  scratch-only id is a task deleted since (in the app or on the web, mid
+ *  Talk/call session) — pointing the model at it would schedule a block for a
+ *  task that no longer exists. */
+suspend fun recentDuplicateTask(name: String, api: AssistantApi, nowMs: Long, withinMs: Long = 600_000L): TaskItem? {
     val key = name.trim().lowercase()
     if (key.isEmpty()) return null
-    val store = api.getTasks()
-    val stored = store.map { it.id }.toSet()
-    val candidates = store + scratch.newTasks.values.filter { it.id !in stored }
-    return candidates.firstOrNull { t ->
+    return api.getTasks().firstOrNull { t ->
         if (t.done || t.name.trim().lowercase() != key) return@firstOrNull false
         // Local rows stamp `…Z`, server rows `…+00:00` with microseconds.
         val made = Time.parseMillis(t.createdAt) ?: return@firstOrNull false
@@ -289,7 +290,7 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             // so a nudge to "call the right tool now" made another (audit
             // 2026-09-21). Point the model at the existing one instead (parity
             // with iOS build 79, 2c4b723; create_tasks stays unguarded, as there).
-            recentDuplicateTask(nm, api, scratch, api.nowMs())?.let { dupe ->
+            recentDuplicateTask(nm, api, api.nowMs())?.let { dupe ->
                 return "error: \"${dupe.name}\" already exists (id=${dupe.id}, created just now) — use schedule_task or update_task on it rather than making another. Only create a second one if the user asks for a separate task."
             }
             val later = args.bool("later") ?: false

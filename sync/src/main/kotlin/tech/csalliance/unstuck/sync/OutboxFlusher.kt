@@ -7,7 +7,10 @@ import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
+import tech.csalliance.unstuck.core.logic.clampDurationMin
+import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.data.LocalStore
@@ -179,6 +182,25 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
 
         private const val FAIL_CAP = 5
 
+        /** [row] held to the server's CHECKs on the columns this client writes
+         *  (migration 001): `tasks.estimate_min between 1 and 1440`,
+         *  `cal_blocks.duration_minutes between 5 and 1440`. WriteThrough clamps
+         *  every new write, but the queued payload is sent as stored — so an op a
+         *  build without the clamp queued was refused, quarantined and re-sent on
+         *  every launch for ever, stranding the task's blocks behind it. Clamping
+         *  here heals those ops on the next drain (parity with iOS build 81,
+         *  audit 2026-09-22 C4). */
+        internal fun clampServerChecks(table: String, row: JsonObject): JsonObject {
+            val key = when (table) {
+                Tables.TASKS -> "estimate_min"
+                Tables.CAL_BLOCKS -> "duration_minutes"
+                else -> return row
+            }
+            val raw = (row[key] as? JsonPrimitive)?.takeIf { !it.isString }?.intOrNull ?: return row
+            val clamped = if (table == Tables.TASKS) clampEstimateMin(raw) else clampDurationMin(raw)
+            return if (clamped == raw) row else JsonObject(row + (key to JsonPrimitive(clamped)))
+        }
+
         /** Seqs of upsert ops that a LATER upsert for the same (table,id) makes
          *  redundant. Keeps only the highest-seq upsert per row; returns the older
          *  ones to drop. A `delete` op resets a row's run (an upsert after a delete
@@ -251,7 +273,7 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
             }
             return
         }
-        gateway.upsert(op.recordTable, Json.parseToJsonElement(payload).jsonObject, userId)
+        gateway.upsert(op.recordTable, clampServerChecks(op.recordTable, Json.parseToJsonElement(payload).jsonObject), userId)
     }
 
 }

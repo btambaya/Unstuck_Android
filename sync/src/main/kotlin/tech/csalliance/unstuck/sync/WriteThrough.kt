@@ -1,5 +1,7 @@
 package tech.csalliance.unstuck.sync
 
+import tech.csalliance.unstuck.core.logic.clampDurationMin
+import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.isUuid
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
@@ -41,7 +43,13 @@ class WriteThrough(private val store: LocalStore) {
      *  an empty outbox. Never throws into the write path. */
     internal var onEnqueue: (() -> Unit)? = null
 
-    suspend fun upsertTask(t: TaskItem) {
+    suspend fun upsertTask(task: TaskItem) {
+        // Every task write passes here, so the estimate is clamped to the server's
+        // `estimate_min between 1 and 1440` CHECK first and the local row and the op
+        // agree. A row outside it was refused on every flush and quarantined, and as
+        // the FK parent it held every block of the task back behind it (parity with
+        // iOS build 81, audit 2026-09-22 C4).
+        val t = task.copy(estimateMin = clampEstimateMin(task.estimateMin))
         // Capture the merge base BEFORE the local write: the server-shaped row this
         // edit started from. If an earlier edit of the same row is still queued, its
         // base carries forward (the flusher coalesces the older op away, so the base
@@ -62,12 +70,19 @@ class WriteThrough(private val store: LocalStore) {
         return if (queued != null) queued.base else current()
     }
 
-    suspend fun upsertCalBlock(b: CalBlock) {
-        store.upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id)
+    suspend fun upsertCalBlock(block: CalBlock) {
         // External Google events (g_ ids) are mirrored read-only — never push them
         // to our cal_blocks table (the row id/shape isn't ours; it would fail forever
         // and stall the outbox) and never re-push them to Google.
-        if (b.kind == CalBlockKind.EXTERNAL || b.id.startsWith("g_")) return
+        val external = block.kind == CalBlockKind.EXTERNAL || block.id.startsWith("g_")
+        // Our own blocks are clamped to the server's `duration_minutes between 5 and
+        // 1440` CHECK BEFORE the local write, so the row, the op and the Google event
+        // agree; a refused block was quarantined and lived on this phone only. A
+        // Google mirror keeps its real length (parity with iOS build 81, audit
+        // 2026-09-22 C4).
+        val b = if (external) block else block.copy(durationMinutes = clampDurationMin(block.durationMinutes))
+        store.upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id)
+        if (external) return
         val dependsOn = b.taskId?.let { if (isUuid(it)) it else null } // wait for parent task op
         enqueue("cal_blocks", b.id, "upsert", DbRowCodec.encodeCalBlock(b).toString(), dependsOn)
         // Mirror to Google (best-effort). An INSERT mints an event id we persist on the

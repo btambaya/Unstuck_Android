@@ -639,24 +639,26 @@ class AssistantMemoryHooksTest {
     @Test fun undoAllRevertsOnlyWhatItsConfirmationNamed() = runTest {
         val vm = vm()
         vm.resetVoiceScratch()
-        val a = Regex("id=(\\S+)").find(vm.runVoiceTool("create_task", buildJsonObject { put("name", "Renew the lease") }))!!.groupValues[1]
-        val b = Regex("id=(\\S+)").find(vm.runVoiceTool("create_task", buildJsonObject { put("name", "Buy a doormat") }))!!.groupValues[1]
+        val named = Regex("id=(\\S+)").find(vm.runVoiceTool("create_task", buildJsonObject { put("name", "Buy a doormat") }))!!.groupValues[1]
+        val left = Regex("id=(\\S+)").find(vm.runVoiceTool("create_task", buildJsonObject { put("name", "Renew the lease") }))!!.groupValues[1]
         val turn = landVoice(vm)
-        val note = capture(taskId = a, body = "ask about the break clause")
+        // The NEWER receipt is refused (Undo all runs newest first, so were it
+        // reverted it would be before the one this waits for).
+        val note = capture(taskId = left, body = "ask about the break clause")
         vm.assistantApi.upsertCapture(note)
-        vm.undoAssistantReceipt(turn.id!!, 0)
-        settleUntil { receiptUndoKey(turn.id!!, 0) in vm.receiptUndoNotes.value }
+        vm.undoAssistantReceipt(turn.id!!, 1)
+        settleUntil { receiptUndoKey(turn.id!!, 1) in vm.receiptUndoNotes.value }
         vm.assistantApi.removeCapture(note.id)
         assertTrue("the note is gone again", vm.assistantApi.getCaptures().none { it.id == note.id })
 
-        val named = undoAllReceipts(vm.assistantHistory.first { it.id == turn.id }, vm.receiptUndoNotes.value.keys)
-        assertEquals(listOf("Created “Buy a doormat”"), named.map { it.value.label })
-        vm.undoAllAssistantReceipts(turn.id!!, named.map { it.index })
-        settleUntil { vm.receipt(turn, 1).undone }
+        val listed = undoAllReceipts(vm.assistantHistory.first { it.id == turn.id }, vm.receiptUndoNotes.value.keys)
+        assertEquals(listOf("Created “Buy a doormat”"), listed.map { it.value.label })
+        vm.undoAllAssistantReceipts(turn.id!!, listed.map { it.index })
+        settleUntil { vm.receipt(turn, 0).undone }
 
-        assertTrue(vm.assistantApi.getTasks().none { it.id == b })
-        assertTrue("not named, not reverted", vm.assistantApi.getTasks().any { it.id == a })
-        assertFalse(vm.receipt(turn, 0).undone)
+        assertTrue(vm.assistantApi.getTasks().none { it.id == named })
+        assertTrue("not named, not reverted", vm.assistantApi.getTasks().any { it.id == left })
+        assertFalse(vm.receipt(turn, 1).undone)
     }
 
     @Test fun forgetProfileFact_tombstonesAndForgetAllClears() = runTest {

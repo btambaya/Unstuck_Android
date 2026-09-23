@@ -5,11 +5,15 @@ import tech.csalliance.unstuck.core.logic.MomentFact
 import tech.csalliance.unstuck.core.logic.MomentRituals
 import tech.csalliance.unstuck.core.logic.MomentState
 import tech.csalliance.unstuck.core.logic.RitualPrefs
+import tech.csalliance.unstuck.core.logic.ChosenDateWrite
+import tech.csalliance.unstuck.core.logic.RegenPlan
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
 import tech.csalliance.unstuck.core.logic.clampDurationMin
 import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.composeBrief
+import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.pickMoment
+import tech.csalliance.unstuck.core.logic.recurrenceChosenDateWrite
 import tech.csalliance.unstuck.core.logic.toneFromFacts
 import tech.csalliance.unstuck.core.logic.usableToday
 import tech.csalliance.unstuck.core.model.CalBlock
@@ -35,6 +39,9 @@ data class GatewayWrites(
     val blocks: List<CalBlock> = emptyList(),
     val tasks: List<TaskItem> = emptyList(),
     val confirmation: String? = null,
+    /** MINTS: a series' occurrences with their deterministic id, written
+     *  insert-if-absent (stage 2, "same id for same day", Ahmad 2026-09-23). */
+    val inserts: List<CalBlock> = emptyList(),
 )
 
 object GatewayActions {
@@ -74,16 +81,26 @@ object GatewayActions {
         todayIso: String, newId: String,
     ): GatewayWrites {
         val t = tasks.firstOrNull { it.id == taskId } ?: return GatewayWrites()
+        val confirmation = "Blocked — ${t.name}, $date${time?.let { " $it" } ?: ""}."
         val anchor = blocks
             .filter { it.taskId == taskId && !it.done && !it.skipped && it.date >= todayIso }
             .minWithOrNull(compareBy<CalBlock> { it.date }.thenBy { it.startTime }.thenBy { it.id })
-        val block = if (anchor != null) {
-            anchor.copy(date = date, startTime = time ?: anchor.startTime)
-        } else {
-            CalBlock(id = newId, taskId = taskId, taskName = t.name, startTime = time ?: "09:00",
-                durationMinutes = clampDurationMin(t.estimateMin), date = date, kind = CalBlockKind.TASK)
+        if (anchor != null) return GatewayWrites(listOf(anchor.copy(date = date, startTime = time ?: anchor.startTime)), emptyList(), confirmation)
+        if (t.recurrence != null) {
+            // A series' first placement: the chosen day's write with an empty plan
+            // (§3b′, stage 2 — parity with web's moment action): the day's
+            // deterministic occurrence, minted insert-if-absent, or a block of its
+            // own when that id lives on elsewhere. A covered day writes nothing.
+            val mine = blocks.filter { it.taskId == taskId && isTaskBlock(it) }
+            return when (val w = recurrenceChosenDateWrite(t, mine, RegenPlan(emptyList(), emptyList()), date, time ?: "09:00").second) {
+                is ChosenDateWrite.Insert -> GatewayWrites(confirmation = confirmation, inserts = listOf(w.block))
+                is ChosenDateWrite.Upsert -> GatewayWrites(listOf(w.block), emptyList(), confirmation)
+                ChosenDateWrite.None -> GatewayWrites(confirmation = confirmation)
+            }
         }
-        return GatewayWrites(listOf(block), emptyList(), "Blocked — ${t.name}, $date${time?.let { " $it" } ?: ""}.")
+        val block = CalBlock(id = newId, taskId = taskId, taskName = t.name, startTime = time ?: "09:00",
+            durationMinutes = clampDurationMin(t.estimateMin), date = date, kind = CalBlockKind.TASK)
+        return GatewayWrites(listOf(block), emptyList(), confirmation)
     }
 
     /** `create_task`: a plain new task (estimate defaults to 25 like the web),

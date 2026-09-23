@@ -8,8 +8,10 @@ import io.github.jan.supabase.postgrest.query.Order
 import io.ktor.client.plugins.ResponseException
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 
 // SyncGateway — the PostgREST CRUD primitive the engine builds on. Works in
 // JsonObject row shapes (from DbRowCodec) so explicit-null semantics survive.
@@ -28,6 +30,30 @@ interface SyncRemote {
      *  member, unknown collection): terminal, never retried. Any other throw is
      *  transient (offline, 5xx) and the outbox retries it. */
     suspend fun rpc(fn: String, params: JsonObject)
+
+    /** INSERT-IF-ABSENT — a MINT of a repeating task's occurrence with its
+     *  deterministic id (stage 2, "same id for same day", Ahmad 2026-09-23;
+     *  deterministic-occurrence-ids.md §3c): `INSERT … ON CONFLICT (id) DO
+     *  NOTHING RETURNING id`. True = inserted; false = the server already had
+     *  the id and kept its row untouched (another device's occurrence, perhaps
+     *  moved, done or retimed there).
+     *
+     *  The default THROWS (as a non-refusal, so the outbox keeps the op): an
+     *  interface default cannot reach the client, and it must never fall back
+     *  to [upsert] — a plain upsert would overwrite the other device's row
+     *  (hazard c). */
+    suspend fun insertIfAbsent(table: String, row: JsonObject, userId: String): Boolean =
+        throw UnsupportedOperationException("insertIfAbsent is not implemented by this SyncRemote")
+
+    /** RULE H's conditional retime, sent only after a USER's mint was ignored:
+     *  `PATCH ?id=eq.X&date=eq.D&done=eq.false&skipped=eq.false` with only
+     *  `start_time` + `duration_minutes`. It moves that day's OPEN occurrence to
+     *  the time the user asked for; a row that moved, is done or skipped keeps
+     *  the first write. The server row when it matched, else null. Column-scoped:
+     *  the Google mapping, the name, the date and the done state are never
+     *  touched. The default THROWS, as [insertIfAbsent]'s does. */
+    suspend fun retimeIfOpen(table: String, id: String, date: String, startTime: String, durationMinutes: Int): JsonObject? =
+        throw UnsupportedOperationException("retimeIfOpen is not implemented by this SyncRemote")
 
     /** CATCH-UP READ — the correctness path (see [CatchUpPuller]). Rows of
      *  [table] whose [column] (`updated_at`, or the table's monotonic stand-in)
@@ -127,6 +153,35 @@ class SyncGateway(private val client: SupabaseClient) : SyncRemote {
     override suspend fun delete(table: String, id: String) {
         client.from(table).delete { filter { eq("id", id) } }
     }
+
+    /** `POST /<table>?on_conflict=id&select=id` with `Prefer:
+     *  resolution=ignore-duplicates,return=representation`: PostgREST answers
+     *  `[{"id":…}]` for a row it inserted and `[]` for an id it already had
+     *  (checked against prod with two temporary users, 2026-09-23 — DECISIONS.md
+     *  "Stage 2 step 0"). The request shape is pinned by
+     *  InsertRequestShapeTest. */
+    override suspend fun insertIfAbsent(table: String, row: JsonObject, userId: String): Boolean =
+        client.from(table).upsert(withUserId(row, userId)) {
+            onConflict = "id"
+            ignoreDuplicates = true
+            select(Columns.list("id"))
+        }.decodeList<JsonObject>().isNotEmpty()
+
+    override suspend fun retimeIfOpen(table: String, id: String, date: String, startTime: String, durationMinutes: Int): JsonObject? =
+        client.from(table).update(
+            buildJsonObject {
+                put("start_time", startTime)
+                put("duration_minutes", durationMinutes)
+            },
+        ) {
+            select()
+            filter {
+                eq("id", id)
+                eq("date", date)
+                eq("done", false)
+                eq("skipped", false)
+            }
+        }.decodeList<JsonObject>().firstOrNull()
 
     override suspend fun rpc(fn: String, params: JsonObject) {
         try {

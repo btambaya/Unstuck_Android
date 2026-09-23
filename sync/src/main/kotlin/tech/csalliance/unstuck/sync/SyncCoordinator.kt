@@ -72,7 +72,7 @@ class SyncCoordinator(
     )
     /** ProcessLifecycle STARTED (set by resumeRealtime / pauseRealtime). */
     @Volatile private var foreground = false
-    val write = WriteThrough(store)
+    val write = WriteThrough(store, scope)
     val calendar = CalendarClient(client)
     val push = PushClient(client)
     val notifications = NotificationsClient(client)
@@ -88,7 +88,8 @@ class SyncCoordinator(
     private val wakeWindow = WakeWindowClient(client)
 
     private val hydrator = Hydrator(gateway, store)
-    private val flusher = OutboxFlusher(gateway, store)
+    // Shares rule G's gate with the writer: every mint it sends is bracketed there.
+    private val flusher = OutboxFlusher(gateway, store, write.mirrorGate)
     // THE FRESHNESS LAYER (2026-09-12 sync contract). The cursor marks + the
     // catch-up pull that is now the CORRECTNESS path: realtime is an optimisation
     // (postgres_changes has no replay, and a channel can report SUBSCRIBED while
@@ -113,6 +114,7 @@ class SyncCoordinator(
         onEvent = { freshness.noteRealtimeEvent() },
         onSubscribed = { freshness.noteSubscribed() },
         onPreferencesChanged = { _preferencesChanged.tryEmit(Unit) },
+        onCalBlockLanded = { id -> write.mirrorGate.rowLanded(id) },
     )
     // Live change SIGNALS for sharing (RPC-backed surfaces can't be table-mirrored;
     // recipients have no RLS read on raw task rows). ViewModels observe
@@ -265,6 +267,8 @@ class SyncCoordinator(
             engineMutex.withLock {
                 // A failed drain (offline) must not block the pull: the pending
                 // rows survive the replace regardless (Hydrator keeps them).
+                // The top-up judges whether THIS pull's cal_blocks read succeeded.
+                hydrator.notePullStart()
                 runCatching { flushUnlocked(uid) }
                     .onFailure { if (it is CancellationException) throw it; Log.w(TAG, "pre-pull flush failed; pulling anyway", it) }
                 val maxima = hydrator.hydrate(uid)
@@ -286,6 +290,7 @@ class SyncCoordinator(
         var outcome: CatchUpOutcome? = null
         hydrateMutex.withLock {
             engineMutex.withLock {
+                hydrator.notePullStart()
                 runCatching { flushUnlocked(uid) }
                     .onFailure { if (it is CancellationException) throw it; Log.w(TAG, "pre-pull flush failed; pulling anyway", it) }
                 val pulled = catchUp.catchUp(uid)
@@ -404,6 +409,17 @@ class SyncCoordinator(
         write.pushCalBlockDelete = { pushBlockDelete(it) }
         // Flush-on-enqueue: every queued op arms the debounced drain.
         write.onEnqueue = { enqueueFlush.schedule() }
+        // Rule G (stage 2, deterministic occurrence ids — Ahmad 2026-09-23 "every
+        // day, everywhere"): a minted day's Google push waited for the server's
+        // answer. Confirmed → push once, from the row as it is then (queued on the
+        // one Google worker, so a burst of confirmations goes out one at a time);
+        // ignored → never. A confirmed push whose row was missing for a moment goes
+        // out once the realtime echo or the next cal_blocks pull brings it back.
+        flusher.onInsertResolved = { r ->
+            if (r.table == Tables.CAL_BLOCKS && r.mirrorWanted) write.queueConfirmedMirror(r.rowId)
+        }
+        write.mirrorGate.onAwaitedRowLanded = { id -> write.googleMirror.queueLanded(id) }
+        hydrator.onCalBlocksPulled = { write.mirrorGate.sweepLandedRows() }
         // A refused shared-collection RPC: ROLL BACK the optimistic row by re-pulling
         // the collection from the server (its copy never had the edit), then surface
         // it. The op itself is already dequeued (terminal).
@@ -596,6 +612,28 @@ class SyncCoordinator(
         hydrateLock = hydrateMutex,
     )
 
+    /** The recurrence horizon top-up (stage 2 — "same id for same day", Ahmad
+     *  2026-09-23): extends every repeating task's tail with deterministic ids after
+     *  a good cal_blocks pull, once per local day. See RecurrenceHorizonTopUp. */
+    private val recurrenceTopUp = RecurrenceHorizonTopUp(
+        store = store,
+        write = write,
+        remote = gateway,
+        pull = { hydrator.calBlocksPull },
+        pulledAfter = { hydrator.seqBeforeLatestPull },
+        currentUserId = { auth.currentUserId },
+        today = { tech.csalliance.unstuck.core.time.Clock.todayIso() },
+        timeZone = { java.util.TimeZone.getDefault().id },
+        log = { Log.i(TAG, it) },
+    )
+
+    /** Run the horizon top-up if the last pull allows it (the app calls this after
+     *  every completed pull; the gate decides). No-op when signed out. */
+    suspend fun topUpRecurrenceHorizon() {
+        val uid = auth.currentUserId ?: return
+        recurrenceTopUp.request(uid)
+    }
+
     /** A Google 429 is being waited out (the "Sync now" caption says "busy"). */
     val calendarBackedOff: Boolean get() = calendarPull.backedOff
 
@@ -692,8 +730,17 @@ class SyncCoordinator(
                 Log.w(TAG, "calendar push patch failed", e); return null
             }
         }
-        val id = runCatching { calendar.insertEvent(conn.id, calId, block.taskName, start, end) }
-            .onFailure { Log.w(TAG, "calendar push insert failed", it) }.getOrNull() ?: return null
+        // A 429 backs off like the PATCH's: a confirmed series (stage 2 mirrors every
+        // day) is a burst of INSERTs, and hammering on only lengthened the limit.
+        val id = try {
+            calendar.insertEvent(conn.id, calId, block.taskName, start, end)
+        } catch (e: CalendarRateLimited) {
+            calendarPull.backOff(); return null
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Throwable) {
+            Log.w(TAG, "calendar push insert failed", e); return null
+        }
         return block.copy(externalEventId = id, externalConnectionId = conn.id)
     }
 
@@ -728,6 +775,9 @@ class SyncCoordinator(
                     // The cache is gone, so the high-water marks describe nothing:
                     // the next pull must be a full hydrate that re-seeds them.
                     catchUp.clearCursors(uid)
+                    write.resetMirrors()
+                    hydrator.resetCalBlocksPull()
+                    recurrenceTopUp.reset()
                 }
                 prefs.edit().putString(KEY_PREV_USER, uid).apply()
                 // Push offline edits (stale task ops pruned / merged first so they can't
@@ -782,6 +832,11 @@ class SyncCoordinator(
                 val goneUid = prefs.getString(KEY_PREV_USER, null)
                 store.clearAll()   // leaves parked_outbox alone (per-user, see LocalStore)
                 goneUid?.let { catchUp.clearCursors(it) }   // no marks without the rows they describe
+                // No Google push, owed mirror or top-up verdict of the gone account
+                // carries over to the next one (stage 2).
+                write.resetMirrors()
+                hydrator.resetCalBlocksPull()
+                recurrenceTopUp.reset()
                 freshness.reset()
                 calendarConnect.signedOut()   // the next account never sees its result
                 prefs.edit().remove(KEY_PREV_USER).apply()

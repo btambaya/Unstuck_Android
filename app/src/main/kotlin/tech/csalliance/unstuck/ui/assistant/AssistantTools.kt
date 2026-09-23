@@ -21,6 +21,7 @@ import tech.csalliance.unstuck.core.logic.rejectPastDate
 import tech.csalliance.unstuck.core.logic.rejectPastTime
 import tech.csalliance.unstuck.core.logic.ReceiptArgs
 import tech.csalliance.unstuck.core.logic.ChosenDateAction
+import tech.csalliance.unstuck.core.logic.ChosenDateWrite
 import tech.csalliance.unstuck.core.logic.RECURRENCE_HORIZON_DAYS
 import tech.csalliance.unstuck.core.logic.RecurrenceStart
 import tech.csalliance.unstuck.core.logic.RegenPlan
@@ -30,9 +31,10 @@ import tech.csalliance.unstuck.core.logic.clampDurationMin
 import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.clearLaterOnSchedule
 import tech.csalliance.unstuck.core.logic.isTaskBlock
-import tech.csalliance.unstuck.core.logic.materializeOccurrences
 import tech.csalliance.unstuck.core.logic.newUuid
 import tech.csalliance.unstuck.core.logic.recurrenceChosenDateAction
+import tech.csalliance.unstuck.core.logic.recurrenceChosenDateWrite
+import tech.csalliance.unstuck.core.logic.recurrenceTopUp
 import tech.csalliance.unstuck.core.logic.recurrenceEditStart
 import tech.csalliance.unstuck.core.logic.occurrencesCarryingTaskDone
 import tech.csalliance.unstuck.core.logic.regenerateForTask
@@ -295,6 +297,40 @@ private suspend fun scheduleTask(api: AssistantApi, task: TaskItem, date: String
                 val fresh = api.getTasks().firstOrNull { it.id == task.id } ?: task
                 api.upsertTask(bumpMoveCount(fresh, api.nowIso()))
             }
+        } else if (task.recurrence != null) {
+            // A series' first placement (nothing live to move): the chosen day's
+            // write with an empty plan (§3b′, stage 2 — "same id for same day",
+            // Ahmad 2026-09-23): the day's deterministic occurrence, minted
+            // insert-if-absent with rule H, or a block of its own when that id lives
+            // on elsewhere. `placedBlocks` reports only what landed: a mint whose id
+            // was taken after `blocks` was read (a top-up, another device) is decided
+            // again from the store as it is now — once (parity with iOS build 85).
+            var seen = blocks
+            for (attempt in 0 until 2) {
+                val write = recurrenceChosenDateWrite(task, seen.filter { it.taskId == task.id && isTaskBlock(it) }, RegenPlan(emptyList(), emptyList()), date, time).second
+                when (write) {
+                    is ChosenDateWrite.Insert -> {
+                        if (api.insertBlockIfAbsent(write.block, retimeIfTaken = true)) {
+                            scratch.placedBlocks[task.id] = write.block.id
+                        } else if (attempt == 0) {
+                            seen = api.getBlocks()
+                            continue
+                        }
+                    }
+                    is ChosenDateWrite.Upsert -> {
+                        api.upsertBlock(write.block)
+                        scratch.placedBlocks[task.id] = write.block.id
+                    }
+                    // Covered after all: a done occurrence places nothing (as the
+                    // Covered branch above); a live one at the time is it.
+                    ChosenDateWrite.None -> {
+                        val open = seen.firstOrNull { it.taskId == task.id && isTaskBlock(it) && it.date == date && !it.done && !it.skipped }
+                            ?: return null
+                        scratch.placedBlocks[task.id] = open.id
+                    }
+                }
+                break
+            }
         } else {
             // Clamped to the server's 5…1440 (audit 2026-09-22, C4) — also enforced
             // in WriteThrough; here so the receipts match what is stored.
@@ -304,19 +340,15 @@ private suspend fun scheduleTask(api: AssistantApi, task: TaskItem, date: String
             scratch.placedBlocks[task.id] = placed.id
         }
     }
-    val rec = task.recurrence
-    if (rec != null && placesSeries) {
-        // Only a series being PLACED is materialised, from the placed date at the
-        // placed time up to the horizon, on dates that don't already carry one of
-        // its blocks. Refilling a live series from the moved date at the moved
-        // time brought back occurrences the user had deleted and stretched the
-        // series at a one-off time (parity with iOS build 81, audit 2026-09-22 C1).
-        val taken = blocks.filter { it.taskId == task.id }.map { it.date }.toSet()
-        val lastIso = IsoDate.addDays(today, RECURRENCE_HORIZON_DAYS - 1)
-        for (occ in materializeOccurrences(rec, localMidnightMs(date), time, IsoDate.daysUntil(date, lastIso) + 1)) {
-            if (occ.date <= date || occ.date in taken) continue
-            api.upsertBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = occ.startTime,
-                durationMinutes = clampDurationMin(task.estimateMin), date = occ.date, kind = CalBlockKind.TASK))
+    if (task.recurrence != null) {
+        // Extend only the TAIL, shared with the horizon top-up (parity with iOS
+        // builds 81 + 85, audit 2026-09-22 C1): filling every open date from the
+        // moved date at the moved time brought back occurrences the user had
+        // deleted and stretched the series at a one-off time. Read after the move;
+        // a placed series runs at the placed time. These are maintenance mints —
+        // insert-if-absent WITHOUT rule H's retime (stage 2).
+        for (b in recurrenceTopUp(task, api.getBlocks(), today, seriesTime = if (placesSeries) time else null)) {
+            api.insertBlockIfAbsent(b, retimeIfTaken = false)
         }
     }
     return time
@@ -553,11 +585,14 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             val start = placed?.let { RecurrenceStart(it.date, it.startTime, RECURRENCE_HORIZON_DAYS) }
                 ?: recurrenceEditStart(t.id, rec, blocks, today)
             if (start != null) {
-                val plan = regenerateForTask(upd, rec, blocks, today, start.startTime, localMidnightMs(start.date), start.horizonDays)
-                for (b in plan.toUpsert) api.upsertBlock(b)
                 // This month's occurrence moved later off a series day that has
-                // passed stays (see RecurrenceStart.keepId).
-                for (id in plan.toDelete) if (id != start.keepId) api.deleteBlock(id)
+                // passed stays (see RecurrenceStart.keepId) — it goes INTO the plan
+                // as kept. The lists are disjoint (stage 2): rewrites are plain
+                // saves, new occurrences are mints (insert-if-absent + rule H).
+                val plan = regenerateForTask(upd, rec, blocks, today, start.startTime, localMidnightMs(start.date), start.horizonDays, setOfNotNull(start.keepId))
+                for (b in plan.toRetime) api.upsertBlock(b)
+                for (b in plan.toUpsert) api.insertBlockIfAbsent(b, retimeIfTaken = true)
+                for (id in plan.toDelete) api.deleteBlock(id)
             }
             // A done task made to repeat keeps the day it was done ticked, and the
             // done flip reaches a loop-promoted task's shared-list row — as in the editor.

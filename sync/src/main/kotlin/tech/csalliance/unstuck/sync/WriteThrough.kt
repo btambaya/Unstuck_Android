@@ -2,6 +2,7 @@ package tech.csalliance.unstuck.sync
 
 import tech.csalliance.unstuck.core.logic.clampDurationMin
 import tech.csalliance.unstuck.core.logic.clampEstimateMin
+import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.isUuid
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
 import tech.csalliance.unstuck.core.model.CalBlock
@@ -15,7 +16,9 @@ import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.WireTime
-import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 import kotlinx.serialization.json.JsonObject
 import tech.csalliance.unstuck.data.LocalStore
 import tech.csalliance.unstuck.data.db.OutboxEntity
@@ -27,16 +30,36 @@ import tech.csalliance.unstuck.data.db.Tables
 // cal_block upserts carry dependsOn = task.id so the parent task flushes
 // first. Port of the iOS WriteThrough.swift.
 
-class WriteThrough(private val store: LocalStore) {
+class WriteThrough(
+    private val store: LocalStore,
+    // Where the Google worker runs (the SyncCoordinator's scope in the app).
+    googleScope: CoroutineScope = CoroutineScope(SupervisorJob() + Dispatchers.Default),
+) {
+
+    /** Rule G of the deterministic occurrence ids (stage 2, Ahmad 2026-09-23):
+     *  no Google push of a row whose insert is unresolved. Shared with the
+     *  OutboxFlusher, which brackets every insert it sends. */
+    val mirrorGate = InsertMirrorGate(store)
+
+    /** Every Google call a task block makes, one at a time (see GoogleBlockMirror). */
+    internal val googleMirror = GoogleBlockMirror(googleScope, store, mirrorGate) { id, eventId, connectionId ->
+        stampCalBlockMapping(id, eventId, connectionId)
+    }
 
     // Google Calendar push hooks — wired by SyncCoordinator. `pushCalBlock` returns
     // the block RE-STAMPED with the Google mapping (external_event_id AND
     // external_connection_id — the server's /disconnect + event_gone cleanup select
     // pushed rows by the connection id, so an unstamped block was invisible to
     // them), or null when nothing changed / no Google connection. Kept as a seam so
-    // :data/:core stay Google-agnostic.
-    internal var pushCalBlock: (suspend (CalBlock) -> CalBlock?)? = null
-    internal var pushCalBlockDelete: (suspend (CalBlock) -> Unit)? = null
+    // :data/:core stay Google-agnostic. Both run on [googleMirror]'s one worker,
+    // after the local write (stage 2: they used to run inline, one caller at a
+    // time, and a confirmed mint's push had nowhere to wait its turn).
+    internal var pushCalBlock: (suspend (CalBlock) -> CalBlock?)?
+        get() = googleMirror.push
+        set(value) { googleMirror.push = value }
+    internal var pushCalBlockDelete: (suspend (CalBlock) -> Unit)?
+        get() = googleMirror.deleteEvent
+        set(value) { googleMirror.deleteEvent = value }
 
     /** Fired after EVERY enqueued op (same seam as iOS `setOnEnqueue`). The
      *  SyncCoordinator hooks a debounced flush here so a mid-session edit reaches
@@ -90,20 +113,167 @@ class WriteThrough(private val store: LocalStore) {
         // 2026-09-22 C4).
         val clamped = if (external) block else block.copy(durationMinutes = clampDurationMin(block.durationMinutes))
         val b = asciiDateTime(clamped)
-        store.upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id)
-        if (external) return
-        val dependsOn = b.taskId?.let { if (isUuid(it)) it else null } // wait for parent task op
-        enqueue("cal_blocks", b.id, "upsert", DbRowCodec.encodeCalBlock(b).toString(), dependsOn)
-        // Mirror to Google (best-effort). An INSERT mints an event id we persist on the
-        // block (with the connection it lives on) so later edits PATCH the same event
-        // and a pull won't duplicate it; an event_gone PATCH re-inserts and re-stamps.
-        val push = pushCalBlock ?: return
-        val stamped = push(b) ?: return
-        if (stamped.externalEventId != b.externalEventId || stamped.externalConnectionId != b.externalConnectionId) {
-            store.upsert(Tables.CAL_BLOCKS, stamped, CalBlock.serializer(), stamped.id)
-            enqueue("cal_blocks", stamped.id, "upsert", DbRowCodec.encodeCalBlock(stamped).toString(), dependsOn)
+        if (external) {
+            store.upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id)
+            return
         }
+        store.transaction {
+            // The Google mapping belongs to the stamp ([stampCalBlockMapping]): every
+            // other save carries the row's CURRENT mapping. A save built from a copy
+            // read before a stamp landed — a series edit's rewrites, a Schedule, an
+            // assistant move, all computed from a snapshot while the Google worker
+            // stamps minted days — nulled the event id, and the push that followed
+            // INSERTed a second event (parity with iOS build 85, stage 2 review).
+            // Read inside the write, so no stamp slips between the read and the save.
+            val current = getOne(Tables.CAL_BLOCKS, b.id, CalBlock.serializer())
+            val row = if (current == null) b else b.copy(externalEventId = current.externalEventId, externalConnectionId = current.externalConnectionId)
+            upsert(Tables.CAL_BLOCKS, row, CalBlock.serializer(), row.id)
+            enqueue(outboxOp(Tables.CAL_BLOCKS, row.id, "upsert", DbRowCodec.encodeCalBlock(row).toString(), blockParent(row)))
+        }
+        runCatching { onEnqueue?.invoke() }
+        // Mirror to Google (best-effort), from the row as it is when the worker gets
+        // to it. An INSERT mints an event id the stamp persists on the block (with the
+        // connection it lives on) so later edits PATCH the same event and a pull won't
+        // duplicate it; an event_gone PATCH re-inserts and re-stamps. Rule G: a row
+        // whose insert is unresolved is not pushed until the server confirms it.
+        googleMirror.requestPush(b.id)
     }
+
+    /** What a MINT did ([insertCalBlockIfAbsent]). */
+    enum class MintOutcome {
+        /** The row was written and its insert queued. */
+        INSERTED,
+        /** Rule H, applied locally (`retimeIfTaken` only): the id was already that
+         *  day's OPEN occurrence at another time or length — typically minted by a
+         *  top-up after the caller read the store. It now has the asked start and
+         *  length (those two columns only), queued as `insert_or_retime` so the
+         *  server makes the same conditional retime. */
+        RETIMED,
+        /** That day's open occurrence already has the asked start and length. */
+        ALREADY_THERE,
+        /** Rule A: the id lives on as a row that is NOT that day's open occurrence
+         *  (moved, done or skipped), or any row holds it and this is a maintenance
+         *  mint (a top-up never moves a row). Nothing written. */
+        HELD;
+
+        /** The day now has the asked occurrence (whatever was written). */
+        val landed: Boolean get() = this != HELD
+        /** An insert-family op was queued for the row. */
+        val queued: Boolean get() = this == INSERTED || this == RETIMED
+    }
+
+    /**
+     * A MINT: a repeating task's occurrence created with its deterministic id
+     * (occurrenceId — stage 2, "same id for same day", Ahmad 2026-09-23).
+     * Insert-if-absent end to end — rule A of deterministic-occurrence-ids.md:
+     *  • locally it never overwrites a row with that id: a moved, done, skipped or
+     *    kept occurrence lives on ([MintOutcome.HELD]). The check, the row write
+     *    and the op are ONE Room transaction (and [deleteCalBlock]'s is too), so
+     *    two back-to-back top-ups that read the store before either wrote can't
+     *    both enqueue it;
+     *  • on the server the op is `INSERT … ON CONFLICT (id) DO NOTHING` (`insert`),
+     *    plus rule H's conditional retime when the USER asked for this day
+     *    ([retimeIfTaken] → `insert_or_retime`).
+     * A user's mint whose id is already that day's OPEN occurrence gets rule H
+     * here too ([MintOutcome.RETIMED]): the planner would have retimed that row had
+     * it seen it, and skipping silently dropped the user's time on every device
+     * (parity with iOS build 85's review fix).
+     * Otherwise as [upsertCalBlock]: the duration clamp, ASCII digits, dependsOn
+     * the parent task, and a g_ / external row is never enqueued. It never pushes
+     * to Google inline: "mirror wanted" is recorded BEFORE the op is queued, and
+     * the push goes out once the server confirms the insert (rule G).
+     */
+    suspend fun insertCalBlockIfAbsent(block: CalBlock, retimeIfTaken: Boolean): MintOutcome {
+        if (block.kind == CalBlockKind.EXTERNAL || block.id.startsWith("g_")) {
+            return store.transaction {
+                if (getOne(Tables.CAL_BLOCKS, block.id, CalBlock.serializer()) != null) return@transaction MintOutcome.HELD
+                upsert(Tables.CAL_BLOCKS, block, CalBlock.serializer(), block.id)
+                MintOutcome.INSERTED
+            }
+        }
+        val b = asciiDateTime(block.copy(durationMinutes = clampDurationMin(block.durationMinutes)))
+        val dependsOn = blockParent(b)
+        // "Mirror wanted" goes on BEFORE the op is queued: a flush that resolved the
+        // insert before this returned would otherwise let a later push through for
+        // an insert the server ignored (rule G; the iOS build 85 fix).
+        val expected = isTaskBlock(b) && mirrorGate.expectMirror(b.id)
+        val outcome = store.transaction {
+            // A row whose newest queued op is its DELETE is going, whatever put it
+            // back (a stale realtime echo): it holds nothing. The mint writes over
+            // it and queues its insert AFTER the delete, which the flusher sends
+            // first — else "Never" then "Daily" found the ghost, queued nothing, and
+            // the delete took the day off every device (stage 2 review).
+            val held = getOne(Tables.CAL_BLOCKS, b.id, CalBlock.serializer())
+                ?.takeUnless { isBeingDeleted(Tables.CAL_BLOCKS, b.id) }
+            if (held != null) {
+                if (!retimeIfTaken || held.date != b.date || held.done || held.skipped) return@transaction MintOutcome.HELD
+                if (held.startTime == b.startTime && held.durationMinutes == b.durationMinutes) return@transaction MintOutcome.ALREADY_THERE
+                val next = held.copy(startTime = b.startTime, durationMinutes = b.durationMinutes)
+                upsert(Tables.CAL_BLOCKS, next, CalBlock.serializer(), next.id)
+                enqueue(outboxOp(Tables.CAL_BLOCKS, next.id, OutboxFlusher.OP_INSERT_OR_RETIME, DbRowCodec.encodeCalBlock(next).toString(), dependsOn))
+                return@transaction MintOutcome.RETIMED
+            }
+            upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id)
+            val op = if (retimeIfTaken) OutboxFlusher.OP_INSERT_OR_RETIME else OutboxFlusher.OP_INSERT
+            enqueue(outboxOp(Tables.CAL_BLOCKS, b.id, op, DbRowCodec.encodeCalBlock(b).toString(), dependsOn))
+            MintOutcome.INSERTED
+        }
+        if (!outcome.queued && expected) mirrorGate.forget(b.id)
+        if (outcome.queued) {
+            // A push already queued for this id belonged to the row before this
+            // insert: after an IGNORED outcome it would stamp this device's copy over
+            // another device's row. The insert's outcome pushes it instead.
+            googleMirror.dropQueuedPush(b.id)
+            runCatching { onEnqueue?.invoke() }
+        }
+        return outcome
+    }
+
+    /** The Google push's write-back: the new event id and connection go onto the
+     *  row as it is NOW, in one transaction — the two mapping columns only, never
+     *  the pushed copy (an edit made during the Google call survives). Queued as a
+     *  plain upsert of that current row. Refused for a row that is gone, or that
+     *  has an unresolved insert (rule G: it was deleted and minted again, or a
+     *  user's mint retimed it, during the Google call). Parity with iOS build 85. */
+    suspend fun stampCalBlockMapping(id: String, eventId: String?, connectionId: String?): MappingStamp {
+        val result = store.transaction {
+            val row = getOne(Tables.CAL_BLOCKS, id, CalBlock.serializer()) ?: return@transaction MappingStamp.GONE
+            // A row whose newest queued op is its delete is going: a stale realtime
+            // echo can put it back for a moment, and a stamp queued behind the delete
+            // would re-create it on the server.
+            if (isBeingDeleted(Tables.CAL_BLOCKS, id)) return@transaction MappingStamp.GONE
+            if (row.kind == CalBlockKind.EXTERNAL || id.startsWith("g_")) return@transaction MappingStamp.UNCHANGED
+            if (hasInsertFamilyOp(Tables.CAL_BLOCKS, id)) return@transaction MappingStamp.INSERT_UNRESOLVED
+            if (row.externalEventId == eventId && row.externalConnectionId == connectionId) return@transaction MappingStamp.UNCHANGED
+            val next = asciiDateTime(row.copy(externalEventId = eventId, externalConnectionId = connectionId, durationMinutes = clampDurationMin(row.durationMinutes)))
+            upsert(Tables.CAL_BLOCKS, next, CalBlock.serializer(), next.id)
+            enqueue(outboxOp(Tables.CAL_BLOCKS, id, "upsert", DbRowCodec.encodeCalBlock(next).toString(), blockParent(next)))
+            MappingStamp.STAMPED
+        }
+        if (result == MappingStamp.STAMPED) runCatching { onEnqueue?.invoke() }
+        return result
+    }
+
+    /** The server confirmed a mint whose Google push waited on it (rule G): push it
+     *  once, from the row as it is then. */
+    fun queueConfirmedMirror(id: String) = googleMirror.queueConfirmed(id)
+
+    /** Returns once every queued Google call has run. The push used to run inside
+     *  [upsertCalBlock]; since stage 2 it runs on the Google worker after the write
+     *  returns, so a caller that must finish it before letting go (a shade action in
+     *  its goAsync window, the background sync worker) waits here — bounded by the
+     *  caller (stage 2 review, Ahmad 2026-09-23). */
+    suspend fun awaitGoogleIdle() = googleMirror.awaitIdle()
+
+    /** Sign-out: no mirror is owed to the previous account, and nothing queued for
+     *  it goes to Google. */
+    suspend fun resetMirrors() {
+        mirrorGate.reset()
+        googleMirror.reset()
+    }
+
+    /** The parent task a cal_block op waits for (FK), when it is a real task id. */
+    private fun blockParent(b: CalBlock): String? = b.taskId?.let { if (isUuid(it)) it else null }
 
     /** Date and start time in ASCII digits whatever wrote them: in the phone's own
      *  digits the block never matched a day here and the server refused it, so it
@@ -277,19 +447,30 @@ class WriteThrough(private val store: LocalStore) {
 
     suspend fun deleteTask(id: String) = deleteLocalAndEnqueue(Tables.TASKS, id)
     suspend fun deleteCalBlock(id: String) {
-        // Read the block first so we can push the Google delete (needs its event id).
-        // Skip the read for g_ (external) ids — those are never pushed.
-        val block = if (!id.startsWith("g_")) store.blocks().first().firstOrNull { it.id == id } else null
-        store.delete(Tables.CAL_BLOCKS, id)
-        if (!id.startsWith("g_")) {
-            // Cancel any still-queued upsert for this block first. A cal_block upsert
-            // carries dependsOn=task.id, so it can be held back while the delete (no
-            // dependsOn) flushes ahead of it — which would re-create the block on the
-            // server AFTER the delete. Drop the stale upsert so the row stays deleted.
-            cancelPendingUpserts(Tables.CAL_BLOCKS, id)
-            enqueue(Tables.CAL_BLOCKS, id, "delete", null) // external rows aren't ours
+        // External rows (g_) aren't ours: local only, never queued or pushed.
+        if (id.startsWith("g_")) {
+            store.delete(Tables.CAL_BLOCKS, id)
+            return
         }
-        block?.let { pushCalBlockDelete?.invoke(it) }
+        // The read (for the Google delete, which needs the event id), the row delete,
+        // the cancel of its queued writes and the delete op are ONE transaction, so a
+        // mint's check-then-insert ([insertCalBlockIfAbsent]) lands wholly before or
+        // after it (stage 2). The cancel covers a queued MINT too: a cal_block write
+        // carries dependsOn=task.id, so it can be held back while the delete (no
+        // dependsOn) flushes ahead of it — which would re-create the block on the
+        // server AFTER the delete.
+        val block = store.transaction {
+            val b = getOne(Tables.CAL_BLOCKS, id, CalBlock.serializer())
+            delete(Tables.CAL_BLOCKS, id)
+            for (op in pending()) {
+                if (op.recordTable == Tables.CAL_BLOCKS && op.recordId == id && OutboxFlusher.isRowWrite(op.op)) dequeue(op.seq)
+            }
+            enqueue(outboxOp(Tables.CAL_BLOCKS, id, "delete", null))
+            b
+        }
+        runCatching { onEnqueue?.invoke() }
+        mirrorGate.forget(id)   // its cancelled insert will never resolve
+        block?.let { googleMirror.requestDelete(it) }
     }
     suspend fun deleteTag(id: String) = deleteLocalAndEnqueue(Tables.TAGS, id)
     suspend fun deleteLifeArea(id: String) = deleteLocalAndEnqueue(Tables.LIFE_AREAS, id)
@@ -312,7 +493,7 @@ class WriteThrough(private val store: LocalStore) {
         store.transaction {
             delete(table, id)
             for (op in pending()) {
-                if (op.recordTable == table && op.recordId == id && op.op == "upsert") dequeue(op.seq)
+                if (op.recordTable == table && op.recordId == id && OutboxFlusher.isRowWrite(op.op)) dequeue(op.seq)
             }
             enqueue(outboxOp(table, id, "delete", null))
         }
@@ -320,10 +501,11 @@ class WriteThrough(private val store: LocalStore) {
     }
 
     /** Drop any queued upsert ops for a row about to be deleted, so a held-back
-     *  upsert can't resurrect it on the server after the delete flushes. */
+     *  upsert can't resurrect it on the server after the delete flushes. A queued
+     *  mint (stage 2) is a row write too. */
     private suspend fun cancelPendingUpserts(table: String, id: String) {
         store.pending()
-            .filter { it.recordTable == table && it.recordId == id && it.op == "upsert" }
+            .filter { it.recordTable == table && it.recordId == id && OutboxFlusher.isRowWrite(it.op) }
             .forEach { store.dequeue(it.seq) }
     }
 

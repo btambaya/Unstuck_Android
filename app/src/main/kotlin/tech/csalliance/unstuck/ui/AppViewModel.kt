@@ -686,14 +686,19 @@ class AppViewModel(
             val startDate = start?.date?.split("-")?.mapNotNull { it.toIntOrNull() }?.takeIf { it.size == 3 }
                 ?.let { tech.csalliance.unstuck.core.time.Time.civil(it[0], it[1], it[2]) }
                 ?: tech.csalliance.unstuck.core.time.Time.startOfDayMillis(nowMs())
+            // This month's occurrence moved later off a series day that has passed
+            // stays (see RecurrenceStart.keepId) — it goes INTO the plan as kept, so
+            // rule B can't move it either (stage 2).
             val plan = tech.csalliance.unstuck.core.logic.regenerateForTask(
                 updated, recurrence, existing, today, start?.startTime ?: "09:00", startDate,
                 start?.horizonDays ?: tech.csalliance.unstuck.core.logic.RECURRENCE_HORIZON_DAYS,
+                keepIds = setOfNotNull(start?.keepId),
             )
-            // This month's occurrence moved later off a series day that has passed
-            // stays (see RecurrenceStart.keepId).
-            plan.toDelete.filter { it != start?.keepId }.forEach { write?.deleteCalBlock(it) }
-            plan.toUpsert.forEach { write?.upsertCalBlock(it) }
+            // The lists are disjoint (stage 2, "same id for same day", Ahmad
+            // 2026-09-23): rewrites are plain saves, new occurrences are MINTS —
+            // insert-if-absent with rule H, never over another device's row, and
+            // mirrored to Google once the server confirms them.
+            writeSeriesPlan(plan)
             // A done task made to repeat keeps the day it was done ticked, on that day's
             // occurrence — else it came back open in Today, or overdue in Backlog.
             occurrencesCarryingTaskDone(base, recurrence, existing, today, now).forEach { write?.upsertCalBlock(it) }
@@ -759,25 +764,21 @@ class AppViewModel(
             val parts = date.split("-").mapNotNull { it.toIntOrNull() }
             val startDate = if (parts.size == 3) tech.csalliance.unstuck.core.time.Time.civil(parts[0], parts[1], parts[2])
             else tech.csalliance.unstuck.core.time.Time.startOfDayMillis(nowMs())
-            val plan = tech.csalliance.unstuck.core.logic.regenerateForTask(task, recurrence, blocks.value, today, startTime, startDate)
-            plan.toDelete.forEach { write?.deleteCalBlock(it) }
-            plan.toUpsert.forEach { write?.upsertCalBlock(it) }
+            val regen = tech.csalliance.unstuck.core.logic.regenerateForTask(task, recurrence, blocks.value, today, startTime, startDate)
             // Guarantee the user's CHOSEN slot is materialized. The horizon regen skips
             // the chosen date when it's today or off-pattern (e.g. a Tue pick on a
             // Mon/Wed/Fri weekly), so without this the task vanishes from that date —
             // despite the "Scheduled" confirmation. Decided POST-plan (a block the plan
-            // is about to delete must not count) by recurrenceChosenDateAction: an open
-            // occurrence at another time (today's — regenerate never touches it) is
-            // moved, a skipped one is moved and un-skipped, and a done one leaves the
-            // day alone. "Any block on the day covers it" left today at its old time
-            // and a skipped day hidden (parity with iOS build 81, audit 2026-09-22 C7).
-            when (val action = tech.csalliance.unstuck.core.logic.recurrenceChosenDateAction(existing, plan, date, startTime)) {
-                tech.csalliance.unstuck.core.logic.ChosenDateAction.Covered -> Unit
-                is tech.csalliance.unstuck.core.logic.ChosenDateAction.Retime ->
-                    write?.upsertCalBlock(action.block.copy(startTime = startTime, skipped = false))
-                tech.csalliance.unstuck.core.logic.ChosenDateAction.Mint ->
-                    write?.upsertCalBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = startTime, durationMinutes = tech.csalliance.unstuck.core.logic.clampDurationMin(task.estimateMin), date = date, kind = CalBlockKind.TASK))
-            }
+            // is about to delete or move must not count) by recurrenceChosenDateWrite:
+            // an open occurrence at another time (today's — regenerate never touches
+            // it) is moved, a skipped one is moved and un-skipped, a done one leaves
+            // the day alone (parity with iOS build 81, audit 2026-09-22 C7), and an
+            // empty day gets its deterministic occurrence — or a block of its own when
+            // that id lives on elsewhere (§3b′, stage 2, parity with iOS build 85).
+            // Computed before any of the plan's writes go out; the four are disjoint.
+            val (plan, chosen) = tech.csalliance.unstuck.core.logic.recurrenceChosenDateWrite(task, existing, regen, date, startTime)
+            writeSeriesPlan(plan)
+            writeChosenDay(chosen, task, date, startTime)
             // Only count a "move" if the series' next occurrence actually changed —
             // re-tapping Schedule at the same date/time shouldn't inflate moveCount +
             // falsely trip the slip detector. Compared with recurrenceAnchor, not the
@@ -795,6 +796,42 @@ class AppViewModel(
                 }
             } else {
                 write?.upsertCalBlock(CalBlock(id = newUuid(), taskId = task.id, taskName = task.name, startTime = startTime, durationMinutes = tech.csalliance.unstuck.core.logic.clampDurationMin(task.estimateMin), date = date, kind = CalBlockKind.TASK))
+            }
+        }
+    }
+
+    /** A series plan's writes (stage 2, "same id for same day", Ahmad 2026-09-23).
+     *  Its lists are disjoint, so the order is free: deletes, in-place rewrites
+     *  (plain saves), then the new occurrences as MINTS — insert-if-absent with
+     *  rule H (a user's edit), never over a row with the id. */
+    private suspend fun writeSeriesPlan(plan: tech.csalliance.unstuck.core.logic.RegenPlan) {
+        val w = write ?: return
+        plan.toDelete.forEach { w.deleteCalBlock(it) }
+        plan.toRetime.forEach { w.upsertCalBlock(it) }
+        plan.toUpsert.forEach { w.insertCalBlockIfAbsent(it, retimeIfTaken = true) }
+    }
+
+    /** The chosen day's write. A mint whose id turned out to be taken by the time it
+     *  was written — the row appeared after the plan read the blocks (a top-up,
+     *  another device's occurrence) and it is not that day's open occurrence (the
+     *  local rule-H retime covers that one) — is decided again from the store as it
+     *  is now: the user asked for THIS day, so it still gets its block (parity with
+     *  iOS build 85's writeChosenDay, stage 2 review). */
+    private suspend fun writeChosenDay(chosen: tech.csalliance.unstuck.core.logic.ChosenDateWrite, task: TaskItem, date: String, startTime: String) {
+        val w = write ?: return
+        when (chosen) {
+            tech.csalliance.unstuck.core.logic.ChosenDateWrite.None -> Unit
+            is tech.csalliance.unstuck.core.logic.ChosenDateWrite.Upsert -> w.upsertCalBlock(chosen.block)
+            is tech.csalliance.unstuck.core.logic.ChosenDateWrite.Insert -> {
+                if (w.insertCalBlockIfAbsent(chosen.block, retimeIfTaken = true) != tech.csalliance.unstuck.sync.WriteThrough.MintOutcome.HELD) return
+                val now = store.snapshot(Tables.CAL_BLOCKS, CalBlock.serializer())
+                    .filter { it.taskId == task.id && tech.csalliance.unstuck.core.logic.isTaskBlock(it) }
+                val empty = tech.csalliance.unstuck.core.logic.RegenPlan(emptyList(), emptyList())
+                when (val again = tech.csalliance.unstuck.core.logic.recurrenceChosenDateWrite(task, now, empty, date, startTime).second) {
+                    tech.csalliance.unstuck.core.logic.ChosenDateWrite.None -> Unit
+                    is tech.csalliance.unstuck.core.logic.ChosenDateWrite.Upsert -> w.upsertCalBlock(again.block)
+                    is tech.csalliance.unstuck.core.logic.ChosenDateWrite.Insert -> w.insertCalBlockIfAbsent(again.block, retimeIfTaken = true)
+                }
             }
         }
     }
@@ -3476,6 +3513,9 @@ class AppViewModel(
 
     private suspend fun applyGatewayWrites(api: AssistantApi, w: GatewayWrites) {
         for (b in w.blocks) api.upsertBlock(b)
+        // A series' first placement: its deterministic occurrence, minted
+        // insert-if-absent with rule H (stage 2).
+        for (b in w.inserts) api.insertBlockIfAbsent(b, retimeIfTaken = true)
         for (t in w.tasks) api.upsertTask(t)
     }
 
@@ -4676,6 +4716,16 @@ class AppViewModel(
                     hydrateAssistantPrefs(uid)
                     runCatching { reconcileOnboarded(uid, afterPull = true) }
                 }
+            }
+            // The recurrence horizon top-up (stage 2 — "same id for same day", Ahmad
+            // 2026-09-23; parity with iOS build 85 and web): after every completed
+            // pull, extend each repeating task's tail with its deterministic ids —
+            // before this, a series last edited on Android ran out 8 weeks later. The
+            // coordinator's gate decides whether this pull allows it (its cal_blocks
+            // read succeeded and was complete, once per local day); launched, so a
+            // run never holds up the reconciliations above.
+            viewModelScope.launch {
+                c.hydrated.collect { launch { runCatching { c.topUpRecurrenceHorizon() } } }
             }
         }
     }

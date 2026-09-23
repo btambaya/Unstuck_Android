@@ -55,8 +55,12 @@ interface RecordDao {
 
     /** Ids in [table] with a queued outbox UPSERT — read INSIDE the replace
      *  transaction so a write landing between "read pending" and "wipe + insert"
-     *  can't be dropped (the TOCTOU the non-transactional hydrate had). */
-    @Query("SELECT recordId FROM outbox WHERE recordTable = :table AND op = 'upsert'")
+     *  can't be dropped (the TOCTOU the non-transactional hydrate had). A queued
+     *  MINT (`insert` / `insert_or_retime`, stage 2 — deterministic occurrence
+     *  ids, Ahmad 2026-09-23) is a pending write too: a pull between the mint and
+     *  its flush must keep the minted row, and the deletion reconcile must not
+     *  sweep it. */
+    @Query("SELECT recordId FROM outbox WHERE recordTable = :table AND op IN ('upsert', 'insert', 'insert_or_retime')")
     suspend fun pendingUpsertIds(table: String): List<String>
 
     /** Ids in [table] with a queued outbox DELETE: the server still has the row
@@ -135,9 +139,27 @@ interface OutboxDao {
     suspend fun clear()
 
     /** The newest queued upsert for one row (its `base` is the state every later
-     *  edit of that row still measures against). */
-    @Query("SELECT * FROM outbox WHERE recordTable = :table AND recordId = :id AND op = 'upsert' ORDER BY seq DESC LIMIT 1")
+     *  edit of that row still measures against). A queued mint (`insert` /
+     *  `insert_or_retime`, stage 2) counts, so the catch-up never lays the
+     *  server's copy over a row whose insert hasn't landed; only cal_blocks ever
+     *  queue one, and no one reads a cal_blocks op's base. */
+    @Query("SELECT * FROM outbox WHERE recordTable = :table AND recordId = :id AND op IN ('upsert', 'insert', 'insert_or_retime') ORDER BY seq DESC LIMIT 1")
     suspend fun latestUpsert(table: String, id: String): OutboxEntity?
+
+    /** Does that row have a queued MINT (`insert` / `insert_or_retime`)? Rule G
+     *  of the deterministic occurrence ids (stage 2, Ahmad 2026-09-23): while it
+     *  is unresolved, nothing of the row may be pushed to Google. */
+    @Query("SELECT COUNT(*) FROM outbox WHERE recordTable = :table AND recordId = :id AND op IN ('insert', 'insert_or_retime')")
+    suspend fun insertFamilyCount(table: String, id: String): Int
+
+    /** The kind of the row's newest queued op ("delete" = the row is going), or
+     *  null when nothing is queued for it. */
+    @Query("SELECT op FROM outbox WHERE recordTable = :table AND recordId = :id ORDER BY seq DESC LIMIT 1")
+    suspend fun latestOp(table: String, id: String): String?
+
+    /** Any queued op for that row (upsert, mint, delete, rpc). */
+    @Query("SELECT COUNT(*) FROM outbox WHERE recordTable = :table AND recordId = :id")
+    suspend fun pendingOpCount(table: String, id: String): Int
 
     /** Does this device have a queued DELETE for that row? The catch-up pull
      *  asks before applying a server row: the server still has it (our delete

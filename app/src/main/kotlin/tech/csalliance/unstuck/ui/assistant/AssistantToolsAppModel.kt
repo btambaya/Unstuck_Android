@@ -67,6 +67,15 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
     override suspend fun notifyTaskReopenedIfShared(t: TaskItem) { vm.notifyTaskReopenedIfShared(t) }
     override suspend fun notifyTaskCompletedIfShared(t: TaskItem) { vm.notifyTaskDoneIfShared(t) }
     override suspend fun upsertBlock(b: CalBlock) { write?.upsertCalBlock(b) ?: store.upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id) }
+    /** The mint path the UI takes (WriteThrough.insertCalBlockIfAbsent): never over
+     *  a row with the id; rule H for the user's own day; its Google push waits for
+     *  the server's answer (stage 2). */
+    override suspend fun insertBlockIfAbsent(b: CalBlock, retimeIfTaken: Boolean): Boolean {
+        write?.let { return it.insertCalBlockIfAbsent(b, retimeIfTaken).landed }
+        if (store.getOne(Tables.CAL_BLOCKS, b.id, CalBlock.serializer()) != null) return false
+        store.upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id)
+        return true
+    }
     override suspend fun deleteBlock(id: String) { write?.deleteCalBlock(id) ?: store.delete(Tables.CAL_BLOCKS, id) }
     /** The per-task lead lives in device prefs (reminders fire from on-device
      *  alarms) — the same store the task sheet's "Remind me" chips write. */

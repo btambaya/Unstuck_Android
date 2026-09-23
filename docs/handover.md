@@ -4,6 +4,20 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
+## 2026-09-23 (night) — vc104 / 0.5.20: sign-up links that open the app; "account already exists"
+
+- **vc104** (34e7752, Firebase release 1q9mvhh7qgcn8, 2 testers): signUpWith(Email) and signInWith(OTP) pass
+  `redirectUrl = "unstuck://auth-confirm"` (AuthService.EMAIL_LINK_REDIRECT); reset + Google keep the client default
+  `unstuck://auth-callback`. A new `autoVerify="true"` intent-filter claims https://unstucknow.io/auth/app-confirm (assetlinks.json
+  live, Google's DAL API lists io.unstucknow.app); MainActivity verifies with `verifyEmailOtp(type, tokenHash)` once per link.
+  Prod templates 01/02 send `/auth/app-confirm/?token_hash=…` only for that redirect (older builds keep Supabase's own link).
+- **Play launch TODO:** add the Play App Signing cert's SHA-256 to unstuck/public/.well-known/assetlinks.json, or Play installs
+  open the web page instead of the app.
+- **Already registered:** a sign-up whose user has `identities: []` now shows "An account with this email already exists. Sign in
+  instead." with Sign in instead / Forgot password? (a 422 user_already_exists is treated the same).
+- **Device test:** sign up in vc104 with a real inbox → tap the email on the phone → app opens signed in; open the same kind of
+  email on a computer → the web page says confirmed / open the app; sign up again with that email → the "already exists" notice.
+
 ## 2026-09-23 (evening) — vc102 / 0.5.18 (list-item gestures + reconnect card) and vc103 / 0.5.19 (stage 2: same id for same day)
 
 - **vc102** (c10d689, parity with iOS build 84): collection items use one gesture per job — TAP strikes out, SWIPE LEFT Delete,

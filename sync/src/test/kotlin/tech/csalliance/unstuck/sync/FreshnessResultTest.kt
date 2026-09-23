@@ -33,17 +33,21 @@ class FreshnessResultTest {
         log = {},
     )
 
+    /** The first pull of a launch is a full hydrate (A11, andfix/sync); these
+     *  cases are about the catch-up pull after it, so each warms the owner up. */
+    private suspend fun FreshnessOwner.warm(): FreshnessOwner { assertTrue(requestAndWait(FreshnessTrigger.WORKER)); return this }
+
     @Test fun `a clean pull reports success`() = runTest {
         assertTrue(owner().requestAndWait(FreshnessTrigger.WORKER))
     }
 
     @Test fun `a pull that threw reports failure`() = runTest {
-        assertFalse(owner(catchUp = { _, _ -> throw java.io.IOException("offline") }).requestAndWait(FreshnessTrigger.WORKER))
+        assertFalse(owner(catchUp = { _, _ -> throw java.io.IOException("offline") }).warm().requestAndWait(FreshnessTrigger.WORKER))
     }
 
     @Test fun `a pull that could not run or lost a table reports failure`() = runTest {
-        assertFalse(owner(catchUp = { _, _ -> null }).requestAndWait(FreshnessTrigger.WORKER))
-        assertFalse(owner(catchUp = { _, _ -> CatchUpOutcome(failed = setOf("tasks")) }).requestAndWait(FreshnessTrigger.WORKER))
+        assertFalse(owner(catchUp = { _, _ -> null }).warm().requestAndWait(FreshnessTrigger.WORKER))
+        assertFalse(owner(catchUp = { _, _ -> CatchUpOutcome(failed = setOf("tasks")) }).warm().requestAndWait(FreshnessTrigger.WORKER))
     }
 
     @Test fun `nobody signed in is not a successful pull`() = runTest {
@@ -54,7 +58,7 @@ class FreshnessResultTest {
 
     @Test fun `the pull waits for the session to be established, then runs`() = runTest {
         var pulls = 0
-        val o = owner(user = { delay(1_200); "u1" }, onCatchUp = { pulls++ })
+        val o = owner(user = { delay(1_200); "u1" }, onCatchUp = { pulls++ }).warm()
         assertTrue(o.requestAndWait(FreshnessTrigger.NETWORK))
         assertEquals(1, pulls)
     }
@@ -93,6 +97,7 @@ class FreshnessResultTest {
         val o = owner(catchUp = caughtUpRemoteEdits, onRebuild = { rebuilds++ })
         o.onVisible(); runCurrent()
         o.reset()
+        o.warm()   // reset() forgets the hydrate too: the next account starts with one
         val before = rebuilds
         o.requestAndWait(FreshnessTrigger.NETWORK)
         assertEquals(before + 1, rebuilds)

@@ -24,6 +24,7 @@ import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.model.isRecurringSeriesRefusal
 import tech.csalliance.unstuck.core.model.shareCanTickDone
 import tech.csalliance.unstuck.core.model.shareTickErrorText
 
@@ -264,6 +265,9 @@ class SeriesCompletionTest {
             shareTickErrorText("""{"code":"P0001","message":"recurring_series"}"""))
         assertEquals("Couldn't update this task — try again.", shareTickErrorText("not_allowed"))
         assertEquals("Couldn't update this task — try again.", shareTickErrorText(null))
+        assertTrue(isRecurringSeriesRefusal("""{"code":"P0001","message":"recurring_series"}"""))
+        assertFalse(isRecurringSeriesRefusal("not_configured"))
+        assertFalse(isRecurringSeriesRefusal(null))
     }
 
     // ── receipts ────────────────────────────────────────────────────────────

@@ -609,7 +609,9 @@ fun MainScaffold(vm: AppViewModel) {
                     Route.Palette -> tech.csalliance.unstuck.ui.palette.CommandPalette(
                         vm,
                         onDismiss = ::pop,
-                        onOpenTask = { pop(); push(Route.Detail(it.id)) },
+                        // A series opens on the day's occurrence, as the bell and Inbox do (parity
+                        // with iOS build 81's palette acting on the day's row, audit 2026-09-22 C3).
+                        onOpenTask = { pop(); openTaskRow(it.id) },
                         onTab = { tab = it; stack.clear() },
                         onSettings = { stack.clear(); push(Route.Settings) },
                     )

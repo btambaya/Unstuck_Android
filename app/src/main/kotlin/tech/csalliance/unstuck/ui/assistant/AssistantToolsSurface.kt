@@ -17,6 +17,7 @@ import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.CaptureTag
 import tech.csalliance.unstuck.core.model.Priority
+import tech.csalliance.unstuck.core.model.isRecurringSeriesRefusal
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.model.TaskListView
 
@@ -154,7 +155,7 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             val tasks = api.getTasks()
             val blocks = api.getBlocks()
             val words = q.split(Regex("\\s+")).filter { it.isNotEmpty() }
-            val pool = (scratch.newTasks.values.toList() + tasks).distinctBy { it.id }.filter { includeDone || !it.done }
+            val pool = storeFirst(tasks, scratch).filter { includeDone || !it.done }
             val hits = pool
                 .filter { t -> val n = t.name.lowercase(); n.contains(q) || words.all { w -> n.contains(w) } }
                 .sortedWith(compareBy({ !it.name.lowercase().contains(q) }, { it.name.lowercase() }))
@@ -319,10 +320,16 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
                 // A task deleted elsewhere mid-session: the minutes are logged, nothing
                 // is marked (audit 2026-09-22 C5).
                 t == null && live.sharedTitle == null -> ""
-                // A repeating share is never ticked by its recipient — the server
-                // refuses it — so the finish must not claim one (parity with iOS
-                // build 81, audit 2026-09-22 C3).
-                t == null && !api.sharedTaskAllowsTick(live.taskId) -> ", the task stays open (only its owner ticks off a repeating task)"
+                // A task shared WITH the user: say what the owner's row got. A
+                // repeating share is never ticked by its recipient — the server
+                // refuses it — and a failed tick is no tick either (parity with iOS
+                // build 81, audit 2026-09-22 C3, SC-12).
+                t == null -> when (val why = api.sharedFinishRefusal(live.taskId)) {
+                    null -> ", task marked done"
+                    else ->
+                        if (isRecurringSeriesRefusal(why)) ", the task stays open (only its owner ticks off a repeating task)"
+                        else ", the task stays open (the tick didn't go through — the user can tick it in Shared with you)"
+                }
                 else -> ", task marked done"
             }
             "ok: finished focus on \"$nm\" — logged ${mins}m$done"

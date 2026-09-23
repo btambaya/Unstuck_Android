@@ -115,8 +115,8 @@ class AssistantToolsTest {
         /** collection-task-done sends, as "collectionId:itemId" (audit 2026-09-22 C6). */
         val completedShared = ArrayList<String>()
         val reopenedShared = ArrayList<String>()
-        /** taskId → may the user tick this task shared WITH them (unset = true). */
-        val sharedTickAllowed = HashMap<String, Boolean>()
+        /** taskId → why a shared finish did NOT tick the owner's task (unset = it did). */
+        val sharedFinishRefusal = HashMap<String, String>()
     }
 
     inner class FakeApi(val state: FakeState = FakeState()) : AssistantApi {
@@ -140,7 +140,7 @@ class AssistantToolsTest {
         override suspend fun notifyTaskCompletedIfShared(t: TaskItem) {
             if (t.sourceCollectionId != null && t.sourceItemId != null) state.completedShared += "${t.sourceCollectionId}:${t.sourceItemId}"
         }
-        override fun sharedTaskAllowsTick(taskId: String): Boolean = state.sharedTickAllowed[taskId] ?: true
+        override fun sharedFinishRefusal(taskId: String): String? = state.sharedFinishRefusal[taskId]
         override suspend fun upsertBlock(b: CalBlock) { val i = state.blocks.indexOfFirst { it.id == b.id }; if (i >= 0) state.blocks[i] = b else state.blocks += b }
         override suspend fun deleteBlock(id: String) { state.blocks.removeAll { it.id == id } }
         override fun getTaskReminder(taskId: String): Int? = state.reminders[taskId]
@@ -1824,10 +1824,34 @@ class AssistantToolsTest {
     /** A repeating share is never ticked by its recipient ('recurring_series',
      *  075 §1): the finish must not claim one (C3 / SC-12). */
     @Test fun `finish_focus on a repeating share does not claim a tick`() = runTest {
-        val h = makeApi { live = liveSession("sh1").copy(sharedTitle = "Gym"); sharedTickAllowed["sh1"] = false }
+        val h = makeApi { live = liveSession("sh1").copy(sharedTitle = "Gym"); sharedFinishRefusal["sh1"] = "recurring_series" }
         assertEquals("ok: finished focus on \"Gym\" — logged 5m, the task stays open (only its owner ticks off a repeating task)",
             h.run("finish_focus", "markDone" to true))
         val plain = makeApi { live = liveSession("sh2").copy(sharedTitle = "Report") }
         assertEquals("ok: finished focus on \"Report\" — logged 5m, task marked done", plain.run("finish_focus", "markDone" to true))
+    }
+
+    /** The share list the pre-check reads is empty while no screen collects it (a
+     *  call with the app in the background): the reply follows what the server did
+     *  with the tick, not that guess (SC-12). */
+    @Test fun `finish_focus on a share whose tick did not land does not claim it`() = runTest {
+        val h = makeApi { live = liveSession("sh1").copy(sharedTitle = "Gym"); sharedFinishRefusal["sh1"] = "{\"code\":\"P0001\",\"message\":\"recurring_series\"}" }
+        assertEquals("ok: finished focus on \"Gym\" — logged 5m, the task stays open (only its owner ticks off a repeating task)",
+            h.run("finish_focus", "markDone" to true))
+        val offline = makeApi { live = liveSession("sh2").copy(sharedTitle = "Report"); sharedFinishRefusal["sh2"] = "timeout" }
+        assertEquals("ok: finished focus on \"Report\" — logged 5m, the task stays open (the tick didn't go through — the user can tick it in Shared with you)",
+            offline.run("finish_focus", "markDone" to true))
+    }
+
+    /** find_tasks after finish_focus in the same Talk session: the stored row is
+     *  done, the session's scratch copy is not (audit 2026-09-22 C5). */
+    @Test fun `find_tasks reads the committed row, not a stale scratch copy`() = runTest {
+        val h = makeApi()
+        val id = Regex("id=(\\S+) ").find(h.run("create_task", "name" to "Call mom"))!!.groupValues[1]
+        h.state.live = liveSession(id)
+        assertTrue(h.run("finish_focus", "markDone" to true).endsWith("task marked done"))
+        assertEquals("ok: no open task matches \"call mom\" — includeDone=true searches finished ones too",
+            h.run("find_tasks", "query" to "call mom"))
+        assertTrue(h.run("find_tasks", "query" to "call mom", "includeDone" to true).startsWith("ok: 1 match for \"call mom\""))
     }
 }

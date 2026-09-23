@@ -132,6 +132,15 @@ suspend fun findTask(id: String?, api: AssistantApi, scratch: TurnScratch): Task
     return scratch.newTasks[id]
 }
 
+/** [findTask]'s rule for a whole list: the committed rows, plus scratch only for
+ *  the ids the store lacks — a stale scratch copy (done=false after finish_focus
+ *  completed it) listed a finished task as still open (parity with iOS build 81
+ *  find_tasks, audit 2026-09-22 C5). */
+fun storeFirst(stored: List<TaskItem>, scratch: TurnScratch): List<TaskItem> {
+    val ids = stored.mapTo(HashSet()) { it.id }
+    return stored + scratch.newTasks.values.filter { it.id !in ids }
+}
+
 suspend fun findList(id: String?, api: AssistantApi, scratch: TurnScratch): ItemCollection? {
     if (id == null) return null
     scratch.newLists[id]?.let { return it }
@@ -662,7 +671,7 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             val res = resolveShareRequest(
                 taskId = args.str("taskId"), taskName = args.str("taskName"),
                 person = args.str("person"), level = args.str("level"),
-                tasks = scratch.newTasks.values.toList() + api.getTasks(), people = api.getShareCandidates(), newId = ::newUuid,
+                tasks = storeFirst(api.getTasks(), scratch), people = api.getShareCandidates(), newId = ::newUuid,
             )
             res.pending?.let { api.stageShare(it) }
             res.message
@@ -935,6 +944,6 @@ private suspend fun updateCall(args: ToolArgs, api: AssistantApi, store: Assista
 private suspend fun getCalls(api: AssistantApi, scratch: TurnScratch, store: AssistantCallStore): String {
     val rows = store.liveCalls().sortedBy { it.callAtMs ?: Long.MAX_VALUE }
     if (rows.isEmpty()) return "ok: no calls booked"
-    val tasks = scratch.newTasks.values.toList() + api.getTasks()
+    val tasks = storeFirst(api.getTasks(), scratch)
     return CallToolLogic.formatCalls(rows, taskName = { id -> tasks.firstOrNull { it.id == id }?.name })
 }

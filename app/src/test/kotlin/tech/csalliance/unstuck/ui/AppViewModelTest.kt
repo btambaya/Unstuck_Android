@@ -503,6 +503,21 @@ class AppViewModelTest {
         assertTrue("an unknown share still falls back to the level check", vm.sharedTaskAllowsTick("owners-task"))
     }
 
+    @Test fun finishFocus_aSharedTickThatDidNotLand_isReportedToTheCaller() = runTest(dispatcher) {
+        // The assistant words finish_focus off this. The Shared-with-you list is
+        // empty here, as it is while no screen collects it (a call with the app in
+        // the background), so the pre-check lets the tick through; the RPC not
+        // taking it (no sharing client in this harness) must come back as a
+        // refusal, never read as a completion (SC-12).
+        val vm = vm()
+        store.setLiveSession(
+            LiveSession(id = "sess1", taskId = "owners-task", sessionStart = nowMs - 300_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT, sharedTitle = "Their brief", sharedLevel = "partner"),
+        )
+        var heard: String? = "unset"
+        assertTrue(vm.finishFocusNow(task("owners-task", name = "Their brief"), markDone = true) { heard = it })
+        assertEquals("not_configured", heard)
+    }
+
     // -----------------------------------------------------------------------
     // setRecurrence moves the done state across (parity with iOS build 81,
     // audit 2026-09-22 C3)
@@ -1911,6 +1926,54 @@ class AppViewModelTest {
         assertFalse("the hidden template is never flipped done", loadTask("tpl")!!.done)
     }
 
+    @Test fun startFocus_comingBackThroughTheTemplate_keepsTheSessionsOwnDay() = runTest(dispatcher) {
+        // Today's live card and the assistant's PAUSED chip hand startFocus the
+        // TEMPLATE (live.taskId). A session started on yesterday's overdue day was
+        // re-pointed at today's first open block, so Done ticked today and left
+        // yesterday overdue (parity with iOS build 81 reopenLiveFocus, audit
+        // 2026-09-22 C3).
+        val today = Clock.todayIso()
+        val template = task("tpl", name = "Meds", recurrence = Recurrence.Daily(), totalFocused = 60)
+        seedTask(template)
+        seedBlock(CalBlock(id = "occY", taskId = "tpl", taskName = "Meds", startTime = "08:00", durationMinutes = 10, date = addDaysIso(today, -1), kind = CalBlockKind.TASK))
+        seedBlock(CalBlock(id = "occT", taskId = "tpl", taskName = "Meds", startTime = "20:00", durationMinutes = 10, date = today, kind = CalBlockKind.TASK))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        store.setLiveSession(
+            LiveSession(
+                id = "sessY", taskId = "tpl", sessionStart = nowMs - 600_000L, sessionEstimateMin = 10, treatment = FocusTreatment.AMBIENT,
+                priorAccumulatedSec = 60, occurrenceBlockId = "occY", paused = true, pausedAt = nowMs - 300_000L,
+            ),
+        )
+
+        assertTrue(vm.startFocusNow(template))   // the live card's row
+        val live = store.getLiveSession()!!
+        assertEquals("same session", "sessY", live.id)
+        assertEquals("still bound to the day it was started on", "occY", live.occurrenceBlockId)
+        assertTrue("stays paused", live.paused)
+
+        assertTrue(vm.finishFocusNow(template, markDone = true))
+        assertTrue(loadBlock("occY")!!.done)
+        assertFalse("today's day is left for today", loadBlock("occT")!!.done)
+    }
+
+    @Test fun startFocus_throughTheTemplate_rePointsASessionWhoseDayIsGone() = runTest(dispatcher) {
+        // The session's own block was deleted (the series re-planned): today's open
+        // block takes over, as before.
+        val today = Clock.todayIso()
+        val template = task("tpl", name = "Meds", recurrence = Recurrence.Daily())
+        seedTask(template)
+        seedBlock(CalBlock(id = "occT", taskId = "tpl", taskName = "Meds", startTime = "20:00", durationMinutes = 10, date = today, kind = CalBlockKind.TASK))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        store.setLiveSession(
+            LiveSession(id = "sessY", taskId = "tpl", sessionStart = nowMs - 600_000L, sessionEstimateMin = 10, treatment = FocusTreatment.AMBIENT, occurrenceBlockId = "gone"),
+        )
+
+        assertTrue(vm.startFocusNow(template))
+        assertEquals("occT", store.getLiveSession()!!.occurrenceBlockId)
+    }
+
     @Test fun finishFocus_backstopsALiveSessionThatCarriesOnlyTheTemplate() = runTest(dispatcher) {
         // A session minted BEFORE that fix (or persisted across the upgrade) has no
         // occurrenceBlockId and a template taskId. Finishing it must still tick the
@@ -1980,6 +2043,25 @@ class AppViewModelTest {
         advanceUntilIdle()
         val moved = awaitTask("t1") { it.moveCount == 1 }
         assertEquals("the move bump must not resurrect the Later flag", false, moved.later)
+    }
+
+    @Test fun scheduleTask_writesOntoTheStoredRow_notTheCallersCopy() = runTest(dispatcher) {
+        // The task sheet hands over the row it had when the date dialog opened. An
+        // edit synced in while the pickers were up (a rename, focus minutes) was
+        // reverted by the move-count bump's whole-row write (parity with iOS build
+        // 81, audit 2026-09-22 C5).
+        val snapshot = task("t1", name = "Call mom")
+        seedTask(snapshot.copy(name = "Call Mum", totalFocused = 300))
+        seedBlock(CalBlock(id = "b1", taskId = "t1", taskName = "Call mom", startTime = "09:00", durationMinutes = 25, date = Clock.dateIso(nowMs + 86_400_000L), kind = CalBlockKind.TASK))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.scheduleTask(snapshot, Clock.dateIso(nowMs + 2 * 86_400_000L), "10:00")
+        advanceUntilIdle()
+
+        val moved = awaitTask("t1") { it.moveCount == 1 }
+        assertEquals("the rename made meanwhile stands", "Call Mum", moved.name)
+        assertEquals("…and so do the focus minutes", 300, moved.totalFocused)
     }
 
     @Test fun scheduleTask_leavesARecurringTemplatesLaterFlagAlone() = runTest(dispatcher) {
@@ -2142,6 +2224,33 @@ class AppViewModelTest {
         awaitPending { l -> l.count { it.recordTable == Tables.TASKS && it.op == "upsert" } >= 2 }
         advanceUntilIdle()
         assertTrue("receipt marked used", vm.assistantHistory.first().receipts!![0].undone)
+    }
+
+    @Test fun assistant_undoReopened_onATaskReTickedByHand_isUsedWithoutAWrite() = runTest(dispatcher) {
+        // "Reopened: Call mum" → the user ticked it again by hand → Undo. The target
+        // state already holds: the receipt is used up, and the real completion time
+        // is not re-stamped to now (parity with iOS build 81, audit 2026-09-22 C6).
+        val doneAt = "2026-05-21T09:00:00.000Z"
+        seedTask(task("a", "Call mum", done = true).copy(completedAt = doneAt))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks)
+        vm.assistantHistory.add(
+            tech.csalliance.unstuck.sync.ChatMessage(
+                role = "assistant", content = "Reopened it", id = "m1",
+                receipts = listOf(
+                    tech.csalliance.unstuck.core.logic.Receipt(
+                        tech.csalliance.unstuck.core.logic.ReceiptIcon.CHECK, "Reopened: Call mum",
+                        tech.csalliance.unstuck.core.logic.ReceiptUndo.completeTask("a"),
+                    ),
+                ),
+            ),
+        )
+
+        vm.undoAssistantReceipt("m1", 0)
+        awaitGateway { vm.assistantHistory.first().receipts!![0].undone }
+
+        assertEquals(doneAt, loadTask("a")!!.completedAt)
+        assertTrue("no write queued", store.pending().none { it.recordTable == Tables.TASKS })
     }
 
     // -----------------------------------------------------------------------

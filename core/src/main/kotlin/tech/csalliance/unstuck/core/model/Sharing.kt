@@ -229,10 +229,16 @@ data class SharedWithMe(
  *  (parity with iOS build 81 and web shareCanTickDone, audit 2026-09-22 C3). */
 fun shareCanTickDone(s: SharedWithMe): Boolean = s.level.canComplete && !s.recurring
 
+/** What shared_task_set_done raises for a tick on a repeating task (075 §1). */
+const val RECURRING_SERIES_REFUSAL = "recurring_series"
+
+/** Whether a refused shared tick was refused because the task repeats. */
+fun isRecurringSeriesRefusal(message: String?): Boolean = message?.contains(RECURRING_SERIES_REFUSAL) == true
+
 /** Plain words for a refused shared tick — the web's shareTickErrorText, minus
  *  the raw server code (never shown to the user). */
 fun shareTickErrorText(message: String?): String =
-    if (message?.contains("recurring_series") == true) "Only the owner can tick off a repeating task."
+    if (isRecurringSeriesRefusal(message)) "Only the owner can tick off a repeating task."
     else "Couldn't update this task — try again."
 
 /** Read-only detail for a task shared WITH me, from the shared_task_detail RPC

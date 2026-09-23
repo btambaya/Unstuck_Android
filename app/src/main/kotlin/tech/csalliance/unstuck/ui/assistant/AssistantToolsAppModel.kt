@@ -199,11 +199,14 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
         // iOS build 81, audit 2026-09-22 C5).
         val task = getTasks().firstOrNull { it.id == live.taskId }
             ?: TaskItem(id = live.taskId, name = live.sharedTitle ?: "Focus session", estimateMin = live.sessionEstimateMin, createdAt = nowIso(), updatedAt = nowIso())
-        if (!vm.finishFocusNow(task, markDone)) return false
+        sharedFinish = null
+        if (!vm.finishFocusNow(task, markDone) { refusal -> sharedFinish = live.taskId to refusal }) return false
         vm.tearDownFocusSurfaces()
         return true
     }
-    override fun sharedTaskAllowsTick(taskId: String): Boolean = vm.sharedTaskAllowsTick(taskId)
+    /** The last shared finish's tick outcome (task id → why it didn't land). */
+    private var sharedFinish: Pair<String, String?>? = null
+    override fun sharedFinishRefusal(taskId: String): String? = sharedFinish?.takeIf { it.first == taskId }?.second
     override suspend fun cancelFocus(): Boolean = vm.cancelFocusNow()
 
     // ── navigation ──

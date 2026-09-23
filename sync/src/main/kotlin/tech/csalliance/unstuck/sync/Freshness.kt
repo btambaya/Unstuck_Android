@@ -80,7 +80,8 @@ data class FreshnessState(
  *                          a backgrounded process establishes the session first
  *                          (SessionGate — Android audit 2026-09-23, A2).
  * @param runFullHydrate    the existing full server-canonical pull; returns true
- *                          when it completed. Used on first run / no cursor.
+ *                          when it completed. Used for the first pull of each
+ *                          launch and whenever there is no cursor.
  * @param runCatchUp        the cursor pull; `reconcileDeletions` asks it to also
  *                          sweep ids. Returns null when it could not run.
  * @param needsFullHydrate  "this user has no cursors yet".
@@ -120,6 +121,12 @@ class FreshnessOwner(
     @Volatile private var lastReconcileAtMs: Long = 0L
     /** Start of the current window of "visible with no realtime event". */
     @Volatile private var silenceSinceMs: Long = 0L
+    /** The user this owner (one per process) has completed a full hydrate for.
+     *  The first pull of each launch is a full server-canonical read even when
+     *  cursors survive, as on iOS (FreshnessOwner.hasHydratedThisSession): the
+     *  cursors page by stamps some writers set with their own clock, and this
+     *  bounds whatever slipped behind them (Android audit 2026-09-23, A11). */
+    @Volatile private var hydratedFor: String? = null
 
     // ── what other components report ────────────────────────────────────────
 
@@ -163,6 +170,7 @@ class FreshnessOwner(
         lastEventAtMs = 0L
         lastReconcileAtMs = 0L
         silenceSinceMs = 0L
+        hydratedFor = null
         _state.value = FreshnessState()
     }
 
@@ -211,8 +219,9 @@ class FreshnessOwner(
         val startedAt = now()
         _state.update { it.copy(pulling = true, lastPullStartedAt = startedAt, lastTrigger = trigger) }
         try {
-            if (needsFullHydrate(uid)) {
+            if (hydratedFor != uid || needsFullHydrate(uid)) {
                 val ok = runFullHydrate(uid)
+                if (ok) hydratedFor = uid
                 lastReconcileAtMs = now()   // a full replace reconciles deletions itself
                 _state.update {
                     if (ok) it.copy(pulling = false, lastSuccessAt = now(), fullHydrates = it.fullHydrates + 1)

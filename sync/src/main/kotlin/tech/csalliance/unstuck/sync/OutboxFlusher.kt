@@ -1,5 +1,7 @@
 package tech.csalliance.unstuck.sync
 
+import io.github.jan.supabase.exceptions.RestException
+import io.ktor.client.plugins.ResponseException
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -31,10 +33,11 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
      *  back (re-pull the row) and tell the user. Never throws into the drain. */
     var onRpcRejected: (suspend (op: OutboxEntity, error: RpcRejected) -> Unit)? = null
 
-    // Per-op consecutive-failure tally (keyed by outbox seq). After FAIL_CAP
-    // failures an op is QUARANTINED (dead-lettered) so it can't wedge its
-    // dependents (e.g. a cal_block whose parent task upsert keeps failing)
-    // forever. Resets on app restart, so a transient failure still gets retries.
+    // Per-op tally of SERVER REFUSALS (keyed by outbox seq). After FAIL_CAP an
+    // op is QUARANTINED (dead-lettered) so it can't wedge its dependents (e.g. a
+    // cal_block whose parent task upsert keeps being refused) forever. Offline,
+    // timeout, 5xx and auth-refresh failures never count ([classifyFailure]).
+    // Resets on app restart and when the network returns ([releaseQuarantine]).
     private val failCounts = mutableMapOf<Long, Int>()
 
     // Dead-lettered op seqs: hit FAIL_CAP, so we stop RETRYING them this session,
@@ -44,6 +47,16 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
     // evaporate the row on the following replace. In-memory, so a restart retries.
     private val deadLettered = mutableSetOf<Long>()
 
+    // Set from the network watcher's thread, applied by the next drain under the
+    // mutex (the tallies above are only touched there).
+    @Volatile private var quarantineReleased = false
+
+    /** Connectivity came back: give quarantined ops a fresh round of FAIL_CAP
+     *  tries on the next drain instead of waiting for a relaunch — a refusal
+     *  seen through a captive portal, or an FK refusal whose parent has landed
+     *  since, can succeed now (Android audit 2026-09-23, A10). */
+    fun releaseQuarantine() { quarantineReleased = true }
+
     // One drain at a time. flush() is reachable from four concurrent contexts
     // (auth handle, SyncWorker, calendar connect, sign-out); overlapping drains
     // could re-apply an older payload AFTER a newer one for the same row
@@ -51,6 +64,10 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
     private val mutex = Mutex()
 
     suspend fun flush(userId: String, currentUserId: () -> String? = { userId }) = mutex.withLock {
+        if (quarantineReleased) {
+            quarantineReleased = false
+            deadLettered.clear(); failCounts.clear()
+        }
         while (true) {
             // Bail if the signed-in user changed mid-drain (sign-out + sign-in to
             // a different account). RLS already blocks a cross-account write, but
@@ -108,7 +125,18 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
                         .onFailure { println("[outbox] rpc rollback hook failed: $it") }
                     continue
                 } catch (e: Throwable) {
-                    println("[outbox] $rowKey failed: $e")
+                    if (classifyFailure(e) == FlushFailure.TRANSIENT) {
+                        // Offline, timeout, 5xx, a 401 while the token refreshes: the
+                        // op is fine, the network isn't. Hold the row for this pass
+                        // (per-row order) and retry on the next drain. NEVER counted:
+                        // five failed drains on a train used to dead-letter a valid
+                        // write and its blocks until the process died (Android audit
+                        // 2026-09-23, A10; parity with iOS).
+                        println("[outbox] $rowKey transient failure, will retry: $e")
+                        blockedRows.add(rowKey)
+                        continue
+                    }
+                    println("[outbox] $rowKey rejected: $e")
                     false
                 }
                 if (ok) {
@@ -121,10 +149,10 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
                     if (n >= FAIL_CAP) {
                         // QUARANTINE, don't drop. The op stays in the outbox so the row
                         // it represents is still preserved across the next hydrate; we
-                        // just stop retrying it this session (a restart resets and tries
-                        // again). Dropping it here would let a transiently-failing write
-                        // evaporate the user's local row on the following replace.
-                        println("[outbox] WARNING quarantining op $rowKey after $n failures — keeping local row, will retry after restart")
+                        // just stop retrying it (a restart, or the network returning,
+                        // resets and tries again). Dropping it here would let the
+                        // user's local row evaporate on the following replace.
+                        println("[outbox] WARNING quarantining op $rowKey after $n refusals — keeping local row, will retry after restart / reconnect")
                         deadLettered.add(op.seq)
                         // Also quarantine ops that depended on this row — their FK parent
                         // isn't on the server yet, so flushing them would fail in turn.
@@ -139,6 +167,17 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
             }
             if (!progressed) break // all remaining ops errored — stop, retry later
         }
+    }
+
+    /** How a failed send counts toward FAIL_CAP ([classifyFailure]). */
+    internal enum class FlushFailure {
+        /** No definitive answer (offline, timeout, 5xx, auth refresh, rate
+         *  limit): retry on the next drain, never counted. */
+        TRANSIENT,
+        /** The server understood these exact bytes and refused them (a
+         *  PostgREST 4xx), or the payload can't even be parsed: retrying the
+         *  same op can't succeed, so it counts. */
+        REJECTED,
     }
 
     /** Dequeue a `tasks` upsert that landed, and re-base the row's edits queued
@@ -194,6 +233,27 @@ class OutboxFlusher(private val gateway: SyncRemote, private val store: LocalSto
             e.status == 404 && (e.message?.contains("PGRST202") == true || e.message?.contains("Could not find the function", ignoreCase = true) == true)
 
         private const val FAIL_CAP = 5
+
+        /** Only a DEFINITE refusal counts; anything ambiguous is transient —
+         *  retrying costs a request, miscounting cost the user's edits (parity
+         *  with iOS SyncDecision.classifyFlushFailure, Android audit 2026-09-23,
+         *  A10). supabase-kt 3.0.3 wraps every network failure in
+         *  HttpRequestException, lets HttpRequestTimeoutException (an IOException)
+         *  through, and reports a PostgREST error as a RestException carrying only
+         *  the HTTP status (not the SQLSTATE), so the status decides, as iOS does
+         *  for a non-PostgREST body. */
+        internal fun classifyFailure(e: Throwable): FlushFailure = when (e) {
+            is RestException -> if (isRefusalStatus(e.statusCode)) FlushFailure.REJECTED else FlushFailure.TRANSIENT
+            is ResponseException -> if (isRefusalStatus(e.response.status.value)) FlushFailure.REJECTED else FlushFailure.TRANSIENT
+            // A payload that won't parse (SerializationException is one) never will.
+            is IllegalArgumentException -> FlushFailure.REJECTED
+            else -> FlushFailure.TRANSIENT
+        }
+
+        /** 4xx is a refusal, except the auth-refresh / timing / rate-limit
+         *  statuses a retry can clear; 5xx is the server's problem. */
+        private fun isRefusalStatus(status: Int): Boolean =
+            status in 400..499 && status !in setOf(401, 403, 408, 425, 429)
 
         /** [row] held to the server's CHECKs on the columns this client writes
          *  (migration 001): `tasks.estimate_min between 1 and 1440`,

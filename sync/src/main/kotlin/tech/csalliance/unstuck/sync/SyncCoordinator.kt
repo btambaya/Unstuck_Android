@@ -151,9 +151,9 @@ class SyncCoordinator(
      *  socket (re)connect, channel (re)subscribe, token refresh, the 60s floor,
      *  suspected deafness, the worker, sign-in — goes through here, and nothing
      *  else schedules a pull. It decides between the cursor catch-up (normal) and
-     *  the full hydrate (first run / no cursors), coalesces overlapping triggers
-     *  into one in-flight pull, and rebuilds the subscriptions when the evidence
-     *  says the socket is deaf. */
+     *  the full hydrate (first pull of a launch / no cursors), coalesces
+     *  overlapping triggers into one in-flight pull, and rebuilds the
+     *  subscriptions when the evidence says the socket is deaf. */
     val freshness: FreshnessOwner = FreshnessOwner(
         scope = scope,
         // In the background the pull establishes the session first: the live status reads
@@ -172,8 +172,13 @@ class SyncCoordinator(
     )
 
     /** Connectivity: Android had NO network signal at all before this — a tunnel
-     *  or a wifi→cellular handover was only noticed at the next floor tick. */
-    private val networkWatcher = NetworkWatcher(context) { freshness.request(FreshnessTrigger.NETWORK) }
+     *  or a wifi→cellular handover was only noticed at the next floor tick. The
+     *  pull drains the outbox first, and a quarantined op gets another round
+     *  rather than waiting for a relaunch (Android audit 2026-09-23, A10). */
+    private val networkWatcher = NetworkWatcher(context) {
+        flusher.releaseQuarantine()
+        freshness.request(FreshnessTrigger.NETWORK)
+    }
 
     // --- Pull serialization. COALESCING now belongs to the freshness owner (it is
     // the only thing that decides a pull is needed); this mutex is the last line of

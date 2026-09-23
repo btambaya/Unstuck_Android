@@ -274,11 +274,9 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
      *  filled its lists with no members and the owner's edits would route as
      *  unshared (audit 2026-09-22 C8).
      *
-     *  It starts TRUE: a relaunch resumes from the persisted cursors with no full
-     *  hydrate, so a read that failed before the process died was never retried
-     *  until some list changed. iOS re-reads membership on every launch through
-     *  its full hydrate; here the first catch-up of a process does (one
-     *  collection_members read per launch). */
+     *  It starts TRUE, so a process whose first pull is a catch-up still re-reads
+     *  membership once; each launch's full hydrate (Android audit 2026-09-23, A11)
+     *  settles it too, as iOS's does. */
     @Volatile private var membershipUnresolved = true
 
     /** Collections + their membership. RLS returns own AND shared-with-me rows;
@@ -451,8 +449,12 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
             // shape this build can't parse) must not abort the whole table and wipe
             // every good row off the UI. Drop only the bad row.
             val rows = gateway.fetchAll(table)
-            noteServerMax(table, rows)
             val models = rows.mapNotNull { runCatching { decode(it) }.getOrNull() }
+            if (mayBeTruncated(table, rows)) {
+                store.upsertAllKeepingPending(table, models, ser, id, updatedAt)
+                return@runCatching
+            }
+            noteServerMax(table, rows)
             // keepPendingUpserts: every local row with a still-queued outbox upsert
             // survives the replace — whether or not the server also returned that id.
             // Rows NOT on the server (a transient flush failure) would otherwise vanish
@@ -462,6 +464,20 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
             // can't slip through the old read-then-replace gap.
             store.replace(table, models, ser, id, updatedAt, keepPendingUpserts = true)
         }.onFailure { println("[hydrate] $table failed, leaving local intact: $it") }
+    }
+
+    /** PostgREST cuts an unpaged select at max_rows ([SERVER_ROW_CAP]) without an
+     *  error, so a fetch that size may be only part of the table. Replacing the
+     *  table with it wiped every row past the cap, and seeding the mark from it
+     *  skipped rows that were cut. With a full hydrate at every launch that hit
+     *  each cold start, not only a sign-in (Android audit 2026-09-23, A11). Such a
+     *  fetch is merged instead, and gets no mark: the catch-up carries on from the
+     *  table's old mark (or from the start), and the id sweep drops what the
+     *  server deleted. */
+    private fun mayBeTruncated(table: String, rows: List<JsonObject>): Boolean {
+        if (rows.size < SERVER_ROW_CAP) return false
+        println("[hydrate] $table returned ${rows.size} rows, the server's cap: merged, not replaced")
+        return true
     }
 
     /** Record the newest SERVER stamp this table's fetch returned (the catch-up
@@ -483,8 +499,12 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
     private suspend fun hydrateCallRequests() {
         runCatching {
             val rows = gateway.fetchAll(Tables.CALL_REQUESTS)
-            noteServerMax(Tables.CALL_REQUESTS, rows)
             val remote = rows.mapNotNull { runCatching { DbRowCodec.decodeCallRequest(it) }.getOrNull() }
+            if (mayBeTruncated(Tables.CALL_REQUESTS, rows)) {
+                store.upsertAllKeepingPending(Tables.CALL_REQUESTS, remote, CallRequest.serializer(), { it.id }, { it.updatedAt })
+                return@runCatching
+            }
+            noteServerMax(Tables.CALL_REQUESTS, rows)
             val local = store.snapshot(Tables.CALL_REQUESTS, CallRequest.serializer())
             val merged = CallRequestsMirror.mergeHydrated(remote, local)
             store.replace(Tables.CALL_REQUESTS, merged, CallRequest.serializer(), { it.id }, { it.updatedAt }, keepPendingUpserts = true)
@@ -510,6 +530,10 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
         /** `set_timezone(p_tz text)` — migration 053 C. */
         const val SET_TIMEZONE_RPC = "set_timezone"
         const val SET_TIMEZONE_PARAM = "p_tz"
+
+        /** PostgREST's max_rows on this project (the Supabase default): the most
+         *  rows one unpaged select returns. */
+        internal const val SERVER_ROW_CAP = 1_000
 
         /** Clock-skew tolerance between devices' updated_at stamps (each client
          *  stamps its own wall clock). Within it, "the server is newer" is not

@@ -165,8 +165,9 @@ class LocalStore(private val db: UnstuckDatabase) {
     /** Replace-per-table hydrate. cal_blocks preserve local external `g_` rows.
      *  [keepPendingUpserts] keeps every local row that still has a queued outbox
      *  upsert — even one the server also returned — so an unflushed optimistic edit
-     *  never reverts to the stale server copy; the pending set is read inside the
-     *  same transaction as the wipe + insert (no TOCTOU). */
+     *  never reverts to the stale server copy, and leaves out a server row whose
+     *  local delete is still queued; the pending set is read inside the same
+     *  transaction as the wipe + insert (no TOCTOU). */
     suspend fun <T> replace(
         table: String,
         items: List<T>,
@@ -179,6 +180,20 @@ class LocalStore(private val db: UnstuckDatabase) {
         val rows = items.map { RecordEntity(table, id(it), json.encodeToString(ser, it), updatedAt(it)) }
         if (keepPendingUpserts) records.replaceTableKeepingPending(table, rows, preservePrefix)
         else records.replaceTable(table, rows, preservePrefix)
+        invalidate(table)
+    }
+
+    /** [replace] (keeping pending rows) for a fetch that may hold only PART of the
+     *  table — PostgREST cuts an unpaged select at its row cap without saying so.
+     *  Upserts what came back and drops nothing (Android audit 2026-09-23, A11). */
+    suspend fun <T> upsertAllKeepingPending(
+        table: String,
+        items: List<T>,
+        ser: KSerializer<T>,
+        id: (T) -> String,
+        updatedAt: (T) -> String? = { null },
+    ) {
+        records.upsertKeepingPending(table, items.map { RecordEntity(table, id(it), json.encodeToString(ser, it), updatedAt(it)) })
         invalidate(table)
     }
 
@@ -197,6 +212,11 @@ class LocalStore(private val db: UnstuckDatabase) {
     /** How many rows this table holds locally — the deletion reconcile's
      *  "is the server's empty answer plausible?" guard reads it. */
     suspend fun countRows(table: String): Int = records.get(table).size
+
+    /** Every row id of [table] with the stamp it was stored with (null when the
+     *  table keeps none) — the catch-up's id sweep diffs the server's ids and
+     *  stamps against it to take rows its cursor could not see. */
+    suspend fun rowStamps(table: String): Map<String, String?> = records.get(table).associate { it.id to it.updatedAt }
 
     /** Sign-out / user-switch wipe. Deliberately leaves `parked_outbox` alone: those
      *  are another (or the same, returning) user's un-pushed edits. */

@@ -140,6 +140,27 @@ class LocalStoreTest {
         assertEquals("New", byId["b"]?.name)       // everything else is server-canonical
     }
 
+    /** Android audit 2026-09-23, A11: a row whose local delete hasn't landed is
+     *  still on the server; the replace must not bring it back. */
+    @Test fun replaceKeepingPending_leavesARowWithAQueuedDeleteGone() = runTest {
+        store.enqueue(OutboxEntity(op = "delete", recordTable = Tables.TASKS, recordId = "a", payload = null, createdAt = 1))
+        store.replace(Tables.TASKS, listOf(task("a", "Server"), task("b", "New")), TaskItem.serializer(), { it.id }, keepPendingUpserts = true)
+        assertEquals(listOf("b"), store.tasks().first().map { it.id })
+    }
+
+    /** A fetch that may be only part of the table (PostgREST's row cap) is merged:
+     *  nothing it didn't return is dropped, and queued rows keep their state. */
+    @Test fun upsertAllKeepingPending_dropsNothingAndHonoursQueuedRows() = runTest {
+        store.upsert(Tables.TASKS, task("kept", "Not in the fetch"), TaskItem.serializer(), "kept")
+        store.upsert(Tables.TASKS, task("a", "Renamed"), TaskItem.serializer(), "a")
+        store.enqueue(OutboxEntity(op = "upsert", recordTable = Tables.TASKS, recordId = "a", payload = "{}", createdAt = 1))
+        store.enqueue(OutboxEntity(op = "delete", recordTable = Tables.TASKS, recordId = "gone", payload = null, createdAt = 2))
+        store.upsertAllKeepingPending(Tables.TASKS, listOf(task("a", "Server"), task("gone"), task("b", "New")), TaskItem.serializer(), { it.id })
+        val byId = store.tasks().first().associateBy { it.id }
+        assertEquals(setOf("kept", "a", "b"), byId.keys)
+        assertEquals("Renamed", byId["a"]?.name)
+    }
+
     @Test fun replaceKeepingPending_withoutPendingOpsIsPlainReplace() = runTest {
         store.upsert(Tables.TASKS, task("a", "Stale"), TaskItem.serializer(), "a")
         store.replace(Tables.TASKS, listOf(task("a", "Server")), TaskItem.serializer(), { it.id }, keepPendingUpserts = true)

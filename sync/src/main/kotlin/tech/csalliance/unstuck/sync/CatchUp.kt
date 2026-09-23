@@ -17,20 +17,21 @@ import tech.csalliance.unstuck.data.db.Tables
 // being permanently deaf. So the live mirror is an OPTIMISATION, and this is the
 // mechanism that actually keeps the device in step.
 //
-// Per table we keep a HIGH-WATER MARK — the newest server stamp this client has
-// accepted — and ask only for rows STRICTLY newer than it, ordered and paged.
-// That is bounded work (usually zero rows) instead of the full-table replace the
-// 60s foreground pull used to do.
+// Per table we keep a HIGH-WATER MARK — the newest stamp this client has
+// accepted — and ask for rows AT or after it, ordered by (stamp, id) and paged.
+// That is bounded work (usually just the row the mark sits on) instead of the
+// full-table replace the 60s foreground pull used to do.
 //
 // What a cursor pull CANNOT see, and what covers it:
 //  • a HARD DELETE — no row comes back to tell us. [reconcileDeletions] fetches
 //    id-only pages and drops what the server no longer has.
-//  • a mutation that does not move the cursor column ([CursorKind.APPEND]
-//    tables, e.g. archiving a capture: `captures.at` doesn't move). Those tables
-//    have no `updated_at` column at all server-side; the periodic FULL hydrate
-//    and the archive reconcile still cover them, and the cheap real fix is an
-//    `updated_at` column + touch trigger on them (see the notes in the sync
-//    report).
+//  • a row stamped by its WRITER's clock: a task INSERT keeps the client's
+//    `updated_at` (the touch trigger is BEFORE UPDATE only) and profile_facts has
+//    no trigger at all, so a row created offline elsewhere can land behind the
+//    mark, and a fast clock can drag the mark past real server edits. The same
+//    id sweep takes what the server has that this device doesn't hold, or holds
+//    an older stamp of; and each launch starts with a full hydrate, as on iOS
+//    (Android audit 2026-09-23, A11).
 //  • tables with no monotonic column whatsoever (cal_blocks, calendar_connections)
 //    — [NON_CURSOR_TABLES]; the catch-up pulls those the old way (full replace),
 //    which is still strictly less work than replacing every table.
@@ -40,13 +41,20 @@ import tech.csalliance.unstuck.data.db.Tables
 internal enum class CursorKind {
     /** A real `updated_at`, moved by the server on every write. */
     EXACT,
-
-    /** Moves on insert only (`completed_at`, `at`): a later mutation of an old
-     *  row is invisible to the cursor. New rows — the dominant case — are caught. */
-    APPEND,
 }
 
-internal data class CursorSpec(val table: String, val column: String, val kind: CursorKind)
+internal data class CursorSpec(
+    val table: String,
+    val column: String,
+    val kind: CursorKind,
+    /** The column whose value the local store keeps as this table's row stamp
+     *  (RowMeta.updatedAt, the LWW guard), or null when it keeps none. Only when
+     *  it IS [column] can a local row's stamp be compared with the server's. */
+    val localStamp: String? = column,
+    /** Where the mark is stored. A table whose cursor column changed gets a new
+     *  key, so a mark measured on the old column is never read as the new one. */
+    val cursorKey: String = table,
+)
 
 /** The outcome of one catch-up pass — what the freshness owner reasons about. */
 data class CatchUpOutcome(
@@ -69,9 +77,8 @@ data class CatchUpOutcome(
     /** A `collections` row came back (applied, kept by the local store, or skipped
      *  for a queued write). The server row carries no membership, and migration 056
      *  §4 bumps `updated_at` on every collection_members change, so this is what
-     *  tells the catch-up to re-read membership (audit 2026-09-22 C8). The pull is
-     *  strictly newer than the mark, so every returned row is one this device had
-     *  not seen, and a quiet tick never sets it. */
+     *  tells the catch-up to re-read membership (audit 2026-09-22 C8). The re-read
+     *  of the row the mark sits on doesn't count, so a quiet tick never sets it. */
     val collectionsChanged: Boolean = false,
 ) {
     val appliedCount: Int get() = applied.values.sum()
@@ -84,6 +91,7 @@ data class CatchUpOutcome(
 interface SyncCursors {
     fun get(userId: String, table: String): String?
     fun put(userId: String, table: String, value: String)
+    fun remove(userId: String, table: String)
     fun clear(userId: String)
     /** True when this user has at least one cursor — i.e. a full hydrate has
      *  completed at least once and a cursor pull is meaningful. */
@@ -95,18 +103,22 @@ class InMemorySyncCursors : SyncCursors {
     private fun key(u: String, t: String) = "$u|$t"
     override fun get(userId: String, table: String): String? = map[key(userId, table)]
     override fun put(userId: String, table: String, value: String) { map[key(userId, table)] = value }
+    override fun remove(userId: String, table: String) { map.remove(key(userId, table)) }
     override fun clear(userId: String) { map.keys.removeAll { it.startsWith("$userId|") } }
     override fun hasAny(userId: String): Boolean = map.keys.any { it.startsWith("$userId|") }
 }
 
 /** SharedPreferences-backed cursors (`cursor.<uid>.<table>`). Survives a process
- *  death, so a relaunch resumes from the mark instead of re-pulling everything —
- *  but a sign-out / user switch clears them and the next pull is a full hydrate. */
+ *  death (each launch's full hydrate then re-seeds them); a sign-out / user
+ *  switch clears them. */
 class PrefsSyncCursors(private val prefs: SharedPreferences) : SyncCursors {
     private fun key(u: String, t: String) = "cursor.$u.$t"
     override fun get(userId: String, table: String): String? = prefs.getString(key(userId, table), null)
     override fun put(userId: String, table: String, value: String) {
         prefs.edit().putString(key(userId, table), value).apply()
+    }
+    override fun remove(userId: String, table: String) {
+        prefs.edit().remove(key(userId, table)).apply()
     }
     override fun clear(userId: String) {
         val e = prefs.edit()
@@ -147,14 +159,19 @@ class CatchUpPuller(
         var provenMissed = 0
         var collectionsChanged = false
         for (spec in CURSOR_TABLES) {
-            val since = cursors.get(userId, spec.table) ?: EPOCH
+            val since = cursors.get(userId, spec.cursorKey) ?: EPOCH
+            val tieKey = spec.cursorKey + TIE_SUFFIX
+            val storedTie = cursors.get(userId, tieKey)
             try {
-                val result = pullTable(userId, spec, since)
+                val result = pullTable(userId, spec, since, storedTie?.let { resumeIdFor(it, since) })
                 if (result.count > 0) applied[spec.table] = result.count
                 provenMissed += result.provenMissed
                 if (result.blocked) blocked += spec.table
                 if (spec.table == Tables.COLLECTIONS && result.seen) collectionsChanged = true
-                result.cursor?.let { cursors.put(userId, spec.table, it) }
+                result.cursor?.let { cursors.put(userId, spec.cursorKey, it) }
+                val tie = result.resumeAfterId?.let { "${result.cursor ?: since}|$it" }
+                if (tie == null) { if (storedTie != null) cursors.remove(userId, tieKey) }
+                else if (tie != storedTie) cursors.put(userId, tieKey, tie)
             } catch (t: CancellationException) {
                 throw t
             } catch (t: Throwable) {
@@ -180,29 +197,73 @@ class CatchUpPuller(
         )
     }
 
-    /** [seen]: at least one row came back and was taken or deliberately skipped
-     *  (not one that failed to apply). */
-    private data class TablePull(val count: Int, val cursor: String?, val blocked: Boolean, val provenMissed: Int, val seen: Boolean)
+    /** [seen]: at least one row this device had not seen came back and was taken
+     *  or deliberately skipped (not one that failed to apply). [resumeAfterId]: the
+     *  id of the last row taken at the mark's stamp when that stamp is a run of rows
+     *  longer than a page — the next pass carries on after it (null = start AT the
+     *  mark). */
+    private data class TablePull(
+        val count: Int, val cursor: String?, val blocked: Boolean, val provenMissed: Int, val seen: Boolean,
+        val resumeAfterId: String?,
+    )
 
-    private suspend fun pullTable(userId: String, spec: CursorSpec, since: String): TablePull {
+    private suspend fun pullTable(userId: String, spec: CursorSpec, since: String, resumeAfterId: String?): TablePull {
         var cursor: String? = null
-        var at = since
+        var cursorId: String? = null     // the id of the row `cursor` was taken from
         var applied = 0
         var provenMissed = 0
         var blocked = false
         var seen = false
-        var page = 0
-        while (page < MAX_PAGES) {
-            val rows = remote.fetchSince(spec.table, spec.column, at, PAGE_SIZE)
-            if (rows.isEmpty()) break
+        // The pass starts AT the mark, not strictly after it: a row sharing the
+        // mark's stamp that was held back last pass, or the tail of a tie the page
+        // cap cut short, is still owed (Android audit 2026-09-23, A11). The row the
+        // mark sits on therefore comes back every pass; that re-read is applied
+        // (RowApply is idempotent) but is not news. `taken` skips a row a page
+        // repeats; it is keyed by stamp too, because a row edited while the pass
+        // pages comes back later with a newer stamp, and that version is news
+        // (Android audit 2026-09-23, A11).
+        //
+        // A run of rows sharing the mark's stamp that outgrew a page resumes after
+        // the last id taken instead (Android audit 2026-09-23, A11): restarting at
+        // its head re-read the same MAX_PAGES pages every pass, and a run longer
+        // than that (a backfill, a bulk statement) was never finished, nor was
+        // anything newer read. Nothing at the mark is a re-read then.
+        val sinceInstant = if (since == EPOCH) null else instantOf(since)
+        val reReadAt = if (resumeAfterId != null) null else sinceInstant
+        val taken = HashSet<String>()
+        var at = since
+        var inclusive = sinceInstant != null && resumeAfterId == null
+        var tieAfterId: String? = resumeAfterId   // set while finishing a run of rows stamped `at`, by id
+        var tieStamp: String? = if (resumeAfterId != null) since else null   // the run last paged by id
+        var pages = 0
+        var capped = false
+        while (true) {
+            if (pages >= MAX_PAGES) { capped = true; break }
+            pages++
+            val rows = when {
+                tieAfterId != null -> remote.fetchTie(spec.table, spec.column, at, tieAfterId, PAGE_SIZE)
+                inclusive -> remote.fetchSince(spec.table, spec.column, justBefore(at), PAGE_SIZE)
+                else -> remote.fetchSince(spec.table, spec.column, at, PAGE_SIZE)
+            }
             for (row in rows) {
                 val stamp = stampOf(row, spec.column)
                 val id = (row["id"] as? JsonPrimitive)?.contentOrNull
                 if (id == null) { blocked = true; continue }
+                if (!taken.add("$id|$stamp")) continue
+                val reRead = reReadAt != null && stamp != null && instantOf(stamp) == reReadAt &&
+                    store.rowMeta(spec.table, id).exists
                 // A row this device has a queued write for must not be clobbered
                 // (the rule the hydrate already honours). Don't advance past it
                 // either: once the write lands, the server's copy is re-offered.
                 if (store.latestPendingUpsert(spec.table, id) != null) {
+                    // …except the row the mark sits on, re-read: nothing past it is
+                    // owed for it. Its write, once it lands, re-stamps it past the
+                    // mark, and a task op the prune drops as stale leaves the
+                    // server's newer stamp for the sweep to take. Blocking here froze
+                    // the table for as long as the write stayed queued, which for a
+                    // write the server keeps refusing is for good (Android audit
+                    // 2026-09-23, A11).
+                    if (reRead) continue
                     blocked = true
                     seen = true
                     continue
@@ -213,13 +274,13 @@ class CatchUpPuller(
                 // re-offered if that delete is ever abandoned.
                 if (store.hasPendingDelete(spec.table, id)) {
                     blocked = true
-                    seen = true
+                    if (!reRead) seen = true
                     continue
                 }
                 // Was this row genuinely missing from this device? (Absent, or our
                 // copy is older than the server's by more than the grace the live
                 // mirror gets to deliver it.) That is the deafness evidence.
-                val missed = provablyMissed(spec.table, id, stamp)
+                val missed = !reRead && provablyMissed(spec, id, stamp)
                 val attempt = runCatching { RowApply.apply(spec.table, row, store, userId) }
                 if (attempt.isFailure) {
                     val t = attempt.exceptionOrNull()
@@ -234,39 +295,62 @@ class CatchUpPuller(
                     continue
                 }
                 val ok = attempt.getOrDefault(false)
-                seen = true
+                if (!reRead) seen = true
                 // A row the local store deliberately kept (its copy is newer) still
                 // counts as SEEN — freezing the cursor on it would re-pull for ever
                 // on a device whose clock runs ahead. Only a row we could not
                 // apply, or one with a pending local write, blocks.
-                if (ok) {
+                if (ok && !reRead) {
                     applied++
                     if (missed) provenMissed++
                 }
-                if (!blocked && stamp != null) cursor = stamp
+                if (!blocked && stamp != null) { cursor = stamp; cursorId = id }
+            }
+            // Past a row we could not take there is nothing to advance to; the next
+            // pass starts again from the mark.
+            if (blocked) break
+            if (tieAfterId != null) {
+                // The run is finished once a page comes back short; carry on
+                // strictly after its stamp.
+                if (rows.size < PAGE_SIZE) { tieAfterId = null; inclusive = false; continue }
+                tieAfterId = (rows.last()["id"] as? JsonPrimitive)?.contentOrNull ?: break
+                continue
             }
             if (rows.size < PAGE_SIZE) break
-            // Full page: keep going from the newest stamp we actually consumed. If
-            // the cursor could not advance (blocked, or every row shares one stamp)
-            // stop rather than spin.
-            val next = cursor ?: break
-            if (next == at) break
-            at = next
-            page++
+            // A full page can end part-way through a run of rows sharing its last
+            // stamp (one server statement stamps them all alike). Finish that run by
+            // id before asking for anything strictly newer, or its tail is skipped
+            // for good (Android audit 2026-09-23, A11).
+            val last = rows.last()
+            at = stampOf(last, spec.column) ?: break
+            tieAfterId = (last["id"] as? JsonPrimitive)?.contentOrNull ?: break
+            tieStamp = at
+            inclusive = false
         }
-        if (page >= MAX_PAGES) log("[catchup] ${spec.table} hit the page cap — a full hydrate will re-baseline it")
-        return TablePull(applied, cursor, blocked, provenMissed, seen)
+        if (capped) log("[catchup] ${spec.table} hit the page cap — the next pass carries on from where this one stopped")
+        // Where the next pass resumes inside the mark's run. Nothing taken this
+        // pass: the stored position still holds. Otherwise only when the mark ends
+        // in a run that was paged by id; a short run is cheaper to re-read whole.
+        val resume = when {
+            cursor == null -> resumeAfterId
+            tieStamp != null && instantOf(cursor) == instantOf(tieStamp) -> cursorId
+            else -> null
+        }
+        return TablePull(applied, cursor, blocked, provenMissed, seen, resume)
     }
 
     /** True when the local store demonstrably did NOT have this row's change and
      *  the live mirror had long enough to deliver it. Conservative on purpose: an
      *  unstamped local row, a stamp we can't parse, or a change younger than
      *  [REALTIME_GRACE_MS] proves nothing. */
-    private suspend fun provablyMissed(table: String, id: String, stamp: String?): Boolean {
+    private suspend fun provablyMissed(spec: CursorSpec, id: String, stamp: String?): Boolean {
         val serverMs = stamp?.let { Time.parseMillis(it) } ?: return false
         if (now() - serverMs < REALTIME_GRACE_MS) return false
-        val meta = store.rowMeta(table, id)
+        val meta = store.rowMeta(spec.table, id)
         if (!meta.exists) return true
+        // The local store stamps this table with another column (sessions keep
+        // completed_at, captures and reason_logs `at`): nothing to compare.
+        if (spec.localStamp != spec.column) return false
         val localMs = meta.updatedAt?.let { Time.parseMillis(it) } ?: return false
         return serverMs > localMs
     }
@@ -281,49 +365,106 @@ class CatchUpPuller(
      * is far more likely an unauthenticated / RLS-empty read than a user who
      * deleted their whole account's data — exactly the shape that has wiped
      * devices before. It logs and does nothing.
+     *
+     * The same sweep then takes what the cursor could not see ([repairUnseen]).
      */
     suspend fun reconcileDeletions(userId: String): Int {
-        val serverIds = LinkedHashMap<String, Set<String>>()
-        for (table in RECONCILE_TABLES) {
-            val ids = try {
-                fetchAllIds(table)
+        val server = LinkedHashMap<CursorSpec, Map<String, String?>>()
+        for (spec in CURSOR_TABLES) {
+            if (spec.table !in RECONCILE_TABLES) continue
+            val rows = try {
+                fetchAllIdStamps(spec)
             } catch (t: CancellationException) {
                 throw t
             } catch (t: Throwable) {
-                log("[catchup] id sweep of $table failed, skipping: $t")
+                log("[catchup] id sweep of ${spec.table} failed, skipping: $t")
                 continue
             }
-            serverIds[table] = ids
+            server[spec] = rows
         }
-        if (serverIds.isEmpty()) return 0
-        if (serverIds.values.all { it.isEmpty() }) {
-            val populated = serverIds.keys.count { store.countRows(it) > 0 }
+        if (server.isEmpty()) return 0
+        if (server.values.all { it.isEmpty() }) {
+            val populated = server.keys.count { store.countRows(it.table) > 0 }
             if (populated > 1) {
                 log("[catchup] id sweep returned NOTHING for every table while $populated hold rows — refusing to delete")
                 return 0
             }
         }
         var dropped = 0
-        for ((table, ids) in serverIds) {
-            val preserve = if (table == Tables.CAL_BLOCKS) EXTERNAL_BLOCK_PREFIX else null
-            dropped += store.retainIds(table, ids, preserve)
+        for ((spec, rows) in server) {
+            val preserve = if (spec.table == Tables.CAL_BLOCKS) EXTERNAL_BLOCK_PREFIX else null
+            dropped += store.retainIds(spec.table, rows.keys, preserve)
         }
         if (dropped > 0) log("[catchup] reconciled $dropped row(s) the server no longer has")
+        var repaired = 0
+        for ((spec, rows) in server) repaired += repairUnseen(userId, spec, rows)
+        if (repaired > 0) log("[catchup] took $repaired row(s) the cursor could not see")
         return dropped
     }
 
-    private suspend fun fetchAllIds(table: String): Set<String> {
-        val out = LinkedHashSet<String>()
+    /** id → [CursorSpec.column] for every server row of [spec]'s table; the stamp
+     *  is only read where the local store keeps the same column to compare with. */
+    private suspend fun fetchAllIdStamps(spec: CursorSpec): Map<String, String?> {
+        val column = spec.column.takeIf { spec.localStamp == it }
+        val out = LinkedHashMap<String, String?>()
         var offset = 0
         while (offset < MAX_IDS) {
-            val page = remote.fetchIds(table, offset, ID_PAGE_SIZE)
-            out += page
+            val page = remote.fetchIdStamps(spec.table, column, offset, ID_PAGE_SIZE)
+            for ((id, stamp) in page) out[id] = stamp
             if (page.size < ID_PAGE_SIZE) return out
             offset += ID_PAGE_SIZE
         }
         // Bigger than we are willing to page: the id set is incomplete, so using
         // it would delete real rows. Signal "unknown" by throwing.
-        throw IllegalStateException("$table has more than $MAX_IDS rows — id sweep abandoned")
+        throw IllegalStateException("${spec.table} has more than $MAX_IDS rows — id sweep abandoned")
+    }
+
+    /**
+     * What the cursor cannot see (Android audit 2026-09-23, A11). The mark pages by
+     * stamps, and a task INSERT or a profile_facts write carries its WRITER's
+     * clock: a row created (or a fact forgotten) offline on another device lands
+     * behind this device's mark, and a row stamped in the future drags the mark
+     * past real server edits. The id sweep already lists every row the server has,
+     * so take the ones this device doesn't hold and — where both sides keep the
+     * same stamp — the ones whose server stamp is newer than ours. Same guards as
+     * the pull: a row with a queued local write or delete is left alone.
+     */
+    private suspend fun repairUnseen(userId: String, spec: CursorSpec, server: Map<String, String?>): Int {
+        val local = store.rowStamps(spec.table)
+        val want = ArrayList<String>()
+        for ((id, serverStamp) in server) {
+            if (id in local) {
+                val serverMs = serverStamp?.let { Time.parseMillis(it) } ?: continue
+                val localMs = local[id]?.let { Time.parseMillis(it) } ?: continue
+                if (serverMs <= localMs) continue
+            }
+            if (store.latestPendingUpsert(spec.table, id) != null || store.hasPendingDelete(spec.table, id)) continue
+            want += id
+        }
+        if (want.isEmpty()) return 0
+        var taken = 0
+        try {
+            for (chunk in want.take(MAX_REPAIR_ROWS).chunked(REPAIR_CHUNK)) {
+                for (row in remote.fetchByIds(spec.table, chunk)) {
+                    val id = (row["id"] as? JsonPrimitive)?.contentOrNull ?: continue
+                    if (store.latestPendingUpsert(spec.table, id) != null || store.hasPendingDelete(spec.table, id)) continue
+                    val ok = try {
+                        RowApply.apply(spec.table, row, store, userId)
+                    } catch (t: CancellationException) {
+                        throw t
+                    } catch (t: Throwable) {
+                        log("[catchup] ${spec.table} row $id could not be applied by the sweep: $t")
+                        false
+                    }
+                    if (ok) taken++
+                }
+            }
+        } catch (t: CancellationException) {
+            throw t
+        } catch (t: Throwable) {
+            log("[catchup] ${spec.table} repair read failed, retried next sweep: $t")
+        }
+        return taken
     }
 
     /** After a FULL hydrate: adopt the server stamps that hydrate actually saw as
@@ -332,7 +473,9 @@ class CatchUpPuller(
     fun seedCursors(userId: String, serverMaxima: Map<String, String>) {
         for (spec in CURSOR_TABLES) {
             val seed = serverMaxima[spec.table] ?: continue
-            cursors.put(userId, spec.table, seed)
+            cursors.put(userId, spec.cursorKey, seed)
+            // A position inside the old mark's run means nothing at the new mark.
+            if (cursors.get(userId, spec.cursorKey + TIE_SUFFIX) != null) cursors.remove(userId, spec.cursorKey + TIE_SUFFIX)
         }
     }
 
@@ -346,7 +489,21 @@ class CatchUpPuller(
         internal const val MAX_PAGES = 10
         internal const val ID_PAGE_SIZE = 1000
         internal const val MAX_IDS = 20_000
+        /** Rows the sweep's repair reads per request (an `in` list of ids) and per
+         *  table per sweep; the rest follow on the next sweep. */
+        internal const val REPAIR_CHUNK = 50
+        internal const val MAX_REPAIR_ROWS = 1_000
         internal const val EXTERNAL_BLOCK_PREFIX = "g_"
+        /** Stored next to a table's mark (`<cursorKey>.tie` = "<stamp>|<id>"): where
+         *  a run of rows sharing that stamp, longer than a page, was left off. */
+        internal const val TIE_SUFFIX = ".tie"
+
+        /** The id to resume after, when [stored] is a position in the run at [since]. */
+        internal fun resumeIdFor(stored: String, since: String): String? {
+            val id = stored.substringAfter('|', "").takeIf { it.isNotEmpty() } ?: return null
+            val at = instantOf(stored.substringBefore('|')) ?: return null
+            return id.takeIf { at == instantOf(since) }
+        }
         /** How long the live mirror gets to deliver a change before a catch-up
          *  that finds it counts as evidence the channel is deaf. */
         internal const val REALTIME_GRACE_MS = 5_000L
@@ -354,17 +511,20 @@ class CatchUpPuller(
         /** Tables a catch-up can page by a stamp. */
         internal val CURSOR_TABLES: List<CursorSpec> = listOf(
             CursorSpec(Tables.TASKS, "updated_at", CursorKind.EXACT),
-            CursorSpec(Tables.COLLECTIONS, "updated_at", CursorKind.EXACT),
-            CursorSpec(Tables.TAGS, "updated_at", CursorKind.EXACT),
-            CursorSpec(Tables.LIFE_AREAS, "updated_at", CursorKind.EXACT),
+            CursorSpec(Tables.COLLECTIONS, "updated_at", CursorKind.EXACT, localStamp = null),
+            CursorSpec(Tables.TAGS, "updated_at", CursorKind.EXACT, localStamp = null),
+            CursorSpec(Tables.LIFE_AREAS, "updated_at", CursorKind.EXACT, localStamp = null),
             CursorSpec(Tables.PROFILE_FACTS, "updated_at", CursorKind.EXACT),
             CursorSpec(Tables.CALL_REQUESTS, "updated_at", CursorKind.EXACT),
-            // No updated_at column exists on these three (checked against
-            // production's information_schema): their insert stamp is the best
-            // monotonic column available.
-            CursorSpec(Tables.SESSIONS, "completed_at", CursorKind.APPEND),
-            CursorSpec(Tables.CAPTURES, "at", CursorKind.APPEND),
-            CursorSpec(Tables.REASON_LOGS, "at", CursorKind.APPEND),
+            // Migration 064 gave these three a server-stamped updated_at (default
+            // now() on insert; no client sends it) and a touch trigger. Their old
+            // cursors — completed_at / at, set by the writer's clock and never
+            // moved by an edit — missed sessions logged offline elsewhere and a
+            // capture promoted to a task on the web (Android audit 2026-09-23,
+            // A11). The local store still stamps them with those columns.
+            CursorSpec(Tables.SESSIONS, "updated_at", CursorKind.EXACT, localStamp = "completed_at", cursorKey = "sessions.updated_at"),
+            CursorSpec(Tables.CAPTURES, "updated_at", CursorKind.EXACT, localStamp = "at", cursorKey = "captures.updated_at"),
+            CursorSpec(Tables.REASON_LOGS, "updated_at", CursorKind.EXACT, localStamp = "at", cursorKey = "reason_logs.updated_at"),
         )
 
         /** Tables with NO monotonic column at all — a catch-up still has to pull
@@ -397,6 +557,14 @@ class CatchUpPuller(
             runCatching { java.time.OffsetDateTime.parse(raw).toInstant().toString() }.getOrNull()
                 ?: runCatching { java.time.Instant.parse(raw).toString() }.getOrNull()
                 ?: raw.takeIf { Time.parseMillis(it) != null }
+
+        internal fun instantOf(stamp: String): java.time.Instant? =
+            normalizeStamp(stamp)?.let { runCatching { java.time.Instant.parse(it) }.getOrNull() }
+
+        /** One microsecond before [stamp] — Postgres' timestamp resolution — so a
+         *  strictly-greater-than read returns the rows AT [stamp] too. */
+        internal fun justBefore(stamp: String): String =
+            instantOf(stamp)?.minusNanos(1_000)?.toString() ?: stamp
 
         /** The newest stamp in a fetched page, compared as instants (never as
          *  strings: "…+00:00" and "…Z" don't sort together). */

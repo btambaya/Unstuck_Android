@@ -137,6 +137,19 @@ data class PendingInvite(
     val id: String get() = "${kind.wire}:$inviteId"
 }
 
+/** Someone I blocked — a row of `my_blocked_users()` (migration 075), what
+ *  Settings → People's "Blocked" section lists with an Unblock. The block is
+ *  account-scoped on the server; Android had no Block at all before (audit
+ *  2026-09-22, C10). `name` is the server-resolved display name, never an
+ *  email. Mirrors the iOS BlockedUser 1:1. */
+data class BlockedUser(
+    val userId: String,
+    val name: String,
+    val createdAt: String? = null,
+) {
+    val id: String get() = userId
+}
+
 /** The read-only detail as a "Shared with you" ROW — what the shared-task sheet
  *  takes. Used when a task arrives by id alone (the `task_share` push's
  *  `unstuck://task/<id>` for a task that is NOT in my store) and the list

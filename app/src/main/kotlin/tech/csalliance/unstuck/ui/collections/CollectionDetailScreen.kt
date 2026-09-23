@@ -35,6 +35,8 @@ import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Unarchive
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -109,6 +111,14 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     // cancel it) — this scope only carries the await + the navigation.
     val scope = rememberCoroutineScope()
     LaunchedEffect(Unit) { vm.collectionSyncErrors.collect { syncError = it } }
+    // A member's own controls next to Leave — Report… and Block the owner
+    // (server-side, migration 075). A member used to have only Leave (parity with
+    // iOS build 79, audit 2026-09-22 C10).
+    var memberMenu by remember { mutableStateOf(false) }
+    var leaving by remember { mutableStateOf(false) }
+    var showReport by remember { mutableStateOf(false) }
+    var reportNote by remember { mutableStateOf<String?>(null) }
+    var confirmBlockOwner by remember { mutableStateOf(false) }
 
     // Move-to-task: solo list → straight to "for me"; shared list → ask via the chooser.
     fun startPromote(item: CollectionItem) {
@@ -172,17 +182,36 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                             Icon(Icons.Filled.PersonAdd, contentDescription = "Share", tint = c.ink2, modifier = Modifier.size(22.dp).clip(CircleShape).clickable { showShare = true })
                         }
                     } else {
-                        // Leave only closes the screen once the SERVER confirms it.
-                        // Popping optimistically (and dropping the list locally)
-                        // told the user they had left while the membership stood —
-                        // the list reappeared on the next hydrate. A refusal keeps
-                        // them here with the reason.
-                        Text("Leave", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink3, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable {
-                            scope.launch {
-                                if (vm.leaveCollection(col.id)) onBack()
-                                else syncError = "Couldn't leave “${col.name}” — check your connection and try again."
+                        // Leave / Report… / Block the owner. Leave only closes the
+                        // screen once the SERVER confirms it. Popping optimistically
+                        // (and dropping the list locally) told the user they had left
+                        // while the membership stood — the list reappeared on the
+                        // next hydrate. A refusal keeps them here with the reason.
+                        Box {
+                            Text(
+                                if (leaving) "Leaving…" else "Leave", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink3,
+                                modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable(enabled = !leaving) { memberMenu = true }.padding(horizontal = 6.dp, vertical = 4.dp),
+                            )
+                            DropdownMenu(expanded = memberMenu, onDismissRequest = { memberMenu = false }) {
+                                DropdownMenuItem(text = { Text("Leave", style = UFont.sans(14), color = c.ink) }, onClick = {
+                                    memberMenu = false
+                                    leaving = true
+                                    scope.launch {
+                                        val ok = vm.leaveCollection(col.id)
+                                        leaving = false
+                                        if (ok) onBack()
+                                        else syncError = "Couldn't leave “${col.name}” — check your connection and try again."
+                                    }
+                                })
+                                DropdownMenuItem(text = { Text("Report…", style = UFont.sans(14), color = c.ink) }, onClick = { memberMenu = false; showReport = true })
+                                if (col.ownerId != null) {
+                                    DropdownMenuItem(
+                                        text = { Text("Block the owner", style = UFont.sans(14), color = c.red) },
+                                        onClick = { memberMenu = false; confirmBlockOwner = true },
+                                    )
+                                }
                             }
-                        }.padding(horizontal = 6.dp, vertical = 4.dp))
+                        }
                     }
                 }
             }
@@ -276,6 +305,66 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
             containerColor = c.surface,
         )
     }
+
+    if (showReport) AlertDialog(
+        onDismissRequest = { showReport = false },
+        title = { Text("Report this list?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                Text("Send a report about this list to the Unstuck team. We review reports and take action.", style = UFont.sans(13), color = c.ink2)
+                listOf("Objectionable content", "Spam", "Harassment", "Other").forEach { reason ->
+                    TextButton(onClick = {
+                        showReport = false
+                        scope.launch {
+                            val ok = vm.reportSharedList(col.id, about = "list owner", reason = reason)
+                            reportNote = if (ok) "Report sent — we review every report." else "Couldn't send the report — try again."
+                        }
+                    }) { Text(reason, color = c.ink) }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = { showReport = false }) { Text("Cancel", color = c.ink2) } },
+        containerColor = c.surface,
+    )
+
+    reportNote?.let { note ->
+        AlertDialog(
+            onDismissRequest = { reportNote = null },
+            text = { Text(note, style = UFont.sans(14), color = c.ink) },
+            confirmButton = { TextButton(onClick = { reportNote = null }) { Text("OK", color = c.ink) } },
+            containerColor = c.surface,
+        )
+    }
+
+    // Block the owner: server-side, and it also takes me out of this list (and
+    // every other list between us), so it confirms first and pops only once the
+    // SERVER confirmed; a refusal keeps me here and says so.
+    if (confirmBlockOwner) AlertDialog(
+        onDismissRequest = { confirmBlockOwner = false },
+        title = { Text("Block the owner?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+        text = {
+            Text(
+                "They won't be able to share tasks or lists with you, and everything shared between you stops — this list too. You can unblock them in Settings › People.",
+                style = UFont.sans(13), color = c.ink2,
+            )
+        },
+        confirmButton = {
+            TextButton(onClick = {
+                confirmBlockOwner = false
+                val ownerId = col.ownerId ?: return@TextButton
+                leaving = true
+                scope.launch {
+                    val ok = vm.blockUser(ownerId)
+                    leaving = false
+                    if (ok) onBack()
+                    else syncError = "Couldn't block the owner — check your connection and try again."
+                }
+            }) { Text("Block", color = c.red) }
+        },
+        dismissButton = { TextButton(onClick = { confirmBlockOwner = false }) { Text("Cancel", color = c.ink2) } },
+        containerColor = c.surface,
+    )
 
     if (confirmDelete) AlertDialog(
         onDismissRequest = { confirmDelete = false },

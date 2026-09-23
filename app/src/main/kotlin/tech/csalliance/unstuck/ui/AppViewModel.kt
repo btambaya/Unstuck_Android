@@ -18,6 +18,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.mapNotNull
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.emitAll
@@ -25,6 +26,7 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.onStart
+import kotlinx.coroutines.flow.runningFold
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -314,12 +316,29 @@ class AppViewModel(
      *  Mirrors the optimistic stamp in the web useSharedWithMe.setDone. */
     private val _sharedCompletedAt = MutableStateFlow<Map<String, String>>(emptyMap())
 
+    // A failed read keeps what is on screen (for the same account) instead of
+    // blanking it — an offline refresh used to empty Shared-with-you and the
+    // badges (parity with iOS build 79, audit 2026-09-22 C11). Declared above
+    // the flows that use them (property init order).
+    private val sharedWithMeHold = tech.csalliance.unstuck.ui.sharing.LastGoodRead<List<SharedWithMe>>(emptyList())
+    private val shareBadgesHold = tech.csalliance.unstuck.ui.sharing.LastGoodRead<Map<String, List<ShareBadge>>>(emptyMap())
+
+    /** The session's account the holds key on: the signed-in user, kept through a
+     *  failed token refresh, where currentUid() reads null although [authed] still
+     *  says signed in (see sessionAccount). Eager, so it has seen the last
+     *  Authenticated before any refresh fails. */
+    private val heldAccount: StateFlow<String?> =
+        graph.provider?.client?.auth?.sessionStatus
+            ?.runningFold(null as String?) { prev, status -> tech.csalliance.unstuck.ui.sharing.sessionAccount(status, prev) }
+            ?.stateIn(viewModelScope, SharingStarted.Eagerly, null)
+            ?: MutableStateFlow(null)
+
     /** Tasks other people have shared WITH me — the "Shared with you" group. Read via
      *  the tasks_shared_with_me projection (raw task rows are RLS-forbidden). */
     val sharedWithMe: StateFlow<List<SharedWithMe>> =
         merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
             .onStart { emit(Unit) }
-            .map { graph.coordinator?.circle?.tasksSharedWithMe() ?: emptyList() }
+            .mapNotNull { sharedWithMeHold.refresh(currentUid(), heldAccount.value) { graph.coordinator?.circle?.tasksSharedWithMe() } }
             .combine(_sharedCompletedAt) { rows, stamps ->
                 if (stamps.isEmpty()) rows else rows.map { s ->
                     if (s.done && s.completedAt == null) s.copy(completedAt = stamps[s.taskId]) else s
@@ -332,7 +351,7 @@ class AppViewModel(
     val shareBadges: StateFlow<Map<String, List<ShareBadge>>> =
         merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } })
             .onStart { emit(Unit) }
-            .map { graph.coordinator?.circle?.myTaskShareBadges() ?: emptyMap() }
+            .mapNotNull { shareBadgesHold.refresh(currentUid(), heldAccount.value) { graph.coordinator?.circle?.myTaskShareBadges() } }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     /** taskId → assignee name for tasks I've assigned away ('assign' level). These
@@ -2368,6 +2387,21 @@ class AppViewModel(
      *  lands in the feedback table under `report` for triage. */
     suspend fun reportShareConcern(kind: String, itemId: String, about: String, reason: String): Boolean =
         sendFeedback(body = "⚠️ REPORT — shared $kind $itemId, recipient $about: $reason", category = "report", screen = "share-$kind")
+
+    /** "Report…" on a task someone shared WITH me — a recipient could only report
+     *  from a Share screen they owned (audit 2026-09-22 C10). Same channel; the body
+     *  and screen match iOS so the dashboard triages both alike. False = not sent. */
+    suspend fun reportSharedTask(taskId: String, shareId: String?, ownerName: String, reason: String): Boolean =
+        sendFeedback(
+            body = tech.csalliance.unstuck.core.logic.sharedTaskReportBody(taskId, shareId, ownerName, reason),
+            category = "report", screen = "shared-with-me",
+        )
+
+    /** "Report…" by a MEMBER of a list shared with me (about its owner) — a member
+     *  used to have only Leave (audit 2026-09-22 C10). Body and screen match iOS
+     *  reportConcern. False = not sent. */
+    suspend fun reportSharedList(collectionId: String, about: String, reason: String): Boolean =
+        sendFeedback(body = "⚠️ REPORT — shared collection $collectionId, member $about: $reason", category = "report", screen = "shared-collection")
     private suspend fun setCollectionMembersLocally(collectionId: String, memberIds: List<String>) {
         collectionMutex.withLock {
             val cur = store.collections().first().firstOrNull { it.id == collectionId } ?: return@withLock
@@ -2427,13 +2461,17 @@ class AppViewModel(
         extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
 
+    /** A failed roster read keeps the roster on screen instead of "No one yet"
+     *  (parity with iOS build 79, audit 2026-09-22 C11). */
+    private val circleHold = tech.csalliance.unstuck.ui.sharing.LastGoodRead<List<CircleMember>>(emptyList())
+
     /** My connections: active members (resolved names) + pending invites (with their
      *  code, so the link can be re-copied). Empty until first collected — the
      *  Connections screen drives it (WhileSubscribed, so it stops when off-screen). */
     val circle: StateFlow<List<CircleMember>> =
         merge(_circleRefresh, flow { collab?.circleChanged?.let { emitAll(it) } })
             .onStart { emit(Unit) }
-            .map { circleClient?.circleList() ?: emptyList() }
+            .mapNotNull { circleHold.refresh(currentUid(), heldAccount.value) { circleClient?.circleList() } }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Force a roster refetch now (after a write). */
@@ -2458,11 +2496,77 @@ class AppViewModel(
         return r
     }
 
-    /** Remove a connection (or cancel a pending invite); cascades their task shares
-     *  server-side. Refetches the roster. */
-    suspend fun removeFromCircle(id: String) {
-        circleClient?.circleRemove(id)
-        refreshCircle()
+    /** Remove a connection (or cancel a pending roster invite). Server-side this also
+     *  drops the task shares AND the list memberships between the two of us, both
+     *  ways (migration 075). TRUE only when the server accepted it. Only a confirmed
+     *  removal of a real connection re-reads the shared state — a pending row changes
+     *  no list, and an offline re-read must never run on a removal that didn't happen
+     *  (parity with iOS build 79, audit 2026-09-22 C11). Refetches the roster. Runs
+     *  on viewModelScope so dismissing the dialog can't cancel it mid-call. */
+    suspend fun removeFromCircle(m: CircleMember): Boolean =
+        viewModelScope.async {
+            val wasConnection = m.memberUserId != null
+            val ok = circleClient?.circleRemove(m.id) ?: false
+            refreshCircle()   // first: the roster re-read needn't wait for the lists
+            if (ok && wasConnection) refreshAfterSevering()
+            ok
+        }.await()
+
+    // --- blocks + recipient-side removal (migration 075, audit 2026-09-22 C10) ---
+    // Android had no Block at all: not on the Share screen, a shared task, a shared
+    // list or People. Every write answers what the SERVER did; the shared state is
+    // re-read only on a confirmed true (parity with iOS build 79). Each runs on
+    // viewModelScope, like leaveCollection, so the screen popping itself on success
+    // (or the user backing out) can't cancel the RPC or the re-read.
+
+    /** Block someone by user id — a Share-screen row, a People row, the owner of a
+     *  list shared with me. The server also cuts the connection, the task shares and
+     *  the list memberships between us both ways, so all three are re-read. */
+    suspend fun blockUser(userId: String): Boolean {
+        if (userId.isBlank()) return false
+        return viewModelScope.async {
+            val ok = circleClient?.blockUser(userId) ?: false
+            if (ok) { refreshCircle(); refreshAfterSevering() }
+            ok
+        }.await()
+    }
+
+    /** Block the owner of a task shared WITH me (a recipient knows only the share id). */
+    suspend fun blockTaskSharer(shareId: String): Boolean {
+        if (shareId.isBlank()) return false
+        return viewModelScope.async {
+            val ok = circleClient?.blockTaskSharer(shareId) ?: false
+            if (ok) { refreshCircle(); refreshAfterSevering() }
+            ok
+        }.await()
+    }
+
+    /** Lift a block. Restores nothing the block removed. */
+    suspend fun unblockUser(userId: String): Boolean =
+        viewModelScope.async { circleClient?.unblockUser(userId) ?: false }.await()
+
+    /** Remove a task shared WITH me from my list (the owner isn't told). */
+    suspend fun leaveSharedTask(shareId: String): Boolean {
+        if (shareId.isBlank()) return false
+        return viewModelScope.async {
+            val ok = circleClient?.leaveSharedTask(shareId) ?: false
+            if (ok) refreshShares()
+            ok
+        }.await()
+    }
+
+    /** Everyone I blocked (Settings → People "Blocked"). Null when it couldn't be
+     *  read — the screen keeps the list it has. Never mirrored: user_blocks is not in
+     *  the realtime publication, so it is re-read when People refreshes. */
+    suspend fun blockedUsers(): List<tech.csalliance.unstuck.core.model.BlockedUser>? = circleClient?.blockedUsers()
+
+    /** A block or a removed connection took task shares and list memberships away
+     *  server-side: re-read both. Realtime usually gets there first here (Android's
+     *  collection_members channel is unfiltered), so this is the backstop for a
+     *  missed event. */
+    private suspend fun refreshAfterSevering() {
+        refreshShares()
+        graph.coordinator?.refreshCollections()
     }
 
     // --- per-task sharing (M2) + shared-with-you / delegated groups (M3) ---

@@ -1,12 +1,15 @@
 package tech.csalliance.unstuck.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tech.csalliance.unstuck.core.logic.circleInviteErrorMessage
 import tech.csalliance.unstuck.core.logic.composePeopleSections
 import tech.csalliance.unstuck.core.logic.pendingInviteLabel
+import tech.csalliance.unstuck.core.logic.removeConnectionMessage
 import tech.csalliance.unstuck.core.model.CircleMember
 import tech.csalliance.unstuck.core.model.CircleStatus
 import tech.csalliance.unstuck.core.model.PendingInvite
@@ -153,5 +156,40 @@ class PendingInvitesTest {
         assertEquals("2026-07-20", s.nextDate)
         assertEquals("09:00", s.nextStartTime)
         assertEquals("", s.shareId)
+    }
+
+    // ── removal says what it does (parity with iOS build 79, audit 2026-09-22 C11)
+
+    /** The dialog used to promise "will no longer see anything you've shared"
+     *  while every shared list stayed shared. */
+    @Test fun `the remove dialog says what removal does`() {
+        val maya = member("c1", CircleStatus.ACTIVE, name = "Maya Chen", uid = "u1")
+        assertEquals(
+            "Maya Chen will no longer see the tasks and lists you've shared with them, and you'll lose access to the ones they shared with you.",
+            removeConnectionMessage(maya),
+        )
+        assertEquals(
+            "They will no longer see the tasks and lists you've shared with them, and you'll lose access to the ones they shared with you.",
+            removeConnectionMessage(maya.copy(memberName = null)),
+        )
+        assertEquals("Cancels this pending invite to p@x.com.", removeConnectionMessage(member("c3", CircleStatus.INVITED, email = "p@x.com", code = "k")))
+        assertEquals("Cancels this pending invite.", removeConnectionMessage(member("c4", CircleStatus.INVITED, code = "k")))
+        assertTrue(removeConnectionMessage(maya).contains("lists"))
+        assertFalse("the C11 overclaim is gone", removeConnectionMessage(maya).contains("anything you've shared"))
+    }
+
+    // ── circle-invite refusals reach the user (audit 2026-09-22 SC-3)
+
+    @Test fun `a refused circle invite names the reason`() {
+        assertEquals("You've blocked that person.", circleInviteErrorMessage("blocked"))
+        assertEquals("Too many invites right now — try again in a few minutes.", circleInviteErrorMessage("rate_limited"))
+        assertEquals("Your circle is full.", circleInviteErrorMessage("circle_full"))
+        assertEquals("That doesn't look like an email address.", circleInviteErrorMessage("invalid_email"))
+        assertEquals("Sign in to invite people.", circleInviteErrorMessage("not_configured"))
+        assertEquals("codes are trimmed + case-folded", "You've blocked that person.", circleInviteErrorMessage(" Blocked "))
+        // Anything else keeps the caller's generic line.
+        assertNull(circleInviteErrorMessage("invite_failed"))
+        assertNull(circleInviteErrorMessage("server_error"))
+        assertNull(circleInviteErrorMessage(null))
     }
 }

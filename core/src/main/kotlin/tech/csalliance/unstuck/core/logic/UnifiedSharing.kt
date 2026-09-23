@@ -261,6 +261,9 @@ sealed class ShareResult {
     data class Removed(val name: String) : ShareResult()
     /** A pending email invite was cancelled. */
     data class InviteCancelled(val email: String) : ShareResult()
+    /** The person was blocked server-side (migration 075): everything shared
+     *  between you is gone and they can't share with you again. */
+    data class Blocked(val name: String) : ShareResult()
 }
 
 /** The honest line under the button (§2 "Feedback that is true"). */
@@ -273,6 +276,7 @@ fun shareResultLine(r: ShareResult): String = when (r) {
     is ShareResult.AccessChanged -> "${shareShortName(r.name)} can now ${r.access.verb}."
     is ShareResult.Removed -> "${shareShortName(r.name)} no longer has this."
     is ShareResult.InviteCancelled -> "Invite to ${r.email} cancelled."
+    is ShareResult.Blocked -> "Blocked ${shareShortName(r.name)} — they can't share with you, and nothing is shared between you now."
 }
 
 // ── failures ────────────────────────────────────────────────────────────────
@@ -282,7 +286,8 @@ fun shareResultLine(r: ShareResult): String = when (r) {
 sealed class ShareFailure {
     /** The email is the caller's own. */
     data object SelfShare : ShareFailure()
-    /** A device-local block, or the server's `blocked`. */
+    /** The server's `blocked`: the caller blocked that person (migration 075).
+     *  Android never had a device-local blocklist (audit 2026-09-22, C10). */
     data object Blocked : ShareFailure()
     /** The limiter refused (`rate_limited`). */
     data object RateLimited : ShareFailure()
@@ -299,6 +304,10 @@ sealed class ShareFailure {
     /** Sharing a LIST with a connection by name: the collection function
      *  resolves emails only and the roster has none (contract gap). */
     data object ListNeedsEmail : ShareFailure()
+    /** A Block the server didn't confirm (offline, or no 075) — its own line,
+     *  so a safety action never reads as a failed share (parity with iOS
+     *  build 79, audit 2026-09-22 C10). */
+    data class BlockFailed(val name: String) : ShareFailure()
     /** Offline / a non-2xx with no readable reason. */
     data object Network : ShareFailure()
     /** Any other server code, kept for the log. */
@@ -315,6 +324,7 @@ sealed class ShareFailure {
         NotSignedIn -> "Sign in to share."
         NotConnected -> "You're not connected yet — share by email or a link below."
         ListNeedsEmail -> "Lists can't be shared by name yet — enter their email below."
+        is BlockFailed -> "Couldn't block ${shareShortName(name)} — try again."
         Network, is Server -> "Couldn't share — try again."
     }
 
@@ -374,6 +384,43 @@ fun shareShortName(raw: String): String {
 
 /** The one-line explainer on the Hand-over picker (§2). */
 const val HAND_OVER_EXPLAINER = "It becomes their task to do — you keep view and hear when it's done."
+
+// ── the recipient's own controls on a task shared WITH them ────────────────
+// A recipient used to have no way to drop, report or block a task shared with
+// them — an unwanted share sat in Today for good (parity with iOS build 79,
+// audit 2026-09-22 C10).
+
+/** A confirmed recipient action on a shared task — the confirm dialog's copy. */
+enum class RecipientShareAction {
+    /** task_share_leave — drop MY recipient row; the owner isn't told. */
+    LEAVE,
+    /** block_task_sharer — block the owner server-side. */
+    BLOCK;
+
+    fun title(owner: String): String = when (this) {
+        LEAVE -> "Remove from my list?"
+        BLOCK -> "Block ${ownerShortName(owner)}?"
+    }
+
+    fun message(owner: String): String = when (this) {
+        LEAVE -> "You'll stop seeing this task. ${ownerShortName(owner)} isn't told."
+        BLOCK -> "${ownerShortName(owner)} won't be able to share tasks or lists with you, and everything shared between you stops. You can unblock them in Settings › People."
+    }
+
+    val confirmLabel: String get() = when (this) {
+        LEAVE -> "Remove"
+        BLOCK -> "Block"
+    }
+}
+
+/** The report row's body for a task shared WITH me — which task, which share,
+ *  from whom, why. */
+fun sharedTaskReportBody(taskId: String, shareId: String?, ownerName: String, reason: String): String =
+    "⚠️ REPORT — task shared with me $taskId${shareId?.let { " (share $it)" } ?: ""} from $ownerName: $reason"
+
+/** An owner's display name with an email's domain dropped ("maya@x.com" →
+ *  "maya"; "Maya Chen" stays whole), as the shared-task sheet shows it. */
+private fun ownerShortName(raw: String): String = raw.substringBefore('@')
 
 // ── Settings → People · "Waiting to join" (§2 "One place for people") ───────
 
@@ -447,6 +494,30 @@ fun composePeopleSections(circle: List<CircleMember>, pending: List<PendingInvit
     }
     val roster = circle.filter { !(it.status == CircleStatus.INVITED && it.id in replaced) }
     return PeopleSections(roster = roster, waiting = waiting)
+}
+
+/** What "Remove" does, in the Remove dialog. The old line promised the person
+ *  "will no longer see anything you've shared" while circle_remove left every
+ *  shared list shared; migration 075 now removes the list memberships between
+ *  the two of you in both directions (066 already did tasks both ways), and the
+ *  copy names exactly that. It deliberately does not claim items you both have
+ *  in someone ELSE's list — those stay (parity with iOS build 79, audit
+ *  2026-09-22 C11). */
+fun removeConnectionMessage(m: CircleMember): String =
+    if (m.status == CircleStatus.INVITED) "Cancels this pending invite${m.inviteeEmail?.let { " to $it" } ?: ""}."
+    else "${m.memberName ?: "They"} will no longer see the tasks and lists you've shared with them, and you'll lose access to the ones they shared with you."
+
+/** The line for a refused `circle-invite`, by its `{error}` code; null for a
+ *  code with no specific copy (the caller shows its generic line). The body of
+ *  a non-2xx now reaches the app, so a 403 `blocked` or a 429 says what
+ *  happened instead of "Could not create invite" (audit 2026-09-22 SC-3). */
+fun circleInviteErrorMessage(code: String?): String? = when (code?.trim()?.lowercase()) {
+    "circle_full" -> "Your circle is full."
+    "blocked" -> ShareFailure.Blocked.message
+    "rate_limited" -> ShareFailure.RateLimited.message
+    "invalid_email" -> ShareFailure.InvalidEmail.message
+    "not_configured" -> "Sign in to invite people."
+    else -> null
 }
 
 /** Trimmed, or null when blank / absent. */

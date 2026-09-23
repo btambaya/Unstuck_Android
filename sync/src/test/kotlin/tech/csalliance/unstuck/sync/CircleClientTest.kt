@@ -264,4 +264,44 @@ class CircleClientTest {
         assertEquals("2026-09-05", pre.nextDate)
         assertFalse(pre.later)
     }
+
+    // ── blocks + recipient-side removal (migration 075, audit 2026-09-22 C10) ──
+
+    @Test fun `block and leave params are the snake_case the 075 functions expect`() {
+        assertEquals("""{"p_user":"u9"}""", Json.encodeToString(UserParam("u9")))
+        assertEquals("""{"p_share_id":"s1"}""", Json.encodeToString(ShareIdParam("s1")))
+    }
+
+    /** block_user / block_task_sharer / unblock_user / task_share_leave return a
+     *  scalar boolean — TRUE only when the server says so. */
+    @Test fun `block rpcs read the server's boolean and a server without 075 is never a success`() {
+        assertTrue(CircleClient.decodeCancelPendingInvite("true"))
+        assertTrue(CircleClient.decodeCancelPendingInvite("[true]"))
+        assertFalse(CircleClient.decodeCancelPendingInvite("false"))
+        assertFalse(CircleClient.decodeCancelPendingInvite("null"))
+        assertFalse(CircleClient.decodeCancelPendingInvite("""{"code":"PGRST202","message":"Could not find the function"}"""))
+    }
+
+    @Test fun `a blocked-users row maps and a missing name never shows blank`() {
+        val b = json.decodeFromString<BlockedUserRow>("""{"user_id":"u9","name":"Sam Lee","created_at":"2026-09-22T10:00:00+00:00"}""").toModel()
+        assertEquals(tech.csalliance.unstuck.core.model.BlockedUser("u9", "Sam Lee", "2026-09-22T10:00:00+00:00"), b)
+        assertEquals("u9", b.id)
+        assertEquals("Someone", json.decodeFromString<BlockedUserRow>("""{"user_id":"u8","name":null,"created_at":null}""").toModel().name)
+        assertEquals("Someone", json.decodeFromString<BlockedUserRow>("""{"user_id":"u7","name":"  "}""").toModel().name)
+        val rows = json.decodeFromString<List<BlockedUserRow>>("""[{"user_id":"a","name":"A"},{"user_id":"b","name":"B"}]""")
+        assertEquals("server order (newest first) is kept", listOf("a", "b"), rows.map { it.toModel().userId })
+    }
+
+    // ── circle-invite refusals (audit 2026-09-22 SC-3) ──
+
+    /** A non-2xx body is always a refusal: its `{error}` code, else invite_failed —
+     *  never a success-shaped InviteResult with no error. */
+    @Test fun `a refused circle invite keeps its code and never reads as success`() {
+        assertEquals(InviteResult(ok = false, error = "blocked"), CircleClient.decodeInviteError("""{"error":"blocked"}"""))
+        assertEquals("rate_limited", CircleClient.decodeInviteError("""{"error":"rate_limited"}""").error)
+        assertEquals("invite_failed", CircleClient.decodeInviteError("{}").error)
+        assertEquals("invite_failed", CircleClient.decodeInviteError("""{"error":""}""").error)
+        assertEquals("invite_failed", CircleClient.decodeInviteError("<html>502 Bad Gateway</html>").error)
+        assertEquals("invite_failed", CircleClient.decodeInviteError("").error)
+    }
 }

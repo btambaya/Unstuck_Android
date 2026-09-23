@@ -10,21 +10,29 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,6 +44,8 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
+import tech.csalliance.unstuck.core.logic.RecipientShareAction
 import tech.csalliance.unstuck.core.logic.plannedLabel
 import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.model.ShareSlot
@@ -64,6 +74,12 @@ import tech.csalliance.unstuck.ui.components.areaColorFor
 //   view          → strictly read-only (no actions; "you're watching this").
 //   partner/assign → Complete (shared_task_set_done) + Focus (starts shared focus,
 //                    which accrues onto the owner via log_shared_focus — T3).
+//
+// At EVERY level the recipient also has their own controls over the share (the
+// ⋮ menu): Remove from my list / Report… / Block the owner. A recipient used to
+// have none — an unwanted share sat in Today for good (parity with iOS build
+// 79, audit 2026-09-22 C10). Remove and Block confirm first and close the sheet
+// only once the SERVER agreed.
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -98,6 +114,42 @@ fun SharedTaskDetailSheet(
     val title = detail?.title ?: shared.title
     val canAct = level.canComplete
 
+    // The share this sheet is for — the row carries it, else (opened from a push,
+    // by task id alone) my Shared-with-you row does. None → no menu.
+    val sharedRows by vm.sharedWithMe.collectAsStateWithLifecycle()
+    val shareId = shared.shareId.ifBlank { null }
+        ?: sharedRows.firstOrNull { it.taskId == shared.taskId }?.shareId?.ifBlank { null }
+    val owner = ownerName.ifBlank { "Someone" }
+    val scope = rememberCoroutineScope()
+    var menu by remember(shared.taskId) { mutableStateOf(false) }
+    var confirmAction by remember(shared.taskId) { mutableStateOf<RecipientShareAction?>(null) }
+    var showReport by remember(shared.taskId) { mutableStateOf(false) }
+    var working by remember(shared.taskId) { mutableStateOf(false) }
+    /** The line after a report, or a refused remove / block (ok → green). */
+    var note by remember(shared.taskId) { mutableStateOf<Pair<Boolean, String>?>(null) }
+
+    fun run(action: RecipientShareAction) {
+        val sid = shareId ?: return
+        if (working) return
+        working = true; note = null
+        scope.launch {
+            val ok = when (action) {
+                RecipientShareAction.LEAVE -> vm.leaveSharedTask(sid)
+                RecipientShareAction.BLOCK -> vm.blockTaskSharer(sid)
+            }
+            working = false
+            if (ok) onDismiss() else note = false to "Couldn't do that — try again."
+        }
+    }
+
+    fun report(reason: String) {
+        note = null
+        scope.launch {
+            val ok = vm.reportSharedTask(shared.taskId, shareId, owner, reason)
+            note = if (ok) true to "Report sent — we review every report." else false to "Couldn't do that — try again."
+        }
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss, sheetState = sheetState, containerColor = c.surface, scrimColor = SheetScrim,
         dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } },
@@ -109,8 +161,31 @@ fun SharedTaskDetailSheet(
                     modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(onClick = onDismiss).padding(horizontal = 6.dp, vertical = 4.dp),
                 )
                 Text("Shared with you", style = UFont.serif(18, italic = true), color = c.ink, textAlign = TextAlign.Center, modifier = Modifier.weight(1f))
-                Text("Close", style = UFont.sans(14, FontWeight.Medium), color = Color.Transparent, modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp))
+                // The invisible "Close" keeps the title centred; the ⋮ sits on it.
+                Box(contentAlignment = Alignment.CenterEnd) {
+                    Text("Close", style = UFont.sans(14, FontWeight.Medium), color = Color.Transparent, modifier = Modifier.padding(horizontal = 6.dp, vertical = 4.dp))
+                    if (shareId != null) {
+                        if (working) CircularProgressIndicator(Modifier.size(18.dp), color = c.ink2, strokeWidth = 2.dp)
+                        else Icon(
+                            Icons.Filled.MoreVert, contentDescription = "More", tint = c.ink2,
+                            modifier = Modifier.size(32.dp).clip(CircleShape).clickable { menu = true }.padding(6.dp),
+                        )
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Remove from my list", style = UFont.sans(14), color = c.red) },
+                                onClick = { menu = false; confirmAction = RecipientShareAction.LEAVE },
+                            )
+                            DropdownMenuItem(text = { Text("Report…", style = UFont.sans(14), color = c.ink) }, onClick = { menu = false; showReport = true })
+                            DropdownMenuItem(
+                                text = { Text("Block $owner", style = UFont.sans(14), color = c.red) },
+                                onClick = { menu = false; confirmAction = RecipientShareAction.BLOCK },
+                            )
+                        }
+                    }
+                }
             }
+
+            note?.let { (ok, text) -> Text(text, style = UFont.sans(13, FontWeight.SemiBold), color = if (ok) c.greenInk else c.red) }
 
             // From + level chip.
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -211,6 +286,35 @@ fun SharedTaskDetailSheet(
                 Text("You're watching this — $ownerName will start & finish it.", style = UFont.sans(12), color = c.ink3)
             }
         }
+    }
+
+    confirmAction?.let { action ->
+        AlertDialog(
+            onDismissRequest = { confirmAction = null },
+            title = { Text(action.title(owner), style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+            text = { Text(action.message(owner), style = UFont.sans(13), color = c.ink2) },
+            confirmButton = { TextButton(onClick = { confirmAction = null; run(action) }) { Text(action.confirmLabel, color = c.red) } },
+            dismissButton = { TextButton(onClick = { confirmAction = null }) { Text("Cancel", color = c.ink2) } },
+            containerColor = c.surface,
+        )
+    }
+
+    if (showReport) {
+        AlertDialog(
+            onDismissRequest = { showReport = false },
+            title = { Text("Report this task?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Send a report about this task from $owner to the Unstuck team. We review reports and take action.", style = UFont.sans(13), color = c.ink2)
+                    listOf("Objectionable content", "Spam", "Harassment", "Other").forEach { reason ->
+                        TextButton(onClick = { showReport = false; report(reason) }) { Text(reason, color = c.ink) }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = { TextButton(onClick = { showReport = false }) { Text("Cancel", color = c.ink2) } },
+            containerColor = c.surface,
+        )
     }
 }
 

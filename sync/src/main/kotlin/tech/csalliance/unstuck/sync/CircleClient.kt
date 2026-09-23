@@ -21,6 +21,7 @@ import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.IsoRange
 import tech.csalliance.unstuck.core.logic.clampSharedRange
 import tech.csalliance.unstuck.core.logic.resolveSharedSlot
+import tech.csalliance.unstuck.core.model.BlockedUser
 import tech.csalliance.unstuck.core.model.CircleMember
 import tech.csalliance.unstuck.core.model.CircleStatus
 import tech.csalliance.unstuck.core.model.Objective
@@ -39,9 +40,13 @@ import tech.csalliance.unstuck.core.model.SharedWithMe
 // circle-invite / share-notify edge functions — the same auth.uid()-scoped,
 // server-validated surface the web uses. Recipients CANNOT read raw task rows
 // (RLS): shared tasks come from the tasks_shared_with_me RPC projection, never a
-// table mirror. Error handling mirrors CollectionShareClient: reads degrade to
-// empty, best-effort writes are swallowed, and only the two RPCs the web throws
-// on (task_share, shared_task_set_done) propagate.
+// table mirror. Error handling mirrors CollectionShareClient: best-effort writes
+// are swallowed, and only the two RPCs the web throws on (task_share,
+// shared_task_set_done) propagate. The three reads the app keeps on screen
+// (circleList, tasksSharedWithMe, myTaskShareBadges) answer NULL on a failure,
+// not empty: an offline refresh used to read [] and blank People, Shared-with-
+// you and the delegation badges (parity with iOS build 79, audit 2026-09-22
+// C11). The removal / block / leave writes answer whether the SERVER did it.
 //
 // The wire DTOs below are `internal` (not `private`) so the module's unit tests
 // can assert the exact snake_case param names + default-omission (kotlinx omits
@@ -102,6 +107,23 @@ enum class SharedFocusLogResult { LOGGED, SKIPPED, NOT_ALLOWED, FAILED }
     // pre-065 projection, explicit null for link-only / active rows.
     @SerialName("invitee_email") val inviteeEmail: String? = null,
 )
+
+// migration 075 block_user(p_user uuid) / unblock_user(p_user uuid) → boolean.
+@Serializable internal data class UserParam(@SerialName("p_user") val user: String)
+
+// migration 075 block_task_sharer(p_share_id uuid) / task_share_leave(p_share_id uuid)
+// → boolean — a recipient knows only the share id, never the owner's user id.
+@Serializable internal data class ShareIdParam(@SerialName("p_share_id") val shareId: String)
+
+// One my_blocked_users() row (migration 075): `name` is the server's
+// _display_name (never an email); a null / blank one reads "Someone".
+@Serializable internal data class BlockedUserRow(
+    @SerialName("user_id") val userId: String,
+    val name: String? = null,
+    @SerialName("created_at") val createdAt: String? = null,
+) {
+    fun toModel(): BlockedUser = BlockedUser(userId = userId, name = name?.trim()?.takeIf { it.isNotEmpty() } ?: "Someone", createdAt = createdAt)
+}
 
 // migration 067 cancel_pending_invite(p_kind text, p_id text) → boolean.
 @Serializable internal data class CancelPendingInviteParams(
@@ -293,13 +315,12 @@ data class RedeemResult(
 
 class CircleClient(private val client: SupabaseClient) {
 
-    private val lenientJson = Json { ignoreUnknownKeys = true }
-
     // ── Trusted circle / connections (migrations 036 + 040) ─────────────────
 
     /** My circle roster: active members (resolved names) + pending invites (with
-     *  their code, so the link can be re-copied). Degrades to empty on error. */
-    suspend fun circleList(): List<CircleMember> = runCatching {
+     *  their code, so the link can be re-copied). NULL on a failure — the caller
+     *  keeps the roster it has rather than showing "No one yet" (audit C11). */
+    suspend fun circleList(): List<CircleMember>? = runCatching {
         client.postgrest.rpc("circle_list").decodeList<CircleRow>().map { r ->
             CircleMember(
                 id = r.id,
@@ -313,7 +334,7 @@ class CircleClient(private val client: SupabaseClient) {
                 inviteeEmail = r.inviteeEmail?.takeIf { it.isNotBlank() },
             )
         }
-    }.getOrDefault(emptyList())
+    }.getOrNull()
 
     // ── Pending invites — Settings → People "Waiting to join" ───────────────
     // (unified sharing v1, spec §2 "One place for people"; migration 067)
@@ -369,6 +390,14 @@ class CircleClient(private val client: SupabaseClient) {
             }
         }
 
+        /** A non-2xx circle-invite body → a REFUSAL, always: the server's `{error}`
+         *  code, or `invite_failed` when the body has none / doesn't parse — a
+         *  non-2xx must never read as a success (mirrors iOS CircleClient.invite). */
+        internal fun decodeInviteError(text: String): InviteResult {
+            val code = runCatching { lenient.decodeFromString<InviteResult>(text) }.getOrNull()?.error?.takeIf { it.isNotBlank() }
+            return InviteResult(ok = false, error = code ?: "invite_failed")
+        }
+
         /** `cancel_pending_invite` body → did a row go? PostgREST renders a scalar
          *  `boolean` as `true` / `false`; `[true]` and `{"ok":true}` are read too in
          *  case the function is ever reshaped. Anything else is false. */
@@ -391,17 +420,55 @@ class CircleClient(private val client: SupabaseClient) {
         client.postgrest.rpc("circle_redeem", CodeParam(code.trim())).decodeAs<RedeemResult>()
     }.getOrElse { RedeemResult(ok = false, error = it.message ?: "error") }
 
-    /** Remove a member (or cancel a pending invite). Cascades their task shares
-     *  server-side. Best-effort. */
-    suspend fun circleRemove(id: String) {
-        runCatching { client.postgrest.rpc("circle_remove", IdParam(id)) }
-    }
+    /** Remove a member (or cancel a pending invite). Server-side this also drops
+     *  the task shares AND the list memberships between the two of you, in both
+     *  directions, releasing the promotions they held (migration 075 — 066 left
+     *  every shared list shared). RPC: circle_remove(p_id) → void, so TRUE means it
+     *  didn't throw; offline is false. The caller re-reads the shared state only
+     *  on true (parity with iOS build 79, audit 2026-09-22 C11). */
+    suspend fun circleRemove(id: String): Boolean =
+        runCatching { client.postgrest.rpc("circle_remove", IdParam(id)); true }.getOrElse { false }
+
+    // ── Blocks + recipient-side removal (migration 075) ─────────────────────
+    // Android had no Block at all, and a recipient had no way to drop a task
+    // shared with them (audit 2026-09-22, C10). Every write is TRUE only when
+    // the server says so (the scalar boolean is read by the same parser as
+    // `cancel_pending_invite`); a throw — offline, or a server without 075
+    // (PGRST202) — is false, so the UI never claims a block that didn't land.
+
+    /** Block someone by user id: the server cuts the connection, the task shares
+     *  and list memberships both ways, and their pending invites to me, and
+     *  refuses anything they share with me from then on. RPC: block_user(p_user). */
+    suspend fun blockUser(userId: String): Boolean = booleanRpc("block_user", UserParam(userId))
+
+    /** Block the OWNER of a task shared with me — the recipient only knows the
+     *  share id. RPC: block_task_sharer(p_share_id). */
+    suspend fun blockTaskSharer(shareId: String): Boolean = booleanRpc("block_task_sharer", ShareIdParam(shareId))
+
+    /** Lift a block. Restores nothing the block removed. RPC: unblock_user(p_user). */
+    suspend fun unblockUser(userId: String): Boolean = booleanRpc("unblock_user", UserParam(userId))
+
+    /** Remove a task shared WITH me from my list (deletes MY recipient row; the
+     *  owner isn't told). RPC: task_share_leave(p_share_id). */
+    suspend fun leaveSharedTask(shareId: String): Boolean = booleanRpc("task_share_leave", ShareIdParam(shareId))
+
+    /** Everyone I blocked, newest first (display names only, never an email).
+     *  RPC: my_blocked_users() → table(user_id, name, created_at). NULL on a
+     *  failure (including a server without 075) so the caller keeps its list. */
+    suspend fun blockedUsers(): List<BlockedUser>? = runCatching {
+        client.postgrest.rpc("my_blocked_users").decodeList<BlockedUserRow>().map { it.toModel() }
+    }.getOrNull()
+
+    private suspend inline fun <reified T : Any> booleanRpc(fn: String, params: T): Boolean = runCatching {
+        decodeCancelPendingInvite(client.postgrest.rpc(fn, params).data)
+    }.getOrDefault(false)
 
     /** Invite someone to my circle via the circle-invite edge fn. With an email the
      *  server reaches them (adds an existing user directly + notifies; emails a new
      *  person the join link). Blank/null email → a link I share myself. Returns what
      *  happened. Decodes the `{error}` body even from a non-2xx (like
-     *  CollectionShareClient), so the caller can surface it. */
+     *  CollectionShareClient), so the caller can surface it — e.g. 403
+     *  `{error:'blocked'}` for someone I blocked (migration 075). */
     suspend fun circleInvite(email: String? = null): InviteResult {
         val trimmed = email?.trim()?.takeIf { it.isNotEmpty() }
         return callInvite(InviteBody(email = trimmed)) ?: InviteResult(error = "invite_failed")
@@ -415,8 +482,16 @@ class CircleClient(private val client: SupabaseClient) {
                 setBody(body)
             }.body<InviteResult>()
         }.getOrElse { e ->
-            val resp = (e as? ResponseException)?.response ?: return null
-            runCatching { lenientJson.decodeFromString<InviteResult>(resp.bodyAsText()) }.getOrNull()
+            // supabase-kt's Functions plugin throws a RestException for EVERY non-2xx
+            // (its `error` is the body text, Functions.parseErrorResponse), never a ktor
+            // ResponseException — catching only the latter lost every body, so a 403
+            // `blocked` or a 429 read "Could not create invite" (audit 2026-09-22 SC-3).
+            val text = when (e) {
+                is io.github.jan.supabase.exceptions.RestException -> e.error.ifBlank { e.message ?: "" }
+                is ResponseException -> runCatching { e.response.bodyAsText() }.getOrDefault("")
+                else -> return null
+            }
+            decodeInviteError(text)
         }
 
     // ── Per-task sharing (migrations 037 + 044) ─────────────────────────────
@@ -447,12 +522,13 @@ class CircleClient(private val client: SupabaseClient) {
     }.getOrDefault(emptyList())
 
     /** Tasks other people have shared WITH me (SECURITY DEFINER projection — the raw
-     *  task rows are RLS-forbidden). Degrades to empty on error. */
-    suspend fun tasksSharedWithMe(): List<SharedWithMe> = runCatching {
+     *  task rows are RLS-forbidden). NULL on a failure — the caller keeps the rows it
+     *  has; an offline [] used to blank Shared-with-you (audit C11). */
+    suspend fun tasksSharedWithMe(): List<SharedWithMe>? = runCatching {
         // Slots land in the RECIPIENT's zone (migration 053 next_start_at) — see
         // SharedWithMeRow.toModel. A pre-053 server leaves the owner's wall-clock.
         client.postgrest.rpc("tasks_shared_with_me").decodeList<SharedWithMeRow>().map { it.toModel() }
-    }.getOrDefault(emptyList())
+    }.getOrNull()
 
     /** Every block of every task shared WITH me dated inside [from, to] (inclusive
      *  'YYYY-MM-DD') — the calendar surface (migration 052 shared_task_blocks). The
@@ -509,12 +585,13 @@ class CircleClient(private val client: SupabaseClient) {
     }
 
     /** All my outgoing shares, grouped by taskId → the row badges (mirrors the web's
-     *  useShareBadges().byTask map). Degrades to empty on error. */
-    suspend fun myTaskShareBadges(): Map<String, List<ShareBadge>> = runCatching {
+     *  useShareBadges().byTask map). NULL on a failure — an offline {} used to put
+     *  handed-over tasks back in the active list and Start-Next (audit C11). */
+    suspend fun myTaskShareBadges(): Map<String, List<ShareBadge>>? = runCatching {
         client.postgrest.rpc("my_task_share_badges").decodeList<BadgeRow>()
             .map { ShareBadge(it.taskId, ShareLevel.fromWire(it.level), it.recipientName) }
             .groupBy { it.taskId }
-    }.getOrDefault(emptyMap())
+    }.getOrNull()
 
     // ── share-notify edge fn (best-effort; server re-validates + pref-gates) ─
 

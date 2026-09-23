@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 104
-        versionName = "0.5.20"
+        versionCode = 105
+        versionName = "0.5.21"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.20 — Sign-up and magic-link emails now open the app when you tap them on this phone, and the website when you open them on a computer (instead of a link a computer can't open). Signing up with an email that already has an account now says so, with Sign in and Forgot password buttons, instead of waiting for an email that never comes."
+    releaseNotes = "v0.5.21 — Connecting Google Calendar now goes through unstucknow.io (part of getting Unstuck verified by Google). Nothing else changes; if Google Calendar is already connected, it stays connected."
 }
 
 dependencies {

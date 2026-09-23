@@ -101,8 +101,15 @@ class CallVoiceServiceTest {
         assertTrue(comp.instructions.startsWith("BASE VOICE INSTRUCTIONS\n\nTHIS IS A PHONE CALL"))
         assertEquals(CallScript.opening(payload, nowMs = 0L), comp.opening)
         assertTrue(comp.opening.startsWith("Hi Ahmad — you asked me to ring so you'd speak to James."))
-        assertTrue(comp.primer.contains("\"${comp.opening}\""))
+        // Greet once (parity with iOS build 77): the opening is quoted in the
+        // instructions only — quoted in the primer too, the model spoke it twice.
+        assertFalse(comp.primer.contains(comp.opening))
+        assertTrue(comp.instructions.contains("\"${comp.opening}\""))
         assertTrue(comp.primer.contains("YOU rang them"))
+        assertEquals(
+            "(The call just connected — YOU rang them; this is not the user speaking. Say your opening line now, once, exactly as your instructions give it, then listen. Never repeat it later.)",
+            comp.primer,
+        )
         // The call is the full assistant: every voice tool handed in, in order, plus snooze_call.
         assertEquals(listOf("create_task", "complete_task", "add_capture", "schedule_task", "start_focus", "update_call", "snooze_call"), comp.toolNames)
         assertTrue(comp.instructions.contains("You have every tool you have in Talk"))
@@ -114,7 +121,16 @@ class CallVoiceServiceTest {
         assertTrue(morning.instructions.contains("THIS IS THE MORNING PLANNING CALL"))
         val after = CallVoiceService.compose(payload.copy(callKind = "after_block", endTime = "11:30"), "BASE", registry("complete_task"), nowMs = 0L)
         assertEquals("Hi Ahmad — Board prep was on till 11:30am. How did it go?", after.opening)
-        assertTrue(after.primer.contains("\"${after.opening}\""))
+        assertFalse(after.primer.contains(after.opening))
+    }
+
+    @Test fun `compose threads the store's day context into the call context (parity with iOS build 75)`() {
+        val evening = CallVoiceService.compose(payload.copy(callKind = "evening", label = "Evening wrap-up", taskId = null, notes = emptyList()),
+            "BASE", registry("get_tasks"), nowMs = 0L, dayContext = listOf("done today (1): X", "still open today: nothing"))
+        assertTrue(evening.instructions, evening.instructions.contains("- done today (1): X"))
+        assertTrue(evening.instructions.contains("- still open today: nothing"))
+        assertTrue(evening.instructions.contains("NEVER ask them what got done"))
+        assertFalse("no day context → no lines", CallVoiceService.compose(payload, "BASE", registry("get_tasks"), nowMs = 0L).instructions.contains("- done today"))
     }
 
     @Test fun `call tool schemas - every voice tool in order, snooze always ours, update_call synthesised`() {

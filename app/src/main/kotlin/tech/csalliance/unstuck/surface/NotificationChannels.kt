@@ -33,6 +33,12 @@ object NotificationChannels {
      *  focus timer, and an active call must not read as a low-priority
      *  "Focus session" entry in the shade. */
     const val CALL_ONGOING = "unstuck_call_ongoing"
+    /** The QUIET call results — "outside your hours" / "calls are off" (LOW,
+     *  silent, no vibration). They are posted the moment the server rings,
+     *  which can be 3 am, so they must not sound or pop up; missed / busy /
+     *  voice-failed stay on [REMINDERS]. A NEW id because a channel's
+     *  importance can't change after creation (parity with iOS build 78, 0f24908). */
+    const val CALL_NOTES = "unstuck_call_notes"
 
     /** Brand accents for notification tint (running = coral, paused = amber). */
     const val CORAL = 0xFFE89077.toInt()
@@ -65,6 +71,7 @@ object NotificationChannels {
         // focus timer — a reasonable thing to do — would otherwise take the only
         // hang-up affordance away while the microphone kept running.
         ch(CALL_ONGOING, "Ongoing call", NotificationManager.IMPORTANCE_DEFAULT, silent = true, vibrate = false, desc = "Shows the call you're on with Unstuck, with an End button")
+        ch(CALL_NOTES, "Call notes", NotificationManager.IMPORTANCE_LOW, silent = true, vibrate = false, desc = "The notes of a call this phone declined — outside your call hours, or with Calls off")
         // The ring channel: HIGH so it heads-up / full-screens, the device's
         // RINGTONE (not the notification tone) under USAGE_NOTIFICATION_RINGTONE so
         // it follows the ringer volume + silent/vibrate modes like a phone call,

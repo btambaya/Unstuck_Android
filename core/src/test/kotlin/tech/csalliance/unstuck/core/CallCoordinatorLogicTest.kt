@@ -297,4 +297,16 @@ class CallCoordinatorLogicTest {
         assertNull(CoordinatorState.fromJson("{not json"))
         assertNotNull(CoordinatorState.fromJson(s.toJson().replace("}", ",\"future\":1}")))
     }
+
+    /** A provider error mid-call used to be dropped — dead air with the mic hot
+     *  until the 14-minute cap (parity with iOS build 78). */
+    @Test fun `a conversation that ends on its own - error is a voice failure, a snooze in flight wins, clean is a goodbye`() {
+        assertEquals(CallEndReason.Failed("The voice server is unavailable right now (502)."),
+            CallCoordinatorLogic.endedOnItsOwn("The voice server is unavailable right now (502).", pendingSnoozeMin = null))
+        assertEquals(CallEndReason.Snoozed(20), CallCoordinatorLogic.endedOnItsOwn("socket closed", pendingSnoozeMin = 20))
+        assertEquals(CallEndReason.Snoozed(10), CallCoordinatorLogic.endedOnItsOwn(null, pendingSnoozeMin = 10))
+        assertEquals(CallEndReason.HungUp, CallCoordinatorLogic.endedOnItsOwn(null, pendingSnoozeMin = null))
+        val r = CallCoordinatorLogic.endOutcome(CallCoordinatorLogic.endedOnItsOwn("boom", null))
+        assertEquals(listOf("voice failed: boom"), r.outcomeNotes)
+    }
 }

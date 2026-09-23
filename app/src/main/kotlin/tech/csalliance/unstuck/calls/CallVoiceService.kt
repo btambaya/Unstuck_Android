@@ -35,11 +35,16 @@ import kotlinx.serialization.json.putJsonArray
 import kotlinx.serialization.json.putJsonObject
 import tech.csalliance.unstuck.MainActivity
 import tech.csalliance.unstuck.R
+import android.util.Log
 import tech.csalliance.unstuck.core.logic.CallCoordinatorLogic
+import tech.csalliance.unstuck.core.logic.CallDayContext
 import tech.csalliance.unstuck.core.logic.CallEndReason
 import tech.csalliance.unstuck.core.logic.CallOutcome
 import tech.csalliance.unstuck.core.logic.CallScript
+import tech.csalliance.unstuck.core.logic.CallSettings
+import tech.csalliance.unstuck.core.logic.CallSettingsLogic
 import tech.csalliance.unstuck.core.logic.IncomingCallPayload
+import tech.csalliance.unstuck.core.model.CallKind
 import tech.csalliance.unstuck.surface.NotificationChannels
 import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.assistant.CallMode
@@ -92,7 +97,12 @@ class CallVoiceService : Service() {
      *  RealtimeCallVoiceLauncher.Deps). Bound by AppViewModel via [bind]. */
     interface Deps {
         fun isVoiceConfigured(): Boolean
+        /** The stored token — only the "signed in?" gate and the fallback. */
         fun accessToken(): String?
+        /** The token the dial sends, resolved at dial time and refreshed when it
+         *  would not outlive the call (`forceRefresh` after the proxy's 401).
+         *  Parity with iOS build 81, audit 2026-09-22 C14. */
+        suspend fun freshAccessToken(forceRefresh: Boolean): String? = if (forceRefresh) null else accessToken()
         val proxyUrl: String
         val model: String
         /** The assistant's voice instructions — scope guardrail + live app state. */
@@ -105,12 +115,23 @@ class CallVoiceService : Service() {
         /** Receipts land in the thread as "While we talked:" (iOS resetVoiceScratch / endVoiceSession). */
         fun sessionWillStart() {}
         fun sessionDidEnd() {}
+        /** CallDayContext.lines over the STORE — what got done today, what's
+         *  open, today's plan — for the call instructions (parity with iOS
+         *  build 75). Default: nothing (tests; a store that isn't ready). */
+        suspend fun dayContext(kind: CallKind): List<String> = emptyList()
+        /** This phone's Calls switch + hours: an in-call snooze that would ring
+         *  outside them is refused, the call left up (C12). */
+        fun callSettings(): CallSettings = CallSettings.DEFAULTS
 
         companion object {
             /** The production seams over the live AppViewModel. */
             fun live(vm: AppViewModel): Deps = object : Deps {
                 override fun isVoiceConfigured() = vm.voiceConfigured()
                 override fun accessToken() = vm.voiceAccessToken()
+                // A call answered on the lock screen of an app idle overnight
+                // dialled with last night's token (the SDK refreshes only in the
+                // foreground) and the proxy's 401 hung it up.
+                override suspend fun freshAccessToken(forceRefresh: Boolean) = vm.freshVoiceAccessToken(forceRefresh)
                 override val proxyUrl: String get() = vm.voiceProxyUrl
                 override val model: String get() = vm.voiceModel
                 override suspend fun voiceInstructions() = vm.voiceInstructionsAsync()
@@ -121,6 +142,15 @@ class CallVoiceService : Service() {
                 // "While we talked:", with Undo — a call is a voice session like
                 // Talk, and the receipt is the consent UX (web / iOS parity).
                 override fun sessionDidEnd() = vm.endVoiceSession()
+                // Direct Room snapshots through the executor's seam — NOT the
+                // vm.tasks / vm.blocks StateFlows, which are WhileSubscribed and
+                // empty when a call is answered from the lock screen with no UI
+                // collecting them.
+                override suspend fun dayContext(kind: CallKind): List<String> {
+                    val api = vm.assistantApi
+                    return CallDayContext.lines(kind, api.getTasks(), api.getBlocks(), api.todayIso(), api.nowHM())
+                }
+                override fun callSettings(): CallSettings = vm.callSettings.value
             }
         }
     }
@@ -242,10 +272,12 @@ class CallVoiceService : Service() {
         scope.launch {
             // The prompt is the whole app context (a dozen Room reads) — never on main.
             val base = runCatching { withContext(Dispatchers.Default) { d.voiceInstructions() } }.getOrNull()
+            // Today's facts from the store (B75.1); a failed read leaves them out.
+            val day = runCatching { withContext(Dispatchers.Default) { d.dayContext(p.resolvedKind) } }.getOrDefault(emptyList())
             withContext(Dispatchers.Main) {
                 if (gen != generation || phase != Phase.STARTING) return@withContext
                 if (base == null) { finish(CallEndReason.Failed("couldn't build the session")); return@withContext }
-                val comp = compose(p, base, d.voiceTools())
+                val comp = compose(p, base, d.voiceTools(), dayContext = day)
                 openSession(d, p, token, comp, gen)
             }
         }
@@ -262,11 +294,23 @@ class CallVoiceService : Service() {
             runTool = { name, args -> d.runAppTool(name, args) },
             onState = { s -> main.post { if (current()) state = s } },
             onCaption = { _, _, _ -> },
-            onError = { _ -> },
+            // A provider failure mid-call was discarded: on a live call that is
+            // dead air with the mic hot until MAX_CALL_MS. End it the way a
+            // transport failure does, so the user gets the "here's what it was
+            // about" notification (parity with iOS build 78, 0f24908). finish()
+            // is once-only, so the transport path (onError, then the hook) is safe.
+            onError = { msg ->
+                Log.w(VoiceRealtimeClient.TAG, "voice call failed: $msg")
+                main.post { if (current()) endOnItsOwn(msg) }
+            },
             callMode = CallMode(
                 allowedTools = comp.toolNames.toSet(),
                 onSnoozeCall = { minutes -> main.post { if (current()) snooze(minutes) } },
+                // A call-back is a booking too: one that would ring outside this
+                // phone's hours is refused and the call stays up (C12).
+                snoozeRefusal = { minutes -> CallSettingsLogic.snoozeRefusal(minutes, System.currentTimeMillis(), d.callSettings()) },
             ),
+            freshToken = { force -> d.freshAccessToken(force) },
         )
         // TRANSIENT focus loss (an alarm, a notification ducking us) → MUTE, never
         // end; regained → un-mute. A PERMANENT loss (AUDIOFOCUS_LOSS — a real
@@ -283,19 +327,17 @@ class CallVoiceService : Service() {
         audio.onCaptureError = { main.post { if (current()) finish(CallEndReason.Failed("microphone unavailable")) } }
         // The transport ended on its own (never after stop()): a clean close is the
         // model's goodbye + the server hanging up; a failure is a voice failure.
-        rc.onTransportEnded = { error ->
-            main.post {
-                if (!current()) return@post
-                if (pendingSnoozeMin != null) finish(CallEndReason.Snoozed(pendingSnoozeMin!!))
-                else finish(error?.let { CallEndReason.Failed(it) } ?: CallEndReason.HungUp)
-            }
-        }
+        rc.onTransportEnded = { error -> main.post { if (current()) endOnItsOwn(error) } }
         engine = audio
         client = rc
         phase = Phase.ACTIVE
         runCatching { d.sessionWillStart() }
         rc.start()
     }
+
+    /** The conversation ended on its own — the transport, or a provider error
+     *  mid-call (CallCoordinatorLogic.endedOnItsOwn). */
+    private fun endOnItsOwn(error: String?) = finish(CallCoordinatorLogic.endedOnItsOwn(error, pendingSnoozeMin))
 
     /** `snooze_call` ran: report `snoozed` NOW (one outcome — a second snooze
      *  repeats the first), let the goodbye play, then end. */
@@ -558,19 +600,29 @@ class CallVoiceService : Service() {
         /** instructions = base + call script (per kind); opening = CallScript.opening;
          *  primer wraps the opening; tools = every voice tool + update_call +
          *  snooze_call. Port of iOS RealtimeCallVoiceLauncher.compose. */
-        fun compose(p: IncomingCallPayload, baseInstructions: String, voiceTools: JsonArray, nowMs: Long = System.currentTimeMillis()): Composition {
+        fun compose(
+            p: IncomingCallPayload, baseInstructions: String, voiceTools: JsonArray,
+            nowMs: Long = System.currentTimeMillis(), dayContext: List<String> = emptyList(),
+        ): Composition {
             val opening = CallScript.opening(p, nowMs = nowMs)
             return Composition(
-                instructions = baseInstructions + "\n\n" + CallScript.instructions(p, nowMs = nowMs),
+                instructions = baseInstructions + "\n\n" + CallScript.instructions(p, nowMs = nowMs, dayContext = dayContext),
                 opening = opening,
                 primer = primer(opening),
                 tools = callToolSchemas(voiceTools),
             )
         }
 
-        /** The hidden primer: the model must speak the opening verbatim, once. */
+        /** The hidden primer: the trigger for the opening, which the call
+         *  instructions carry verbatim. It must NOT quote the opening itself:
+         *  with both the instructions and the primer quoting it, the model spoke
+         *  it twice, as two message items in one response — every call,
+         *  measured through the proxy 2026-09-21. Pointing at the instructions
+         *  instead: once, every time (parity with iOS build 77, 2c79212). The
+         *  parameter stays for signature parity. */
+        @Suppress("UNUSED_PARAMETER")
         fun primer(opening: String): String =
-            "(The call just connected — YOU rang them, this is not the user speaking. Say EXACTLY this now, word for word, before anything else, then listen: \"$opening\" This opening happens ONCE — after any interruption continue the conversation naturally; never repeat it.)"
+            "(The call just connected — YOU rang them; this is not the user speaking. Say your opening line now, once, exactly as your instructions give it, then listen. Never repeat it later.)"
 
         /** The call's tool schemas: EVERY schema in [voiceTools] (the Talk
          *  session's voice surface, in that order) plus the call extras —

@@ -258,6 +258,17 @@ object CallCoordinatorLogic {
     fun ringSnoozeReport(minutes: Int = DEFAULT_SNOOZE_MIN): OutcomeReport =
         OutcomeReport(CallOutcome.SNOOZED, snoozeMin = clampSnooze(minutes))
 
+    /** How an answered call's conversation that ended ON ITS OWN ends: a
+     *  snooze already in flight stays that snooze; otherwise an error — the
+     *  transport's, or a provider error mid-call, which used to be dropped and
+     *  left dead air until the length cap (parity with iOS build 78) — is a
+     *  voice failure, and a clean close is the model's goodbye. */
+    fun endedOnItsOwn(error: String?, pendingSnoozeMin: Int?): CallEndReason = when {
+        pendingSnoozeMin != null -> CallEndReason.Snoozed(pendingSnoozeMin)
+        error != null -> CallEndReason.Failed(error)
+        else -> CallEndReason.HungUp
+    }
+
     /** How an ANSWERED call's end reports, 1:1 with iOS `performEnd`. */
     fun endOutcome(reason: CallEndReason): OutcomeReport = when (reason) {
         CallEndReason.HungUp -> OutcomeReport(CallOutcome.DONE)

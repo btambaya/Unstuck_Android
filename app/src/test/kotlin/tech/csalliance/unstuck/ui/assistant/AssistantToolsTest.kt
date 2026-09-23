@@ -93,6 +93,7 @@ class AssistantToolsTest {
         var canEditOverride: Boolean? = null
         var userId: String? = "me"
         var callStoreAvailable = false
+        var callSettings = tech.csalliance.unstuck.core.logic.CallSettings.DEFAULTS
         // 2026-09-20 tooling rewrite: the seams that report REAL outcomes.
         val reminders = HashMap<String, Int?>()
         var reminderSaveOk = true
@@ -267,6 +268,7 @@ class AssistantToolsTest {
         }
         override fun currentUserId() = state.userId
         override fun callStore(): AssistantCallStore? = if (state.callStoreAvailable) FakeCalls() else null
+        override fun callSettings() = state.callSettings
 
         inner class FakeCalls : AssistantCallStore {
             override suspend fun liveCalls() = state.calls.filter { it.isLive }
@@ -1245,6 +1247,49 @@ class AssistantToolsTest {
         assertEquals("error: task not found", h.run("request_call", "taskId" to "zz"))
         val unscheduled = makeApi { callStoreAvailable = true; tasks += task("u", "Loose") }
         assertEquals("error: \"Loose\" has no upcoming slot — schedule_task it first, or give a time with when", unscheduled.run("request_call", "taskId" to "u"))
+    }
+
+    // ── this phone's switch + hours (parity with iOS build 81, audit 2026-09-22 C12) ──
+
+    /** "call me at 9pm" used to be answered "ok: call booked", then declined
+     *  quietly on receipt by the phone's hours. */
+    @Test fun `request_call refuses a time this phone would decline, and while Calls is off`() = runTest {
+        val narrow = tech.csalliance.unstuck.core.logic.CallSettings(hoursStart = "08:00", hoursEnd = "21:00")
+        val h = makeApi { callStoreAvailable = true; callSettings = narrow }
+        assertEquals(
+            "error: 21:00 is outside this phone's call hours (08:00–21:00; the latest it rings is 20:59), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Calls",
+            h.run("request_call", "label" to "meds", "when" to "$TOMORROW 21:00"),
+        )
+        val early = h.run("request_call", "label" to "meds", "when" to "$TOMORROW 07:30")
+        assertTrue(early, early.startsWith("error: 07:30 is outside this phone's call hours"))
+        // Task-anchored: block start minus the lead is what's judged.
+        h.state.tasks += task("t1", "Evening review"); h.state.blocks += block("b1", "t1", TOMORROW, "21:30")
+        val anchored = h.run("request_call", "taskId" to "t1", "leadMin" to 15)
+        assertTrue(anchored, anchored.startsWith("error: 21:15 is outside this phone's call hours"))
+        // The server window still answers first.
+        assertEquals("error: calls can only be booked between 06:00 and 23:00 — suggest a time inside that window", h.run("request_call", "label" to "meds", "when" to "$TOMORROW 05:00"))
+        assertTrue("nothing is booked on a refusal", h.state.calls.isEmpty())
+        assertEquals("ok: call booked $TOMORROW 20:59 \"meds\" (0 notes) id=call1", h.run("request_call", "label" to "meds", "when" to "$TOMORROW 20:59"))
+        // The 23:00 edge on untouched defaults: the server takes it, the phone doesn't.
+        val d = makeApi { callStoreAvailable = true }
+        assertTrue(d.run("request_call", "label" to "late", "when" to "$TOMORROW 23:00").contains("(06:00–23:00; the latest it rings is 22:59)"))
+        val off = makeApi { callStoreAvailable = true; callSettings = tech.csalliance.unstuck.core.logic.CallSettings(enabled = false) }
+        assertEquals(
+            "error: calls are off on this phone, so it would decline this call — tell them to switch Calls on in Settings › Calls first",
+            off.run("request_call", "label" to "dentist", "when" to "$TOMORROW 18:00"),
+        )
+        assertTrue(off.state.calls.isEmpty())
+    }
+
+    @Test fun `update_call meets the phone's hours only when the time changes`() = runTest {
+        val h = makeApi { callStoreAvailable = true }
+        h.run("request_call", "label" to "meds", "when" to "$TOMORROW 20:00")
+        h.state.callSettings = tech.csalliance.unstuck.core.logic.CallSettings(hoursStart = "08:00", hoursEnd = "21:00")
+        assertTrue(h.run("update_call", "callId" to "call1", "when" to "$TOMORROW 22:00").startsWith("error: 22:00 is outside this phone's call hours"))
+        assertEquals("a notes-only edit is never refused", "ok: updated call \"meds\" — $TOMORROW 20:00, 1 note id=call1",
+            h.run("update_call", "callId" to "call1", "notes" to listOf("take the blue one")))
+        h.state.callSettings = tech.csalliance.unstuck.core.logic.CallSettings(enabled = false)
+        assertTrue(h.run("update_call", "callId" to "call1", "when" to "$TOMORROW 19:00").startsWith("error: calls are off on this phone"))
     }
 
     // ── ToolArgs ───────────────────────────────────────────────────────────

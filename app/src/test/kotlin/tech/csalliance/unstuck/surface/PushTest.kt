@@ -148,7 +148,15 @@ class PushTest {
         assertEquals("A\nB\n" + CallNotificationCopy.HOURS_HINT, n.extras.getCharSequence(Notification.EXTRA_BIG_TEXT).toString())
         assertEquals(listOf("Start", "Reschedule"), n.actions.map { it.title.toString() })
         assertEquals("unstuck://task/t-1", shadowOf(n.contentIntent).savedIntent.data.toString())
-        assertEquals(NotificationChannels.REMINDERS, n.channelId)
+        // QUIET (parity with iOS build 78): it lands when the server rang —
+        // outside the hours, possibly 3 am — so no sound, no heads-up.
+        assertEquals(NotificationChannels.CALL_NOTES, n.channelId)
+        val ch = nm.getNotificationChannel(NotificationChannels.CALL_NOTES)
+        assertEquals(NotificationManager.IMPORTANCE_LOW, ch.importance)
+        assertNull("silent", ch.sound)
+        assertFalse(ch.shouldVibrate())
+        @Suppress("DEPRECATION") assertEquals(Notification.PRIORITY_LOW, n.priority)
+        assertEquals("setSilent: a member of the group never alerts", Notification.GROUP_ALERT_SUMMARY, n.groupAlertBehavior)
     }
 
     @Test fun `the kill-switches decline with the calls-off notice`() {
@@ -158,6 +166,7 @@ class PushTest {
         assertTrue(handle(contract + mapOf("callId" to "c2"), env = ringEnv.copy(callsEnabled = false)))
         n = shadowOf(nm).getNotification(NotifIds.callResult("c2"))
         assertTrue(n.extras.getCharSequence(Notification.EXTRA_BIG_TEXT).toString().endsWith("(calls are switched off — Settings › Calls)"))
+        assertEquals("the user switched calls off — a quiet note, never a buzz", NotificationChannels.CALL_NOTES, n.channelId)
         assertEquals(listOf(CallOutcome.DECLINED, CallOutcome.DECLINED), queued().map { it.outcome })
     }
 
@@ -166,6 +175,7 @@ class PushTest {
         assertEquals(listOf(CallOutcome.BUSY), queued().map { it.outcome })
         val n = shadowOf(nm).getNotification(NotifIds.callResult(callId))
         assertEquals("I called about speak to James — you were mid-focus", n.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
+        assertEquals("busy / missed / voice-failed stay loud, as on iOS", NotificationChannels.REMINDERS, n.channelId)
     }
 
     @Test fun `anchor gone → stale, silently - unknown anchor rings`() {

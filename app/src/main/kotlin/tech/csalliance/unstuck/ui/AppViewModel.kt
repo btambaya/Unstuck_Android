@@ -3518,7 +3518,35 @@ class AppViewModel(
      *  kill-switch has to reach EVERY assistant surface, voice included — the
      *  published privacy policy promises exactly that. */
     fun voiceConfigured(): Boolean = voiceProxyUrl.isNotBlank() && settings.value.assistantEnabled
+    /** The stored access token. It may be EXPIRED (supabase-kt refreshes only
+     *  while the app is in the foreground), so it is only the "signed in?" gate
+     *  and the fallback — a dial goes through [freshVoiceAccessToken]. */
     fun voiceAccessToken(): String? = graph.provider?.client?.auth?.currentSessionOrNull()?.accessToken
+
+    /** The token a voice dial sends: refreshed when it is expired OR would
+     *  expire before the session can end — a lock-screen call on an app idle
+     *  overnight otherwise dialled with a dead token and the proxy's 401 hung
+     *  it up. `forceRefresh` follows that 401 and never answers with the token
+     *  the proxy refused (parity with iOS build 81, audit 2026-09-22 C14/C15). */
+    suspend fun freshVoiceAccessToken(forceRefresh: Boolean = false): String? {
+        val auth = graph.provider?.client?.auth
+        val fresh = if (auth == null) null else tech.csalliance.unstuck.ui.assistant.VoiceToken.resolve(
+            forceRefresh = forceRefresh,
+            nowMs = { System.currentTimeMillis() },
+            stored = {
+                auth.currentSessionOrNull()?.let {
+                    tech.csalliance.unstuck.ui.assistant.VoiceToken.Stored(it.accessToken, it.expiresAt.toEpochMilliseconds())
+                }
+            },
+            // The refresh token is read at call time by the SDK; the new session
+            // is imported (and persisted) before this reads it back.
+            refresh = { auth.refreshCurrentSession(); auth.currentSessionOrNull()?.accessToken },
+            // Never viewModelScope: a refresh cut mid-flight can spend the refresh
+            // token without storing its successor.
+            scope = graph.scope,
+        )
+        return tech.csalliance.unstuck.ui.assistant.VoiceToken.dialToken(fresh, voiceAccessToken(), forceRefresh)
+    }
 
     private val voiceScratch = TurnScratch()
 

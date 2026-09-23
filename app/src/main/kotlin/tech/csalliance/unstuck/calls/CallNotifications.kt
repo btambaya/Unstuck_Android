@@ -9,6 +9,7 @@ import androidx.core.app.NotificationManagerCompat
 import tech.csalliance.unstuck.MainActivity
 import tech.csalliance.unstuck.R
 import tech.csalliance.unstuck.core.logic.CallNotificationCopy
+import tech.csalliance.unstuck.core.logic.CallNotificationKind
 import tech.csalliance.unstuck.core.logic.CallNotificationSpec
 import tech.csalliance.unstuck.core.logic.IncomingCallPayload
 import tech.csalliance.unstuck.surface.NotifIds
@@ -19,7 +20,8 @@ import tech.csalliance.unstuck.surface.NotificationLog
 /**
  * "What happened to the call" notifications — 1:1 with iOS
  * `CallNotifications` (CallCoordinator.swift): missed / busy / outside hours /
- * voice failed, on the reminders channel, with the notes as the body and, when
+ * voice failed — on the reminders channel, except the quiet "outside your
+ * hours" / "calls are off" pair on CALL_NOTES — with the notes as the body and, when
  * a task is anchored, the same **Start** / **Reschedule** shade actions the
  * "starts now" reminder has (NotificationRenderer.postTaskStarting). The copy
  * is :core `CallNotificationCopy` (unit-tested there); one id per call
@@ -35,9 +37,10 @@ object CallNotifications {
         fun snoozedTitle(minutes: Int) = "I'll call back in $minutes minutes"
     }
 
-    /** Post one of the core verdicts. */
-    fun post(context: Context, spec: CallNotificationSpec) =
-        post(context, spec, kind = "call_" + spec.kind.name.lowercase())
+    /** Post one of the core verdicts. An outside-hours one is always QUIET,
+     *  whichever path posts it. */
+    fun post(context: Context, spec: CallNotificationSpec, quiet: Boolean = spec.kind == CallNotificationKind.OUTSIDE_HOURS) =
+        post(context, spec, kind = "call_" + spec.kind.name.lowercase(), quiet = quiet)
 
     /** Unanswered after 30 s (or the ring never showed). */
     fun missed(context: Context, p: IncomingCallPayload) = post(context, CallNotificationCopy.missed(p))
@@ -45,7 +48,9 @@ object CallNotifications {
     /** A focus session was live / another call was up. */
     fun busy(context: Context, p: IncomingCallPayload) = post(context, CallNotificationCopy.busy(p))
 
-    /** Received outside the user's Settings › Calls window. */
+    /** Received outside the user's Settings › Calls window. QUIET: it lands
+     *  when the server rang — by definition outside the hours the user wants
+     *  to hear from us, possibly 3 am (parity with iOS build 78). */
     fun outsideHours(context: Context, p: IncomingCallPayload) = post(context, CallNotificationCopy.outsideHours(p))
 
     /** Answered, but the voice stack could not start. */
@@ -57,6 +62,7 @@ object CallNotifications {
         context,
         CallNotificationCopy.missed(p).copy(id = "unstuck.call.off.${p.callId}", title = Copy.callsOffTitle(p.label), body = Copy.callsOffBody(p.notes)),
         kind = "call_off",
+        quiet = true,   // the user switched calls off — don't buzz them for it
     )
 
     /** Brief confirmation after a shade / ring-screen snooze (auto-dismisses). */
@@ -79,9 +85,10 @@ object CallNotifications {
     )
 
     /** Same privacy shape as NotificationRenderer.base: private on the lock
-     *  screen with an "Unlock to read" public version. */
-    private fun base(context: Context): NotificationCompat.Builder =
-        NotificationCompat.Builder(context, NotificationChannels.REMINDERS)
+     *  screen with an "Unlock to read" public version. [quiet] = the silent,
+     *  passive [NotificationChannels.CALL_NOTES] shape (no sound, no heads-up). */
+    private fun base(context: Context, quiet: Boolean = false): NotificationCompat.Builder =
+        NotificationCompat.Builder(context, if (quiet) NotificationChannels.CALL_NOTES else NotificationChannels.REMINDERS)
             .setSmallIcon(R.drawable.ic_orbit)
             .setColor(NotificationChannels.CORAL)
             .setGroup(NotificationChannels.GROUP)
@@ -94,13 +101,15 @@ object CallNotifications {
                     .build(),
             )
             .setCategory(NotificationCompat.CATEGORY_REMINDER)
-            .setPriority(NotificationCompat.PRIORITY_HIGH)
+            .setPriority(if (quiet) NotificationCompat.PRIORITY_LOW else NotificationCompat.PRIORITY_HIGH)
+            .setSilent(quiet)
+            .setOnlyAlertOnce(quiet)
             .setAutoCancel(true)
 
-    private fun post(context: Context, spec: CallNotificationSpec, kind: String) {
+    private fun post(context: Context, spec: CallNotificationSpec, kind: String, quiet: Boolean = false) {
         val nm = NotificationManagerCompat.from(context)
         if (!nm.areNotificationsEnabled()) return   // no "shown" log entry for a suppressed one
-        val b = base(context)
+        val b = base(context, quiet)
             .setContentTitle(spec.title)
             .setContentText(spec.body.lineSequence().first())
             .setStyle(NotificationCompat.BigTextStyle().bigText(spec.body))

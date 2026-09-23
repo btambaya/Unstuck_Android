@@ -4,7 +4,6 @@ import android.app.AlarmManager
 import android.app.PendingIntent
 import android.content.Context
 import android.content.Intent
-import android.os.Build
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
@@ -26,11 +25,16 @@ import java.time.ZoneId
  *  - LEAD    (A1) at (start − leadMinutes) — "Coming up". All levels (lead > 0).
  *  - ATSTART (A2) at start                 — "starts now" + Start / Reschedule. Balanced+.
  *  - DRIFTED (A4) at start + 10m           — "didn't get to it?" follow-up. Coach.
- * Best-effort: falls back to an inexact alarm if exact-alarm permission isn't granted.
+ * Best-effort: without exact-alarm access (Android 14+ denies it to a new install)
+ * they fall back to an inexact alarm that still fires in Doze, and are all
+ * re-armed exact once the user allows it ([ExactAlarmPermissionReceiver],
+ * [resyncIfNowExact]).
  */
 object ReminderScheduler {
     private const val PREFS = "unstuck.reminders"
     private const val KEY_SCHEDULED = "scheduled"
+    /** Whether the last [sync] armed exact alarms. */
+    private const val KEY_ARMED_EXACT = "armedExact"
     private const val HORIZON_MS = 2L * 86_400_000 // schedule 48h ahead
     private const val DRIFT_MS = 10L * 60_000      // A4 fires 10 min after start
 
@@ -83,6 +87,16 @@ object ReminderScheduler {
         }
     }
 
+    /** Re-arm every reminder when exact alarms are allowed now but the last [sync]
+     *  armed them inexact: the user granted "Alarms & reminders" and came back
+     *  (the permission broadcast does the same; this covers a missed one). */
+    fun resyncIfNowExact(app: UnstuckApp) {
+        val prefs = app.applicationContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (needsExactResync(ExactAlarms.granted(app.applicationContext), prefs.getBoolean(KEY_ARMED_EXACT, true))) reschedule(app)
+    }
+
+    internal fun needsExactResync(exactNow: Boolean, armedExact: Boolean): Boolean = exactNow && !armedExact
+
     private fun sync(app: UnstuckApp, blocks: List<CalBlock>, tasks: List<tech.csalliance.unstuck.core.model.TaskItem>) {
         val ctx = app.applicationContext
         val am = ctx.getSystemService(AlarmManager::class.java) ?: return
@@ -91,13 +105,14 @@ object ReminderScheduler {
         val prefs = ctx.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
         val prev = prefs.getString(KEY_SCHEDULED, "").orEmpty().split(",").filter { it.isNotBlank() }.toSet()
         val nowSet = mutableSetOf<String>()
+        val exact = ExactAlarms.granted(ctx)
         val plans = planReminders(blocks, tasks, s.notificationLevel, s.reminderLeadMin, settingsStore::reminderOverride, System.currentTimeMillis())
         for (p in plans) {
-            setAlarm(ctx, am, p.block, p.kind, p.lead, p.fireAt)
+            setAlarm(ctx, am, p.block, p.kind, p.lead, p.fireAt, exact)
             nowSet += key(p.block.id, p.kind)
         }
         (prev - nowSet).forEach { cancelKey(ctx, am, it) }
-        prefs.edit().putString(KEY_SCHEDULED, nowSet.joinToString(",")).apply()
+        prefs.edit().putString(KEY_SCHEDULED, nowSet.joinToString(",")).putBoolean(KEY_ARMED_EXACT, exact).apply()
     }
 
     /** The alarms that should exist right now — the decision half of [sync], pure
@@ -145,21 +160,30 @@ object ReminderScheduler {
 
     private fun key(blockId: String, kind: Kind) = "${kind.tag}:$blockId"
 
-    private fun pendingIntent(ctx: Context, kind: Kind, blockId: String, taskName: String, taskId: String, lead: Int): PendingIntent {
+    private fun pendingIntent(ctx: Context, kind: Kind, blockId: String, taskName: String, taskId: String, lead: Int, startAt: Long = 0L): PendingIntent {
         val i = Intent(ctx, ReminderReceiver::class.java).setAction("${kind.tag}:$blockId")
             .putExtra(ReminderReceiver.EXTRA_KIND, kind.tag)
             .putExtra(ReminderReceiver.EXTRA_TASK_NAME, taskName)
             .putExtra(ReminderReceiver.EXTRA_TASK_ID, taskId)
             .putExtra(ReminderReceiver.EXTRA_BLOCK_ID, blockId)
             .putExtra(ReminderReceiver.EXTRA_LEAD, lead)
+            .putExtra(ReminderReceiver.EXTRA_START_AT, startAt)
         return PendingIntent.getBroadcast(ctx, key(blockId, kind).hashCode(), i, PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT)
     }
 
-    private fun setAlarm(ctx: Context, am: AlarmManager, b: CalBlock, kind: Kind, lead: Int, fireAt: Long) {
-        val pi = pendingIntent(ctx, kind, b.id, b.taskName, b.taskId ?: "", lead)
-        val canExact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S || am.canScheduleExactAlarms()
-        if (canExact) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, fireAt, pi)
-        else am.set(AlarmManager.RTC_WAKEUP, fireAt, pi)
+    private fun setAlarm(ctx: Context, am: AlarmManager, b: CalBlock, kind: Kind, lead: Int, fireAt: Long, exact: Boolean) {
+        // The block's start rides along so a reminder delivered late can say so.
+        val pi = pendingIntent(ctx, kind, b.id, b.taskName, b.taskId ?: "", lead, blockStartMs(b) ?: 0L)
+        arm(am, fireAt, pi, exact)
+    }
+
+    /** Exact when allowed. Otherwise an inexact alarm that still fires in Doze: the
+     *  plain set() this used was deferred to Doze's maintenance windows, so on a
+     *  new Android 14+ install a reminder armed with the phone on a desk arrived an
+     *  hour or more late (Android audit 2026-09-23, A15). */
+    internal fun arm(am: AlarmManager, fireAt: Long, pi: PendingIntent, exact: Boolean) {
+        if (exact) am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, fireAt, pi)
+        else am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, fireAt, pi)
     }
 
     /** Cancel a "tag:blockId" entry (recreates the matching PendingIntent to cancel it). */

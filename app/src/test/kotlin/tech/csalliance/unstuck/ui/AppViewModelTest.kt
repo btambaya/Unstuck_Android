@@ -15,6 +15,7 @@ import kotlinx.coroutines.test.advanceUntilIdle
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runTest
 import kotlinx.coroutines.test.setMain
+import kotlinx.serialization.json.jsonObject
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -670,9 +671,12 @@ class AppViewModelTest {
         vm.finishFocus(task("owners-task", name = "Their brief"), markDone = false)
         advanceUntilIdle()
 
-        // Live session cleared + a recap surfaced with the shared title.
+        // Live session cleared + a recap surfaced with the shared title. The finish
+        // writes more after clearing the live session (its captures are released,
+        // Android audit 2026-09-23 A14), so wait for the recap, don't read it on the
+        // live session's emission.
         awaitLiveSession { it == null }
-        assertEquals("Their brief", vm.lastRecap.value?.taskName)
+        assertEquals("Their brief", vm.lastRecap.first { it != null }?.taskName)
         // Crucially: NO own Session row + NO own task row for the foreign task.
         assertTrue("no own Session row for a foreign task", store.sessions().first().isEmpty())
         assertTrue("no own task row for a foreign task", store.tasks().first().none { it.id == "owners-task" })
@@ -727,6 +731,214 @@ class AppViewModelTest {
         val tpl = awaitTask("tpl") { it.totalFocused == 360 }
         assertFalse("template never flipped done", tpl.done)
         awaitBlock("occ1") { it.done }
+    }
+
+    // -----------------------------------------------------------------------
+    // Focus on a repeating task starts from ITS day, not the series' lifetime
+    // (Android audit 2026-09-23, A13; web W10)
+    // -----------------------------------------------------------------------
+
+    @Test fun startFocus_onARepeatingTasksDay_startsAtZero_notTheSeriesLifetimeTotal() = runTest(dispatcher) {
+        // Day 4 of a daily 25-min habit focused 25 min on each of 3 days: the
+        // template's totalFocused is 4500 s. Seeded into the ring, Focus opened at
+        // 75:00, overrun from the first second.
+        val template = task("tpl", name = "Stretch", recurrence = Recurrence.Daily(), totalFocused = 4500)
+        val occ = CalBlock(id = "occ4", taskId = "tpl", taskName = "Stretch", startTime = "09:00", durationMinutes = 25, date = Clock.todayIso(), kind = CalBlockKind.TASK)
+        seedTask(template); seedBlock(occ)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.startFocus(template.copy(id = "occ4", recurrence = null))   // the day's row, as the detail screen hands it
+        advanceUntilIdle()
+
+        val live = awaitLiveSession { it?.sessionStart != null }!!
+        assertEquals("tpl", live.taskId)
+        assertEquals("occ4", live.occurrenceBlockId)
+        assertEquals("no prior from the series' lifetime", 0, live.priorAccumulatedSec ?: 0)
+        assertEquals(0, tech.csalliance.unstuck.core.logic.FocusTimer.displayedElapsedSec(live, nowMs))
+        assertEquals(
+            tech.csalliance.unstuck.core.model.FocusState.RUNNING,
+            tech.csalliance.unstuck.core.logic.FocusTimer.deriveState(live, nowMs, 1.0),
+        )
+    }
+
+    @Test fun startFocus_onASeriesWithNoOpenDay_startsAtZero() = runTest(dispatcher) {
+        // No block today (or the blocks not loaded yet on a cold notification
+        // Start): the template itself reaches the plain path, with its lifetime total.
+        val template = task("tpl", name = "Stretch", recurrence = Recurrence.Daily(), totalFocused = 4500)
+        seedTask(template)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.startFocus(template)
+        advanceUntilIdle()
+
+        val live = awaitLiveSession { it?.sessionStart != null }!!
+        assertEquals("tpl", live.taskId)
+        assertEquals(0, live.priorAccumulatedSec ?: 0)
+    }
+
+    @Test fun startFocus_onAPlainTask_stillContinuesFromItsFocusedTotal() = runTest(dispatcher) {
+        // "End for now" then back: a one-off task's total IS its progress.
+        val t = task("t1", name = "Write report", estimateMin = 50, totalFocused = 600)
+        seedTask(t)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.startFocus(t)
+        advanceUntilIdle()
+
+        assertEquals(600, awaitLiveSession { it?.sessionStart != null }!!.priorAccumulatedSec)
+    }
+
+    // -----------------------------------------------------------------------
+    // Captures made during focus leave the phone (Android audit 2026-09-23, A14)
+    // -----------------------------------------------------------------------
+
+    private fun uuid() = java.util.UUID.randomUUID().toString()
+    private fun capture(sessionId: String?, taskId: String? = null) = tech.csalliance.unstuck.core.model.Capture(
+        id = uuid(), taskId = taskId, sessionId = sessionId,
+        tag = tech.csalliance.unstuck.core.model.CaptureTag.FOLLOW_UP, body = "call the bank", at = "2026-05-21T10:00:00.000Z",
+    )
+
+    @Test fun captureAndPauseReason_onARepeatingTasksDay_areFiledOnTheSeries() = runTest(dispatcher) {
+        // Focus on a day of a series runs on the day's row, whose id is its
+        // cal_block id: captures.task_id references tasks(id), so a capture filed
+        // on it was refused on every flush.
+        val template = task("tpl", name = "Stretch", recurrence = Recurrence.Daily())
+        val plain = task("t1", name = "Write")
+        seedTask(template); seedTask(plain)
+        seedBlock(CalBlock(id = "occ1", taskId = "tpl", taskName = "Stretch", startTime = "09:00", durationMinutes = 25, date = Clock.todayIso(), kind = CalBlockKind.TASK))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.saveCapture("occ1", null, tech.csalliance.unstuck.core.model.CaptureTag.FOLLOW_UP, "call the bank")
+        vm.saveCapture("t1", null, tech.csalliance.unstuck.core.model.CaptureTag.IDEA, "plain")
+        vm.saveReasonLog("occ1", "Drink")
+        advanceUntilIdle()
+
+        val caps = awaitCaptures { it.size == 2 }
+        assertEquals("tpl", caps.single { it.body == "call the bank" }.taskId)
+        assertEquals("a real task id passes through", "t1", caps.single { it.body == "plain" }.taskId)
+        assertEquals("tpl", store.reasonLogs().first { it.isNotEmpty() }.single().taskId)
+    }
+
+    @Test fun cancelFocus_releasesTheCapturesQueuedBehindItsSession() = runTest(dispatcher) {
+        // cancel_focus writes no Session row, so a capture waiting on one never flushed.
+        seedTask(task("t1", name = "Write"))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        val sid = uuid()
+        store.setLiveSession(LiveSession(id = sid, taskId = "t1", sessionStart = nowMs - 300_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT))
+        vm.saveCapture("t1", sid, tech.csalliance.unstuck.core.model.CaptureTag.FOLLOW_UP, "call the bank")
+        advanceUntilIdle()
+        awaitPending { ops -> ops.any { it.recordTable == Tables.CAPTURES && it.dependsOn == sid } }
+
+        assertTrue(vm.cancelFocusNow())
+
+        val ops = awaitPending { ops -> ops.any { it.recordTable == Tables.CAPTURES } && ops.none { it.dependsOn == sid } }
+        assertNull(ops.single { it.recordTable == Tables.CAPTURES }.dependsOn)
+        assertNull(awaitCaptures { it.isNotEmpty() }.single().sessionId)
+        assertTrue("cancel still writes no Session row", store.sessions().first().isEmpty())
+    }
+
+    @Test fun displacingASessionWhoseTaskWasDeleted_releasesItsCaptures() = runTest(dispatcher) {
+        // The task went away elsewhere mid-session: finalizeDisplaced writes no
+        // Session row for it, so its captures must not wait on one, nor name the
+        // dead task (captures.task_id references tasks(id)).
+        seedTask(task("b", name = "Second"))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        val sid = uuid(); val gone = uuid()
+        store.setLiveSession(LiveSession(id = sid, taskId = gone, sessionStart = nowMs - 300_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT))
+        write.upsertCapture(capture(sid, taskId = gone))
+
+        vm.startFocus(task("b", name = "Second"))
+        advanceUntilIdle()
+
+        awaitLiveSession { it?.taskId == "b" }
+        val ops = awaitPending { ops -> ops.any { it.recordTable == Tables.CAPTURES } && ops.none { it.dependsOn == sid } }
+        val op = ops.single { it.recordTable == Tables.CAPTURES }
+        assertNull(op.dependsOn)
+        assertEquals(kotlinx.serialization.json.JsonNull, kotlinx.serialization.json.Json.parseToJsonElement(op.payload!!).jsonObject["task_id"])
+        assertNull(awaitCaptures { it.isNotEmpty() }.single().taskId)
+    }
+
+    @Test fun finishingASessionWhoseTaskWasDeletedElsewhere_sendsItsCapturesWithoutTheDeadTask() = runTest(dispatcher) {
+        // The Session goes up without the dead task id (C5); its captures did not,
+        // and the server refused each one.
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        val sid = uuid(); val gone = uuid()
+        store.setLiveSession(LiveSession(id = sid, taskId = gone, sessionStart = nowMs - 300_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT))
+        write.upsertCapture(capture(sid, taskId = gone))
+
+        assertTrue(vm.finishFocusNow(task(gone, name = "Deleted"), markDone = false))
+
+        val cap = awaitCaptures { l -> l.singleOrNull()?.taskId == null }.single()
+        assertEquals("still joined to its Session row", sid, cap.sessionId)
+        assertNull(awaitSessions { it.isNotEmpty() }.single().taskId)
+        val op = awaitPending { ops -> ops.any { it.recordTable == Tables.CAPTURES } }.single { it.recordTable == Tables.CAPTURES }
+        assertEquals("waits for that row", sid, op.dependsOn)
+        assertEquals(kotlinx.serialization.json.JsonNull, kotlinx.serialization.json.Json.parseToJsonElement(op.payload!!).jsonObject["task_id"])
+    }
+
+    @Test fun signingOutDuringASharedSession_releasesItsCaptures() = runTest(dispatcher) {
+        // Sign-out leaves a partner session running and wipes the live blob: no
+        // Session row ever comes from this phone, so the captures would wait for ever
+        // (parked, then still held after the next sign-in).
+        seedTask(task("t1", name = "Brief"))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        val sid = uuid()
+        store.setLiveSession(LiveSession(id = sid, taskId = "t1", sessionStart = nowMs - 300_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT, sharedSessionRev = 2, sharedSessionAtMs = nowMs - 300_000L))
+        write.upsertCapture(capture(sid, taskId = "t1"))
+        advanceUntilIdle()
+
+        vm.signOut()
+        advanceUntilIdle()
+
+        val ops = awaitPending { ops -> ops.any { it.recordTable == Tables.CAPTURES } && ops.none { it.dependsOn == sid } }
+        assertNull(ops.single { it.recordTable == Tables.CAPTURES }.dependsOn)
+        assertTrue("still no Session row for the partner's session", store.sessions().first().isEmpty())
+    }
+
+    @Test fun startingTheApp_healsCapturesAnEarlierBuildStranded() = runTest(dispatcher) {
+        // vc100 and earlier filed a habit day's captures on its cal_block id (refused
+        // by captures_task_id_fkey on every launch) and held others behind a session
+        // that never wrote its row. The next start re-files and releases them.
+        seedTask(task("tpl", name = "Stretch", recurrence = Recurrence.Daily()))
+        seedBlock(CalBlock(id = "occ1", taskId = "tpl", taskName = "Stretch", startTime = "09:00", durationMinutes = 25, date = Clock.todayIso(), kind = CalBlockKind.TASK))
+        val neverWritten = uuid()
+        val stuck = capture(neverWritten, taskId = "occ1")
+        store.upsert(Tables.CAPTURES, stuck, tech.csalliance.unstuck.core.model.Capture.serializer(), stuck.id, stuck.at)
+        store.enqueue(OutboxEntity(op = "upsert", recordTable = Tables.CAPTURES, recordId = stuck.id, payload = "{}", dependsOn = neverWritten, createdAt = 1L))
+
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        advanceUntilIdle()
+
+        val healed = awaitCaptures { l -> l.singleOrNull()?.taskId == "tpl" }.single()
+        assertNull(healed.sessionId)
+        assertNull(awaitPending { ops -> ops.none { it.dependsOn == neverWritten } }.single { it.recordTable == Tables.CAPTURES }.dependsOn)
+    }
+
+    @Test fun finishingASessionOnATaskSharedWithMe_releasesItsCaptures() = runTest(dispatcher) {
+        // A recipient's session writes no own Session row (the owner's task accrues
+        // via log_shared_focus).
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        val sid = uuid()
+        store.setLiveSession(
+            LiveSession(id = sid, taskId = "owners-task", sessionStart = nowMs - 300_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT, sharedTitle = "Their brief", sharedLevel = "partner"),
+        )
+        write.upsertCapture(capture(sid))
+
+        assertTrue(vm.finishFocusNow(task("owners-task", name = "Their brief"), markDone = false))
+
+        val ops = awaitPending { ops -> ops.any { it.recordTable == Tables.CAPTURES } && ops.none { it.dependsOn == sid } }
+        assertNull(ops.single { it.recordTable == Tables.CAPTURES }.dependsOn)
+        assertTrue(store.sessions().first().isEmpty())
     }
 
     // -----------------------------------------------------------------------

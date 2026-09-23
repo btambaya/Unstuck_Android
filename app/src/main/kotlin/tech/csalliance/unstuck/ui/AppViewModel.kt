@@ -1656,7 +1656,13 @@ class AppViewModel(
             if (prev != null) {
                 write?.upsertSession(Session(id = sid, taskId = prev.id, taskName = prev.name, estimateMin = cur.sessionEstimateMin, actualSec = elapsed, completedAt = isoNow()))
                 flushOutbox()
+            } else {
+                // Task gone: no Session row, and a capture naming it would be refused (A14).
+                write?.unlinkCapturesFromTask(cur.taskId)
+                releaseCapturesOf(sid)
             }
+        } else {
+            releaseCapturesOf(sid)   // a task shared with me: no own Session row (A14)
         }
         accrueSharedFocus(cur.taskId, elapsed, sid, msg.estimateMin, ownerFallback = cur.sharedTitle == null)
         refreshShares()
@@ -1803,13 +1809,18 @@ class AppViewModel(
                 // sessionId + clock) instead of minting a second one. Partner-shared
                 // sessions run on the SESSION clock (priorAccumulatedSec = 0, minted or
                 // adopted) so every device's ring shows the same number.
+                // An occurrence seeds NO prior either: the template's totalFocused is the
+                // series' LIFETIME focus, not progress on this day's slice. Seeded into the
+                // ring, day 4 of a 25-min habit opened at 75:00, overrun from the first
+                // second with the coach saying "That's your block" (Android audit
+                // 2026-09-23, A13; web W10).
                 val partnerSharedOcc = shareBadges.value[tpl.id].orEmpty().any { it.level == ShareLevel.PARTNER }
                 val adoptedOcc = if (partnerSharedOcc) probeCoFocusAdoption(tpl.id) else null
                 val live = if (adoptedOcc != null) {
                     registerAdoptedSession(adoptedOcc.sessionId)
                     FocusTimer.adopt(base, tpl.id, adoptedOcc, now = nowMs(), priorAccumulatedSec = 0, occurrenceBlockId = occ.id)
                 } else {
-                    FocusTimer.start(base, tpl.id, estimateMin = occ.durationMinutes, priorAccumulatedSec = if (partnerSharedOcc) 0 else tpl.totalFocused, now = nowMs(), occurrenceBlockId = occ.id)
+                    FocusTimer.start(base, tpl.id, estimateMin = occ.durationMinutes, priorAccumulatedSec = 0, now = nowMs(), occurrenceBlockId = occ.id)
                 }
                 store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
                 return true
@@ -1838,8 +1849,12 @@ class AppViewModel(
             return true
         }
         // Seed prior focus so reopening after "End for now" continues from the
-        // accumulated total instead of restarting the displayed timer at 0.
-        val live = FocusTimer.start(base, task.id, estimateMin = task.estimateMin, priorAccumulatedSec = if (partnerShared) 0 else task.totalFocused, now = nowMs())
+        // accumulated total instead of restarting the displayed timer at 0. Not for
+        // a repeating series with no open day to attach (none today, or the blocks
+        // not loaded yet on a cold notification Start): its total is the series'
+        // lifetime focus, never progress on this sitting (Android audit 2026-09-23, A13).
+        val seedsPrior = !partnerShared && task.recurrence == null
+        val live = FocusTimer.start(base, task.id, estimateMin = task.estimateMin, priorAccumulatedSec = if (seedsPrior) task.totalFocused else 0, now = nowMs())
         store.setLiveSession(FocusTimer.setTreatment(live, _settings.value.treatment))
         return true
     }
@@ -1882,11 +1897,18 @@ class AppViewModel(
             // replacement session after we return.
             val sid = cur.id ?: newUuid()
             store.setLiveSession(null)
+            releaseCapturesOf(cur.id)   // no own Session row for a task shared with me (A14)
             accrueSharedFocus(cur.taskId, elapsed, sid, cur.sessionEstimateMin, ownerFallback = false)
             refreshShares()
             return
         }
-        val prev = store.tasks().first().firstOrNull { it.id == cur.taskId } ?: return
+        // The task was deleted meanwhile: no Session row, so its captures go up without
+        // one, and without the task, which the server would refuse (A14).
+        val prev = store.tasks().first().firstOrNull { it.id == cur.taskId } ?: run {
+            write?.unlinkCapturesFromTask(cur.taskId)
+            releaseCapturesOf(cur.id)
+            return
+        }
         val sid = cur.id ?: newUuid()
         write?.upsertSession(Session(id = sid, taskId = prev.id, taskName = prev.name, estimateMin = prev.estimateMin, actualSec = elapsed, completedAt = isoNow()))
         if (accruesViaSharedLedger(cur, prev.id, shareBadges.value)) {
@@ -1941,6 +1963,7 @@ class AppViewModel(
             // idempotency also guards, but this is cleaner). elapsed is snapshotted above.
             val sid = live.id ?: newUuid()
             store.setLiveSession(null)
+            releaseCapturesOf(live.id)   // no own Session row for a task shared with me (A14)
             accrueSharedFocus(live.taskId, elapsed, sid, live.sessionEstimateMin, ownerFallback = false)
             // Never a repeating share: the server refuses that tick ('recurring_series',
             // 075 §1) and the owner ticks each day (parity with iOS build 81, audit
@@ -1995,6 +2018,10 @@ class AppViewModel(
         // offline relaunch, which made the owner double-credit the task.
         val partnerShared = accruesViaSharedLedger(live, realTask.id, shareBadges.value)
         val sid = live.id ?: newUuid()
+        // A task deleted elsewhere: its captures go up without the dead id too, as the
+        // Session does. captures.task_id references tasks(id) as well, so each was
+        // refused and quarantined (Android audit 2026-09-23, A14).
+        if (stored == null && storedTasks.none { it.id == live.taskId }) write?.unlinkCapturesFromTask(live.taskId)
         // Reuse the live-session id so captures taken during the session join back
         // to this Session row (the interruption histogram depends on it).
         write?.upsertSession(
@@ -2080,11 +2107,40 @@ class AppViewModel(
 
     fun saveCapture(taskId: String?, sessionId: String?, tag: CaptureTag, body: String) = launchWrite {
         val text = body.trim(); if (text.isEmpty()) return@launchWrite
-        write?.upsertCapture(Capture(id = newUuid(), taskId = taskId, sessionId = sessionId, tag = tag, body = text, at = isoNow()))
+        write?.upsertCapture(Capture(id = newUuid(), taskId = ownTaskIdFor(taskId), sessionId = sessionId, tag = tag, body = text, at = isoNow()))
     }
 
     fun saveReasonLog(taskId: String?, reason: String, action: ReasonAction = ReasonAction.PAUSE, durationSec: Int? = null) = launchWrite {
-        write?.upsertReasonLog(ReasonLog(id = newUuid(), taskId = taskId, reason = reason, action = action, at = isoNow(), durationSec = durationSec))
+        write?.upsertReasonLog(ReasonLog(id = newUuid(), taskId = ownTaskIdFor(taskId), reason = reason, action = action, at = isoNow(), durationSec = durationSec))
+    }
+
+    /** The task a capture or pause reason filed on row [rowId] belongs to. Focus on
+     *  a repeating task's day runs on a row whose id is the day's cal_block id
+     *  (taskForBlock), which is no task: captures.task_id references tasks(id), so
+     *  every capture made there was refused on each flush and never left the phone.
+     *  It belongs to the series template, the task the live session runs on, as on
+     *  iOS (Android audit 2026-09-23, A14). */
+    private suspend fun ownTaskIdFor(rowId: String?): String? {
+        if (rowId == null) return null
+        return occurrenceBlockFor(rowId, store.tasks().first(), store.blocks().first())?.taskId ?: rowId
+    }
+
+    // When this model was made, on the outbox's clock (OutboxEntity.createdAt is wall
+    // time, not the nowProvider seam): captures queued before it are an earlier run's.
+    private val startedAtMs = System.currentTimeMillis()
+
+    init {
+        // Captures an earlier build left stuck in the outbox: filed on a repeating
+        // task's day id, or held behind a session that never wrote its row. Heal them
+        // once per start (idempotent; see WriteThrough.healStrandedCaptures) (Android
+        // audit 2026-09-23, A14).
+        viewModelScope.launch { runCatching { write?.healStrandedCaptures(queuedBefore = startedAtMs) } }
+    }
+
+    /** A live session ended without writing its Session row: release the captures
+     *  queued behind it (see WriteThrough.detachCapturesFromSession). */
+    private suspend fun releaseCapturesOf(sessionId: String?) {
+        if (sessionId != null) write?.detachCapturesFromSession(sessionId)
     }
 
     fun deleteCapture(id: String) = launchWrite { deleteCaptureNow(id) }
@@ -4261,6 +4317,8 @@ class AppViewModel(
         val cur = store.getLiveSession() ?: return false
         if (cur.sessionStart == null) return false
         store.setLiveSession(null)
+        // No Session row: a capture taken during it would wait on one for ever (A14).
+        releaseCapturesOf(cur.id)
         tearDownFocusSurfaces()
         _coFocusAttribution.value = null
         return true
@@ -4325,7 +4383,13 @@ class AppViewModel(
     private suspend fun finalizeOwnLiveSessionForSignOut() {
         val live = store.getLiveSession() ?: return
         if (live.sessionStart == null) return
-        if (live.sharedTitle != null || accruesViaSharedLedger(live, live.taskId, shareBadges.value)) return
+        if (live.sharedTitle != null || accruesViaSharedLedger(live, live.taskId, shareBadges.value)) {
+            // Left running for the partner, and this phone writes no Session row for it
+            // (the live blob goes with the sign-out wipe): the captures queued behind it
+            // go up without one rather than wait for ever (Android audit 2026-09-23, A14).
+            runCatching { releaseCapturesOf(live.id) }
+            return
+        }
         runCatching { finalizeDisplaced(live) }
         store.setLiveSession(null)
         val ctx = graph.appContext

@@ -35,6 +35,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import tech.csalliance.unstuck.core.model.Capture
+import tech.csalliance.unstuck.core.model.CaptureTag
 import tech.csalliance.unstuck.core.model.CollectionItem
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.TaskItem
@@ -176,6 +178,121 @@ class OfflineEngineTest {
         remote.serverRows[Tables.TASKS] = emptyList()
         hydrator.hydrate("u1")
         assertEquals("local row must survive hydrate", listOf("t1"), store.tasks().first().map { it.id })
+    }
+
+    // A capture taken during focus waits (dependsOn) for its session's row. A session
+    // that ended WITHOUT one (cancel_focus, its task deleted, a task shared with me)
+    // left it held for ever; detaching re-queues it without the session so it syncs
+    // (Android audit 2026-09-23, A14).
+    @Test fun detachCapturesFromSession_releasesACaptureHeldOnASessionThatWillNeverExist() = runTest {
+        val remote = FakeRemote()
+        val write = WriteThrough(store)
+        val flusher = OutboxFlusher(remote, store)
+        val ended = java.util.UUID.randomUUID().toString()
+        val stillLive = java.util.UUID.randomUUID().toString()
+        val note = Capture(id = java.util.UUID.randomUUID().toString(), sessionId = ended, tag = CaptureTag.FOLLOW_UP, body = "call the bank", at = "2026-05-21T10:00:00.000Z")
+        val other = Capture(id = java.util.UUID.randomUUID().toString(), sessionId = stillLive, tag = CaptureTag.IDEA, body = "later", at = "2026-05-21T10:01:00.000Z")
+        write.upsertCapture(note)
+        write.upsertCapture(other)
+
+        flusher.flush("u1")
+        assertTrue("both wait for a session row", remote.upserts.isEmpty())
+
+        write.detachCapturesFromSession(ended)
+        flusher.flush("u1")
+
+        val sent = Json.parseToJsonElement(remote.upserts.single().second).jsonObject
+        assertEquals(note.id, (sent["id"] as JsonPrimitive).content)
+        assertEquals("sent without the session that never came", kotlinx.serialization.json.JsonNull, sent["session_id"])
+        assertNull(store.captures().first().single { it.id == note.id }.sessionId)
+        assertEquals("a live session's capture still waits for its row", listOf(other.id), store.pending().map { it.recordId })
+    }
+
+    // The task was deleted on another device mid-session: the Session goes up without
+    // it, and so must the captures filed on it. captures.task_id references tasks(id),
+    // so one still naming the dead task was refused and quarantined on every launch
+    // (Android audit 2026-09-23, A14).
+    @Test fun unlinkCapturesFromTask_sendsTheCapturesOfADeletedTaskWithoutIt() = runTest {
+        val remote = FakeRemote()
+        val write = WriteThrough(store)
+        val flusher = OutboxFlusher(remote, store)
+        fun uuid() = java.util.UUID.randomUUID().toString()
+        val gone = uuid(); val kept = uuid(); val sid = uuid()
+        store.upsert(Tables.TASKS, task(kept, "2026-05-21T10:00:00.000Z"), TaskItem.serializer(), kept)
+        val note = Capture(id = uuid(), taskId = gone, sessionId = sid, tag = CaptureTag.FOLLOW_UP, body = "call the bank", at = "2026-05-21T10:00:00.000Z")
+        val other = Capture(id = uuid(), taskId = kept, sessionId = sid, tag = CaptureTag.IDEA, body = "later", at = "2026-05-21T10:01:00.000Z")
+        write.upsertCapture(note)
+        write.upsertCapture(other)
+
+        write.unlinkCapturesFromTask(gone)
+        write.unlinkCapturesFromTask(kept)   // still stored here: never unlinked
+        flusher.flush("u1")
+        assertTrue("both still wait for their session's row", remote.upserts.isEmpty())
+
+        write.upsertSession(tech.csalliance.unstuck.core.model.Session(id = sid, taskName = "Gone", actualSec = 60, completedAt = "2026-05-21T10:30:00.000Z"))
+        flusher.flush("u1")
+
+        val sent = remote.upserts.filter { it.first == Tables.CAPTURES }.map { Json.parseToJsonElement(it.second).jsonObject }
+        val sentNote = sent.single { (it["id"] as JsonPrimitive).content == note.id }
+        assertEquals("sent without the dead task", kotlinx.serialization.json.JsonNull, sentNote["task_id"])
+        assertEquals("still joined to its session", sid, (sentNote["session_id"] as JsonPrimitive).content)
+        assertEquals(kept, (sent.single { (it["id"] as JsonPrimitive).content == other.id }["task_id"] as JsonPrimitive).content)
+        assertNull(store.captures().first().single { it.id == note.id }.taskId)
+        assertTrue(store.pending().isEmpty())
+    }
+
+    // Captures an earlier build stranded: filed on a repeating task's DAY (its
+    // cal_block id, which captures_task_id_fkey refuses), or held behind a session
+    // that ended without a Session row. The heal re-files the first on the series and
+    // releases the second, and leaves alone anything that could still resolve
+    // (Android audit 2026-09-23, A14).
+    @Test fun healStrandedCaptures_refilesADaysCaptureOnItsSeries_andReleasesOnlyNeverWrittenSessions() = runTest {
+        val remote = FakeRemote()
+        val write = WriteThrough(store)
+        val flusher = OutboxFlusher(remote, store)
+        fun uuid() = java.util.UUID.randomUUID().toString()
+        val tpl = uuid(); val day = uuid()
+        store.upsert(Tables.TASKS, task(tpl, "2026-05-21T10:00:00.000Z").copy(recurrence = tech.csalliance.unstuck.core.model.Recurrence.Daily()), TaskItem.serializer(), tpl)
+        store.upsert(Tables.CAL_BLOCKS, tech.csalliance.unstuck.core.model.CalBlock(id = day, taskId = tpl, taskName = "Stretch", startTime = "09:00", durationMinutes = 25, date = "2026-05-21", kind = tech.csalliance.unstuck.core.model.CalBlockKind.TASK), tech.csalliance.unstuck.core.model.CalBlock.serializer(), day)
+        val written = uuid(); val neverWritten = uuid(); val live = uuid(); val ending = uuid(); val newer = uuid()
+        store.upsert(Tables.SESSIONS, tech.csalliance.unstuck.core.model.Session(id = written, taskId = tpl, taskName = "Stretch", actualSec = 60, completedAt = "2026-05-21T09:30:00.000Z"), tech.csalliance.unstuck.core.model.Session.serializer(), written)
+        store.setLiveSession(tech.csalliance.unstuck.core.model.LiveSession(id = live, taskId = tpl, sessionStart = 1L, sessionEstimateMin = 25, treatment = tech.csalliance.unstuck.core.model.FocusTreatment.AMBIENT))
+        fun cap(taskId: String?, sessionId: String?) = Capture(id = uuid(), taskId = taskId, sessionId = sessionId, tag = CaptureTag.FOLLOW_UP, body = "note", at = "2026-05-21T10:00:00.000Z")
+
+        write.nowMillis = { 1_000L }   // queued by the earlier build
+        val onTheDay = cap(day, written).also { write.upsertCapture(it) }
+        val stranded = cap(null, neverWritten).also { write.upsertCapture(it) }
+        val onLive = cap(null, live).also { write.upsertCapture(it) }
+        val onEnding = cap(null, ending).also { write.upsertCapture(it) }
+        val endingRow = tech.csalliance.unstuck.core.model.Session(id = ending, taskName = "Ending", actualSec = 60, completedAt = "2026-05-21T09:40:00.000Z")
+        write.upsertSession(endingRow)
+        store.delete(Tables.SESSIONS, ending)   // only its queued op shows it is coming
+        // A parked op restored at sign-in comes back without its local row.
+        val parked = cap(null, neverWritten)
+        store.enqueue(OutboxEntity(op = "upsert", recordTable = Tables.CAPTURES, recordId = parked.id, payload = DbRowCodec.encodeCapture(parked).toString(), dependsOn = neverWritten, createdAt = 1_000L))
+        write.nowMillis = { 9_000L }   // this run
+        val thisRun = cap(null, newer).also { write.upsertCapture(it) }
+
+        assertEquals(2, write.healStrandedCaptures(queuedBefore = 5_000L))
+        assertEquals("idempotent", 0, write.healStrandedCaptures(queuedBefore = 5_000L))
+
+        val rows = store.captures().first().associateBy { it.id }
+        assertEquals("a day's capture is filed on its series", tpl, rows.getValue(onTheDay.id).taskId)
+        assertEquals(written, rows.getValue(onTheDay.id).sessionId)
+        assertNull("a session that was never written is dropped", rows.getValue(stranded.id).sessionId)
+        assertEquals("the live session's row is still to come", live, rows.getValue(onLive.id).sessionId)
+        assertEquals("a queued Session row is still to come", ending, rows.getValue(onEnding.id).sessionId)
+        assertEquals("a capture from this run is not judged", newer, rows.getValue(thisRun.id).sessionId)
+        assertTrue("a restored parked op is left alone", store.pending().any { it.recordId == parked.id && it.dependsOn == neverWritten })
+
+        store.upsert(Tables.SESSIONS, endingRow, tech.csalliance.unstuck.core.model.Session.serializer(), ending)
+        flusher.flush("u1")
+        val sent = remote.upserts.filter { it.first == Tables.CAPTURES }.map { Json.parseToJsonElement(it.second).jsonObject }.associateBy { (it["id"] as JsonPrimitive).content }
+        assertEquals(tpl, (sent.getValue(onTheDay.id)["task_id"] as JsonPrimitive).content)
+        assertEquals(kotlinx.serialization.json.JsonNull, sent.getValue(stranded.id)["session_id"])
+        assertTrue("its session's row landed first, then it went", onEnding.id in sent)
+        assertFalse(onLive.id in sent)
+        assertFalse(thisRun.id in sent)
     }
 
     // --- forward-compat: one un-decodable server row must not abort the whole table ---

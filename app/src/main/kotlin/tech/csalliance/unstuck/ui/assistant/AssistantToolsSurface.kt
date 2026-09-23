@@ -391,7 +391,9 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             val live = api.getLiveFocus()
             // A cut body is reported, not silently dropped (rules §1).
             val cut = body.length > 500
-            val c = Capture(id = newUuid(), taskId = t?.id, sessionId = if (live?.sessionStart != null) live.id else null,
+            // A session on a task shared WITH the user never writes an own Session row,
+            // so a capture tied to it waited on one for ever (Android audit 2026-09-23, A14).
+            val c = Capture(id = newUuid(), taskId = t?.id, sessionId = if (live?.sessionStart != null && live.sharedTitle == null) live.id else null,
                 tag = tag, body = body.take(500), at = now())
             api.upsertCapture(c)
             "ok: captured id=${c.id} [${tag.wire()}] \"${c.body}\"${if (t != null) " on \"${t.name}\"" else ""}" +

@@ -41,11 +41,10 @@ class MainActivity : ComponentActivity() {
         ) {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
-        // Exact alarms — without this, task reminders fall back to INEXACT alarms,
-        // which Android batches/Doze-delays so they fire late or not at all. On
-        // Android 12+ it can be denied (and is denied-by-default for apps targeting
-        // 14+). Prompt once so scheduled-task / promote reminders actually fire.
-        maybePromptExactAlarm()
+        // Exact alarms are asked for from Today once the user is in the app
+        // (ui/ExactAlarmPrompt) and in Settings › Focus, not here: onCreate ran before
+        // the async session restore knew the user was onboarded, so the ask was
+        // skipped, then fired on some later rotation (Android audit 2026-09-23, A15).
         // Register the FCM token once a session exists (so it lands on first
         // sign-in, and re-registers on a later sign-in / token refresh). The
         // StateFlow emits its current value immediately, covering relaunches
@@ -78,31 +77,6 @@ class MainActivity : ComponentActivity() {
             // theme / accent / density settings.
             AppRoot(graph)
         }
-    }
-
-    /** One-time nudge to the system "Alarms & reminders" toggle so exact alarms
-     *  (and thus reliable reminders) work. Only when reminders are on + not yet
-     *  granted + not asked before. */
-    private fun maybePromptExactAlarm() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return
-        // Don't bounce a brand-new user to the system Alarms-&-reminders screen before
-        // they've even seen onboarding — wait until they're in the app.
-        if (!graph.onboarded) return
-        val am = getSystemService(android.app.AlarmManager::class.java) ?: return
-        if (am.canScheduleExactAlarms()) return
-        // Skip only when NO exact-alarm-driven moment is enabled. Lead reminders off is
-        // not enough — Balanced/Coach still schedule start-now & drift alarms.
-        val s = graph.settings.load()
-        if (s.reminderLeadMin <= 0 && s.notificationLevel == tech.csalliance.unstuck.NotificationLevel.CALM) return
-        val prefs = getSharedPreferences("unstuck.app", MODE_PRIVATE)
-        if (prefs.getBoolean("exactAlarmPrompted", false)) return
-        // Only mark as prompted if the Settings screen actually launched — a failed
-        // launch can then be retried on a later cold start (was set unconditionally).
-        runCatching {
-            startActivity(
-                Intent(android.provider.Settings.ACTION_REQUEST_SCHEDULE_EXACT_ALARM, android.net.Uri.parse("package:$packageName")),
-            )
-        }.onSuccess { prefs.edit().putBoolean("exactAlarmPrompted", true).apply() }
     }
 
     override fun onNewIntent(intent: Intent) {

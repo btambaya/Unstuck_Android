@@ -49,16 +49,19 @@ class ReminderReceiver : BroadcastReceiver() {
         val taskId = intent.getStringExtra(EXTRA_TASK_ID).orEmpty()
         val blockId = intent.getStringExtra(EXTRA_BLOCK_ID).orEmpty()
         val lead = intent.getIntExtra(EXTRA_LEAD, 0)
+        val startAt = intent.getLongExtra(EXTRA_START_AT, 0L)
         val drifted = kind == "drifted"
         NotificationChannels.ensureAll(context)
 
-        fun post() {
+        fun post(startNowCovers: Boolean = false) {
             if (kind == "lead") {
-                val body = if (lead > 0) "$taskName — in $lead minutes." else "$taskName is starting."
+                val copy = leadCopy(taskName, lead, startAt, System.currentTimeMillis(), startNowCovers) { at ->
+                    android.text.format.DateFormat.getTimeFormat(context).format(java.util.Date(at))
+                } ?: return
                 val deepLink = if (taskId.isNotBlank()) "unstuck://task/$taskId" else "unstuck://today"
                 // External calendar events have a blank task id — key the notif id off the
                 // block id instead so two events close in time don't share one id (overwrite).
-                NotificationRenderer.renderPush(context, kind = "reminder", title = "Coming up", body = body, deepLink = deepLink, notifId = NotifIds.reminder(taskId.ifBlank { blockId }))
+                NotificationRenderer.renderPush(context, kind = "reminder", title = copy.first, body = copy.second, deepLink = deepLink, notifId = NotifIds.reminder(taskId.ifBlank { blockId }))
             } else {
                 NotificationRenderer.postTaskStarting(context, taskName, taskId, blockId, drifted)
             }
@@ -101,7 +104,10 @@ class ReminderReceiver : BroadcastReceiver() {
                     true   // confirmed still relevant → post
                 }
                 // null = reads timed out → best-effort post; false = confirmed-absent → suppress.
-                if (validated != false) post()
+                // A task block at Balanced+ also has its start-now alarm: a lead delivered
+                // after the start leaves the moment to it.
+                val startNowCovers = taskId.isNotBlank() && runCatching { app.graph.settings.load().notificationLevel.atStart }.getOrDefault(false)
+                if (validated != false) post(startNowCovers)
             } finally {
                 pending.finish()
             }
@@ -114,5 +120,32 @@ class ReminderReceiver : BroadcastReceiver() {
         const val EXTRA_TASK_ID = "taskId"
         const val EXTRA_BLOCK_ID = "blockId"
         const val EXTRA_LEAD = "lead"
+        /** The block's start (epoch ms); 0 on an alarm armed before it was sent. */
+        const val EXTRA_START_AT = "startAt"
+
+        /** Title + body of a "Coming up" reminder delivered at [now], or null to drop
+         *  it. Without exact-alarm access Android can deliver it late, and it still
+         *  said "in 10 minutes" after the task had started (Android audit 2026-09-23,
+         *  A15). It counts the minutes actually left. Once the start has passed it is
+         *  no longer coming up: dropped when the start-now reminder covers that
+         *  moment ([startNowCovers]), else it says when the task was set for. */
+        internal fun leadCopy(
+            taskName: String,
+            lead: Int,
+            startAt: Long,
+            now: Long,
+            startNowCovers: Boolean,
+            timeLabel: (Long) -> String,
+        ): Pair<String, String>? {
+            if (startAt <= 0L) return "Coming up" to (if (lead > 0) "$taskName — in $lead minutes." else "$taskName is starting.")
+            val leftMs = startAt - now
+            if (leftMs > 0) {
+                val mins = ((leftMs + 59_999) / 60_000).toInt().coerceAtMost(maxOf(lead, 1))
+                return "Coming up" to "$taskName — in $mins minute${if (mins == 1) "" else "s"}."
+            }
+            if (startNowCovers) return null
+            if (-leftMs < 60_000) return "Coming up" to "$taskName is starting."
+            return "Time to start" to "$taskName was set for ${timeLabel(startAt)}."
+        }
     }
 }

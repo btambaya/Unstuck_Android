@@ -27,6 +27,7 @@ import tech.csalliance.unstuck.core.model.Priority
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.data.db.OutboxEntity
+import tech.csalliance.unstuck.data.db.RecordEntity
 import tech.csalliance.unstuck.data.db.Tables
 import tech.csalliance.unstuck.data.db.UnstuckDatabase
 
@@ -71,6 +72,18 @@ class LocalStoreTest {
         assertEquals(listOf("deep-work"), loaded.tags)
         assertEquals(Objective("ship it", true, 30), loaded.objectives?.single())
         assertEquals(Recurrence.Weekly(listOf(1, 3, 5), "2026-08-01"), loaded.recurrence)
+    }
+
+    // "Export everything" names a table whose rows won't all decode. The count comes
+    // from the same read as the rows, so a write in between can't skew it
+    // (Android audit 2026-09-23, A18).
+    @Test fun snapshotCheckedCountsTheRowsItCouldNotDecode() = runTest {
+        store.upsert(Tables.TASKS, task("a"), TaskItem.serializer(), "a")
+        db.records().upsertOne(RecordEntity(Tables.TASKS, "bad", "{not json"))
+        val read = store.snapshotChecked(Tables.TASKS, TaskItem.serializer())
+        assertEquals(listOf("a"), read.rows.map { it.id })
+        assertEquals(1, read.undecodable)
+        assertEquals(0, store.snapshotChecked(Tables.TAGS, TaskItem.serializer()).undecodable)
     }
 
     @Test fun replacePreservesExternalGBlocks() = runTest {

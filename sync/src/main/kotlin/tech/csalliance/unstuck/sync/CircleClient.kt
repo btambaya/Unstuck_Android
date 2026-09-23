@@ -533,15 +533,17 @@ class CircleClient(private val client: SupabaseClient) {
     /** Every block of every task shared WITH me dated inside [from, to] (inclusive
      *  'YYYY-MM-DD') — the calendar surface (migration 052 shared_task_blocks). The
      *  window is clamped to the RPC's 62-day cap client-side so it can never raise
-     *  range_too_wide. Any share level; external blocks never arrive. Degrades to
-     *  empty on error (a pre-052 server has no such function → empty calendar, not
-     *  a crash). READ-only. */
-    suspend fun sharedTaskBlocks(from: String, to: String): List<SharedBlock> = runCatching {
+     *  range_too_wide. Any share level; external blocks never arrive. NULL on an
+     *  error, so the caller keeps the blocks it has: re-read after every pull, an
+     *  offline [] blanked the calendar's shared blocks (Android audit 2026-09-23,
+     *  A16). A pre-052 server has no such function → empty calendar, not a crash.
+     *  READ-only. */
+    suspend fun sharedTaskBlocks(from: String, to: String): List<SharedBlock>? = runCatching {
         val r = clampSharedRange(IsoRange(from, to))
         client.postgrest.rpc("shared_task_blocks", RangeParams(r.from, r.to)).decodeList<SharedBlockRow>().map { it.toModel() }
     }.getOrElse {
         println("[shared-blocks] shared_task_blocks($from..$to) failed: ${it.message}")
-        emptyList()
+        null
     }
 
     /** Complete/uncomplete a task shared with me — partner OR assign only (the RPC

@@ -1,6 +1,7 @@
 package tech.csalliance.unstuck.ui.sharing
 
 import io.github.jan.supabase.auth.status.SessionStatus
+import kotlinx.coroutines.flow.FlowCollector
 
 /**
  * The last good answer of a read that returns NULL on a failure — kept for the
@@ -14,8 +15,8 @@ import io.github.jan.supabase.auth.status.SessionStatus
  * over to the next: a signed-out read, or a failed read for a different account,
  * shows empty.
  *
- * One instance per flow; the flow's single upstream collector calls [refresh]
- * (or [next]) sequentially.
+ * One instance per flow; the flow's single upstream collector calls [refreshInto]
+ * (or [refresh] / [next]) sequentially.
  */
 internal class LastGoodRead<T : Any>(private val empty: T) {
     /** The account whose good read is on screen, or null when none is. */
@@ -37,6 +38,20 @@ internal class LastGoodRead<T : Any>(private val empty: T) {
      *  answer empty. So offline with an expired token keeps what is shown. */
     suspend fun refresh(uid: String?, account: String?, read: suspend () -> T?): T? =
         next(uid ?: account, if (uid != null) read() else null)
+
+    /** [refresh] as a flow step: emits what the flow shows next. When what it
+     *  shows is another account's good read, [empty] goes out BEFORE the read.
+     *  A WhileSubscribed projection that nobody collected through a sign-out
+     *  still holds the last account's rows; the next account's screen used to
+     *  show them until its own first read came back (Android audit 2026-09-23,
+     *  A16). */
+    suspend fun refreshInto(out: FlowCollector<T>, uid: String?, account: String?, read: suspend () -> T?) {
+        if (owner != null && owner != (uid ?: account)) {
+            owner = null
+            out.emit(empty)
+        }
+        refresh(uid, account, read)?.let { out.emit(it) }
+    }
 }
 
 /**

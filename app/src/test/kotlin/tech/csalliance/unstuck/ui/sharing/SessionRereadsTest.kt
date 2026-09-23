@@ -9,13 +9,15 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.flow.runningFold
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.transform
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -52,7 +54,7 @@ class SessionRereadsTest {
         val badges: StateFlow<Map<String, String>> =
             merge(manual, sessionRereads(status, account))
                 .onStart { emit(Unit) }
-                .mapNotNull { hold.refresh(currentUid(), account.value) { reads++; server[currentUid()] } }
+                .transform { hold.refreshInto(this, currentUid(), account.value) { reads++; server[currentUid()] } }
                 .stateIn(scope.backgroundScope, SharingStarted.Eagerly, emptyMap())
     }
 
@@ -139,6 +141,47 @@ class SessionRereadsTest {
         account.value = null
         runCurrent()
         assertEquals("the sign-out is", 1, ticks)
+    }
+
+    // Shared-with-you, People and the shared blocks stop reading 5 s after their last
+    // screen goes; the StateFlow keeps its value. Signed out from a screen that
+    // doesn't collect them (Settings from the Lists tab), the next account's Today
+    // got the last account's rows first and kept them until its own read came back
+    // (Android audit 2026-09-23, A16).
+    @Test fun `a projection nobody collected through a sign-out never shows the last account's rows to the next`() = runTest {
+        val status = MutableStateFlow<SessionStatus>(signedIn("a"))
+        val account: StateFlow<String?> = status
+            .runningFold(null as String?) { prev, s -> sessionAccount(s, prev) }
+            .stateIn(backgroundScope, SharingStarted.Eagerly, null)
+        fun currentUid(): String? = (status.value as? SessionStatus.Authenticated)?.session?.user?.id
+        val server = mapOf("a" to listOf("A's partner's task"), "b" to listOf("B's partner's task"))
+        val hold = LastGoodRead<List<String>>(emptyList())
+        // The sharedWithMe pipeline; each read takes a second on the network.
+        val sharedWithMe: StateFlow<List<String>> =
+            merge(MutableSharedFlow<Unit>(), sessionRereads(status, account))
+                .onStart { emit(Unit) }
+                .transform { hold.refreshInto(this, currentUid(), account.value) { delay(1_000); server[currentUid()] } }
+                .stateIn(backgroundScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
+        val todayA = backgroundScope.launch { sharedWithMe.collect {} }
+        advanceTimeBy(1_001)
+        runCurrent()
+        assertEquals(listOf("A's partner's task"), sharedWithMe.value)
+        todayA.cancel()   // A goes to the Lists tab, then Settings
+        advanceTimeBy(6_000)
+        runCurrent()
+
+        status.value = SessionStatus.NotAuthenticated(isSignOut = true)
+        runCurrent()
+        status.value = signedIn("b")
+        runCurrent()
+
+        backgroundScope.launch { sharedWithMe.collect {} }   // B's Today
+        runCurrent()
+        assertEquals("B's read is in flight: nothing of A's", emptyList<String>(), sharedWithMe.value)
+        advanceTimeBy(1_001)
+        runCurrent()
+        assertEquals(listOf("B's partner's task"), sharedWithMe.value)
     }
 
     private fun signedIn(uid: String, token: String = "t") = SessionStatus.Authenticated(

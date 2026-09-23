@@ -84,7 +84,7 @@ class ExportEverythingTest {
         Dispatchers.resetMain()
     }
 
-    private fun TestScope.vm() =
+    private fun TestScope.vm(graph: AppGraph = this@ExportEverythingTest.graph) =
         AppViewModel(graph = graph, writeOverride = WriteThrough(graph.store), currentUidProvider = { "me" }, currentNameProvider = { "Ada" })
             .also { created ->
                 drain.track(created)
@@ -145,6 +145,34 @@ class ExportEverythingTest {
         assertEquals(listOf("tags"), file.getValue("incomplete").jsonArray.map { it.jsonPrimitive.content })
         val message = exportOutcomeMessage(export.missing)
         assertTrue(message, message.startsWith("Exported, but") && message.contains("tags"))
+    }
+
+    @Test fun `a pull deleting rows while the export reads doesn't pass a complete table off as missing`() = runTest(dispatcher) {
+        // A store whose tags lose a row once they have been read — what a pull's
+        // deletion sweep does when it lands mid-export (the export runs right on the
+        // return from the picker, as the resume pulls do). Counting the rows in one
+        // read and decoding them in another saw 2 then 1, and told the user their tags
+        // weren't in the file (Android audit 2026-09-23, A18). Tags: nothing else here
+        // reads them, so the second read is the export's own.
+        var tagReads = 0
+        lateinit var racing: UnstuckDatabase
+        racing = Room.inMemoryDatabaseBuilder(ApplicationProvider.getApplicationContext(), UnstuckDatabase::class.java)
+            .allowMainThreadQueries()
+            .setQueryCallback({ sql, args ->
+                if (sql.startsWith("SELECT * FROM records WHERE tableName = ?") && args.firstOrNull() == Tables.TAGS && ++tagReads == 2) {
+                    racing.openHelper.writableDatabase.execSQL("DELETE FROM records WHERE tableName = ? AND id = ?", arrayOf<Any?>(Tables.TAGS, "g2"))
+                }
+            }, Runnable::run)
+            .build()
+        val racingStore = LocalStore(racing)
+        racingStore.upsert(Tables.TAGS, TagRow("g1", "errand", null, 0), TagRow.serializer(), "g1")
+        racingStore.upsert(Tables.TAGS, TagRow("g2", "call", null, 1), TagRow.serializer(), "g2")
+        val racingGraph = AppGraph(ApplicationProvider.getApplicationContext(), configured = false, storeOverride = racingStore)
+
+        val export = vm(racingGraph).exportJson()
+
+        assertEquals("nothing is missing from what was read", emptyList<String>(), export.missing)
+        assertEquals(listOf("g1", "g2"), parse(export.json).ids("tags"))
     }
 
     @Test fun `exportTo writes the whole file to the picked document and reports it`() = runTest(dispatcher) {

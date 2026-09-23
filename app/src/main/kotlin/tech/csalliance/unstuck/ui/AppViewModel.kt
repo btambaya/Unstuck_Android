@@ -19,6 +19,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.mapNotNull
+import kotlinx.coroutines.flow.transform
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.emitAll
@@ -353,7 +354,7 @@ class AppViewModel(
     val sharedWithMe: StateFlow<List<SharedWithMe>> =
         merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } }, shareRereads)
             .onStart { emit(Unit) }
-            .mapNotNull { sharedWithMeHold.refresh(currentUid(), heldAccount.value) { graph.coordinator?.circle?.tasksSharedWithMe() } }
+            .transform { sharedWithMeHold.refreshInto(this, currentUid(), heldAccount.value) { graph.coordinator?.circle?.tasksSharedWithMe() } }
             .combine(_sharedCompletedAt) { rows, stamps ->
                 if (stamps.isEmpty()) rows else rows.map { s ->
                     if (s.done && s.completedAt == null) s.copy(completedAt = stamps[s.taskId]) else s
@@ -366,7 +367,7 @@ class AppViewModel(
     val shareBadges: StateFlow<Map<String, List<ShareBadge>>> =
         merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } }, shareRereads)
             .onStart { emit(Unit) }
-            .mapNotNull { shareBadgesHold.refresh(currentUid(), heldAccount.value) { graph.coordinator?.circle?.myTaskShareBadges() } }
+            .transform { shareBadgesHold.refreshInto(this, currentUid(), heldAccount.value) { graph.coordinator?.circle?.myTaskShareBadges() } }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyMap())
 
     /** taskId → assignee name for tasks I've assigned away ('assign' level). These
@@ -382,10 +383,12 @@ class AppViewModel(
     private val _sharedBlockRange = MutableStateFlow<IsoRange?>(null)
 
     /** Per-window cache so flipping Day↔Week (same week) or paging back to a month
-     *  already seen is free. Dropped wholesale on every shares-changed tick — a share
-     *  added/removed/moved anywhere invalidates every window. Only touched from the
+     *  already seen is free. Invalidated on every shares-changed tick — a share
+     *  added/removed/moved anywhere invalidates every window — but a window keeps its
+     *  last good blocks until a read replaces them, so a failed re-read no longer
+     *  blanks the calendar (Android audit 2026-09-23, A16). Only touched from the
      *  [sharedBlocks] pipeline (viewModelScope → main thread), never elsewhere. */
-    private val sharedBlockCache = HashMap<IsoRange, List<SharedBlock>>()
+    private val sharedBlockWindows = tech.csalliance.unstuck.ui.sharing.SharedBlockWindows()
 
     /** Every block of every task shared WITH me inside the visible window — the
      *  read-only "shared" blocks on the calendars (Day / Week grids, the Month planned
@@ -399,13 +402,13 @@ class AppViewModel(
             _sharedBlockRange,
             merge(_sharesRefresh, flow { graph.coordinator?.collab?.sharesChanged?.let { emitAll(it) } }, shareRereads)
                 .onStart { emit(Unit) }
-                .map { sharedBlockCache.clear(); System.nanoTime() },   // a distinct value per tick → combine re-emits
+                .map { sharedBlockWindows.invalidate(); System.nanoTime() },   // a distinct value per tick → combine re-emits
         ) { range, _ -> range }
-            .map { range ->
-                if (range == null) emptyList()
-                else sharedBlockCache[range]
-                    ?: (graph.coordinator?.circle?.sharedTaskBlocks(range.from, range.to) ?: emptyList())
-                        .also { sharedBlockCache[range] = it }
+            .transform { range ->
+                if (range == null) emit(emptyList())
+                else sharedBlockWindows.readInto(this, range, currentUid(), heldAccount.value) {
+                    graph.coordinator?.circle?.sharedTaskBlocks(range.from, range.to)
+                }
             }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
@@ -2486,7 +2489,7 @@ class AppViewModel(
     val circle: StateFlow<List<CircleMember>> =
         merge(_circleRefresh, flow { collab?.circleChanged?.let { emitAll(it) } }, shareRereads)
             .onStart { emit(Unit) }
-            .mapNotNull { circleHold.refresh(currentUid(), heldAccount.value) { circleClient?.circleList() } }
+            .transform { circleHold.refreshInto(this, currentUid(), heldAccount.value) { circleClient?.circleList() } }
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
     /** Force a roster refetch now (after a write). */
@@ -4291,8 +4294,9 @@ class AppViewModel(
     suspend fun exportJson(): DataExport = withContext(Dispatchers.IO) {
         val missing = mutableListOf<String>()
         suspend fun <T> read(table: String, label: String, ser: kotlinx.serialization.KSerializer<T>): List<T> = try {
-            val stored = store.countRows(table)
-            store.snapshot(table, ser).also { if (it.size < stored) missing += label }
+            // Counted in the same read: a pull deleting rows between a count and
+            // the read made a complete table look short (Android audit 2026-09-23, A18).
+            store.snapshotChecked(table, ser).also { if (it.undecodable > 0) missing += label }.rows
         } catch (e: kotlinx.coroutines.CancellationException) {
             throw e
         } catch (e: Exception) {

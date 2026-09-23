@@ -51,6 +51,7 @@ import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.BuildConfig
 import tech.csalliance.unstuck.core.logic.FocusTimer
+import tech.csalliance.unstuck.core.logic.areaFilterFollowing
 import tech.csalliance.unstuck.core.logic.daysSinceCreated
 import tech.csalliance.unstuck.core.logic.formatMMSS
 import tech.csalliance.unstuck.core.logic.isCompletedToday
@@ -135,6 +136,15 @@ fun TodayScreen(
     val now = nowState
     val liveId = live?.taskId
     var areaFilter by remember { mutableStateOf<String?>(null) }
+    // The pill holds the area NAME: follow a rename (Settings, the assistant, another
+    // device) and fall back to All on a delete. After the cascade moved the tasks, a
+    // filter left on the old name matched nothing — no pill lit and "Nothing in
+    // Personal right now." (parity with iOS build 81, audit 2026-09-22 C19).
+    var prevAreas by remember { mutableStateOf(areas) }
+    LaunchedEffect(areas) {
+        areaFilter = areaFilterFollowing(areaFilter, prevAreas, areas)
+        prevAreas = areas
+    }
     var backlogActive by remember { mutableStateOf(false) }
     val initials = remember(vm.currentName) {
         (vm.currentName ?: "U").split(' ', '.', '@').mapNotNull { it.firstOrNull()?.uppercaseChar() }.take(2).joinToString("").ifEmpty { "U" }

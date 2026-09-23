@@ -212,7 +212,10 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
     // ── navigation ──
     override fun navigate(screen: String, id: String?) { vm.openDeepLink(assistantScreenLink(screen, id)) }
 
-    // ── areas + tags (rename/delete cascade like the web's use-life-areas / use-tags) ──
+    // ── areas + tags ──
+    // The rename/delete cascade onto tasks lives in AppViewModel, shared with the
+    // Settings rows, so there is one serialized path (parity with iOS build 81, audit
+    // 2026-09-22 C19).
     override suspend fun addArea(name: String, color: String?): Boolean {
         val next = (getAreaRows().maxOfOrNull { it.sortOrder } ?: -1) + 1
         val a = LifeArea(newUuid(), name, color ?: "indigo", next)
@@ -220,47 +223,25 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
         return true
     }
     override suspend fun updateArea(id: String, name: String?, color: String?): Boolean {
+        if (name != null && !vm.renameLifeAreaNow(id, name)) return false
+        if (color == null) return true
+        // Re-read after the rename so the colour write keeps the new name.
         val row = getAreaRows().firstOrNull { it.id == id } ?: return false
-        val next = row.copy(name = name ?: row.name, color = color ?: row.color)
+        val next = row.copy(color = color)
         write?.upsertLifeArea(next) ?: store.upsert(Tables.LIFE_AREAS, next, LifeArea.serializer(), next.id)
-        if (name != null && name != row.name) {
-            for (t in getTasks().filter { it.lifeArea == row.name }) upsertTask(t.copy(lifeArea = name, updatedAt = nowIso()))
-        }
         return true
     }
-    override suspend fun removeArea(id: String): Boolean {
-        val row = getAreaRows().firstOrNull { it.id == id } ?: return false
-        write?.deleteLifeArea(id) ?: store.delete(Tables.LIFE_AREAS, id)
-        // "its tasks keep everything else" — they just lose the label.
-        for (t in getTasks().filter { it.lifeArea == row.name }) upsertTask(t.copy(lifeArea = null, updatedAt = nowIso()))
-        return true
-    }
+    /** "its tasks keep everything else" — the cascade just clears the label. */
+    override suspend fun removeArea(id: String): Boolean = vm.deleteLifeAreaNow(id)
     override suspend fun addTag(name: String): Boolean {
         val next = (getTagRows().maxOfOrNull { it.sortOrder } ?: -1) + 1
         val row = TagRow(newUuid(), name, null, next)
         write?.upsertTag(row) ?: store.upsert(Tables.TAGS, row, TagRow.serializer(), row.id)
         return true
     }
-    override suspend fun updateTag(id: String, name: String?): Boolean {
-        val row = getTagRows().firstOrNull { it.id == id } ?: return false
-        val next = row.copy(name = name ?: row.name)
-        write?.upsertTag(next) ?: store.upsert(Tables.TAGS, next, TagRow.serializer(), next.id)
-        if (name != null && name != row.name) {
-            for (t in getTasks().filter { t -> t.tags?.any { it.equals(row.name, ignoreCase = true) } == true }) {
-                val tags = t.tags.orEmpty().map { if (it.equals(row.name, ignoreCase = true)) name else it }.distinctBy { it.lowercase() }
-                upsertTask(t.copy(tags = tags, updatedAt = nowIso()))
-            }
-        }
-        return true
-    }
-    override suspend fun removeTag(id: String): Boolean {
-        val row = getTagRows().firstOrNull { it.id == id } ?: return false
-        write?.deleteTag(id) ?: store.delete(Tables.TAGS, id)
-        for (t in getTasks().filter { t -> t.tags?.any { it.equals(row.name, ignoreCase = true) } == true }) {
-            upsertTask(t.copy(tags = t.tags?.filterNot { it.equals(row.name, ignoreCase = true) }?.ifEmpty { null }, updatedAt = nowIso()))
-        }
-        return true
-    }
+    override suspend fun updateTag(id: String, name: String?): Boolean =
+        if (name != null) vm.renameTagNow(id, name) else getTagRows().any { it.id == id }
+    override suspend fun removeTag(id: String): Boolean = vm.deleteTagNow(id)
 
     // ── settings ──
     /** What the Settings screen shows. Usable minutes are server-only on

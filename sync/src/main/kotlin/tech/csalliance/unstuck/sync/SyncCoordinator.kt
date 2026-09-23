@@ -15,6 +15,7 @@ import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.isActive
@@ -22,9 +23,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import java.util.concurrent.atomic.AtomicBoolean
-import tech.csalliance.unstuck.core.logic.externalEventToBlock
-import tech.csalliance.unstuck.core.logic.incomingEventsToMirror
-import tech.csalliance.unstuck.core.logic.staleExternalBlockIds
 import tech.csalliance.unstuck.core.logic.wakeWindowSample
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
@@ -507,113 +505,80 @@ class SyncCoordinator(
 
     // --- Google Calendar (consent + pull). Push of local blocks is a later step. ---
 
-    private var pendingCalState: String? = null
-
-    /** Start the OAuth consent: returns the Google authorize URL to open in a Custom Tab. */
-    suspend fun beginGoogleConnect(): String? = runCatching {
-        val r = calendar.authorize(CAL_REDIRECT)
-        pendingCalState = r.state
-        r.url
-    }.onFailure { Log.w(TAG, "calendar authorize failed", it) }.getOrNull()
-
-    /** Finish consent from the `unstuck://calendar-callback?code&state` deep link. */
-    suspend fun completeGoogleConnect(code: String, state: String): Boolean = runCatching {
-        // CSRF guard: only honor a callback when WE initiated the consent flow AND
-        // the returned state matches the one minted for it. A null pendingCalState
-        // means no connect is in flight — an unsolicited deep link (the callback is
-        // BROWSABLE, reachable from any web page/app) must be rejected, not processed.
-        val expected = pendingCalState
-        if (expected == null || expected != state) {
-            Log.w(TAG, "calendar connect: no pending consent or state mismatch — ignoring callback")
-            return false
-        }
-        pendingCalState = null   // single-use: a replayed deep link can't be honored twice
-        calendar.connectGoogle(code, CAL_REDIRECT, state)
+    private val calendarConnect = GoogleCalendarConnect(
+        store = store,
+        currentUserId = { auth.currentUserId },
+        authorize = { calendar.authorize(CAL_REDIRECT) },
+        exchange = { code, state -> calendar.connectGoogle(code, CAL_REDIRECT, state) },
         // Push-then-pull through the serialized path: pulls the new calendar_connections
         // row so the UI flips to "Synced" now, not on next launch (and never races the
-        // foreground pull into a double replace).
-        freshness.requestAndWait(FreshnessTrigger.MANUAL)
-        pullCalendar()
-        true
-    }.getOrElse { Log.w(TAG, "calendar connect failed", it); false }
+        // foreground pull into a double replace). The first Google pull drops any old
+        // back-off, as iOS calendarDidConnect does.
+        firstSync = {
+            freshness.requestAndWait(FreshnessTrigger.MANUAL)
+            pullCalendar(manual = true)
+        },
+        hydrateLock = hydrateMutex,
+    )
 
-    // 429 back-off: no pulls until this instant (the provider / function rate-limited us).
-    @Volatile private var calendarBackoffUntilMs: Long = 0L
+    /** Start the OAuth consent: returns the Google authorize URL to open in a Custom Tab. */
+    suspend fun beginGoogleConnect(): String? = calendarConnect.begin()
 
-    /** Pull external events for [-7d, +30d] and reconcile them into local EXTERNAL blocks.
-     *  The server reports per-connection FAILURES (`failures[]`, contract 2026-09) and
-     *  marks a connection `needs_reauth` on 401 / invalid_grant: a failed connection's
-     *  missing events are "unknown", never "deleted" — its blocks are kept — and on
-     *  429 we back off. (Before, a lapsed refresh token came back as `events: []` and
-     *  every meeting was reconciled away.) */
-    suspend fun pullCalendar() {
-        auth.currentUserId ?: return
-        if (System.currentTimeMillis() < calendarBackoffUntilMs) {
-            Log.i(TAG, "calendar pull skipped — backing off after a 429")
-            return
-        }
-        val conns = runCatching { calendar.listConnections() }
-            .onFailure { Log.w(TAG, "calendar listConnections failed", it) }.getOrNull() ?: return
-        if (conns.isEmpty()) return
-        val today = LocalDate.now()
-        val fromDate = today.minusDays(7)
-        val toDate = today.plusDays(30)
-        // Google's events.list requires RFC3339 timestamps for timeMin/timeMax — a bare
-        // YYYY-MM-DD is rejected (400) and silently yields zero events. Send full instants
-        // (like the web's .toISOString()); reconcile locally with the date-only bounds.
-        val zone = java.time.ZoneId.systemDefault()
-        val fromIso = fromDate.atStartOfDay(zone).toInstant().toString()
-        val toIso = toDate.plusDays(1).atStartOfDay(zone).toInstant().toString()
-        val resp = try {
-            calendar.pullEvents(fromIso, toIso)
-        } catch (e: CalendarRateLimited) {
-            backOffCalendar(); return
-        } catch (e: CancellationException) {
-            throw e
-        } catch (e: Throwable) {
-            Log.w(TAG, "calendar pullEvents failed", e); return
-        }
-        val failedConnIds = resp.failures.map { it.connectionId }.toSet()
-        if (resp.failures.any { it.status == 429 }) backOffCalendar()
-        if (resp.failures.isNotEmpty()) {
-            Log.w(TAG, "calendar pull: ${resp.failures.size} connection(s) failed — keeping their blocks: ${resp.failures}")
-            // Surface needs_reauth NOW (the bar offers "Reconnect Google") rather than
-            // on the next full hydrate: re-read the connection rows the server just stamped.
-            runCatching { calendar.listConnections() }.getOrNull()?.forEach { c ->
-                store.upsert(Tables.CALENDAR_CONNECTIONS, c, CalendarConnection.serializer(), c.id, c.connectedAt)
-            }
-        }
-        // Don't mirror events we pushed ourselves (the originating task block already
-        // represents them) nor all-day events (no lane on the time grid yet). The
-        // server stamps `allDay: true` — the old `contains('T')` check alone was dead
-        // because the server normalises all-day starts to an ISO instant.
-        val ownEventIds = store.blocks().first()
-            .filter { it.kind == CalBlockKind.TASK && !it.externalEventId.isNullOrBlank() }
-            .mapNotNull { it.externalEventId }.toSet()
-        val blocks = incomingEventsToMirror(resp.events, ownEventIds).map { externalEventToBlock(it, it.calendarId) }
-        val keep = blocks.map { it.id }.toSet()
-        blocks.forEach { write.upsertCalBlock(it) }
-        // Reconcile deletions: drop in-window EXTERNAL blocks Google no longer returns —
-        // EXCEPT for connections whose fetch failed (unknown ≠ deleted).
-        staleExternalBlockIds(store.blocks().first(), keep, fromDate.toString(), toDate.toString(), failedConnIds)
-            .forEach { write.deleteCalBlock(it) }
-    }
+    /** How the last in-app connect ended, held until the calendar bar shows it (see
+     *  [GoogleCalendarConnect]; parity with iOS build 81, audit 2026-09-22 C18). */
+    val calendarConnectOutcome: StateFlow<CalendarConnectOutcome?> = calendarConnect.outcome
+    fun consumeCalendarConnectOutcome() = calendarConnect.consume()
 
-    private fun backOffCalendar() {
-        calendarBackoffUntilMs = System.currentTimeMillis() + CALENDAR_BACKOFF_MS
-        Log.w(TAG, "calendar rate-limited (429) — backing off ${CALENDAR_BACKOFF_MS / 1000}s")
-    }
+    /** Finish consent from the `unstuck://calendar-callback` deep link, with or without
+     *  a code (a denied consent has none). Every callback reports an outcome; only ours,
+     *  with a matching state, has its code exchanged. */
+    suspend fun completeGoogleConnect(code: String?, state: String?): CalendarConnectOutcome =
+        calendarConnect.complete(code, state)
+
+    private val calendarPull = GoogleCalendarPull(
+        store = store,
+        currentUserId = { auth.currentUserId },
+        listConnections = { calendar.listConnections() },
+        pullEvents = { from, to -> calendar.pullEvents(from, to) },
+        upsertBlock = { write.upsertCalBlock(it) },
+        deleteBlock = { write.deleteCalBlock(it) },
+        hydrateLock = hydrateMutex,
+    )
+
+    /** A Google 429 is being waited out (the "Sync now" caption says "busy"). */
+    val calendarBackedOff: Boolean get() = calendarPull.backedOff
+
+    /** Pull external events for [-7d, +30d] and reconcile them into local EXTERNAL
+     *  blocks (see [GoogleCalendarPull]). [manual] = an explicit ask ("Sync now"), which
+     *  first forgets any 429 back-off. False = the server or Google could not be read,
+     *  so the bar can say so (parity with iOS build 81, audit 2026-09-22 C18). */
+    suspend fun pullCalendar(manual: Boolean = false): Boolean = calendarPull.pull(manual)
 
     /** Disconnect an account and immediately purge its connection row + external blocks. */
     suspend fun disconnectCalendar(connectionId: String) {
         runCatching { calendar.disconnect(connectionId) }
             .onFailure { Log.w(TAG, "calendar disconnect failed", it) }
         // Drop the connection row locally so the bar flips back to "Connect" now
-        // (the server row is gone; a later hydrate would reach the same state).
-        store.delete(Tables.CALENDAR_CONNECTIONS, connectionId)
-        store.blocks().first()
-            .filter { it.kind == CalBlockKind.EXTERNAL && it.externalConnectionId == connectionId }
-            .forEach { write.deleteCalBlock(it.id) }
+        // (the server row is gone; a later hydrate would reach the same state). Done
+        // under the Google pull's write gate (a pull already reading is then never
+        // applied) and the mutexes every catch-up holds, so no answer read before the
+        // revoke can put the account or its meetings back (parity with iOS build 81,
+        // audit 2026-09-22 C18).
+        calendarPull.exclusive {
+            hydrateMutex.withLock {
+                engineMutex.withLock {
+                    store.delete(Tables.CALENDAR_CONNECTIONS, connectionId)
+                    store.blocks().first()
+                        .filter { it.kind == CalBlockKind.EXTERNAL && it.externalConnectionId == connectionId }
+                        .forEach { write.deleteCalBlock(it.id) }
+                }
+            }
+        }
+        // Re-read the server's post-disconnect state, as iOS does: the catch-up brings
+        // calendar_connections in step, and with no connection left the pull clears any
+        // g_ meeting still on the grid.
+        freshness.requestAndWait(FreshnessTrigger.MANUAL)
+        pullCalendar(manual = true)
     }
 
     // --- Push (Unstuck → Google). Best-effort; mirrors web lib/sync/google-sync. ---
@@ -652,7 +617,7 @@ class SyncCoordinator(
         if (block.kind != CalBlockKind.TASK) return null
         val conn = googleConn() ?: return null
         if (conn.needsReauth) return null   // every call would 401 until the user reconnects
-        if (System.currentTimeMillis() < calendarBackoffUntilMs) return null
+        if (calendarPull.backedOff) return null
         // Always write task blocks to the user's PRIMARY calendar — selectedCalendarIds
         // can include read-only/subscribed calendars (which 403 on insert). "primary" is
         // Google's alias for the main, always-writable calendar.
@@ -669,7 +634,7 @@ class SyncCoordinator(
                 Log.i(TAG, "calendar push: event $existing is gone — re-inserting")
                 // fall through to INSERT below
             } catch (e: CalendarRateLimited) {
-                backOffCalendar(); return null
+                calendarPull.backOff(); return null
             } catch (e: CancellationException) {
                 throw e
             } catch (e: Throwable) {
@@ -749,7 +714,12 @@ class SyncCoordinator(
                     // would otherwise never restart them until the next onStart (BUG 2).
                     // Idempotent (isActive guards), so redundant with resumeRealtime's call.
                     startForegroundNets()
-                    runCatching { pullCalendar() }   // ingest Google events if connected
+                    // Ingest Google events if connected — launched, not awaited: the pull
+                    // (/connections, Google per connection, N writes) held this sequential
+                    // auth collector, so a quick sign-out + sign-in could reach it as one
+                    // merged update and skip the sign-out branch. Its per-write user checks
+                    // make that safe (parity with iOS build 81, audit 2026-09-22 C18).
+                    scope.launch { runCatching { pullCalendar() } }
                     maybeTrackLogin(uid)             // best-effort usage analytics (throttled)
                     maybeRecordWakeWindow(uid)       // first input of the local day → wake-window calibration
                 }.onFailure { Log.w(TAG, "sync authenticated-branch step failed; sync stays alive", it) }
@@ -762,6 +732,7 @@ class SyncCoordinator(
                 store.clearAll()   // leaves parked_outbox alone (per-user, see LocalStore)
                 goneUid?.let { catchUp.clearCursors(it) }   // no marks without the rows they describe
                 freshness.reset()
+                calendarConnect.signedOut()   // the next account never sees its result
                 prefs.edit().remove(KEY_PREV_USER).apply()
                 runCatching { onSignedOut?.invoke() }.onFailure { Log.w(TAG, "onSignedOut hook failed", it) }
             }
@@ -772,8 +743,6 @@ class SyncCoordinator(
     companion object {
         private const val TAG = "UnstuckSync"
         private const val KEY_PREV_USER = "unstuck.prevUserId"
-        // After a 429 from the calendar function / provider, no pulls or pushes for this long.
-        private const val CALENDAR_BACKOFF_MS = 5 * 60_000L
         // Flush-on-enqueue debounce: a burst of edits (typing, a drag) collapses to one
         // drain ~1.5 s after the last one (same window as iOS).
         internal const val ENQUEUE_FLUSH_DEBOUNCE_MS = 1_500L

@@ -72,6 +72,7 @@ import tech.csalliance.unstuck.ui.settings.SettingsHub
 import tech.csalliance.unstuck.ui.settings.SettingsSection
 import tech.csalliance.unstuck.ui.tasks.NewTaskSheet
 import tech.csalliance.unstuck.core.logic.taskForBlock
+import tech.csalliance.unstuck.core.logic.areaFilterFollowing
 import tech.csalliance.unstuck.core.logic.isExactTaskLink
 import tech.csalliance.unstuck.core.logic.taskLinkRowForId
 import tech.csalliance.unstuck.core.time.Clock
@@ -198,6 +199,14 @@ fun MainScaffold(vm: AppViewModel) {
 
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
+    // The Tasks tab's area pill (held here, by NAME) follows a rename and falls back to
+    // All on a delete, like Today's (parity with iOS build 81, audit 2026-09-22 C19).
+    val lifeAreas by vm.lifeAreas.collectAsStateWithLifecycle()
+    var prevLifeAreas by remember { mutableStateOf(lifeAreas) }
+    LaunchedEffect(lifeAreas) {
+        activeArea = areaFilterFollowing(activeArea, prevLifeAreas, lifeAreas)
+        prevLifeAreas = lifeAreas
+    }
     // Privacy §21 kill-switch (Settings → Interface → AI Assistant): when the
     // user turns AI off there is NO launcher, NO sheet, and no voice — and an
     // open-assistant request from anywhere else (e.g. the tour) is ignored.

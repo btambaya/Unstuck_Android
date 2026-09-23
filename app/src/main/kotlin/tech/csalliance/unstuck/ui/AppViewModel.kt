@@ -53,6 +53,10 @@ import tech.csalliance.unstuck.sync.AssistantResult
 import tech.csalliance.unstuck.sync.PreferencesClient
 import tech.csalliance.unstuck.sync.ProfileFactsService
 import tech.csalliance.unstuck.core.logic.InterviewFlag
+import tech.csalliance.unstuck.core.logic.labelNameTaken
+import tech.csalliance.unstuck.core.logic.relabelingArea
+import tech.csalliance.unstuck.core.logic.renamingTag
+import tech.csalliance.unstuck.core.logic.strippingTag
 import tech.csalliance.unstuck.core.logic.PAPrefsLogic
 import tech.csalliance.unstuck.core.logic.ProfileFactsLogic
 import tech.csalliance.unstuck.core.logic.ReceiptIcon
@@ -107,6 +111,7 @@ import tech.csalliance.unstuck.core.logic.TestCallLogic
 import tech.csalliance.unstuck.sync.CallRequest
 import tech.csalliance.unstuck.sync.CallRequestsMirror
 import tech.csalliance.unstuck.sync.CallsClient
+import tech.csalliance.unstuck.sync.CalendarConnectOutcome
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.putJsonArray
 import tech.csalliance.unstuck.core.logic.DivergenceResolution
@@ -771,8 +776,16 @@ class AppViewModel(
     // --- google calendar ---
     /** Begin OAuth consent — returns the authorize URL to open in a Custom Tab. */
     suspend fun beginGoogleConnect(): String? = graph.coordinator?.beginGoogleConnect()
-    /** Pull external events now (manual refresh). */
-    suspend fun syncCalendar() { graph.coordinator?.pullCalendar() }
+    /** Pull external events now ("Sync now"; forgets any 429 back-off first). False =
+     *  the server or Google could not be read — the bar says so instead of ending
+     *  silently (parity with iOS build 81, audit 2026-09-22 C18). */
+    suspend fun syncCalendar(): Boolean = graph.coordinator?.pullCalendar(manual = true) ?: false
+    /** A Google 429 is being waited out: a failed "Sync now" reads "busy", not offline. */
+    val calendarBackedOff: Boolean get() = graph.coordinator?.calendarBackedOff ?: false
+    /** The in-app connect's result, held until the calendar bar shows it. */
+    val calendarConnectOutcome: StateFlow<CalendarConnectOutcome?> =
+        graph.coordinator?.calendarConnectOutcome ?: MutableStateFlow(null)
+    fun consumeCalendarConnectOutcome() { graph.coordinator?.consumeCalendarConnectOutcome() }
     fun disconnectCalendar(id: String) = launchWrite { graph.coordinator?.disconnectCalendar(id) }
 
     // --- reminders (pre-task "remind me N min before"; device-local) ---
@@ -2576,13 +2589,7 @@ class AppViewModel(
     fun upsertTag(t: TagRow) = launchWrite { write?.upsertTag(t) }
 
     /** Delete a tag and strip its name from every task (case-insensitive cascade). */
-    fun deleteTag(id: String) = launchWrite {
-        val name = tags.value.firstOrNull { it.id == id }?.name
-        write?.deleteTag(id)
-        if (name != null) tasks.value.filter { t -> t.tags?.any { it.equals(name, ignoreCase = true) } == true }.forEach { t ->
-            write?.upsertTask(t.copy(tags = t.tags?.filterNot { it.equals(name, ignoreCase = true) }?.ifEmpty { null }, updatedAt = isoNow()))
-        }
-    }
+    fun deleteTag(id: String) = launchWrite { deleteTagNow(id) }
 
     /** Add a tag to the vocabulary if its name is new; returns the name. */
     fun ensureTag(name: String): String {
@@ -2595,40 +2602,97 @@ class AppViewModel(
 
     /** Rename a tag and cascade across every task that uses it — case-insensitive
      *  match + de-dupe so renaming A→B on a task tagged [A,B] yields [B], not [B,B]. */
-    fun renameTag(tag: TagRow, newName: String) = launchWrite {
-        val nm = newName.trim(); if (nm.isEmpty() || nm == tag.name) return@launchWrite
-        // Bail on a duplicate name (case-insensitive) — two same-named tags make the
-        // name-keyed filter/cascade ambiguous.
-        if (tags.value.any { it.id != tag.id && it.name.equals(nm, ignoreCase = true) }) return@launchWrite
-        write?.upsertTag(tag.copy(name = nm))
-        tasks.value.filter { t -> t.tags?.any { it.equals(tag.name, ignoreCase = true) } == true }.forEach { t ->
-            write?.upsertTask(t.copy(tags = t.tags?.map { if (it.equals(tag.name, ignoreCase = true)) nm else it }?.distinct(), updatedAt = isoNow()))
-        }
-    }
+    fun renameTag(tag: TagRow, newName: String) = launchWrite { renameTagNow(tag.id, newName) }
 
     fun recolorTag(tag: TagRow, color: String?) = launchWrite { write?.upsertTag(tag.copy(color = color)) }
     fun upsertLifeArea(a: LifeArea) = launchWrite { write?.upsertLifeArea(a) }
 
     /** Delete an area and clear its label off every task (no dangling lifeArea). */
-    fun deleteLifeArea(id: String) = launchWrite {
-        val name = lifeAreas.value.firstOrNull { it.id == id }?.name
-        write?.deleteLifeArea(id)
-        if (name != null) tasks.value.filter { it.lifeArea == name }.forEach { t ->
-            write?.upsertTask(t.copy(lifeArea = null, updatedAt = isoNow()))
-        }
-    }
+    fun deleteLifeArea(id: String) = launchWrite { deleteLifeAreaNow(id) }
 
     /** Rename an area + cascade the new name onto its tasks (web parity). */
-    fun renameLifeArea(area: LifeArea, newName: String) = launchWrite {
-        val nm = newName.trim(); if (nm.isEmpty() || nm == area.name) return@launchWrite
-        // Bail on a duplicate name — areas key tasks by name string, so two same-named
-        // areas make the Today/Tasks filter ambiguous.
-        if (lifeAreas.value.any { it.id != area.id && it.name.equals(nm, ignoreCase = true) }) return@launchWrite
-        write?.upsertLifeArea(area.copy(name = nm))
-        tasks.value.filter { it.lifeArea == area.name }.forEach { t -> write?.upsertTask(t.copy(lifeArea = nm, updatedAt = isoNow())) }
-    }
+    fun renameLifeArea(area: LifeArea, newName: String) = launchWrite { renameLifeAreaNow(area.id, newName) }
 
     fun recolorLifeArea(area: LifeArea, color: String) = launchWrite { write?.upsertLifeArea(area.copy(color = color)) }
+
+    // THE label cascade. Tasks key areas and tags by NAME, so a rename or delete of the
+    // row rewrites every task that carries it. Settings (above) and the assistant
+    // (AppViewModelAssistantApi) both come through here: one path, where there were two
+    // copies that had drifted (the Settings tag rename de-duped case-sensitively). Rows
+    // are read from the store, never the WhileSubscribed flows, which are empty while
+    // nothing on screen collects them (parity with iOS build 81, audit 2026-09-22 C19).
+    //
+    // One cascade at a time: each yields at every task write, so a rename A→B still
+    // relabelling while a delete of B (or a rename B→C) reads the task list would skip
+    // the tasks not yet moved, and the first cascade would then park them on a name no
+    // area has.
+    private val labelCascadeMutex = Mutex()
+
+    /** Rename an area and move its tasks. A blank or unchanged name, or one another area
+     *  already has (ignoring case — the server's unique(user_id, name) would quarantine
+     *  the row while the task relabels still synced), is refused: FALSE, nothing written.
+     *  TRUE once the row and its tasks are committed. */
+    suspend fun renameLifeAreaNow(id: String, newName: String): Boolean = labelCascadeMutex.withLock {
+        val w = write ?: return@withLock false
+        val name = newName.trim()
+        val rows = store.snapshot(Tables.LIFE_AREAS, LifeArea.serializer())
+        val row = rows.firstOrNull { it.id == id }
+        val others = rows.filter { it.id != id }
+        if (name.isEmpty() || row == null || name == row.name || labelNameTaken(name, others.map { it.name })) return@withLock false
+        w.upsertLifeArea(row.copy(name = name))
+        // A same-named twin (left by the assistant's old unchecked rename) still owns
+        // the old name: its tasks stay where they are.
+        if (others.none { it.name == row.name }) relabelTasks(w) { relabelingArea(it, row.name, name, isoNow()) }
+        true
+    }
+
+    /** Delete an area and clear its label off its tasks — what the Settings alert
+     *  promises ("they just lose this area label"). FALSE when there is no such row. */
+    suspend fun deleteLifeAreaNow(id: String): Boolean = labelCascadeMutex.withLock {
+        val w = write ?: return@withLock false
+        val rows = store.snapshot(Tables.LIFE_AREAS, LifeArea.serializer())
+        val row = rows.firstOrNull { it.id == id } ?: return@withLock false
+        w.deleteLifeArea(id)
+        if (rows.none { it.id != id && it.name == row.name }) relabelTasks(w) { relabelingArea(it, row.name, null, isoNow()) }
+        true
+    }
+
+    /** Rename a tag and carry the new name onto its tasks (case-insensitive, one copy
+     *  per task). Refused like [renameLifeAreaNow]; TRUE once committed. */
+    suspend fun renameTagNow(id: String, newName: String): Boolean = labelCascadeMutex.withLock {
+        val w = write ?: return@withLock false
+        val name = newName.trim()
+        val rows = store.snapshot(Tables.TAGS, TagRow.serializer())
+        val row = rows.firstOrNull { it.id == id }
+        val others = rows.filter { it.id != id }.map { it.name }
+        if (name.isEmpty() || row == null || name == row.name || labelNameTaken(name, others)) return@withLock false
+        w.upsertTag(row.copy(name = name))
+        // Tags match ignoring case, so any remaining "Quick"/"QUICK" twin keeps the tasks.
+        if (!labelNameTaken(row.name, others)) relabelTasks(w) { renamingTag(it, row.name, name, isoNow()) }
+        true
+    }
+
+    /** Delete a tag and strip it from its tasks. FALSE when there is no such row. */
+    suspend fun deleteTagNow(id: String): Boolean = labelCascadeMutex.withLock {
+        val w = write ?: return@withLock false
+        val rows = store.snapshot(Tables.TAGS, TagRow.serializer())
+        val row = rows.firstOrNull { it.id == id } ?: return@withLock false
+        w.deleteTag(id)
+        if (!labelNameTaken(row.name, rows.filter { it.id != id }.map { it.name })) relabelTasks(w) { strippingTag(it, row.name, isoNow()) }
+        true
+    }
+
+    /** Rewrite every task [transform] touches. Each match is RE-READ right before its
+     *  write: the upsert sends the whole row, so a snapshot taken before an earlier
+     *  write would revert a realtime / catch-up edit that landed in between and push it
+     *  as a fresh local change. */
+    private suspend fun relabelTasks(w: tech.csalliance.unstuck.sync.WriteThrough, transform: (TaskItem) -> TaskItem?) {
+        for (t in store.snapshot(Tables.TASKS, TaskItem.serializer())) {
+            if (transform(t) == null) continue
+            val fresh = store.getOne(Tables.TASKS, t.id, TaskItem.serializer()) ?: continue
+            w.upsertTask(transform(fresh) ?: continue)
+        }
+    }
 
     // --- onboarding ---
 

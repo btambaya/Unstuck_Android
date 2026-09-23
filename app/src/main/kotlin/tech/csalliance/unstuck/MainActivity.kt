@@ -114,12 +114,14 @@ class MainActivity : ComponentActivity() {
     private fun handleAuthOrCalendar(intent: Intent?) {
         val data = intent?.data
         if (data?.scheme == "unstuck" && data.host == "calendar-callback") {
+            // With or without a code: a denied or cancelled consent comes back as
+            // `?error=access_denied&state=…` and used to end here with no message. The
+            // coordinator reports it to the calendar bar and exchanges only a code whose
+            // state it minted (parity with iOS build 81, audit 2026-09-22 C18).
             val code = data.getQueryParameter("code")
             val state = data.getQueryParameter("state")
-            if (code != null && state != null) {
-                lifecycleScope.launch { graph.coordinator?.completeGoogleConnect(code, state) }
-                return
-            }
+            lifecycleScope.launch { graph.coordinator?.completeGoogleConnect(code, state) }
+            return
         }
         // Notification "Capture" action → open quick capture.
         if (intent?.getBooleanExtra(tech.csalliance.unstuck.surface.NotificationActionReceiver.EXTRA_OPEN_CAPTURE, false) == true) {

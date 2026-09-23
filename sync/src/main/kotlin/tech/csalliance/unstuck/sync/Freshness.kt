@@ -76,6 +76,9 @@ data class FreshnessState(
 )
 
 /**
+ * @param currentUserId     the user to pull for, null = nobody (no pull). Suspends:
+ *                          a backgrounded process establishes the session first
+ *                          (SessionGate — Android audit 2026-09-23, A2).
  * @param runFullHydrate    the existing full server-canonical pull; returns true
  *                          when it completed. Used on first run / no cursor.
  * @param runCatchUp        the cursor pull; `reconcileDeletions` asks it to also
@@ -85,7 +88,7 @@ data class FreshnessState(
  */
 class FreshnessOwner(
     private val scope: CoroutineScope,
-    private val currentUserId: () -> String?,
+    private val currentUserId: suspend () -> String?,
     private val runFullHydrate: suspend (String) -> Boolean,
     private val runCatchUp: suspend (String, Boolean) -> CatchUpOutcome?,
     private val needsFullHydrate: (String) -> Boolean,
@@ -168,22 +171,24 @@ class FreshnessOwner(
     }
 
     /** For callers whose next step assumes a pull has actually happened (sign-in,
-     *  the worker, connecting a calendar). Queues behind a running pull. */
-    suspend fun requestAndWait(trigger: FreshnessTrigger) = pull(trigger, waitIfBusy = true)
+     *  the worker, connecting a calendar). Queues behind a running pull. True when
+     *  this pull completed cleanly; false when nobody was signed in or it failed
+     *  (the SyncWorker's Result.retry() — it could never fire while every failure
+     *  was swallowed here, Android audit 2026-09-23 A2). */
+    suspend fun requestAndWait(trigger: FreshnessTrigger): Boolean = pull(trigger, waitIfBusy = true)
 
-    private suspend fun pull(trigger: FreshnessTrigger, waitIfBusy: Boolean) {
+    private suspend fun pull(trigger: FreshnessTrigger, waitIfBusy: Boolean): Boolean {
         val claimed = inFlight.compareAndSet(false, true)
         if (!claimed) {
             if (!waitIfBusy) {
                 followUpTrigger = trigger
                 followUp.set(true)
-                return
+                return false
             }
-            mutex.withLock { runOnce(trigger) }
-            return
+            return mutex.withLock { runOnce(trigger) }
         }
         try {
-            mutex.withLock { runOnce(trigger) }
+            val ok = mutex.withLock { runOnce(trigger) }
             // Whatever asked while we were busy gets exactly one more pass — a
             // snapshot taken before their trigger cannot be an answer to it.
             var extra = 0
@@ -191,13 +196,15 @@ class FreshnessOwner(
                 extra++
                 mutex.withLock { runOnce(followUpTrigger ?: FreshnessTrigger.FLOOR) }
             }
+            return ok
         } finally {
             inFlight.set(false)
         }
     }
 
-    private suspend fun runOnce(trigger: FreshnessTrigger) {
-        val uid = currentUserId() ?: return
+    /** One pull. True when it completed with every table read. */
+    private suspend fun runOnce(trigger: FreshnessTrigger): Boolean {
+        val uid = currentUserId() ?: return false
         val startedAt = now()
         _state.update { it.copy(pulling = true, lastPullStartedAt = startedAt, lastTrigger = trigger) }
         try {
@@ -208,7 +215,7 @@ class FreshnessOwner(
                     if (ok) it.copy(pulling = false, lastSuccessAt = now(), fullHydrates = it.fullHydrates + 1)
                     else it.copy(pulling = false, lastFailureAt = now())
                 }
-                return
+                return ok
             }
             val sweep = trigger == FreshnessTrigger.COLD_START ||
                 trigger == FreshnessTrigger.DEAF ||
@@ -218,7 +225,7 @@ class FreshnessOwner(
             if (sweep) lastReconcileAtMs = now()
             if (outcome == null) {
                 _state.update { it.copy(pulling = false, lastFailureAt = now()) }
-                return
+                return false
             }
             _state.update {
                 it.copy(
@@ -243,12 +250,14 @@ class FreshnessOwner(
                 rebuildSubscriptions()
                 silenceSinceMs = now()
             }
+            return outcome.failed.isEmpty()
         } catch (t: CancellationException) {
             _state.update { it.copy(pulling = false) }
             throw t
         } catch (t: Throwable) {
             _state.update { it.copy(pulling = false, lastFailureAt = now()) }
             log("[freshness] pull ($trigger) failed: $t")
+            return false
         }
     }
 

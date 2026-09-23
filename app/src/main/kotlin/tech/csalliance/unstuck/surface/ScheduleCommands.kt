@@ -2,6 +2,7 @@ package tech.csalliance.unstuck.surface
 
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import tech.csalliance.unstuck.UnstuckApp
 import tech.csalliance.unstuck.core.logic.bumpMoveCount
 import tech.csalliance.unstuck.core.logic.findFreeSlotsForDate
@@ -36,9 +37,19 @@ object ScheduleCommands {
                     ReminderScheduler.reschedule(app)
                     NotificationRenderer.postRescheduleConfirmation(app.applicationContext, taskName, newTime, taskId)
                 }
+                // Push the move to the server before the receiver lets go (goAsync):
+                // the debounced drain would run after it, when a cached process may
+                // already be frozen, and it used to find no session there anyway —
+                // web / iPhone and the server's calls kept the old slot (Android audit
+                // 2026-09-23, A2). The drain establishes the session itself; bounded
+                // inside the broadcast window.
+                runCatching { withTimeoutOrNull(FLUSH_TIMEOUT_MS) { app.graph.coordinator?.flushOutbox() } }
             } finally { onComplete() }
         }
     }
+
+    /** The in-receiver drain (session + push), inside the ~10 s goAsync window. */
+    private const val FLUSH_TIMEOUT_MS = 8_000L
 
     /** HH:MM + 60 min, clamped to the end of the day. */
     private fun plusHour(hhmm: String): String {

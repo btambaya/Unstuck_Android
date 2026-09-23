@@ -12,14 +12,16 @@ import tech.csalliance.unstuck.core.logic.IncomingCallPayload
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.data.db.Tables
+import tech.csalliance.unstuck.sync.accountId
 import java.time.ZoneId
 
 /**
  * Builds the core `CallEnv` (what CallCoordinatorLogic.decide reads) from the
  * AppGraph singletons — the Android port of iOS `AppCallEnvironment`:
- *  - signedIn        the sync engine has a session (a call queued before a
- *                    sign-out lands silent: no JWT, and never the previous
- *                    account's notes as a notification);
+ *  - signedIn        this phone holds an account's session, live or stored
+ *                    (SessionGate — a call queued before a sign-out lands
+ *                    silent: no JWT, and never the previous account's notes
+ *                    as a notification);
  *  - assistantEnabled the build flag AND the AI Assistant setting — off means
  *                    the call is declined with a notification (plan risk 10);
  *  - callsEnabled    the per-account "Calls from Unstuck" toggle (Settings › Calls);
@@ -34,14 +36,26 @@ import java.time.ZoneId
  *                    store yet → ring).
  *
  * Called on the FCM thread inside the ~10 s onMessageReceived window, so the
- * store reads are bounded (READ_TIMEOUT_MS) and fall back to "unknown".
+ * session and store reads are bounded (SESSION_TIMEOUT_MS / READ_TIMEOUT_MS)
+ * and fall back to "unknown".
  */
 object AppCallEnvironment {
     const val READ_TIMEOUT_MS = 2_500L
+    /** The session wait — the stored session answers once it runs out. */
+    const val SESSION_TIMEOUT_MS = 3_000L
 
     fun env(context: Context, payload: IncomingCallPayload, nowMs: Long = System.currentTimeMillis()): CallEnv {
         val graph = (context.applicationContext as? UnstuckApp)?.graph
-        val uid = graph?.coordinator?.auth?.currentUserId
+        // Not `auth.currentUserId`: it is null whenever the app is in the background
+        // (supabase-kt resets the session at every ON_STOP) and while a process the
+        // push cold-started is still loading it, so every ring outside the app was
+        // dropped as "not signed in" (Android audit 2026-09-23, A1). The gate waits for
+        // the session (restoring it when nothing else will) and, out of time, lets the
+        // stored session speak for the account — iOS's VoIP-token proxy. The restore it
+        // starts carries on, so an answer finds a live session for the dial.
+        val uid = graph?.coordinator?.session?.let { gate ->
+            runCatching { runBlocking { gate.ensure(SESSION_TIMEOUT_MS) } }.getOrNull()?.accountId
+        }
         val callSettings = if (uid != null) CallSettingsStore.load(context, uid) else CallSettings()
         val assistantOn = BuildConfig.ASSISTANT_ENABLED && (graph?.settings?.load()?.assistantEnabled ?: true)
         return CallEnv(

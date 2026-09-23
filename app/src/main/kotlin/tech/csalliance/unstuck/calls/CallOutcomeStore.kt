@@ -15,6 +15,8 @@ import tech.csalliance.unstuck.core.logic.PendingOutcome
 import tech.csalliance.unstuck.surface.NotificationChannels
 import tech.csalliance.unstuck.sync.CallOutcomeRejected
 import tech.csalliance.unstuck.sync.CallsClient
+import tech.csalliance.unstuck.sync.SessionGate
+import tech.csalliance.unstuck.sync.liveUserId
 
 // CallOutcomeStore — the DURABLE half of the call-outcome reporter (the pure
 // queue rules are :core CallOutcomeQueue, ported from iOS CallsOutcomeReporter).
@@ -177,10 +179,24 @@ object CallOutcomeStore {
         val app = context.applicationContext as? UnstuckApp ?: return
         val graph = runCatching { app.graph }.getOrNull() ?: return
         val client = graph.provider?.client ?: return
-        if (graph.coordinator?.auth?.currentUserId == null) return
+        val session = graph.coordinator?.session ?: return
         graph.scope.launch {
-            runCatching { flush(app, CallsClient(client)) }
+            runCatching { flushWhenSignedIn(session) { flush(app, CallsClient(client)) } }
         }
+    }
+
+    /** Run [drain] once [session] has a LIVE user; skip when nobody is signed in
+     *  or the session can't be made live in time (the queue waits on disk).
+     *  The old gate read `auth.currentUserId`, which is null ~700 ms after the app
+     *  leaves the screen (supabase-kt's ON_STOP reset) and in a process that is
+     *  still loading its session — so a snooze said on a locked phone, a miss after
+     *  the ring screen stopped, and the foreground flush that fires at ON_START
+     *  before the SDK's reload all skipped, until the next pull (Android audit
+     *  2026-09-23, A3). The gate waits for that reload in the foreground and loads
+     *  the stored session itself in the background. */
+    internal suspend fun flushWhenSignedIn(session: SessionGate, drain: suspend () -> Unit) {
+        if (session.ensure().liveUserId == null) return
+        drain()
     }
 
     /**

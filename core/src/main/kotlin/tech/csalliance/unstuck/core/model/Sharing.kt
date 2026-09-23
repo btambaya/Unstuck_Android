@@ -221,6 +221,20 @@ data class SharedWithMe(
     val openedFrom: SharedBlock? = null,
 ) : ShareSlot
 
+/** Can the recipient TICK this shared task done? Partner / assign, and not a
+ *  repeating series: a repeating share's row is the owner's TEMPLATE, and ticking
+ *  it ENDED their whole series — every reminder and call for it stopped.
+ *  shared_task_set_done now refuses that tick ('recurring_series', migration 075
+ *  §1); the owner ticks each day. Focus keeps using [ShareLevel.canComplete]
+ *  (parity with iOS build 81 and web shareCanTickDone, audit 2026-09-22 C3). */
+fun shareCanTickDone(s: SharedWithMe): Boolean = s.level.canComplete && !s.recurring
+
+/** Plain words for a refused shared tick — the web's shareTickErrorText, minus
+ *  the raw server code (never shown to the user). */
+fun shareTickErrorText(message: String?): String =
+    if (message?.contains("recurring_series") == true) "Only the owner can tick off a repeating task."
+    else "Couldn't update this task — try again."
+
 /** Read-only detail for a task shared WITH me, from the shared_task_detail RPC
  *  (migration 045). Recipients still can't read the raw `tasks` row (RLS); this
  *  SECURITY DEFINER projection is the ONLY window, scoped to a share the caller holds

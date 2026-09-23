@@ -199,6 +199,10 @@ fun deriveReceipt(name: String, args: ReceiptArgs, result: String, tasks: List<T
         }
         "complete_task" -> {
             val nm = quotedFragment(result) ?: "task"
+            // A repeating task: complete_task ticked TODAY's occurrence —
+            // complete_occurrence's card, with no Undo (the result carries no id=)
+            // (parity with iOS build 81, audit 2026-09-22 C3).
+            if (result.contains("(series continues)")) return Receipt(ReceiptIcon.CHECK, "Done for today: $nm")
             // The executor's id ONLY — resolving by NAME un-completed the wrong
             // duplicate (F8). No id → a receipt without Undo, never a wrong Undo.
             val t = idFragment(result)?.let { id -> tasks.firstOrNull { it.id == id } }
@@ -330,7 +334,10 @@ fun planReceiptUndo(undo: ReceiptUndo, tasks: List<TaskItem>, nowIso: String): R
         }
         ReceiptUndoKind.FORGET_FACT -> ReceiptUndoPlan.ForgetFact(undo.id)
         ReceiptUndoKind.DELETE_CAPTURE -> ReceiptUndoPlan.DeleteCapture(undo.id)
-        ReceiptUndoKind.COMPLETE_TASK -> tasks.firstOrNull { it.id == undo.id }
+        // Never onto a repeating series' template: its done ENDS the series. New
+        // results for a series carry no id=, so only an older persisted "Reopened"
+        // receipt can land here (parity with iOS build 81, audit 2026-09-22 C3).
+        ReceiptUndoKind.COMPLETE_TASK -> tasks.firstOrNull { it.id == undo.id && it.recurrence == null }
             ?.let { ReceiptUndoPlan.Complete(it.copy(done = true, completedAt = nowIso, updatedAt = nowIso)) }
         ReceiptUndoKind.CANCEL_CALL -> ReceiptUndoPlan.CancelCall(undo.id)
     }

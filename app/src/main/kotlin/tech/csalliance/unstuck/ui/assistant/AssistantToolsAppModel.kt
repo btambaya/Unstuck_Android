@@ -65,6 +65,7 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
     override suspend fun upsertTask(t: TaskItem) { write?.upsertTask(t) ?: store.upsert(Tables.TASKS, t, TaskItem.serializer(), t.id, t.updatedAt) }
     override suspend fun removeTask(id: String) { write?.deleteTask(id) ?: store.delete(Tables.TASKS, id) }
     override suspend fun notifyTaskReopenedIfShared(t: TaskItem) { vm.notifyTaskReopenedIfShared(t) }
+    override suspend fun notifyTaskCompletedIfShared(t: TaskItem) { vm.notifyTaskDoneIfShared(t) }
     override suspend fun upsertBlock(b: CalBlock) { write?.upsertCalBlock(b) ?: store.upsert(Tables.CAL_BLOCKS, b, CalBlock.serializer(), b.id) }
     override suspend fun deleteBlock(id: String) { write?.deleteCalBlock(id) ?: store.delete(Tables.CAL_BLOCKS, id) }
     /** The per-task lead lives in device prefs (reminders fire from on-device
@@ -192,13 +193,17 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
         val live = store.getLiveSession()?.takeIf { it.sessionStart != null } ?: return false
         // A session on a task shared WITH the user isn't in this store — finishFocusNow
         // takes its shared branch and never reads the row, so a stand-in carries the id.
+        // So does an own task deleted elsewhere mid-session: finishFocusNow then ends
+        // the session with no task write and a Session without the dead task id —
+        // this used to answer "nothing was running" and leave it live (parity with
+        // iOS build 81, audit 2026-09-22 C5).
         val task = getTasks().firstOrNull { it.id == live.taskId }
-            ?: live.sharedTitle?.let { TaskItem(id = live.taskId, name = it, estimateMin = live.sessionEstimateMin, createdAt = nowIso(), updatedAt = nowIso()) }
-            ?: return false
+            ?: TaskItem(id = live.taskId, name = live.sharedTitle ?: "Focus session", estimateMin = live.sessionEstimateMin, createdAt = nowIso(), updatedAt = nowIso())
         if (!vm.finishFocusNow(task, markDone)) return false
         vm.tearDownFocusSurfaces()
         return true
     }
+    override fun sharedTaskAllowsTick(taskId: String): Boolean = vm.sharedTaskAllowsTick(taskId)
     override suspend fun cancelFocus(): Boolean = vm.cancelFocusNow()
 
     // ── navigation ──
@@ -340,7 +345,9 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
 fun assistantScreenLink(screen: String, id: String?): String = when (screen) {
     // NOT bare `unstuck://tasks` — that link is share-notify's ping, which
     // deliberately lands on Today (it hosts "Shared with you" / "Delegated").
-    "tasks" -> if (id != null) "unstuck://task/$id" else "unstuck://tasks/all"
+    // The task the model named — a series opens its own editor, not a day's
+    // occurrence (owner decision, audit 2026-09-22 C3).
+    "tasks" -> if (id != null) tech.csalliance.unstuck.core.logic.exactTaskLink(id) else "unstuck://tasks/all"
     "lists", "collections" -> if (id != null) "unstuck://collections/$id" else "unstuck://collections"
     "today", "dashboard", "home" -> "unstuck://today"
     "calendar", "day" -> "unstuck://calendar"

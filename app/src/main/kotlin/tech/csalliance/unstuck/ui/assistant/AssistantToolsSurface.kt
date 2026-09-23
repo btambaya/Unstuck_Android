@@ -91,6 +91,17 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
         // ── TASKS ──
         "uncomplete_task" -> {
             val t = findTask(args.str("taskId"), api, scratch) ?: return "error: task not found"
+            // An open repeating series: "untick that" means TODAY's occurrence — the
+            // day complete_task now ticks. No id= in the result, so the receipt offers
+            // no Undo: its complete would set the series' own done and end it (parity
+            // with iOS build 81, audit 2026-09-22 C3).
+            if (t.recurrence != null && !t.done) {
+                val today = api.todayIso()
+                val b = api.getBlocks().filter { it.taskId == t.id && it.date == today && !it.skipped && it.done }.maxByOrNull { it.startTime }
+                    ?: return "error: \"${t.name}\" repeats and isn't done on $today — nothing changed"
+                api.upsertBlock(b.copy(done = false, completedAt = null))
+                return "ok: reopened \"${t.name}\" for $today (series continues)"
+            }
             // Already open → error, never "ok: reopened": that receipt's Undo would
             // COMPLETE a task the user never finished (web parity).
             if (!t.done) return "error: \"${t.name}\" is already open — nothing changed"
@@ -98,7 +109,10 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             api.upsertTask(upd)
             api.notifyTaskReopenedIfShared(upd)
             scratch.newTasks[t.id] = upd
-            "ok: reopened \"${t.name}\" id=${t.id}"
+            // A series the old path ended runs again — no id= either: its Undo would
+            // end it once more (C3).
+            if (t.recurrence != null) "ok: reopened \"${t.name}\" — its repeating series runs again"
+            else "ok: reopened \"${t.name}\" id=${t.id}"
         }
 
         "get_tasks" -> {
@@ -196,12 +210,12 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
                 ?: return "error: \"${t.name}\" has nothing on $date"
             // Already done that day → error, not a second "Done for today" receipt.
             if (b.done) return "error: \"${t.name}\" is already done on $date — nothing changed"
-            api.upsertBlock(b.copy(done = true, completedAt = now()))
-            if (t.recurrence == null) {
-                val upd = t.copy(done = true, completedAt = now(), updatedAt = now())
-                api.upsertTask(upd)
-                scratch.newTasks[t.id] = upd
-            }
+            // Stamped like the UI's tick: the block un-skipped with its completedAt,
+            // and a one-off task its completedAt + the shared-list notice. The
+            // template of a series is never touched (parity with iOS build 81, audit
+            // 2026-09-22 C6).
+            markOccurrenceDone(b, api)
+            if (t.recurrence == null) markTaskDone(t, api, scratch)
             "ok: marked \"${t.name}\" done for $date${if (t.recurrence != null) " (series continues)" else ""}"
         }
 
@@ -302,6 +316,13 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             val done = when {
                 !markDone -> ""
                 t?.recurrence != null -> ", today's occurrence marked done"
+                // A task deleted elsewhere mid-session: the minutes are logged, nothing
+                // is marked (audit 2026-09-22 C5).
+                t == null && live.sharedTitle == null -> ""
+                // A repeating share is never ticked by its recipient — the server
+                // refuses it — so the finish must not claim one (parity with iOS
+                // build 81, audit 2026-09-22 C3).
+                t == null && !api.sharedTaskAllowsTick(live.taskId) -> ", the task stays open (only its owner ticks off a repeating task)"
                 else -> ", task marked done"
             }
             "ok: finished focus on \"$nm\" — logged ${mins}m$done"

@@ -188,6 +188,57 @@ private fun overdueLabelFor(b: CalBlock, todayIso: String): String? {
     return "Overdue · ${OVERDUE_DOW[Time.dayOfWeekJs(ms)]}"
 }
 
+/**
+ * The row a TASK deep link (`unstuck://task/<id>`) must open (parity with iOS
+ * build 81, audit 2026-09-22 C3). Reminders, the "Rescheduled" confirmation,
+ * Inbox "Open" on a capture filed on a series and the bell's reminder rows all
+ * carry the block's `taskId` — the hidden TEMPLATE for a series — and the
+ * template editor's "Mark done" ended the whole series, so "I took my meds" from
+ * a reminder tap stopped every reminder after it. A series opens through an
+ * OCCURRENCE row instead, chosen for a reminder tapped late:
+ *  • today's occurrence, open or already ticked — a stale reminder tapped after
+ *    the day was ticked shows today ticked, never tomorrow's row (whose Mark done
+ *    would tick the wrong day);
+ *  • else the most recent past occurrence while it is still open — the row
+ *    Backlog shows as overdue ([projectOverdueOccurrences]), so last Friday's
+ *    reminder tapped on Saturday opens Friday;
+ *  • else the earliest open future occurrence;
+ *  • else the template itself (it has no occurrence to open).
+ * A block id opens that exact day's row, a plain task id its task, and an
+ * unknown id null (the caller treats it as shared with me).
+ */
+fun taskLinkRowForId(id: String, tasks: List<TaskItem>, blocks: List<CalBlock>, todayIso: String): TaskItem? {
+    if (id.isEmpty()) return null
+    val task = tasks.firstOrNull { it.id == id }
+    if (task == null) {
+        val block = blocks.firstOrNull { it.id == id && isTaskBlock(it) } ?: return null
+        return taskForBlock(block, tasks)
+    }
+    if (task.recurrence == null) return task
+    val mine = blocks.filter { isTaskBlock(it) && it.taskId == task.id }
+        .sortedWith(compareBy({ it.date }, { it.startTime }))
+    val latestPast = mine.lastOrNull { it.date < todayIso }
+    val pick = mine.firstOrNull { it.date == todayIso && !it.skipped && !it.done }
+        ?: mine.firstOrNull { it.date == todayIso && !it.skipped }
+        ?: latestPast?.takeIf { !it.done && !it.skipped }
+        ?: mine.firstOrNull { it.date > todayIso && !it.skipped && !it.done }
+        ?: return task
+    return taskForBlock(pick, tasks) ?: task
+}
+
+/** Marks an `unstuck://task/<id>` link that opens exactly `<id>`, never
+ *  re-resolved to a day's occurrence by [taskLinkRowForId]. */
+const val EXACT_TASK_LINK_SUFFIX = "?exact"
+
+/** A task link for the senders anchored to the SERIES (owner decision, audit
+ *  2026-09-22 C3): a call's notification and the assistant's open_screen name
+ *  the task itself. Safe now that the series editor offers no "Mark done" on an
+ *  open series. */
+fun exactTaskLink(id: String): String = "unstuck://task/$id$EXACT_TASK_LINK_SUFFIX"
+
+/** Whether a task link asks for the exact row ([exactTaskLink]). */
+fun isExactTaskLink(link: String): Boolean = link.substringBefore('#').endsWith(EXACT_TASK_LINK_SUFFIX)
+
 /** The row to open when a calendar block is tapped: the per-day OCCURRENCE
  *  (id = block id) when the block belongs to a recurring template, else the
  *  normal task. Lets the detail sheet treat it as an occurrence. */

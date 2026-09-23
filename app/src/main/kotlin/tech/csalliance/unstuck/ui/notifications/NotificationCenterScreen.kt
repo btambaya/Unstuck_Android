@@ -28,6 +28,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tech.csalliance.unstuck.core.logic.isExactTaskLink
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.TaskItem
@@ -93,7 +94,9 @@ fun NotificationCenterScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (
             } else {
                 items(notifs, key = { it.id }) { n ->
                     val dl = n.deepLink
-                    val taskId = dl?.takeIf { it.startsWith("unstuck://task/") }?.removePrefix("unstuck://task/")
+                    // An exact link (a call's notification — the series itself, audit
+                    // 2026-09-22 C3) goes through the router, which keeps it exact.
+                    val taskId = dl?.takeIf { it.startsWith("unstuck://task/") && !isExactTaskLink(it) }?.removePrefix("unstuck://task/")
                     Card(
                         dotColor = accentFor(n.kind, c),
                         kindLabel = kindLabel(n.kind),

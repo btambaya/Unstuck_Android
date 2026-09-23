@@ -154,7 +154,9 @@ object CallNotificationCopy {
     private fun make(p: IncomingCallPayload, kind: CallNotificationKind, id: String, title: String, body: String) =
         CallNotificationSpec(
             kind = kind, id = id, title = title, body = body,
-            deepLink = p.taskId?.let { "unstuck://task/$it" } ?: "unstuck://today",
+            // The call's task itself — a series opens its own editor, where the
+            // call's "Call me" row lives (owner decision, audit 2026-09-22 C3).
+            deepLink = p.taskId?.let(::exactTaskLink) ?: "unstuck://today",
             callId = p.callId, taskId = p.taskId, blockId = p.taskId?.let { p.blockId },
             taskName = p.taskId?.let { p.taskName ?: p.label },
         )

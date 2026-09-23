@@ -112,6 +112,11 @@ class AssistantToolsTest {
         // Defaults chosen so the pre-rewrite set_ritual assertions still change something.
         val rituals = mutableMapOf("morning" to false, "evening" to true, "friday" to false, "sunday" to true)
         var settingsSaveOk = true
+        /** collection-task-done sends, as "collectionId:itemId" (audit 2026-09-22 C6). */
+        val completedShared = ArrayList<String>()
+        val reopenedShared = ArrayList<String>()
+        /** taskId → may the user tick this task shared WITH them (unset = true). */
+        val sharedTickAllowed = HashMap<String, Boolean>()
     }
 
     inner class FakeApi(val state: FakeState = FakeState()) : AssistantApi {
@@ -129,7 +134,13 @@ class AssistantToolsTest {
         override fun nowIso(): String = Instant.ofEpochMilli(NOW_MS).toString()
         override suspend fun upsertTask(t: TaskItem) { val i = state.tasks.indexOfFirst { it.id == t.id }; if (i >= 0) state.tasks[i] = t else state.tasks += t }
         override suspend fun removeTask(id: String) { state.tasks.removeAll { it.id == id } }
-        override suspend fun notifyTaskReopenedIfShared(t: TaskItem) {}
+        override suspend fun notifyTaskReopenedIfShared(t: TaskItem) {
+            if (t.sourceCollectionId != null && t.sourceItemId != null) state.reopenedShared += "${t.sourceCollectionId}:${t.sourceItemId}"
+        }
+        override suspend fun notifyTaskCompletedIfShared(t: TaskItem) {
+            if (t.sourceCollectionId != null && t.sourceItemId != null) state.completedShared += "${t.sourceCollectionId}:${t.sourceItemId}"
+        }
+        override fun sharedTaskAllowsTick(taskId: String): Boolean = state.sharedTickAllowed[taskId] ?: true
         override suspend fun upsertBlock(b: CalBlock) { val i = state.blocks.indexOfFirst { it.id == b.id }; if (i >= 0) state.blocks[i] = b else state.blocks += b }
         override suspend fun deleteBlock(id: String) { state.blocks.removeAll { it.id == id } }
         override fun getTaskReminder(taskId: String): Int? = state.reminders[taskId]
@@ -226,8 +237,22 @@ class AssistantToolsTest {
         override suspend fun resumeFocus(): Boolean { state.live ?: return false; state.focusCalls += "resume"; state.live = state.live?.copy(paused = false, pausedAt = null); return true }
         override suspend fun extendFocus(minutes: Int): Boolean { state.live ?: return false; state.focusCalls += "extend:$minutes"; state.live = state.live?.let { it.copy(sessionEstimateMin = it.sessionEstimateMin + minutes) }; return true }
         override suspend fun finishFocus(markDone: Boolean): Boolean {
-            if (!state.finishFocusOk || state.live == null) return false
+            val live = state.live
+            if (!state.finishFocusOk || live == null) return false
             state.focusCalls += "finish:$markDone"; state.finished += markDone; state.live = null
+            // What the real seam (AppViewModel.finishFocusNow) lands on the STORED
+            // row: the minutes, plus done on a plain task — never a series template.
+            val i = state.tasks.indexOfFirst { it.id == live.taskId }
+            if (i >= 0) {
+                val t = state.tasks[i]
+                val elapsed = ((NOW_MS - (live.sessionStart ?: NOW_MS)) / 1000).toInt()
+                val completes = markDone && t.recurrence == null && !t.done
+                state.tasks[i] = t.copy(
+                    totalFocused = t.totalFocused + elapsed,
+                    done = t.done || completes,
+                    completedAt = if (completes) nowIso() else t.completedAt,
+                )
+            }
             return true
         }
         override suspend fun cancelFocus(): Boolean { state.live ?: return false; state.focusCalls += "cancel"; state.live = null; return true }
@@ -1153,7 +1178,7 @@ class AssistantToolsTest {
 
     @Test fun `every contract screen resolves to a deep link MainScaffold can route`() {
         for (s in AssistantDestination.SCREENS) assertTrue(s, assistantScreenLink(s, null).startsWith("unstuck://"))
-        assertEquals("unstuck://task/abc", assistantScreenLink("tasks", "abc"))
+        assertEquals("unstuck://task/abc?exact", assistantScreenLink("tasks", "abc"))
         assertEquals("unstuck://collections/L1", assistantScreenLink("lists", "L1"))
         assertEquals("unstuck://collections", assistantScreenLink("lists", null))
         // Each of the 12 needs its OWN link, or MainScaffold can't tell them
@@ -1545,5 +1570,264 @@ class AssistantToolsTest {
             override suspend fun removeProfileFact(id: String): Boolean = false
         }
         assertEquals("error: couldn't forget that just now — try again", runAssistantTool("forget_fact", ToolArgs(json("factId" to "f1")), api, TurnScratch()))
+    }
+
+    // ── completions complete like the UI's tick (parity with iOS build 81, audit 2026-09-22 C6) ──
+
+    private fun promoted(id: String, name: String, item: String, done: Boolean = false, completedAt: String? = null, recurrence: Recurrence? = null) =
+        task(id, name, done = done, completedAt = completedAt, recurrence = recurrence).copy(sourceCollectionId = "c1", sourceItemId = item)
+    private fun receipt(name: String, result: String, h: Harness) =
+        tech.csalliance.unstuck.core.logic.deriveReceipt(name, tech.csalliance.unstuck.core.logic.ReceiptArgs(), result, h.state.tasks.toList())
+
+    @Test fun `complete_task stamps completedAt like the UI toggle`() = runTest {
+        val h = makeApi { tasks += task("a", "Alpha"); blocks += block("a_td", "a", TODAY) }
+        assertEquals("ok: completed \"Alpha\" id=a", h.run("complete_task", "taskId" to "a"))
+        val t = h.state.tasks[0]
+        assertTrue(t.done)
+        assertEquals("applyCompletion's shape", t.updatedAt, t.completedAt)
+        assertEquals(t, h.scratch.newTasks["a"])
+    }
+
+    @Test fun `complete_task and complete_tasks tick the shared-list row of a loop-promoted task once`() = runTest {
+        val h = makeApi { tasks += listOf(promoted("p", "Buy milk", "i1"), promoted("q", "Buy eggs", "i2"), task("b", "Plain")) }
+        assertEquals("ok: completed \"Buy milk\" id=p", h.run("complete_task", "taskId" to "p"))
+        assertEquals(listOf("c1:i1"), h.state.completedShared)
+        assertEquals("error: \"Buy milk\" is already done — nothing changed", h.run("complete_task", "taskId" to "p"))
+        assertEquals(listOf("c1:i1"), h.state.completedShared)
+        assertTrue(h.run("complete_tasks", "taskIds" to listOf("q", "b", "q")).startsWith("ok: completed 2 tasks ids=q,b"))
+        assertEquals("a repeated id sends once; a plain task never", listOf("c1:i1", "c1:i2"), h.state.completedShared)
+        assertTrue(h.state.tasks.filter { it.id != "p" }.all { it.done && it.completedAt != null })
+        assertTrue(h.state.reopenedShared.isEmpty())
+    }
+
+    @Test fun `complete_occurrence stamps the block and the one-off task, never the template`() = runTest {
+        val h = makeApi {
+            tasks += listOf(task("a", "Alpha"), task("r", "Standup", recurrence = Recurrence.Daily()), promoted("s", "Return books", "i9"))
+            blocks += listOf(block("a_td", "a", TODAY), block("r_td", "r", TODAY), block("r_tm", "r", TOMORROW), block("s_td", "s", TODAY))
+        }
+        assertEquals("ok: marked \"Alpha\" done for $TODAY", h.run("complete_occurrence", "taskId" to "a"))
+        val aBlock = h.state.blocks.first { it.id == "a_td" }
+        assertTrue(aBlock.done); assertFalse(aBlock.skipped); assertTrue(aBlock.completedAt != null)
+        assertTrue(h.state.tasks[0].done); assertTrue(h.state.tasks[0].completedAt != null)
+        assertEquals("ok: marked \"Standup\" done for $TODAY (series continues)", h.run("complete_occurrence", "taskId" to "r"))
+        assertTrue(h.state.blocks.first { it.id == "r_td" }.completedAt != null)
+        assertFalse("the template is never touched", h.state.tasks[1].done)
+        assertNull(h.state.tasks[1].completedAt)
+        assertFalse(h.state.blocks.first { it.id == "r_tm" }.done)
+        assertEquals("ok: marked \"Return books\" done for $TODAY", h.run("complete_occurrence", "taskId" to "s"))
+        assertEquals(listOf("c1:i9"), h.state.completedShared)
+    }
+
+    /** The delta lands on the COMMITTED row: a caller's copy still open while the
+     *  store already has it done writes nothing and sends nothing. */
+    @Test fun `markTaskDone leaves a row the store already has done`() = runTest {
+        val h = makeApi { tasks += promoted("p", "Buy milk", "i1", done = true, completedAt = "${TODAY}T08:00:00Z") }
+        val before = h.state.tasks.toList()
+        val out = markTaskDone(before[0].copy(done = false, completedAt = null), h.api, h.scratch)
+        assertTrue(out.done)
+        assertEquals("${TODAY}T08:00:00Z", out.completedAt)
+        assertEquals(before, h.state.tasks)
+        assertTrue(h.state.completedShared.isEmpty())
+    }
+
+    // ── the committed row, never a stale scratch copy (parity with iOS build 81, audit 2026-09-22 C5) ──
+
+    /** "add call mom" → focus → "I'm done, finish it" → "rename it Call Mum":
+     *  finish_focus writes done + totalFocused to the STORE only, so a
+     *  scratch-first lookup handed update_task the pre-finish copy and the rename
+     *  reopened the task and wiped its focus time. */
+    @Test fun `write tools read the committed row, not the session scratch`() = runTest {
+        val h = makeApi()
+        val id = Regex("id=(\\S+) ").find(h.run("create_task", "name" to "Call mom"))!!.groupValues[1]
+        h.state.live = liveSession(id)
+        assertTrue(h.run("finish_focus", "markDone" to true).endsWith("task marked done"))
+        val focused = h.state.tasks[0].totalFocused
+        assertTrue(focused > 0)
+        assertEquals("ok: updated \"Call Mum\" — name", h.run("update_task", "taskId" to id, "name" to "Call Mum"))
+        assertEquals("Call Mum", h.state.tasks[0].name)
+        assertTrue("the rename must not reopen the finished task", h.state.tasks[0].done)
+        assertEquals("…nor wipe its focus time", focused, h.state.tasks[0].totalFocused)
+    }
+
+    /** set_task_later, then schedule_task (which un-parks and bumps the move count
+     *  in the store only), then update_task: the update must not re-park the task
+     *  or revert the bump. */
+    @Test fun `an update after a schedule keeps the un-park and the move-count bump`() = runTest {
+        val h = makeApi { tasks += task("a", "Gym"); blocks += block("a_tm", "a", TOMORROW) }
+        assertEquals("ok: parked \"Gym\" in Later", h.run("set_task_later", "taskId" to "a"))
+        assertTrue(h.run("schedule_task", "taskId" to "a", "date" to NEXT_WEEK, "startTime" to "10:00").startsWith("ok: scheduled"))
+        assertEquals(false, h.state.tasks[0].later)
+        assertEquals(1, h.state.tasks[0].moveCount)
+        assertTrue(h.run("update_task", "taskId" to "a", "name" to "Gym session").startsWith("ok: updated"))
+        assertEquals(false, h.state.tasks[0].later)
+        assertEquals(1, h.state.tasks[0].moveCount)
+    }
+
+    /** A completion that lands after create_task (the web, by realtime) is seen. */
+    @Test fun `complete_task sees a completion that landed after create`() = runTest {
+        val h = makeApi()
+        val id = Regex("id=(\\S+) ").find(h.run("create_task", "name" to "Pay rent"))!!.groupValues[1]
+        h.state.tasks[0] = h.state.tasks[0].copy(done = true, completedAt = "${TODAY}T08:00:00Z")
+        val before = h.state.tasks.toList()
+        assertEquals("error: \"Pay rent\" is already done — nothing changed", h.run("complete_task", "taskId" to id))
+        assertEquals(before, h.state.tasks)
+    }
+
+    /** Scratch stays the fallback for a row the store doesn't have. */
+    @Test fun `findTask falls back to the scratch when the store lacks the row`() = runTest {
+        val h = makeApi()
+        h.scratch.newTasks["n"] = task("n", "Gym shoes")
+        assertEquals("ok: reminder for \"Gym shoes\" set to 5 minutes before (no upcoming slot yet — it applies once the task is scheduled)",
+            h.run("set_task_reminder", "taskId" to "n", "minutes" to 5))
+    }
+
+    @Test fun `finish_focus on a task deleted mid-session claims no completion`() = runTest {
+        val h = makeApi { live = liveSession("gone") }
+        assertEquals("ok: finished focus on \"the task\" — logged 5m", h.run("finish_focus", "markDone" to true))
+    }
+
+    // ── repeating series — today's occurrence, never the series (parity with iOS build 81, audit 2026-09-22 C3) ──
+
+    private fun seedSeries(h: Harness) {
+        h.state.tasks.clear(); h.state.blocks.clear()
+        h.state.tasks += listOf(task("a", "One"), task("r", "Standup", recurrence = Recurrence.Daily()))
+        h.state.blocks += listOf(block("rtd", "r", TODAY), block("rtm", "r", TOMORROW))
+    }
+
+    /** "I took my meds" by voice set the TEMPLATE's done — every reminder for
+     *  the series stopped and today's row stayed open. */
+    @Test fun `complete_task on a series ticks today's occurrence, not the series`() = runTest {
+        val h = makeApi().also { seedSeries(it) }
+        val r = h.run("complete_task", "taskId" to "r")
+        assertEquals("ok: marked \"Standup\" done for $TODAY (series continues)", r)
+        assertFalse("the series is never ended", h.state.tasks[1].done)
+        assertNull(h.state.tasks[1].completedAt)
+        assertNull("the template is never written", h.scratch.newTasks["r"])
+        val rtd = h.state.blocks.first { it.id == "rtd" }
+        assertTrue(rtd.done); assertTrue(rtd.completedAt != null)
+        assertFalse(h.state.blocks.first { it.id == "rtm" }.done)
+        val card = receipt("complete_task", r, h)
+        assertEquals("Done for today: Standup", card?.label)
+        assertNull(card?.undo)
+        assertEquals("error: \"Standup\" is already done on $TODAY — nothing changed", h.run("complete_task", "taskId" to "r"))
+    }
+
+    @Test fun `complete_task on a series with nothing today changes nothing and names the right tool`() = runTest {
+        val h = makeApi { tasks += task("r", "Standup", recurrence = Recurrence.Daily()); blocks += block("rtm", "r", TOMORROW) }
+        val before = h.state.blocks.toList() to h.state.tasks.toList()
+        val r = h.run("complete_task", "taskId" to "r")
+        assertTrue(r, r.startsWith("error:") && r.contains("complete_occurrence"))
+        assertEquals(before, h.state.blocks.toList() to h.state.tasks.toList())
+    }
+
+    /** The bulk close ticks a series' today and keeps it out of ids=, so the
+     *  receipt's Undo reopens only the plain tasks. */
+    @Test fun `complete_tasks ticks a series today and keeps it out of the undo`() = runTest {
+        val h = makeApi().also { seedSeries(it) }
+        val r = h.run("complete_tasks", "taskIds" to listOf("a", "r"))
+        assertEquals("ok: completed 2 tasks ids=a — \"One\", \"Standup\" (today — series continues)", r)
+        assertTrue(h.state.tasks[0].done)
+        assertFalse(h.state.tasks[1].done)
+        assertTrue(h.state.blocks.first { it.id == "rtd" }.done)
+        val card = receipt("complete_tasks", r, h)
+        assertEquals("Completed 2 tasks", card?.label)
+        assertEquals(tech.csalliance.unstuck.core.logic.ReceiptUndo.uncompleteTasks(listOf("a")), card?.undo)
+    }
+
+    @Test fun `complete_tasks with only a series offers no undo`() = runTest {
+        val h = makeApi().also { seedSeries(it) }
+        val r = h.run("complete_tasks", "taskIds" to listOf("r"))
+        assertEquals("ok: completed 1 tasks ids= — \"Standup\" (today — series continues)", r)
+        assertNull(receipt("complete_tasks", r, h)?.undo)
+        assertEquals("error: none completed — \"Standup\" (already done today)", h.run("complete_tasks", "taskIds" to listOf("r")))
+    }
+
+    /** "Untick that" after a voice tick reopens TODAY's occurrence — with no id=,
+     *  so the card has no Undo that would complete (end) the series. */
+    @Test fun `uncomplete_task on a series reopens today's occurrence`() = runTest {
+        val h = makeApi().also { seedSeries(it) }
+        h.run("complete_task", "taskId" to "r")
+        val r = h.run("uncomplete_task", "taskId" to "r")
+        assertEquals("ok: reopened \"Standup\" for $TODAY (series continues)", r)
+        val rtd = h.state.blocks.first { it.id == "rtd" }
+        assertFalse(rtd.done); assertNull(rtd.completedAt)
+        assertFalse(h.state.tasks[1].done)
+        assertNull(receipt("uncomplete_task", r, h)?.undo)
+        assertEquals("error: \"Standup\" repeats and isn't done on $TODAY — nothing changed", h.run("uncomplete_task", "taskId" to "r"))
+    }
+
+    /** A series the old path ended is reopened — and its card has no Undo either. */
+    @Test fun `uncomplete_task reopens a series the old path ended`() = runTest {
+        val h = makeApi { tasks += task("r", "Standup", done = true, recurrence = Recurrence.Daily()) }
+        val r = h.run("uncomplete_task", "taskId" to "r")
+        assertEquals("ok: reopened \"Standup\" — its repeating series runs again", r)
+        assertFalse(h.state.tasks[0].done)
+        assertNull(receipt("uncomplete_task", r, h)?.undo)
+    }
+
+    /** "Stop repeating" on a ticked day carries the tick onto the task instead of
+     *  bringing today back unticked; an open day leaves it open. */
+    @Test fun `stop repeating carries today's tick onto the task`() = runTest {
+        val h = makeApi().also { seedSeries(it) }
+        h.run("complete_task", "taskId" to "r")
+        assertEquals("ok: \"Standup\" no longer repeats (its future slots were removed) — today's occurrence was already done, so the task is now marked done",
+            h.run("set_task_recurrence", "taskId" to "r", "kind" to "none"))
+        assertNull(h.state.tasks[1].recurrence)
+        assertTrue(h.state.tasks[1].done)
+        assertTrue(h.state.tasks[1].completedAt != null)
+
+        val open = makeApi().also { seedSeries(it) }
+        assertEquals("ok: \"Standup\" no longer repeats (its future slots were removed)", open.run("set_task_recurrence", "taskId" to "r", "kind" to "none"))
+        assertFalse("an open day leaves the task open", open.state.tasks[1].done)
+    }
+
+    /** Turning a repeat on for a done task never leaves a DONE template. */
+    @Test fun `start repeating a done task reopens it`() = runTest {
+        val h = makeApi { tasks += task("d", "Stretch", done = true, completedAt = "${TODAY}T08:00:00Z") }
+        assertEquals("ok: \"Stretch\" now repeats daily (it was done — now open again) (not on the calendar yet — schedule_task it to place the series)",
+            h.run("set_task_recurrence", "taskId" to "d", "kind" to "daily"))
+        assertFalse(h.state.tasks[0].done)
+        assertNull(h.state.tasks[0].completedAt)
+    }
+
+    /** Ticked this morning, then "make it daily": today's slot keeps the tick
+     *  (never "open again" over it), and a loop-promoted task's shared-list row
+     *  un-ticks with the task, as the UI's reopen does. */
+    @Test fun `start repeating a task done today keeps today's tick`() = runTest {
+        val done = promoted("d", "Stretch", "i1", done = true, completedAt = Instant.ofEpochMilli(NOW_MS).toString())
+        val h = makeApi { tasks += done; blocks += block("dtd", "d", TODAY, "07:30") }
+        assertEquals("ok: \"Stretch\" now repeats daily (it was done — today's occurrence stays done) (calendar slots regenerated from its next slot)",
+            h.run("set_task_recurrence", "taskId" to "d", "kind" to "daily"))
+        assertFalse("an open series", h.state.tasks[0].done)
+        val slot = h.state.blocks.first { it.id == "dtd" }
+        assertTrue(slot.done)
+        assertEquals(done.completedAt, slot.completedAt)
+        assertEquals("07:30", slot.startTime)
+        assertTrue("tomorrow is a new day", h.state.blocks.any { it.taskId == "d" && it.date == TOMORROW && !it.done })
+        assertEquals(listOf("c1:i1"), h.state.reopenedShared)
+        assertTrue(h.state.completedShared.isEmpty())
+    }
+
+    /** …and back: "stop repeating" on a ticked day marks the task done, and its
+     *  shared-list row ticks with it. */
+    @Test fun `stop repeating a ticked loop-promoted series ticks the list row`() = runTest {
+        val h = makeApi().also { seedSeries(it) }
+        h.state.tasks[1] = h.state.tasks[1].copy(sourceCollectionId = "c1", sourceItemId = "i1")
+        h.run("complete_task", "taskId" to "r")
+        assertTrue("a day's tick is not the task's", h.state.completedShared.isEmpty())
+        h.run("set_task_recurrence", "taskId" to "r", "kind" to "none")
+        assertTrue(h.state.tasks[1].done)
+        assertEquals(listOf("c1:i1"), h.state.completedShared)
+        assertTrue(h.state.reopenedShared.isEmpty())
+    }
+
+    /** A repeating share is never ticked by its recipient ('recurring_series',
+     *  075 §1): the finish must not claim one (C3 / SC-12). */
+    @Test fun `finish_focus on a repeating share does not claim a tick`() = runTest {
+        val h = makeApi { live = liveSession("sh1").copy(sharedTitle = "Gym"); sharedTickAllowed["sh1"] = false }
+        assertEquals("ok: finished focus on \"Gym\" — logged 5m, the task stays open (only its owner ticks off a repeating task)",
+            h.run("finish_focus", "markDone" to true))
+        val plain = makeApi { live = liveSession("sh2").copy(sharedTitle = "Report") }
+        assertEquals("ok: finished focus on \"Report\" — logged 5m, task marked done", plain.run("finish_focus", "markDone" to true))
     }
 }

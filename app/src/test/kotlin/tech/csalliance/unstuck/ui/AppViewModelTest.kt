@@ -361,6 +361,190 @@ class AppViewModelTest {
     }
 
     // -----------------------------------------------------------------------
+    // toggleDone lands on the STORED row (parity with iOS build 81, audit
+    // 2026-09-22 C5) and never flips a series' template done (C3)
+    // -----------------------------------------------------------------------
+
+    @Test fun toggleDone_flipsTheStoredRowNotTheCallersSnapshot() = runTest(dispatcher) {
+        val snapshot = task("t1", name = "Email")
+        // A rename synced in after the caller composed its copy.
+        seedTask(snapshot.copy(name = "Email Anna", updatedAt = "2026-05-21T11:00:00.000Z"))
+        val vm = vm()
+
+        vm.toggleDoneNow(snapshot)
+        val done = loadTask("t1")!!
+        assertTrue(done.done)
+        assertEquals("the rename is kept", "Email Anna", done.name)
+        assertNotNull(done.completedAt)
+
+        // A second tap from the same stale (open) copy is already in its target
+        // state: no write, the first completion time stands.
+        val ops = store.pending().size
+        vm.toggleDoneNow(snapshot)
+        assertEquals(done, loadTask("t1"))
+        assertEquals(ops, store.pending().size)
+    }
+
+    @Test fun toggleDone_doesNothingWhenTheStoredRowIsAlreadyInThatState() = runTest(dispatcher) {
+        val stamped = task("t1", done = true).copy(completedAt = "2026-05-21T09:00:00.000Z")
+        seedTask(stamped)
+        val vm = vm()
+
+        vm.toggleDoneNow(stamped.copy(done = false, completedAt = null))   // ticked elsewhere meanwhile
+        assertEquals(stamped, loadTask("t1"))
+        assertTrue("nothing queued", store.pending().isEmpty())
+    }
+
+    @Test fun toggleDone_neverRecreatesAMissingRow() = runTest(dispatcher) {
+        val vm = vm()
+        vm.toggleDoneNow(task("ghost", name = "Deleted elsewhere"))
+        assertNull(loadTask("ghost"))
+        assertTrue(store.pending().isEmpty())
+    }
+
+    @Test fun toggleDone_refusesADoneFlipOnASeriesTemplate_butReopensAnEndedOne() = runTest(dispatcher) {
+        val template = task("tpl", name = "Meds", recurrence = Recurrence.Daily())
+        seedTask(template)
+        val vm = vm()
+
+        vm.toggleDoneNow(template)
+        assertFalse("the series is never ended", loadTask("tpl")!!.done)
+        assertTrue(store.pending().isEmpty())
+
+        // A series the old path ended can still be reopened.
+        seedTask(template.copy(done = true, completedAt = "2026-05-21T09:00:00.000Z", updatedAt = "2026-05-21T11:00:00.000Z"))
+        vm.toggleDoneNow(template.copy(done = true))
+        val reopened = loadTask("tpl")!!
+        assertFalse(reopened.done)
+        assertNull(reopened.completedAt)
+    }
+
+    // -----------------------------------------------------------------------
+    // finishFocus lands only its delta on the STORED row (parity with iOS
+    // build 81, audit 2026-09-22 C5)
+    // -----------------------------------------------------------------------
+
+    private suspend fun startLive(taskId: String) = store.setLiveSession(
+        LiveSession(id = "s1", taskId = taskId, sessionStart = nowMs - 600_000L, sessionEstimateMin = 25, treatment = FocusTreatment.AMBIENT),
+    )
+
+    @Test fun finishFocus_landsOnlyTheDeltaOnTheStoredRow() = runTest(dispatcher) {
+        val snapshot = task("t1", name = "Write report", totalFocused = 120)
+        seedTask(snapshot)
+        val vm = vm()
+        startLive("t1")
+        // Renamed and given a first step elsewhere while the session ran.
+        seedTask(snapshot.copy(name = "Write the report", firstPhysicalAction = "Open the doc", updatedAt = "2026-05-21T11:00:00.000Z"))
+
+        assertTrue(vm.finishFocusNow(snapshot, markDone = false))
+        val after = loadTask("t1")!!
+        assertEquals("Write the report", after.name)
+        assertEquals("Open the doc", after.firstPhysicalAction)
+        assertEquals(720, after.totalFocused)
+    }
+
+    @Test fun finishFocus_neverReopensOrReStampsATaskCompletedDuringTheSession() = runTest(dispatcher) {
+        val snapshot = task("t1", name = "Ship")
+        seedTask(snapshot)
+        val vm = vm()
+        startLive("t1")
+        seedTask(snapshot.copy(done = true, completedAt = "2026-05-21T09:00:00.000Z", updatedAt = "2026-05-21T11:00:00.000Z"))
+
+        assertTrue(vm.finishFocusNow(snapshot, markDone = true))
+        val after = loadTask("t1")!!
+        assertTrue(after.done)
+        assertEquals("the real completion time stands", "2026-05-21T09:00:00.000Z", after.completedAt)
+        assertEquals(600, after.totalFocused)
+    }
+
+    @Test fun finishFocus_markDoneRespectsARepeatSetDuringTheSession() = runTest(dispatcher) {
+        val snapshot = task("t1", name = "Stretch")
+        seedTask(snapshot)
+        val vm = vm()
+        startLive("t1")
+        seedTask(snapshot.copy(recurrence = Recurrence.Daily(), updatedAt = "2026-05-21T11:00:00.000Z"))
+
+        assertTrue(vm.finishFocusNow(snapshot, markDone = true))
+        val after = loadTask("t1")!!
+        assertFalse("a series is never ended by a finish", after.done)
+        assertEquals(Recurrence.Daily(), after.recurrence)
+        assertEquals(600, after.totalFocused)
+    }
+
+    @Test fun finishFocus_doesNotRecreateADeletedTask_andItsSessionCarriesNoTaskId() = runTest(dispatcher) {
+        val snapshot = task("t1", name = "Call mum")
+        seedTask(snapshot)
+        val vm = vm()
+        startLive("t1")
+        store.delete(Tables.TASKS, "t1")   // deleted on another device mid-session
+
+        assertTrue(vm.finishFocusNow(snapshot, markDone = true))
+        assertNull("never re-created from the copy", loadTask("t1"))
+        val session = store.sessions().first().single()
+        assertNull("sessions.task_id references tasks(id)", session.taskId)
+        assertEquals(600, session.actualSec)
+        assertNull(store.getLiveSession())
+        assertTrue(store.pending().none { it.recordTable == Tables.TASKS })
+    }
+
+    // -----------------------------------------------------------------------
+    // A refused shared tick is reported, never swallowed (audit 2026-09-22 SC-12)
+    // -----------------------------------------------------------------------
+
+    @Test fun completeSharedTask_aTickThatDidNotLand_isReportedForTheSheetsRollback() = runTest(dispatcher) {
+        // No sharing client here, so nothing can reach shared_task_set_done: the
+        // detail sheet must hear that the tick didn't land (it used to keep a
+        // "✓ Completed" that never happened) — in plain words, never raw text.
+        val vm = vm()
+        var refused: String? = null
+        vm.completeSharedTask("owners-task", done = true) { refused = it }
+        advanceUntilIdle()
+        assertEquals("Couldn't update this task — try again.", refused)
+        assertTrue("an unknown share still falls back to the level check", vm.sharedTaskAllowsTick("owners-task"))
+    }
+
+    // -----------------------------------------------------------------------
+    // setRecurrence moves the done state across (parity with iOS build 81,
+    // audit 2026-09-22 C3)
+    // -----------------------------------------------------------------------
+
+    @Test fun setRecurrence_neverOnATickedDay_carriesTheTickOntoTheTask() = runTest(dispatcher) {
+        val today = Clock.todayIso()
+        val template = task("tpl", name = "Meditate", recurrence = Recurrence.Daily())
+        seedTask(template)
+        seedBlock(CalBlock(id = "d0", taskId = "tpl", taskName = "Meditate", startTime = "07:00", durationMinutes = 20, date = today,
+            kind = CalBlockKind.TASK, done = true, completedAt = "2026-05-21T07:20:00.000Z"))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.setRecurrence(template, null)
+        advanceUntilIdle()
+
+        val after = awaitTask("tpl") { it.recurrence == null }
+        assertTrue("today was ticked, so the task is done", after.done)
+        assertEquals("2026-05-21T07:20:00.000Z", after.completedAt)
+    }
+
+    @Test fun setRecurrence_onATaskDoneToday_reopensItAndKeepsTheDayTicked() = runTest(dispatcher) {
+        val today = Clock.todayIso()
+        val doneAt = java.time.Instant.now().toString()
+        val t = task("t1", name = "Stretch", done = true).copy(completedAt = doneAt)
+        seedTask(t)
+        seedBlock(CalBlock(id = "s0", taskId = "t1", taskName = "Stretch", startTime = "07:30", durationMinutes = 20, date = today, kind = CalBlockKind.TASK))
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.setRecurrence(t, Recurrence.Daily())
+        advanceUntilIdle()
+
+        val after = awaitTask("t1") { it.recurrence != null }
+        assertFalse("a done template is an ended series", after.done)
+        assertNull(after.completedAt)
+        val slot = awaitBlock("s0") { it.done }
+        assertEquals("the day keeps the task's own completion time", doneAt, slot.completedAt)
+    }
+
+    // -----------------------------------------------------------------------
     // finishFocus / focus-session finalize accumulation
     // -----------------------------------------------------------------------
 

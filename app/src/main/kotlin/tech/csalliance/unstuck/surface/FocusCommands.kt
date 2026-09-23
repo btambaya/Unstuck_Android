@@ -79,8 +79,11 @@ object FocusCommands {
         write?.upsertSession(
             // Reuse the live-session id so captures taken during the session join back
             // to this Session row (the interruption histogram keys on it) — matches
-            // AppViewModel.finishFocus. A fresh uuid orphaned them.
-            Session(id = live.id ?: newUuid(), taskId = live.taskId, taskName = task?.name ?: "", estimateMin = live.sessionEstimateMin, actualSec = elapsed, completedAt = nowIso()),
+            // AppViewModel.finishFocus. A fresh uuid orphaned them. A task deleted
+            // elsewhere mid-session gives a Session with NO task id: sessions.task_id
+            // references tasks(id), so the dead id failed the insert and the op sat
+            // quarantined (parity with iOS build 81, audit 2026-09-22 C5).
+            Session(id = live.id ?: newUuid(), taskId = task?.id, taskName = task?.name ?: "Focus session", estimateMin = live.sessionEstimateMin, actualSec = elapsed, completedAt = nowIso()),
         )
         store.setLiveSession(null)
         if (live.sharedSessionRev != null || live.lastAppliedRev != null) {

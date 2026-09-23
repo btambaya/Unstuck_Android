@@ -72,6 +72,23 @@
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="unstuck" />
             </intent-filter>
+            <!-- The sign-up / magic-link email's App Link:
+                 https://unstucknow.io/auth/app-confirm/?token_hash=…&type=signup|magiclink
+                 (MainActivity → ui/auth/AppConfirmLink). Verified against
+                 https://unstucknow.io/.well-known/assetlinks.json (the release signing
+                 cert), so a tap on this phone opens the app instead of the browser; on a
+                 computer the same link opens the web page. ONLY this path: the web's own
+                 /auth/confirm links must keep opening in the browser. Its own filter, so
+                 its host and path don't combine with the unstuck:// filter above. -->
+            <intent-filter android:autoVerify="true">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data
+                    android:scheme="https"
+                    android:host="unstucknow.io"
+                    android:pathPrefix="/auth/app-confirm" />
+            </intent-filter>
         </activity>
 
         <!-- "Unstuck calls you": the full-screen ring. Over the keyguard with the

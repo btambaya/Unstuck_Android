@@ -17,9 +17,11 @@ import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import tech.csalliance.unstuck.surface.SyncWorker
 import tech.csalliance.unstuck.surface.registerFcmToken
 import tech.csalliance.unstuck.ui.AppRoot
+import tech.csalliance.unstuck.ui.auth.AppConfirmLink
 
 class MainActivity : ComponentActivity() {
 
@@ -29,7 +31,8 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        // OAuth / magic-link PKCE callback (unstuck://auth-callback) + Google
+        // OAuth / magic-link PKCE callback (unstuck://auth-callback), the sign-up /
+        // magic-link App Link (https://unstucknow.io/auth/app-confirm) + Google
         // Calendar consent return (unstuck://calendar-callback). ONLY on a fresh
         // create — a config change (rotation / theme / locale) recreates the Activity
         // with the same launch Intent, which would otherwise re-fire the deep link
@@ -85,15 +88,22 @@ class MainActivity : ComponentActivity() {
         handleAuthOrCalendar(intent)
     }
 
-    /** Route `unstuck://calendar-callback?code&state` to the calendar connect flow and
-     *  `unstuck://auth-callback?code` to the PKCE code exchange ([completeAuthLink]). */
+    /** Route `unstuck://calendar-callback?code&state` to the calendar connect flow,
+     *  `https://unstucknow.io/auth/app-confirm/?token_hash&type` to the token-hash
+     *  verification ([completeAppConfirmLink]) and `unstuck://auth-callback?code` to the
+     *  PKCE code exchange ([completeAuthLink]). */
     private fun handleAuthOrCalendar(intent: Intent?) {
         val data = intent?.data
-        // A Recents relaunch re-delivers the ORIGINAL launch intent: its auth code was
-        // spent when first tapped, so exchanging it again can only fail (A7 below).
-        if (data?.scheme == "unstuck" && data.host == "auth-callback" &&
-            ((intent?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
-        ) return
+        // A Recents relaunch re-delivers the ORIGINAL launch intent: its auth code (or
+        // token hash) was spent when first tapped, so using it again can only fail (A7
+        // below).
+        val fromHistory = ((intent?.flags ?: 0) and Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) != 0
+        if (data?.scheme == "unstuck" && isCodeCallback(data.host) && fromHistory) return
+        // The sign-up / magic-link email, tapped on this phone (App Link, manifest).
+        if (data != null && AppConfirmLink.matches(data.scheme, data.host, data.path)) {
+            if (!fromHistory) completeAppConfirmLink(data)
+            return
+        }
         if (data?.scheme == "unstuck" && data.host == "calendar-callback") {
             // With or without a code: a denied or cancelled consent comes back as
             // `?error=access_denied&state=…` and used to end here with no message. The
@@ -126,7 +136,46 @@ class MainActivity : ComponentActivity() {
             graph.pendingDeepLink.value = data.toString()
             return
         }
-        if (data?.scheme == "unstuck" && data.host == "auth-callback") completeAuthLink(data)
+        if (data?.scheme == "unstuck" && isCodeCallback(data.host)) completeAuthLink(data)
+    }
+
+    /** Hosts that bring back a PKCE `?code`. `auth-callback` is every Supabase link the
+     *  app asks for except sign-up / magic link. Those ask for `auth-confirm`
+     *  (AuthService.EMAIL_LINK_REDIRECT), which the email templates turn into the
+     *  /auth/app-confirm App Link — it only comes back here as `unstuck://auth-confirm
+     *  ?code=` if the templates are ever rolled back to Supabase's own link, and then
+     *  it is exchanged the same way instead of opening the app to nothing. It never
+     *  arms the recovery probe: no reset email uses it. */
+    private fun isCodeCallback(host: String?): Boolean = host == "auth-callback" || host == "auth-confirm"
+
+    /** Verify an /auth/app-confirm link's token hash for a session HERE, the way
+     *  [completeAuthLink] exchanges a code: on the process scope (a rotation can't
+     *  cancel it), undispatched (links are taken in arrival order), and never a crash.
+     *  The session lands as SessionSource.SignIn, so AppRoot, the sync engine (a
+     *  SIGNED_IN hydrate) and onboarding take it like any sign-in; it can't consume the
+     *  recovery probe (only a code exchange's External session does), and no reset link
+     *  comes this way. A used or expired link while signed out goes to AuthScreen
+     *  ("sign in"); signed in, only a failure worth acting on is toasted. */
+    private fun completeAppConfirmLink(data: android.net.Uri) {
+        val client = graph.provider?.client ?: return
+        val auth = graph.coordinator?.auth ?: return
+        val link = AppConfirmLink.parse(data.getQueryParameter("token_hash"), data.getQueryParameter("type"))
+        graph.scope.launch(start = CoroutineStart.UNDISPATCHED) {
+            // Opened from a cold start, or from the background (supabase-kt 3.0.3 resets
+            // sessionStatus to Initializing on every ON_STOP and reloads at ON_START):
+            // let the stored session settle first, so its reload can't land on top of
+            // the session this link signs in, and so the failure below goes to the
+            // right place. Bounded: that reload can wait on the network for ever.
+            withTimeoutOrNull(10_000) { client.auth.awaitInitialization() }
+            val failure = AppConfirmLink.complete(link) { auth.verifyEmailLink(it.tokenHash, it.type) } ?: return@launch
+            if (client.auth.sessionStatus.value is SessionStatus.NotAuthenticated) {
+                graph.authLinkError.value = failure
+            } else if (AppConfirmLink.showWhenSignedIn(failure)) {
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(graph.appContext, failure, android.widget.Toast.LENGTH_LONG).show()
+                }
+            }
+        }
     }
 
     /** Exchange an auth-callback link's PKCE code for a session HERE, not through

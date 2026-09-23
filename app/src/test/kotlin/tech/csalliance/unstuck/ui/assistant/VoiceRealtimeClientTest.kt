@@ -483,8 +483,9 @@ class VoiceRealtimeClientTest {
         assertEquals("the hold is not up", 1, s.creates())
         idle(BargeInController.TURN_HOLD_MS + 20)
         assertEquals("asked once the hold elapsed", 2, s.creates())
+        factory.created("r2")
         idle(3_000)
-        assertEquals("never twice", 2, s.creates())
+        assertEquals("never twice once the server has created it", 2, s.creates())
     }
 
     @Test
@@ -650,6 +651,70 @@ class VoiceRealtimeClientTest {
         idle(10_000)
         assertEquals("and nothing more is asked", 5, s.creates())
         assertTrue(c.isOpen)
+    }
+
+    /** Asked from idle, no done or error follows a create the server
+     *  swallowed: the create's own grace tick asks again (B75.3; review of
+     *  the 2026-09-23 parity port). */
+    @Test
+    fun `a create swallowed while idle is asked again after the grace, with nobody speaking`() {
+        val (_, factory, _) = session()
+        val s = factory.socket!!
+        factory.created("r0"); factory.done("r0")
+        factory.speechStarted("u"); factory.speechStopped(); factory.completed("u", "what's on today")
+        idle(BargeInController.TURN_HOLD_MS + 20)
+        assertEquals(2, s.creates())
+        idle(BargeInController.CREATE_GRACE_MS + 20)
+        assertEquals("nothing was created: asked again", 3, s.creates())
+        factory.created("r1")
+        idle(10_000)
+        assertEquals("and never again once created", 3, s.creates())
+    }
+
+    /** The confirmation after a tool result is the reply most likely to be
+     *  rate-limited (each tool round is another full-prefix reply). Its retry
+     *  stands in for it: read as a bare claim, the forced corrective told the
+     *  model nothing happened and it ran create_task again (review of the
+     *  B76.3 port, 2026-09-23). */
+    @Test
+    fun `guard - the confirmation after a tool, rate-limited and retried, is still tool-backed`() {
+        val (factory, s) = openSession { name, _ -> if (name == "create_task") "ok: created task id=1 name=\"buy milk\"" else "ok" }
+        factory.created("r1")
+        factory.toolCall("create_task", "c1")
+        awaitToolOutput(s, 1)
+        factory.done("r1")
+        factory.created("r2")
+        factory.failed("r2", "rate_limit_exceeded", rateLimitText)
+        idle(VoiceRealtimeClient.retryAfterMs(rateLimitText, null) + 20)
+        factory.created("r3")
+        factory.transcript("r3", "I've added buy milk for today.")
+        factory.done("r3")
+        assertEquals("the retry confirms what the tool did: no corrective", 0, s.correctives())
+    }
+
+    /** OpenAI's shapes, as the proxy forwards them: a completed reply carries
+     *  `"status_details": null`. Read with `.jsonObject` that threw inside
+     *  onMessage, which OkHttp turns into onFailure — every session died on
+     *  the greeting's done, the kotlinx exception text as its error line
+     *  (review of this port, 2026-09-23). */
+    @Test
+    fun `OpenAI's completed reply with null status_details keeps the session live`() {
+        val states = mutableListOf<VoiceState>()
+        val errors = mutableListOf<String>()
+        val (c, factory, _) = session(states, errors)
+        val s = factory.socket!!
+        factory.message("""{"type":"response.created","event_id":"e1","response":{"object":"realtime.response","id":"r1","status":"in_progress","status_details":null,"output":[],"usage":null}}""")
+        factory.message("""{"type":"response.done","event_id":"e2","response":{"object":"realtime.response","id":"r1","status":"completed","status_details":null,"output":[{"id":"i1","type":"message","role":"assistant","content":[{"type":"output_audio","transcript":"Morning."}]}],"usage":{"total_tokens":12}}}""")
+        assertTrue(c.isOpen)
+        assertTrue("$errors", errors.isEmpty())
+        assertFalse(states.contains(VoiceState.ERROR))
+        // It still takes a turn.
+        factory.speechStarted("u"); factory.speechStopped(); factory.completed("u", "what's on today")
+        idle(BargeInController.TURN_HOLD_MS + 20)
+        assertEquals(2, s.creates())
+        // An `error` that is a bare string is worded too, not thrown on.
+        factory.message("""{"type":"error","error":"boom"}""")
+        assertEquals(listOf("Something went wrong with the assistant — try again."), errors)
     }
 
     @Test

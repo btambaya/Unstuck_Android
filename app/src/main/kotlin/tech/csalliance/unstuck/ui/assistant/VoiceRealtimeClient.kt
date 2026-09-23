@@ -185,6 +185,14 @@ class VoiceIntegrityGuard {
     /** A cancelled/incomplete response (barge-in) is not a claim. */
     fun responseCancelled() { wasCorrection = false }
 
+    /** A rate-limited reply is asked for again (B76.3), and the retry stands
+     *  in for it, tool-backing included. The confirmation after a tool result
+     *  is the reply most likely to be rate-limited; its retry was scored as
+     *  a bare claim, and the forced corrective ran the tool twice (review of
+     *  the 2026-09-23 parity port). Kept when the retries run out too: the
+     *  next reply still owes that confirmation. */
+    fun responseRateLimited() { nextResponseToolBacked = nextResponseToolBacked || toolCalled }
+
     /** Called on a COMPLETED response: true when a corrective must be sent. */
     fun shouldCorrect(): Boolean {
         if (wasCorrection) { wasCorrection = false; return false }
@@ -668,7 +676,12 @@ class VoiceRealtimeClient(
                     val r = ev["response"]?.jsonObject
                     val id = responseId(ev)
                     val status = r?.get("status")?.jsonPrimitive?.contentOrNull
-                    val reason = r?.get("status_details")?.jsonObject?.get("reason")?.jsonPrimitive?.contentOrNull ?: "-"
+                    // OpenAI sends `"status_details": null` on every completed
+                    // reply: `.jsonObject` threw on it, and a throw in onMessage
+                    // is OkHttp's onFailure — the session died on the greeting's
+                    // done (review of the 2026-09-23 parity port).
+                    val details = r?.get("status_details") as? JsonObject
+                    val reason = (details?.get("reason") as? JsonPrimitive)?.contentOrNull ?: "-"
                     Log.i(TAG, "voice response.done status=${status ?: "nil"} reason=$reason")
                     // A cancelled/incomplete response (barge-in) is not a claim:
                     // never score it, and never inject a corrective mid-utterance.
@@ -680,11 +693,14 @@ class VoiceRealtimeClient(
                     // for anything else, the user is told once, in plain words
                     // (parity with iOS builds 76 and 78).
                     if (status == "failed") {
-                        val err = (r?.get("status_details") as? JsonObject)?.get("error") as? JsonObject
+                        val err = details?.get("error") as? JsonObject
                         val code = (err?.get("code") as? JsonPrimitive)?.contentOrNull ?: ""
                         val message = (err?.get("message") as? JsonPrimitive)?.contentOrNull ?: ""
                         if (code == "rate_limit_exceeded" || message.lowercase().contains("rate limit")) {
-                            val (ms, retries) = synchronized(ctlLock) { retryAfterMs(message, tokenResetSec) to ctl.rateLimitRetries }
+                            val (ms, retries) = synchronized(ctlLock) {
+                                guard.responseRateLimited()
+                                retryAfterMs(message, tokenResetSec) to ctl.rateLimitRetries
+                            }
                             Log.i(TAG, "voice rate-limited: retry in $ms ms (retry #${retries + 1})")
                             if (retries + 1 > BargeInController.RATE_LIMIT_MAX_RETRIES) onError(friendlyError(code, message))
                             dispatch(BargeInEvent.ResponseRateLimited(ms))
@@ -727,7 +743,10 @@ class VoiceRealtimeClient(
                     )
                 }
                 "error" -> {
-                    val errObj = ev["error"]?.jsonObject
+                    // A cast, not `.jsonObject`: an `error` that is a bare string
+                    // would otherwise throw (and kill the socket) before the
+                    // string fallback below is ever read.
+                    val errObj = ev["error"] as? JsonObject
                     val m = errObj?.get("message")?.jsonPrimitive?.contentOrNull
                         ?: ev["error"]?.jsonPrimitive?.contentOrNull
                     // Swallow ONLY the primer-delete rejection (matched by our client

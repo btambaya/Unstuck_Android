@@ -406,6 +406,13 @@ class BargeInController(
     /** Rate-limited replies re-asked for the current turn; reset by a new turn
      *  or a reply that completed. */
     var rateLimitRetries = 0; private set
+    /** A rate-limited turn is not asked again before this: the token bucket's
+     *  reset. Every timer posts the same tick and none is cancelled, so a
+     *  stale hold or fallback timer (or a VAD blip's 500 ms) re-asked into
+     *  the still-empty bucket and spent the three retries in seconds (review
+     *  of the 2026-09-23 parity port). Cleared when the server creates a
+     *  reply. A new turn keeps it: asked before the reset, it only fails again. */
+    var retryNotBefore: Long? = null; private set
 
     /** Echo reference: the words of the reply on air and of the one before
      *  it (a reply's tail echoes after the next response was created). Not a
@@ -501,6 +508,7 @@ class BargeInController(
                     val sent = createSentAt
                     if (since == null || sent == null || since <= sent) pendingTurnSince = null
                     createSentAt = null
+                    retryNotBefore = null
                     // A new reply: the one before it is now the "previous" reference.
                     spokenPrevious = spokenCurrent
                     spokenCurrent = emptyList()
@@ -549,6 +557,7 @@ class BargeInController(
                 createSentAt = null
                 muted = false
                 if (phase == BargeInPhase.SPEAKING && !playbackQueued) phase = BargeInPhase.IDLE
+                retryNotBefore = t + event.retryAfterMs
                 rateLimitRetries += 1
                 if (rateLimitRetries > RATE_LIMIT_MAX_RETRIES) {
                     pendingTurnSince = null
@@ -837,6 +846,8 @@ class BargeInController(
      *  generating — or the cancelled reply's done never came (the fallback). */
     private fun tryAsk(t: Long): List<BargeInCommand> {
         val since = pendingTurnSince ?: return emptyList()
+        val notBefore = retryNotBefore
+        if (notBefore != null && t < notBefore) return listOf(BargeInCommand.StartTimer(notBefore - t))
         val elapsed = t - since
         if (responseActive) {
             if (elapsed < PENDING_CREATE_FALLBACK_MS) return emptyList()
@@ -852,7 +863,11 @@ class BargeInController(
             return listOf(BargeInCommand.StartTimer(CREATE_GRACE_MS - (t - sent) + 1))
         }
         createSentAt = t
-        return listOf(BargeInCommand.CreateResponse, uiTracked(BargeInUi.THINKING))
+        // The grace's own tick. Asked from idle, no done or error may ever
+        // come, and a swallowed create then waited for the user to speak
+        // again (review of the 2026-09-23 parity port). Once created, the
+        // tick finds nothing pending.
+        return listOf(BargeInCommand.CreateResponse, BargeInCommand.StartTimer(CREATE_GRACE_MS + 1), uiTracked(BargeInUi.THINKING))
     }
 
     /** The held deletes, as commands — all of them, or all but one item's. */

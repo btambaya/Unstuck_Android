@@ -248,10 +248,10 @@ The must-pass set. If any item fails, do not ship.
 
 ### Collections & Sharing
 - [ ] List item gestures (Ahmad 2026-09-23, parity with iOS b84): TAP strikes it out / back; SWIPE LEFT → red Delete; SWIPE RIGHT → Pin/Unpin + To task (ink); HOLD → inline edit; no ellipsis. One row open at a time; tapping an open row only closes it.
-- [ ] Swipe feel: rubber-bands past the actions; opens past ~45 % or on a fling, shuts otherwise; a flick back shuts an open row; light tick on open; vertical scroll still works when the drag starts on a row.
+- [ ] Swipe feel: rubber-bands past the actions; opens past ~45 % or on a fling, shuts otherwise; a flick back shuts an open row; light tick on open; vertical scroll still works when the drag starts on a row. Tap to close, then tap again straight away → it strikes out (no dead half-second); no red line flashes at the right edge while a Pin row closes.
 - [ ] Pin/unpin from the swipe: items move between Pinned/All; section labels appear/vanish; the moved row comes back closed.
 - [ ] Check/uncheck item (tap the row): coral circle + checkmark, strikethrough ink3 on done.
-- [ ] Inline-edit item: hold → BasicTextField focused with the keyboard up + green check; blank = cancel (body kept); another member's collection rename does NOT wipe draft (keyed on item.id).
+- [ ] Inline-edit item: hold → BasicTextField focused with the keyboard up + green ✓ and a quiet ✕; ✕ = cancel (body kept, nothing sent); blank = cancel; ✓ with nothing typed sends nothing; another member's edit to the item shows up in an untouched field (a typed draft is kept); another member's collection rename does NOT wipe draft (keyed on item.id).
 - [ ] Delete item via swipe left: disappears immediately, count decrements, outbox enqueues delete.
 - [ ] TalkBack on an item: double-tap strikes it out; the actions menu lists Pin/Unpin, Move to task (hidden while promoted), Edit, Delete — once each.
 - [ ] Edit collection name (owner): inline + checkmark, updates header + grid; non-owner read-only.

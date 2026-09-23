@@ -1,8 +1,6 @@
 package tech.csalliance.unstuck.ui.collections
 
 import android.view.HapticFeedbackConstants
-import androidx.compose.animation.core.animate
-import androidx.compose.animation.core.spring
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -79,6 +77,7 @@ import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.onClick
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -451,9 +450,18 @@ private fun CollItemRow(
     val canMove = !promoted || promotedDone
     var editing by remember(item.id) { mutableStateOf(false) }
     var draft by remember(item.id) { mutableStateOf(item.body) }
+    // The body the draft started from — so "nothing typed" can be told apart from
+    // "typed it back to what's there" once another member's edit lands.
+    var editBase by remember(item.id) { mutableStateOf(item.body) }
     val editFocus = remember(item.id) { FocusRequester() }
     // A hold opens the editor with the keyboard up, not a field that needs a second tap.
     LaunchedEffect(editing) { if (editing) runCatching { editFocus.requestFocus() } }
+    // A draft nobody has typed in follows the live body, so an edit another member
+    // makes meanwhile shows up in the field instead of being saved over. iOS re-syncs
+    // only while its field is unfocused; here the field is focused from the hold on,
+    // so it keys on "untouched" instead — the same guarantee, and typing is never
+    // lost (Ahmad 2026-09-23, parity with iOS b84 — found in the port's review).
+    LaunchedEffect(item.body) { if (editing && draft == editBase) { draft = item.body; editBase = item.body } }
 
     // --- swipe state (geometry + snap rules: CollItemSwipe.kt) ---
     val density = LocalDensity.current
@@ -465,22 +473,28 @@ private fun CollItemRow(
     val view = LocalView.current
     // The card's horizontal offset: > 0 shows the left actions, < 0 the right one.
     var offset by remember(item.id) { mutableFloatStateOf(0f) }
+    // Where the card is heading once the finger is off: 0 = shut, else the open
+    // offset. This, not the moving [offset], is whether the row is open. iOS reads
+    // its offset, but a SwiftUI animation sets that to the target at once; the
+    // Compose spring only gets there about half a second after the row looks shut,
+    // and a tap in that gap re-ran the close and lost the strike-out (Ahmad
+    // 2026-09-23, parity with iOS b84 — found in the port's review).
+    var openTo by remember(item.id) { mutableFloatStateOf(0f) }
     // Which side is showing (-1 / 0 / 1). Derived, so a drag recomposes the row only
     // when the card crosses the middle — the card itself moves in the layout phase.
+    // A close never carries the card past the middle (collItemSettle), so a closing
+    // row can't flip this and draw the other side's tile.
     val side by remember(item.id) { derivedStateOf { sign(offset) } }
-    // The finger's own travel this drag (before the rubber band), where the drag
-    // began, and whether one is under way — set on the first delta, so nothing
-    // depends on onDragStarted landing before it.
+    // The finger's own travel this drag (before the rubber band), and whether one is
+    // under way — set on the first delta, so nothing depends on onDragStarted
+    // landing before it.
     var dragRaw by remember(item.id) { mutableFloatStateOf(0f) }
-    var dragOrigin by remember(item.id) { mutableFloatStateOf(0f) }
     var dragging by remember(item.id) { mutableStateOf(false) }
     val settle = remember(item.id) { arrayOfNulls<Job>(1) }
-    // iOS spring(response 0.28, damping 0.9): stiffness (2π/0.28)² ≈ 500.
     fun settleTo(target: Float) {
         settle[0]?.cancel()
-        settle[0] = scope.launch {
-            animate(offset, target, animationSpec = spring(dampingRatio = 0.9f, stiffness = 500f)) { v, _ -> offset = v }
-        }
+        openTo = target
+        settle[0] = scope.launch { collItemSettle(offset, target) { offset = it } }
     }
     fun close() {
         settleTo(0f)
@@ -488,29 +502,36 @@ private fun CollItemRow(
     }
     fun toggleDone() {
         if (readOnly) return
-        // Tapping an open row just closes it — never a surprise strike-out.
-        if (offset != 0f) { close(); return }
+        // Tapping an open row just closes it — never a surprise strike-out. Once
+        // it is closing, the next tap is a strike-out again (iOS does the same).
+        if (dragging || openTo != 0f) { close(); return }
         vm.toggleCollectionItemDone(col, item.id)
     }
     fun startEdit() {
         if (readOnly) return
         close()
-        draft = item.body; editing = true
+        draft = item.body; editBase = item.body; editing = true
     }
     // Blank = cancel (keep the live body): a cleared field must not wipe the item
-    // silently (iOS commitEdit).
+    // silently (iOS commitEdit). An unchanged draft writes nothing either — a ✓ just
+    // to leave the editor must not send an update, let alone one carrying the body
+    // the hold started from.
     fun commitEdit() {
         val text = draft.trim()
-        if (text.isNotEmpty()) vm.updateCollectionItemBody(col, item.id, text)
+        if (text.isNotEmpty() && text != editBase && text != item.body) vm.updateCollectionItemBody(col, item.id, text)
         editing = false
     }
+    // ✕: drop the draft, keep the live body, write nothing (iOS b84's cancel).
+    fun cancelEdit() {
+        draft = item.body; editBase = item.body; editing = false
+    }
     val dragState = rememberDraggableState { delta ->
-        if (!dragging) { dragging = true; settle[0]?.cancel(); dragOrigin = offset; dragRaw = offset }
+        if (!dragging) { dragging = true; settle[0]?.cancel(); dragRaw = offset }
         dragRaw += delta
         offset = collItemRubberBand(dragRaw, leadingPx, trailingPx)
     }
     // Another row opened (or a promote started): slide this one shut.
-    LaunchedEffect(revealed) { if (!revealed && offset != 0f && !dragging) settleTo(0f) }
+    LaunchedEffect(revealed) { if (!revealed && openTo != 0f && !dragging) settleTo(0f) }
 
     // The draggable sits on this box, which never moves: on the sliding card itself
     // the pointer would stay still relative to it and every delta would read ~0.
@@ -524,12 +545,12 @@ private fun CollItemRow(
                 onDragStopped = { velocity ->
                     dragging = false
                     val target = collItemSnapTarget(offset, velocity, leadingPx, trailingPx, flingPx)
+                    // A light tick as a side opens (not when it only re-settles where
+                    // it was already heading — [openTo] still holds that here).
+                    if (target != 0f && target != openTo) view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
                     settleTo(target)
-                    if (target != 0f) {
-                        // A light tick as a side opens (not when it only re-settles).
-                        if (target != dragOrigin) view.performHapticFeedback(HapticFeedbackConstants.CLOCK_TICK)
-                        onReveal(true)
-                    } else if (revealed) onReveal(false)
+                    if (target != 0f) onReveal(true)
+                    else if (revealed) onReveal(false)
                 },
             ),
     ) {
@@ -586,7 +607,9 @@ private fun CollItemRow(
                             keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
                             keyboardActions = KeyboardActions(onDone = { commitEdit() }),
                         )
-                        Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable { commitEdit() }.padding(2.dp))
+                        Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.semantics { contentDescription = "Save" }.clickable { commitEdit() }.padding(2.dp))
+                        // Quiet ink3, like iOS's xmark: the way out that isn't a save.
+                        Text("✕", style = UFont.sans(16), color = c.ink3, modifier = Modifier.semantics { contentDescription = "Cancel" }.clickable { cancelEdit() }.padding(2.dp))
                     }
                 } else {
                     Text(

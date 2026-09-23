@@ -1,5 +1,7 @@
 package tech.csalliance.unstuck.ui.collections
 
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.spring
 import androidx.compose.ui.unit.dp
 
 // The list-item row's swipe geometry (CollectionDetailScreen's CollItemRow), kept
@@ -45,4 +47,20 @@ internal fun collItemSnapTarget(offset: Float, velocity: Float, leading: Float, 
         else -> 0f
     }
     else -> 0f
+}
+
+/** Slide the card from [from] to [to], reporting each frame to [onFrame]. iOS
+ *  spring(response 0.28, damping 0.9): stiffness (2π/0.28)² ≈ 500.
+ *
+ *  A close stops dead at the middle. That spring swings ~0.15 % past its target
+ *  before it comes back — nothing on the way open, but on the way shut it carries
+ *  the card over to the OTHER side for a few frames: the opposite side's tile gets
+ *  drawn underneath and the card rounds to -1 px, so a closing Pin row flashed a
+ *  1 px red Delete line. Bounding the close at the middle ends it the frame it
+ *  arrives (~0.28 s) instead of after the half-second tail (Ahmad 2026-09-23,
+ *  parity with iOS b84 — found in the port's review). */
+internal suspend fun collItemSettle(from: Float, to: Float, onFrame: (Float) -> Unit) {
+    val card = Animatable(from)
+    if (to == 0f) card.updateBounds(lowerBound = minOf(from, 0f), upperBound = maxOf(from, 0f))
+    card.animateTo(to, spring(dampingRatio = 0.9f, stiffness = 500f)) { onFrame(value) }
 }

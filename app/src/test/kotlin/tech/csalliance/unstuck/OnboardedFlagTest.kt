@@ -45,6 +45,23 @@ class OnboardedFlagTest {
         assertEquals(emptySet<String>(), p.all.keys)
     }
 
+    // Offline cold start with an expired token: supabase-kt reports no user during
+    // RefreshFailure, so the flag read false and a long-time user got onboarding
+    // (Android audit 2026-09-23, A9).
+    @Test fun `a refresh failure still reads the flag of the account whose session is stored`() {
+        val p = prefs
+        OnboardedFlag.set(p, "userA", true)
+        val uid = OnboardedFlag.accountFor(currentUid = null, refreshFailing = true, lastSignedIn = "userA")
+        assertEquals("userA", uid)
+        assertTrue(OnboardedFlag.get(p, uid, legacyOwnerUid = "userA"))
+    }
+
+    @Test fun `the live session wins, and signed out or loading there is no account`() {
+        assertEquals("userB", OnboardedFlag.accountFor(currentUid = "userB", refreshFailing = false, lastSignedIn = "userA"))
+        assertEquals(null, OnboardedFlag.accountFor(currentUid = null, refreshFailing = false, lastSignedIn = "userA"))
+        assertEquals(null, OnboardedFlag.accountFor(currentUid = null, refreshFailing = true, lastSignedIn = null))
+    }
+
     @Test fun `clearLegacy drops the device-global key but never a per-account one`() {
         val p = prefs
         p.edit().putBoolean(OnboardedFlag.LEGACY_KEY, true).apply()

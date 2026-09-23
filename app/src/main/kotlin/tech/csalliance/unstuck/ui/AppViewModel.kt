@@ -56,6 +56,7 @@ import tech.csalliance.unstuck.sync.PreferencesClient
 import tech.csalliance.unstuck.sync.ProfileFactsService
 import tech.csalliance.unstuck.core.logic.InterviewFlag
 import tech.csalliance.unstuck.core.logic.labelNameTaken
+import tech.csalliance.unstuck.ui.onboarding.OnboardingGate
 import tech.csalliance.unstuck.core.logic.relabelingArea
 import tech.csalliance.unstuck.core.logic.renamingTag
 import tech.csalliance.unstuck.core.logic.strippingTag
@@ -2803,25 +2804,81 @@ class AppViewModel(
 
     // --- onboarding ---
 
-    /** Per-account (see AppGraph.onboarded) and reconciled from the server after each
-     *  pull, so neither a second account on this phone nor a returning account on a
-     *  fresh install gets the wrong answer. */
-    val onboarded: Boolean get() = graph.onboarded
+    // The gate MainScaffold follows. Per account (see AppGraph.onboarded), keyed on the
+    // session's RESOLVED account, and reactive: it used to be read once, as soon as the
+    // session was authed — before the first pull on a new phone (a web / iOS account was
+    // walked through setup again) and with no uid during an offline RefreshFailure (a
+    // long-time user got the steps). An account not onboarded here now waits on a splash
+    // until the server has answered after the first pull, or the deadline passed — then
+    // the local flag decides, like iOS's onboardingResolved (Android audit 2026-09-23, A9).
+    private val onboardingUid = MutableStateFlow(graph.onboardedUid)
+    private val onboardingResolvedFor = MutableStateFlow<String?>(null)
+    private val onboardedChanged = MutableStateFlow(0)
+    private var onboardingArmedFor: String? = null
 
-    /** A pull just landed: if this device doesn't know the account as onboarded but
-     *  the SERVER shows it was (struggles saved / the interview done / life areas
-     *  seeded — on any platform), record it, so the account isn't re-onboarded. */
-    private suspend fun reconcileOnboarded(uid: String) {
-        if (graph.onboarded) return
-        val server = runCatching { graph.coordinator?.preferences?.fetchUserPrefs(uid) }.getOrNull()
-        val areas = store.snapshot(Tables.LIFE_AREAS, LifeArea.serializer())
-        val onboardedElsewhere = server?.adhd_struggles?.isNotEmpty() == true ||
-            server?.assistant_interview_done_at != null ||
-            areas.isNotEmpty()
-        if (onboardedElsewhere) graph.onboarded = true
+    /** null = not known yet (splash) · true = the onboarding steps · false = the app. */
+    val showOnboarding: StateFlow<Boolean?> =
+        combine(onboardingUid, onboardingResolvedFor, onboardedChanged) { uid, resolvedFor, _ ->
+            OnboardingGate.show(uid, graph.isOnboarded(uid), resolvedFor)
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, OnboardingGate.show(graph.onboardedUid, graph.onboarded, null))
+
+    init {
+        followOnboardingAccount()
+        graph.provider?.client?.let { client ->
+            viewModelScope.launch { client.auth.sessionStatus.collect { followOnboardingAccount() } }
+        }
     }
 
-    fun completeOnboarding(struggles: List<String>, areas: List<String> = emptyList()) = launchWrite {
+    /** The session changed: key the gate on its account, and start resolving one this
+     *  device doesn't know as onboarded — an early single-row read (an account onboarded
+     *  elsewhere skips the splash before the full first pull lands) plus the deadline. */
+    private fun followOnboardingAccount() {
+        val uid = graph.onboardedUid
+        onboardingUid.value = uid
+        if (uid == null) { onboardingArmedFor = null; return }
+        if (uid == onboardingArmedFor || graph.isOnboarded(uid)) return
+        onboardingArmedFor = uid
+        viewModelScope.launch { runCatching { reconcileOnboarded(uid, afterPull = false) } }
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(ONBOARDING_RESOLVE_DEADLINE_MS)
+            if (onboardingUid.value == uid) onboardingResolvedFor.value = uid
+        }
+    }
+
+    private fun markOnboarded() {
+        graph.onboarded = true
+        onboardedChanged.value++
+    }
+
+    /** Ask the SERVER whether this account onboarded on another platform, and pin the
+     *  local flag if it did — without re-arming the tour or touching its struggles.
+     *  [afterPull]: the store holds the server's rows, so a "no" is an answer and the
+     *  gate resolves to the steps; the early read before the pull can only pin. A read
+     *  that fails changes nothing (the deadline lets the local flag decide). */
+    private suspend fun reconcileOnboarded(uid: String, afterPull: Boolean) {
+        if (graph.isOnboarded(uid)) return
+        val prefs = graph.coordinator?.preferences ?: return
+        val server = try {
+            prefs.fetchUserPrefs(uid)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            return
+        }
+        applyOnboardingAnswer(uid, server?.adhd_struggles, server?.assistant_interview_done_at, afterPull)
+    }
+
+    /** The server's answer for [uid] (null fields: no row, or nothing saved). Life areas
+     *  are no signal — the server seeds them for every new account, so they marked a
+     *  brand-new user onboarded after one pull and a rotation mid-setup skipped it. */
+    internal suspend fun applyOnboardingAnswer(uid: String, serverStruggles: List<String>?, interviewDoneAt: String?, afterPull: Boolean) {
+        val hasTasks = store.snapshot(Tables.TASKS, TaskItem.serializer()).isNotEmpty()
+        if (graph.onboardedUid != uid) return   // the account changed while we asked
+        if (!graph.isOnboarded(uid) && OnboardingGate.onboardedElsewhere(serverStruggles, interviewDoneAt, hasTasks)) markOnboarded()
+        if (afterPull) onboardingResolvedFor.value = uid
+    }
+
+    fun completeOnboarding(struggles: List<String>, areas: List<String> = emptyList()) {
         // Arm the ONE-TIME guided-tour auto-offer (next Today arrival) FIRST —
         // nothing after it depends on the server, and arming after the network
         // write below could delay it past TourHost's mount (a lost/late offer).
@@ -2830,22 +2887,24 @@ class AppViewModel(
         runCatching {
             tech.csalliance.unstuck.ui.tour.TourStateStore(graph.appContext).patch { it.copy(eligible = true) }
         }
-        // Seed the user's PICKED areas (or canonical defaults if they picked none).
-        // Single source of seeding — onboarding no longer also writes areas itself,
-        // so we don't double-seed (picked + defaults).
-        if (lifeAreas.value.isEmpty()) {
-            val palette = listOf("indigo", "coral", "green", "amber", "teal", "blue", "violet", "red")
-            val seed = areas.ifEmpty { listOf("Work", "Personal", "Home", "Health") }
-            seed.forEachIndexed { i, n -> write?.upsertLifeArea(LifeArea(id = newUuid(), name = n, color = palette[i % palette.size], sortOrder = i)) }
+        // The gate follows the flag, so set it before anything below suspends.
+        markOnboarded()
+        launchWrite {
+            // Seed only the PICKED areas this account doesn't have. It used to check
+            // lifeAreas.value, a WhileSubscribed flow nothing collects during onboarding
+            // (always empty), and re-create the server-seeded Work / Personal / Home
+            // with fresh ids: shown twice in every picker, and refused by the server's
+            // unique(user_id, name) on every flush (Android audit 2026-09-23, A8).
+            val existing = store.snapshot(Tables.LIFE_AREAS, LifeArea.serializer())
+            OnboardingGate.areasToSeed(areas, existing, ::newUuid).forEach { write?.upsertLifeArea(it) }
+            val uid = auth?.currentUserId
+            if (uid != null && struggles.isNotEmpty()) {
+                // Cached locally first (the gateway + assistant context read them at
+                // once); the server row is the account's copy for every other device.
+                applyStruggles(uid, struggles)
+                runCatching { graph.coordinator?.preferences?.setAdhdStruggles(uid, struggles) }
+            }
         }
-        val uid = auth?.currentUserId
-        if (uid != null && struggles.isNotEmpty()) {
-            // Cached locally first (the gateway + assistant context read them at
-            // once); the server row is the account's copy for every other device.
-            applyStruggles(uid, struggles)
-            runCatching { graph.coordinator?.preferences?.setAdhdStruggles(uid, struggles) }
-        }
-        graph.onboarded = true
     }
 
     // --- settings (device-local prefs: theme / focus / sound / a11y) ---
@@ -4300,13 +4359,17 @@ class AppViewModel(
                     // decides on that flip, and an already-onboarded user (done on
                     // the web, few synced facts) must never be greeted as a stranger.
                     hydrateAssistantPrefs(uid)
-                    runCatching { reconcileOnboarded(uid) }
+                    runCatching { reconcileOnboarded(uid, afterPull = true) }
                 }
             }
         }
     }
 
     companion object {
+        /** How long a not-yet-onboarded account waits on the splash for the server's
+         *  answer after its first pull before the local flag decides (a whole pull, not
+         *  iOS's single-row read — hence longer than its 6 s). */
+        internal const val ONBOARDING_RESOLVE_DEADLINE_MS = 10_000L
         private const val NOTIF_PREF_LEVEL = "level"
         private const val NOTIF_PREF_LEAD = "lead"
         /** Gateway interview keys (web STORAGE_KEYS.GATEWAY_INTERVIEW_DONE / _STEP vocabulary). */

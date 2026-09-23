@@ -1,6 +1,8 @@
 package tech.csalliance.unstuck
 
 import android.content.Context
+import io.github.jan.supabase.auth.auth
+import io.github.jan.supabase.auth.status.SessionStatus
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -83,9 +85,14 @@ class AppGraph(
      *  Reconciled from the SERVER after every pull (AppViewModel.reconcileOnboarded)
      *  so a returning account on a fresh install isn't re-onboarded either. See
      *  [OnboardedFlag] for the legacy-key migration rule. */
-    private val onboardedUid: String? get() = uidOverride?.invoke() ?: coordinator?.auth?.currentUserId
+    internal val onboardedUid: String? get() = uidOverride?.invoke() ?: OnboardedFlag.accountFor(
+        currentUid = coordinator?.auth?.currentUserId,
+        refreshFailing = provider?.client?.auth?.sessionStatus?.value is SessionStatus.RefreshFailure,
+        lastSignedIn = syncPrefs.getString("unstuck.prevUserId", null),
+    )
+    fun isOnboarded(uid: String?): Boolean = OnboardedFlag.get(appPrefs, uid, syncPrefs.getString("unstuck.prevUserId", null))
     var onboarded: Boolean
-        get() = OnboardedFlag.get(appPrefs, onboardedUid, syncPrefs.getString("unstuck.prevUserId", null))
+        get() = isOnboarded(onboardedUid)
         set(value) = OnboardedFlag.set(appPrefs, onboardedUid, value)
 
     /** Device-local settings (theme / focus / sound / a11y). */
@@ -134,4 +141,12 @@ internal object OnboardedFlag {
     fun clearLegacy(p: android.content.SharedPreferences) {
         p.edit().remove(LEGACY_KEY).apply()
     }
+
+    /** The account the flag is read for. supabase-kt reports no user while the session
+     *  is in RefreshFailure (offline with an expired access token: currentUserOrNull()
+     *  answers only for Authenticated), so the flag read false and a long-time user was
+     *  sent through onboarding. The stored session is still the one the sync engine last
+     *  saw signed in (Android audit 2026-09-23, A9). */
+    fun accountFor(currentUid: String?, refreshFailing: Boolean, lastSignedIn: String?): String? =
+        currentUid ?: if (refreshFailing) lastSignedIn else null
 }

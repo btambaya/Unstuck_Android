@@ -993,6 +993,14 @@ class AssistantToolsTest {
         h.state.captures[0].let { assertNull(it.taskId); assertEquals("live-1", it.sessionId); assertEquals(CaptureTag.IDEA, it.tag) }
     }
 
+    // A session on a task shared WITH the user never writes an own Session row, so a
+    // capture tied to it waited on one for ever (Android audit 2026-09-23, A14).
+    @Test fun `add_capture during a session on a task shared with the user ties it to no session`() = runTest {
+        val h = makeApi { live = liveSession("owners-task").copy(sharedTitle = "Their brief", sharedLevel = "partner") }
+        assertTrue(h.run("add_capture", "body" to "Ask Sam about X").startsWith("ok: captured"))
+        assertNull(h.state.captures.single().sessionId)
+    }
+
     @Test fun `add_capture errors without a body`() = runTest {
         val h = makeApi()
         assertEquals("error: body required", h.run("add_capture", "tag" to "idea"))

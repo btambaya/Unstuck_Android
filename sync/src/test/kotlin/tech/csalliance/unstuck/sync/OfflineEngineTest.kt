@@ -35,6 +35,8 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
+import tech.csalliance.unstuck.core.model.Capture
+import tech.csalliance.unstuck.core.model.CaptureTag
 import tech.csalliance.unstuck.core.model.CollectionItem
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.TaskItem
@@ -176,6 +178,34 @@ class OfflineEngineTest {
         remote.serverRows[Tables.TASKS] = emptyList()
         hydrator.hydrate("u1")
         assertEquals("local row must survive hydrate", listOf("t1"), store.tasks().first().map { it.id })
+    }
+
+    // A capture taken during focus waits (dependsOn) for its session's row. A session
+    // that ended WITHOUT one (cancel_focus, its task deleted, a task shared with me)
+    // left it held for ever; detaching re-queues it without the session so it syncs
+    // (Android audit 2026-09-23, A14).
+    @Test fun detachCapturesFromSession_releasesACaptureHeldOnASessionThatWillNeverExist() = runTest {
+        val remote = FakeRemote()
+        val write = WriteThrough(store)
+        val flusher = OutboxFlusher(remote, store)
+        val ended = java.util.UUID.randomUUID().toString()
+        val stillLive = java.util.UUID.randomUUID().toString()
+        val note = Capture(id = java.util.UUID.randomUUID().toString(), sessionId = ended, tag = CaptureTag.FOLLOW_UP, body = "call the bank", at = "2026-05-21T10:00:00.000Z")
+        val other = Capture(id = java.util.UUID.randomUUID().toString(), sessionId = stillLive, tag = CaptureTag.IDEA, body = "later", at = "2026-05-21T10:01:00.000Z")
+        write.upsertCapture(note)
+        write.upsertCapture(other)
+
+        flusher.flush("u1")
+        assertTrue("both wait for a session row", remote.upserts.isEmpty())
+
+        write.detachCapturesFromSession(ended)
+        flusher.flush("u1")
+
+        val sent = Json.parseToJsonElement(remote.upserts.single().second).jsonObject
+        assertEquals(note.id, (sent["id"] as JsonPrimitive).content)
+        assertEquals("sent without the session that never came", kotlinx.serialization.json.JsonNull, sent["session_id"])
+        assertNull(store.captures().first().single { it.id == note.id }.sessionId)
+        assertEquals("a live session's capture still waits for its row", listOf(other.id), store.pending().map { it.recordId })
     }
 
     // --- forward-compat: one un-decodable server row must not abort the whole table ---

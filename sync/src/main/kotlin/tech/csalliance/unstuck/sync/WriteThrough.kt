@@ -132,6 +132,28 @@ class WriteThrough(private val store: LocalStore) {
         enqueue("captures", c.id, "upsert", DbRowCodec.encodeCapture(c).toString(), dependsOn)
     }
 
+    /** A focus session ended WITHOUT a Session row (cancel_focus, its task deleted
+     *  meanwhile, a session on a task shared with me): the captures queued behind
+     *  it wait for a parent row that will never exist, so they never left the
+     *  phone. Re-queue each still-pending one with session_id = null, replacing
+     *  its held op, in one transaction (Android audit 2026-09-23, A14). */
+    suspend fun detachCapturesFromSession(sessionId: String) {
+        val detached = store.transaction {
+            val held = pending().filter { it.recordTable == Tables.CAPTURES && it.op == "upsert" && it.dependsOn == sessionId }
+            var n = 0
+            for (id in held.map { it.recordId }.distinct()) {
+                val c = getOne(Tables.CAPTURES, id, Capture.serializer())?.takeIf { it.sessionId == sessionId } ?: continue
+                held.filter { it.recordId == id }.forEach { dequeue(it.seq) }
+                val freed = c.copy(sessionId = null)
+                upsert(Tables.CAPTURES, freed, Capture.serializer(), freed.id, freed.at)
+                enqueue(outboxOp(Tables.CAPTURES, freed.id, "upsert", DbRowCodec.encodeCapture(freed).toString()))
+                n++
+            }
+            n
+        }
+        if (detached > 0) runCatching { onEnqueue?.invoke() }
+    }
+
     suspend fun upsertReasonLog(r: ReasonLog) {
         store.upsert(Tables.REASON_LOGS, r, ReasonLog.serializer(), r.id, r.at)
         enqueue("reason_logs", r.id, "upsert", DbRowCodec.encodeReasonLog(r).toString())

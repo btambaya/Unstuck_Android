@@ -71,6 +71,8 @@ object FocusCommands {
             // Durable: a transient failure persists a retry drained on next foreground.
             val sid = live.id ?: newUuid()
             store.setLiveSession(null)
+            // No own Session row, so no capture may wait on one (Android audit 2026-09-23, A14).
+            live.id?.let { runCatching { write?.detachCapturesFromSession(it) } }
             runCatching { SharedFocusLedger.logOrQueue(app.graph.settings, circle, live.taskId, elapsed, sid, live.sessionEstimateMin) }
             runCatching { app.graph.coordinator?.notifications?.sessionRecap(sharedTitle, away = true) }
             return@run

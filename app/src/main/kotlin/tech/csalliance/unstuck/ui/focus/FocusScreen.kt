@@ -462,7 +462,12 @@ private fun FocusBtn(label: String, soft: Boolean, onClick: () -> Unit) {
 private fun CapturesRail(vm: AppViewModel, task: TaskItem) {
     val c = UTheme.colors
     val captures by vm.captures.collectAsStateWithLifecycle()
-    val recent = captures.filter { it.taskId == task.id }.takeLast(3)
+    val tasks by vm.tasks.collectAsStateWithLifecycle()
+    val blocks by vm.blocks.collectAsStateWithLifecycle()
+    // A repeating task's day files its captures on the series template (saveCapture),
+    // so match on that, not the day's block id (Android audit 2026-09-23, A14).
+    val ownId = tech.csalliance.unstuck.core.logic.occurrenceBlockFor(task.id, tasks, blocks)?.taskId ?: task.id
+    val recent = captures.filter { it.taskId == ownId }.takeLast(3)
     if (recent.isEmpty()) return
     Column(Modifier.fillMaxWidth().padding(top = 18.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         SectionLabel("Captures", color = Color.White.copy(alpha = 0.45f))

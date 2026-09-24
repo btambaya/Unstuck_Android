@@ -16,7 +16,7 @@ Unstuck's job is to lower the activation cost of starting. Its design voice is *
 - **Focus** — a full-screen distraction-light timer with 3 treatments (Ambient / Cockpit / Monk), pause/capture, and a live ongoing notification.
 - **Collections** — lightweight lists ("keep small things here").
 - **Insights** — reflections (Report / Deep dive), never a score.
-- **Settings** — theme/accent/density, focus prefs, sound, accessibility, areas, tags, account, notifications.
+- **Settings** (slim, 2026-09-24) — hub: Account card · Notifications & calls · Assistant & privacy (AI Assistant, AI data sharing, What Unstuck remembers, Delete conversation history) · People · Appearance (theme + text size) · Send feedback · Replay the tour · footer Terms · Privacy · version. Focus options live on the Focus screen (⋯ Options + the speaker button), areas & tags on the Tasks tab's Edit pill, hold-to-talk on Talk. Links: `unstuck://settings[?section=<any old or new name>]` (`ui/settings/SettingsModel.kt`).
 - **Notifications** — pre-task reminders, the live focus notification, paused-too-long check-ins, session recap, morning brief, and in-app nudges (see §7).
 
 The **web app** (`/Users/ahmadtambaya/Desktop/projects/unstuck`) is the source of truth for *behavior and data*; the design mockups are a *look* cue (and a starting idea — not a literal spec).
@@ -100,7 +100,7 @@ Three "moments", one voice, a server-side 3-push/day cap + device dedup (in the 
 
 - **Channels** (`NotificationChannels`) — per-purpose: reminders (HIGH), recap (DEFAULT-silent), paused (HIGH), daily (LOW), focus (ongoing LOW), all lock-screen-private with an "Unlock to read" public version. Created at app start.
 - **Live focus notification** (`FocusTimerService`, ongoing FGS) — running shows "FOCUSING · LIVE" (coral) + Pause/Capture; paused flips to amber "Did you step away?" + Resume/Snooze/End, same notification updated in place. Actions route through `NotificationActionReceiver` → `FocusCommands` (shared with the UI). Persists after you leave the focus screen; torn down by Done/End.
-- **Pre-task reminders** (`ReminderScheduler` + `ReminderReceiver`) — observes blocks and sets exact `AlarmManager` alarms at (start − lead) for task + Google-event blocks. Lead = per-task override (New Task sheet) ?: global default (Settings → Focus → "Remind me before tasks"). Rescheduled on boot.
+- **Pre-task reminders** (`ReminderScheduler` + `ReminderReceiver`) — observes blocks and sets exact `AlarmManager` alarms at (start − lead) for task + Google-event blocks. Lead = per-task override (New Task sheet) ?: global default (Settings → Notifications & calls → "Remind me before a task"). Rescheduled on boot.
 - **Paused-too-long** (`PausedCheckinScheduler`, WorkManager +14 min) — asks the server (`send-paused-checkin`, cap/pref) then posts the local check-in.
 - **Session-end recap** — `finishFocus` calls `send-session-recap` (in-app card always; push only when away) + shows a "You did the thing." card on Today (alongside the Reflect sheet).
 - **Morning brief** — server cron (`dispatch_morning_briefs`, every 15 min, fires at each user's wake window) → `send-morning-brief` → push "Want to glance at today?".
@@ -126,7 +126,7 @@ The page: Week / Month / All time with a ‹ › stepper to any past week or mon
 
 ## 10. Settings & preferences
 
-Device-local prefs (`SettingsStore` → SharedPreferences, mirrors the web `theme-context`): theme (system/light/dark), accent, density, larger type, focus length/overrun/soft-exit/pause-reasons, sound toggles, accessibility, focus treatment, **reminderLeadMin** (+ per-task reminder overrides). `UnstuckTheme` reacts to theme/accent/density. Server-side `notification_preferences` (wake window, quiet hours, cap, per-moment toggles) exist in the backend; surfacing them in the Android settings UI is a known follow-up.
+Device-local prefs (`SettingsStore` → SharedPreferences): theme (system/light/dark), **text size** (Smaller / Default / Larger — seeded once from the retired density / larger-type keys), focus length (the New Task sheet's remembered estimate) / overrun / soft-exit / pause-reasons, background noise (the Focus speaker button; "brown", an old "pink" reads as on), focus treatment, **reminderLeadMin** (+ per-task reminder overrides). `UnstuckTheme` reacts to theme + text size. Retired 2026-09-24 and left unread (never wiped): accent, density, larger type, reduce motion, high contrast, keyboard hints, hide rail, the three focus sounds. The AI data-sharing OK (core `AIConsent`) lives in auth user_metadata with a device copy (`AIConsentStore` / `AIConsentSync` on the graph); `AppViewModel.withAIConsent` is the gate for chat, Talk and calls. Server-side `notification_preferences` (wake window, quiet hours, cap, per-moment toggles) exist in the backend; surfacing them in the Android settings UI is a known follow-up.
 
 ---
 

@@ -135,7 +135,7 @@ object InterviewCopy {
 
     /** The small-print disclosure under the greeting (iOS Interview.swift). */
     const val DISCLOSURE =
-        "I’ll remember what you tell me; it stays yours — see What Unstuck knows in Settings to view or delete any of it. Facts are shared with our AI provider (which doesn’t train on them) so I can help."
+        "I’ll remember what you tell me; it stays yours — see What Unstuck remembers in Settings to view or delete any of it. Facts are shared with our AI provider (which doesn’t train on them) so I can help."
 
     const val EYEBROW_PREFIX = "GETTING TO KNOW YOU · "
     const val EYEBROW_LAST = "LAST ONE"
@@ -154,7 +154,7 @@ object InterviewCopy {
     const val NOTED_PREFIX = "✓ Noted: "
     const val SAVE_FAILED = "Couldn’t save that — try again"
 
-    const val PICKER_QUESTION = "Which moments should I run for you? All optional, all changeable in Settings."
+    const val PICKER_QUESTION = "Which moments should I run for you? All optional — ask me anytime to change them."
     const val THATS_ME_SET_UP = "That’s me set up"
 }
 
@@ -251,8 +251,8 @@ object InterviewThreadCopy {
     /** The first local turn: the web interview's greeting, then the disclosure. */
     fun greeting(firstName: String?): String = InterviewCopy.greeting(firstName) + "\n\n" + InterviewCopy.DISCLOSURE
 
-    const val PICKER_QUESTION = "Last one — which moments should I run for you? All optional, all changeable in Settings."
-    const val CLOSING = "That’s everything — I’ll plan around it. Change any of it in Settings → What Unstuck knows."
+    const val PICKER_QUESTION = "Last one — which moments should I run for you? All optional — ask me anytime to change them."
+    const val CLOSING = "That’s everything — I’ll plan around it. Change any of it in Settings → Assistant & privacy."
 }
 
 /** The same seven questions as one spoken list for the voice opening primer

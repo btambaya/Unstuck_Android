@@ -17,7 +17,10 @@ import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.Canvas
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MoreHoriz
 import androidx.compose.material.icons.outlined.Mic
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
@@ -33,7 +36,10 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Brush
@@ -46,6 +52,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.delay
+import tech.csalliance.unstuck.SettingsState
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.formatMMSS
 import tech.csalliance.unstuck.core.logic.remotePaused
@@ -107,11 +114,13 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
         }
     }
 
-    // Ambient focus audio — play the loop while focusing when the Ambient setting is on
-    // (was a dead toggle). Stops on leave. (Start chime / overrun bell / completion sound
-    // still need their own audio assets before they can be wired.)
-    androidx.compose.runtime.DisposableEffect(settings.ambient) {
-        if (settings.ambient != "off") tech.csalliance.unstuck.surface.AmbientAudio.start(context)
+    // Background noise — the speaker button in the header IS the setting (slim
+    // settings, 2026-09-24): it remembers on/off, and the loop plays while the
+    // session runs (not while paused). Stops on leave.
+    val noiseOn = settings.ambientOn
+    val playNoise = noiseOn && live?.paused != true
+    androidx.compose.runtime.DisposableEffect(playNoise) {
+        if (playNoise) tech.csalliance.unstuck.surface.AmbientAudio.start(context)
         else tech.csalliance.unstuck.surface.AmbientAudio.stop()
         onDispose { tech.csalliance.unstuck.surface.AmbientAudio.stop() }
     }
@@ -187,6 +196,7 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
     DisposableEffect(task.id) { copilot.reset(); onDispose { copilot.stopAll() } }
 
     var confirmExit by remember { mutableStateOf(false) }
+    var showOptions by remember { mutableStateOf(false) }
     var showCapture by remember { mutableStateOf(autoCapture) }
     // Arriving via the notification "Capture" action opens the capture sheet straight
     // away (was landing on Focus with no input shown).
@@ -271,6 +281,21 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
                                 modifier = Modifier.size(18.dp),
                             )
                         }
+                    }
+                    // The two icon buttons sit flush: each 48dp hit target already
+                    // pads its 32dp disc, so the discs keep the cluster's even gap.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Background noise on/off — the setting itself, remembered.
+                        HeaderIconButton(
+                            icon = if (noiseOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
+                            description = FocusOptionsCopy.speakerA11y(noiseOn),
+                            active = noiseOn,
+                            tag = "focus-speaker",
+                        ) {
+                            vm.updateSettings { it.copy(ambient = if (it.ambientOn) SettingsState.AMBIENT_OFF else SettingsState.AMBIENT_ON) }
+                        }
+                        // ⋯ Options — the focus controls that left Settings.
+                        HeaderIconButton(icon = Icons.Filled.MoreHoriz, description = FocusOptionsCopy.BUTTON_A11Y, active = false, tag = "focus-options") { showOptions = true }
                     }
                 }
             }
@@ -405,12 +430,23 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
 
         if (confirmExit) androidx.compose.material3.AlertDialog(
             onDismissRequest = { confirmExit = false },
-            title = { Text("Leave focus?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
-            text = { Text("Your timer keeps running — you can pick it back up from Today.", style = UFont.sans(13), color = c.ink2) },
-            confirmButton = { androidx.compose.material3.TextButton(onClick = { confirmExit = false; onClose() }) { Text("Leave", color = c.primaryDeep) } },
-            dismissButton = { androidx.compose.material3.TextButton(onClick = { confirmExit = false }) { Text("Stay", color = c.ink2) } },
+            title = { Text(FocusOptionsCopy.LEAVE_TITLE, style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+            text = { Text(FocusOptionsCopy.LEAVE_BODY, style = UFont.sans(13), color = c.ink2) },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { confirmExit = false; onClose() }) { Text(FocusOptionsCopy.LEAVE, color = c.primaryDeep) } },
+            dismissButton = {
+                Row {
+                    // Leave now and stop asking (Focus ⋯ → "Ask before I leave a session" turns it back on).
+                    androidx.compose.material3.TextButton(onClick = {
+                        confirmExit = false
+                        vm.updateSettings { it.copy(focusSoftExit = false) }
+                        onClose()
+                    }) { Text(FocusOptionsCopy.LEAVE_DONT_ASK, color = c.ink2) }
+                    androidx.compose.material3.TextButton(onClick = { confirmExit = false }) { Text(FocusOptionsCopy.STAY, color = c.ink2) }
+                }
+            },
             containerColor = c.surface,
         )
+        if (showOptions) FocusOptionsSheet(vm, onDismiss = { showOptions = false })
         if (showCapture && !sharedFocus) CaptureSheet(vm, task, live?.id) { showCapture = false }
         if (showReflect) ReflectSheet(reflectElapsed) { showReflect = false; onClose() }
         if (showPauseReasons) {
@@ -421,6 +457,12 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
                 // the OWNER's foreign task (mirrors web nulling the shared taskId).
                 onPick = { reason -> vm.saveReasonLog(task.id.takeIf { !sharedFocus }, reason); showPauseReasons = false; if (exitAfterReason) { exitAfterReason = false; onClose() } },
                 onDismiss = { showPauseReasons = false; if (exitAfterReason) { exitAfterReason = false; onClose() } },
+                // Stop asking (Focus ⋯ → "Ask why I'm pausing" turns it back on).
+                onDontAsk = {
+                    vm.updateSettings { it.copy(focusPauseReasons = false) }
+                    showPauseReasons = false
+                    if (exitAfterReason) { exitAfterReason = false; onClose() }
+                },
             )
         }
     }
@@ -429,7 +471,7 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
 private val PAUSE_REASONS = listOf("Bathroom", "Drink", "Quick question", "Stuck — need a moment", "Other")
 
 @Composable
-private fun PauseReasons(onPick: (String) -> Unit, onDismiss: () -> Unit) {
+private fun PauseReasons(onPick: (String) -> Unit, onDismiss: () -> Unit, onDontAsk: () -> Unit) {
     Box(Modifier.fillMaxSize().background(Color(0xCC0B0B14)).clickable(onClick = onDismiss), contentAlignment = Alignment.Center) {
         Column(
             Modifier.padding(28.dp).clip(RoundedCornerShape(20.dp)).background(Color(0xFF1A1B26)).padding(20.dp),
@@ -441,7 +483,32 @@ private fun PauseReasons(onPick: (String) -> Unit, onDismiss: () -> Unit) {
                     Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(Color.White.copy(alpha = 0.08f)).clickable { onPick(r) }.padding(horizontal = 16.dp, vertical = 13.dp),
                 ) { Text(r, style = UFont.sans(14, FontWeight.Medium), color = Color.White) }
             }
+            Text(
+                FocusOptionsCopy.DONT_ASK, style = UFont.sans(13, FontWeight.Medium), color = Color.White.copy(alpha = 0.7f),
+                modifier = Modifier.align(Alignment.CenterHorizontally).clip(RoundedCornerShape(999.dp))
+                    .clickable(role = Role.Button, onClick = onDontAsk)
+                    .minimumInteractiveComponentSize().padding(horizontal = 14.dp),
+            )
         }
+    }
+}
+
+/** A round header control on the dark focus surface (speaker, ⋯): a 32dp
+ *  glyph disc inside a 48dp hit target. [active] lifts the disc slightly. */
+@Composable
+private fun HeaderIconButton(icon: androidx.compose.ui.graphics.vector.ImageVector, description: String, active: Boolean, tag: String, onClick: () -> Unit) {
+    Box(
+        Modifier.clip(RoundedCornerShape(999.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .minimumInteractiveComponentSize()
+            .semantics { contentDescription = description }
+            .testTag(tag),
+        contentAlignment = Alignment.Center,
+    ) {
+        Box(
+            Modifier.size(32.dp).clip(RoundedCornerShape(999.dp)).background(Color.White.copy(alpha = if (active) 0.18f else 0.10f)),
+            contentAlignment = Alignment.Center,
+        ) { Icon(icon, contentDescription = null, tint = Color.White.copy(alpha = if (active) 0.95f else 0.7f), modifier = Modifier.size(18.dp)) }
     }
 }
 

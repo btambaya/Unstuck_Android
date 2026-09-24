@@ -83,6 +83,11 @@ data class CallEnv(
     val anchorExists: Boolean?,
     /** The per-device "Calls from Unstuck" toggle (CallSettings.enabled). */
     val callsEnabled: Boolean = true,
+    /** The account has agreed to AI data sharing (AIConsent). A call is a
+     *  conversation with the assistant — without the OK it never connects: it
+     *  is declined quietly and the notes land as a notification. No default:
+     *  every environment has to answer it (fail closed). */
+    val aiConsent: Boolean,
 )
 
 /** Why a live conversation ended, as the voice service reports it. */
@@ -94,6 +99,10 @@ sealed class CallEndReason {
     /** Voice couldn't start or dropped (socket, proxy, mic) — the user still
      *  gets the notes as a notification. */
     data class Failed(val why: String) : CallEndReason()
+    /** The account's AI-consent OK was gone at the answer (turned off on the
+     *  web or another phone while it rang): nothing connected to the
+     *  assistant, and the notes land with the way to turn it back on. */
+    data object NoAIConsent : CallEndReason()
 }
 
 /** What an end / a decision reports: the outcome plus its extras. */
@@ -107,7 +116,7 @@ data class OutcomeReport(
 
 /** The local notifications the call path posts (CallNotifications in :app
  *  renders them; the copy is [CallNotificationCopy]). */
-enum class CallNotificationKind { MISSED, BUSY, OUTSIDE_HOURS, VOICE_FAILED }
+enum class CallNotificationKind { MISSED, BUSY, OUTSIDE_HOURS, VOICE_FAILED, NO_AI_CONSENT }
 
 /** A local notification the ring path wants posted — pure copy, ported from
  *  iOS `CallNotifications`. `hasActions` ⇒ Start / Reschedule (a task is anchored). */
@@ -128,8 +137,12 @@ data class CallNotificationSpec(
 
 object CallNotificationCopy {
     const val NO_NOTES = "No notes on this one."
-    const val HOURS_HINT = "(outside your call hours — Settings › Calls)"
+    const val HOURS_HINT = "(outside your call hours — Settings › Notifications & calls)"
     const val VOICE_FAILED_TITLE = "Couldn't start the call — here's what it was about"
+    /** The account hasn't agreed to AI data sharing (AIConsent): the way back on. */
+    const val NO_AI_CONSENT_HINT = "(calls use the assistant — turn on AI data sharing in Settings › Assistant & privacy to take them)"
+    /** call_requests.outcome_notes for a call answered after the OK was turned off. */
+    const val NO_AI_CONSENT_OUTCOME = "no AI consent"
 
     /** Unanswered after 30 s: "I called about <label>" with the notes as
      *  lines; Start / Reschedule when a task is anchored. */
@@ -141,12 +154,17 @@ object CallNotificationCopy {
         make(p, CallNotificationKind.OUTSIDE_HOURS, "unstuck.call.hours.${p.callId}", "I called about ${p.label}", body(p.notes) + "\n" + HOURS_HINT)
     fun voiceFailed(p: IncomingCallPayload) =
         make(p, CallNotificationKind.VOICE_FAILED, "unstuck.call.failed.${p.callId}", VOICE_FAILED_TITLE, body(p.notes))
+    /** The call never connected to the assistant: no AI-consent OK (iOS
+     *  CallNotifications.noAIConsent, the same id and words). */
+    fun noAIConsent(p: IncomingCallPayload) =
+        make(p, CallNotificationKind.NO_AI_CONSENT, "unstuck.call.consent.${p.callId}", "I called about ${p.label}", body(p.notes) + "\n" + NO_AI_CONSENT_HINT)
 
     fun of(kind: CallNotificationKind, p: IncomingCallPayload): CallNotificationSpec = when (kind) {
         CallNotificationKind.MISSED -> missed(p)
         CallNotificationKind.BUSY -> busy(p)
         CallNotificationKind.OUTSIDE_HOURS -> outsideHours(p)
         CallNotificationKind.VOICE_FAILED -> voiceFailed(p)
+        CallNotificationKind.NO_AI_CONSENT -> noAIConsent(p)
     }
 
     fun body(notes: List<String>): String = if (notes.isEmpty()) NO_NOTES else notes.joinToString("\n")
@@ -220,10 +238,14 @@ object CallCoordinatorLogic {
 
     /** The receipt rules, in iOS order: signed in → kill-switches → hours →
      *  focus → anchor → ring. `anchorExists == null` (no store yet) rings. */
+    /** The Declined reason for a call without the AI-consent OK. */
+    const val NO_AI_CONSENT = "no AI consent"
+
     fun decide(p: IncomingCallPayload, env: CallEnv): CallDecision {
         if (!env.signedIn) return CallDecision.Silent("not signed in")
         if (!env.assistantEnabled) return CallDecision.Declined("assistant off")
         if (!env.callsEnabled) return CallDecision.Declined("calls off")
+        if (!env.aiConsent) return CallDecision.Declined(NO_AI_CONSENT)
         if (!env.withinHours) return CallDecision.Declined("outside hours")
         if (env.focusLive) return CallDecision.Busy
         if (p.taskId != null && env.anchorExists == false) return CallDecision.Stale
@@ -277,6 +299,10 @@ object CallCoordinatorLogic {
         is CallEndReason.Snoozed -> OutcomeReport(CallOutcome.SNOOZED, snoozeMin = clampSnooze(reason.minutes))
         is CallEndReason.Failed -> OutcomeReport(
             CallOutcome.DONE, outcomeNotes = listOf("voice failed: ${reason.why}"), notify = CallNotificationKind.VOICE_FAILED,
+        )
+        // Answered, but the OK was gone: nothing reached the assistant.
+        CallEndReason.NoAIConsent -> OutcomeReport(
+            CallOutcome.DONE, outcomeNotes = listOf(CallNotificationCopy.NO_AI_CONSENT_OUTCOME), notify = CallNotificationKind.NO_AI_CONSENT,
         )
     }
 

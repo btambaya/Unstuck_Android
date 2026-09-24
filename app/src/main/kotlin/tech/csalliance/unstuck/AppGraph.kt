@@ -95,13 +95,28 @@ class AppGraph(
         get() = isOnboarded(onboardedUid)
         set(value) = OnboardedFlag.set(appPrefs, onboardedUid, value)
 
-    /** Device-local settings (theme / focus / sound / a11y). */
+    /** Device-local settings (theme / text size / focus). */
     val settings = SettingsStore(context.applicationContext)
+
+    /** This device's copy of the account's AI data-sharing OK (core AIConsent),
+     *  and what keeps it in step with user_metadata. Process-wide: the gate, the
+     *  Settings switch and a call ringing before the UI is up read the same one. */
+    val aiConsent = AIConsentStore(context.applicationContext)
+    val aiConsentSync = AIConsentSync(
+        store = aiConsent,
+        auth = { coordinator?.auth },
+        uid = { uidOverride?.invoke() ?: coordinator?.auth?.currentUserId },
+    )
 
     init {
         // Sign-out: the legacy device-global flag must never survive into the next
-        // account's session (the per-account keys are inert for anyone else).
-        coordinator?.onSignedOut = { OnboardedFlag.clearLegacy(appPrefs) }
+        // account's session (the per-account keys are inert for anyone else) — nor
+        // may this account's AI-consent copy (the next one reads its own).
+        coordinator?.onSignedOut = {
+            OnboardedFlag.clearLegacy(appPrefs)
+            aiConsent.clear()
+            aiConsentSync.reset()
+        }
     }
 
     fun start() {

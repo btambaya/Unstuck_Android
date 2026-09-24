@@ -23,7 +23,7 @@ class PAPrefsTest {
     @Test fun `defaults are morning + evening on, the weekly rituals opt-in`() {
         assertEquals(RitualPrefs(morning = true, evening = true, friday = false, sunday = false), RitualPrefs.DEFAULTS)
         assertEquals(listOf("morning", "evening", "friday", "sunday"), RitualKey.entries.map { it.raw })
-        assertEquals(listOf("Morning briefing", "Evening sweep", "Friday review", "Sunday runway"), RITUAL_LABELS.map { it.label })
+        assertEquals(listOf("Morning plan", "Evening wind-down", "Friday look-back", "Sunday plan-ahead"), RITUAL_LABELS.map { it.label })
     }
 
     @Test fun `parseRitualPrefs fills missing keys from the defaults and drops unknown or non-boolean ones`() {

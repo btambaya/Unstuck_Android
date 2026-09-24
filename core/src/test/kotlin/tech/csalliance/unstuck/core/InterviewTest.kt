@@ -93,7 +93,7 @@ class InterviewTest {
         assertEquals("Hey Ada. A few quick questions so I can plan around your actual life — skip any you like.", InterviewCopy.greeting("Ada"))
         assertEquals("Hey. A few quick questions so I can plan around your actual life — skip any you like.", InterviewCopy.greeting(null))
         assertEquals("no name = no dangling space", InterviewCopy.greeting(null), InterviewCopy.greeting("   "))
-        assertEquals("Which moments should I run for you? All optional, all changeable in Settings.", InterviewCopy.PICKER_QUESTION)
+        assertEquals("Which moments should I run for you? All optional — ask me anytime to change them.", InterviewCopy.PICKER_QUESTION)
         assertEquals("That’s me set up", InterviewCopy.THATS_ME_SET_UP)
         assertEquals("I’m done", InterviewCopy.IM_DONE)
         assertEquals("Couldn’t save that — try again", InterviewCopy.SAVE_FAILED)

@@ -12,589 +12,319 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.selection.selectable
+import androidx.compose.foundation.selection.selectableGroup
 import androidx.compose.foundation.selection.toggleable
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.minimumInteractiveComponentSize
-import androidx.compose.runtime.rememberCoroutineScope
-import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.input.PasswordVisualTransformation
-import kotlinx.coroutines.launch
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.disabled
-import androidx.compose.ui.semantics.selected
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import tech.csalliance.unstuck.surface.ExactAlarms
-import tech.csalliance.unstuck.SettingsStore
-import tech.csalliance.unstuck.core.logic.CallSettingsLogic
-import tech.csalliance.unstuck.core.logic.newUuid
-import tech.csalliance.unstuck.core.model.Density
-import tech.csalliance.unstuck.core.model.LifeArea
-import tech.csalliance.unstuck.core.model.TagRow
+import kotlinx.coroutines.launch
+import tech.csalliance.unstuck.BuildConfig
+import tech.csalliance.unstuck.TextSize
 import tech.csalliance.unstuck.core.model.ThemePref
-import tech.csalliance.unstuck.core.time.ClockFormat
-import tech.csalliance.unstuck.core.time.ClockMode
-import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.design.component.AppBar
-import tech.csalliance.unstuck.design.theme.AccentPalette
-import tech.csalliance.unstuck.sync.AuthOutcome
-import tech.csalliance.unstuck.design.component.ColorChip
 import tech.csalliance.unstuck.design.component.Leading
-import tech.csalliance.unstuck.design.component.MdSegment
 import tech.csalliance.unstuck.design.component.MdToggle
 import tech.csalliance.unstuck.design.component.SectionLabel
-import tech.csalliance.unstuck.design.component.UButton
-import tech.csalliance.unstuck.design.component.ButtonKind
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
+import tech.csalliance.unstuck.sync.AuthOutcome
 import tech.csalliance.unstuck.ui.AppViewModel
-import tech.csalliance.unstuck.ui.feedback.FeedbackSheet
-import tech.csalliance.unstuck.ui.tour.TourAnchorIds
-import tech.csalliance.unstuck.ui.tour.TourEvents
-import tech.csalliance.unstuck.ui.tour.tourAnchor
+import tech.csalliance.unstuck.core.logic.AIConsent
+import tech.csalliance.unstuck.ui.assistant.AIConsentHost
+import tech.csalliance.unstuck.ui.assistant.AIConsentNoteLine
 import tech.csalliance.unstuck.ui.assistant.FactsPanelContent
-import tech.csalliance.unstuck.ui.assistant.FactsPanelCopy
+import tech.csalliance.unstuck.ui.tour.TourEvents
 
-enum class SettingsSection(val title: String, val eyebrow: String) {
-    ACCOUNT("Your account.", "SETTINGS · ACCOUNT"),
-    PEOPLE("Sit with someone, not be watched.", "SETTINGS · PEOPLE"),
-    FOCUS("How focus mode behaves.", "SETTINGS · FOCUS"),
-    /** "Calls from Unstuck" (iOS CallSettingsView): kill-switch, allowed hours,
-     *  default lead, the full-screen-intent permission row, "Test call now". */
-    CALLS("Ask, and Unstuck calls you.", "SETTINGS · CALLS"),
-    SOUND("Quiet by default.", "SETTINGS · SOUND"),
-    A11Y("Adjust to your brain.", "SETTINGS · ACCESSIBILITY"),
-    INTERFACE("How things look.", "SETTINGS · INTERFACE"),
-    /** The assistant's memory — every fact it has learned, editable and
-     *  deletable, plus which recurring moments it runs (web/iOS FactsPanel). */
-    MEMORY(FactsPanelCopy.TITLE, "SETTINGS · MEMORY"),
-    BACKUP("Your data is yours.", "SETTINGS · BACKUP"),
-    AREAS("One list. The whole life.", "SETTINGS · AREAS"),
-    TAGS("Your tag vocabulary.", "SETTINGS · TAGS"),
-}
+// The slim Settings screens (plan 2026-09-24). The pure half — sections, copy,
+// the settings-link parser — is SettingsModel.kt; Notifications & calls is
+// NotificationsCallsContent.kt; the Areas & tags sheet is AreasTagsSheet.kt.
 
-private val HUB = listOf(
-    "Account" to SettingsSection.ACCOUNT, "People" to SettingsSection.PEOPLE, "Focus" to SettingsSection.FOCUS,
-    CALLS_NAV_TITLE to SettingsSection.CALLS, "Sound" to SettingsSection.SOUND,
-    "Accessibility" to SettingsSection.A11Y, "Interface" to SettingsSection.INTERFACE,
-    FactsPanelCopy.NAV_TITLE to SettingsSection.MEMORY, "Backup" to SettingsSection.BACKUP,
-    "Areas" to SettingsSection.AREAS, "Tags" to SettingsSection.TAGS,
-)
+// ── The hub ──────────────────────────────────────────────────────────────
 
+/**
+ * Account card · the four screens · Send feedback + Replay the tour · the
+ * Terms / Privacy / version footer. Every row is a pushed screen (never an
+ * inline control): the tour's settings steps rely on their section being the
+ * topmost route for the scoped lockdown exemption.
+ */
 @Composable
-fun SettingsHub(vm: AppViewModel, onBack: () -> Unit, onSection: (SettingsSection) -> Unit, onInsights: () -> Unit) {
+fun SettingsHub(vm: AppViewModel, onBack: () -> Unit, onSection: (SettingsSection) -> Unit, onFeedback: () -> Unit) {
     val c = UTheme.colors
+    val name by vm.currentNameState.collectAsStateWithLifecycle()
+    val email = vm.currentEmail
     Column(Modifier.fillMaxSize().background(c.bg)) {
-        AppBar(title = "Settings", leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp)) {
-            SectionLabel("Settings", color = c.primaryDeep, modifier = Modifier.padding(top = 4.dp))
-            Text("How Unstuck behaves.", style = UFont.serifItalic(28), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 14.dp))
-            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp))) {
-                HUB.forEachIndexed { i, (label, section) ->
-                    if (i > 0) Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
-                    Row(Modifier.fillMaxWidth().clickable { onSection(section) }.padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-                        Text(label, style = UFont.sans(14, FontWeight.Medium), color = c.ink, modifier = Modifier.weight(1f))
-                        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = c.ink3, modifier = Modifier.height(18.dp))
-                    }
+        AppBar(title = SettingsCopy.HUB_TITLE, leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
+        Column(
+            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
+        ) {
+            Column {
+                SectionLabel(SettingsCopy.HUB_TITLE, color = c.primaryDeep, modifier = Modifier.padding(top = 4.dp))
+                Text(SettingsCopy.HUB_HEADING, style = UFont.serifItalic(28), color = c.ink, modifier = Modifier.padding(top = 4.dp).semantics { heading() })
+            }
+            AccountCard(name = name, email = email) { onSection(SettingsSection.ACCOUNT) }
+
+            SettingsCard {
+                SETTINGS_HUB_ROWS.forEachIndexed { i, section ->
+                    SettingRow(
+                        section.row, sub = section.rowSub, last = i == SETTINGS_HUB_ROWS.lastIndex, chevron = true,
+                        modifier = Modifier.testTag(section.testTag),
+                    ) { onSection(section) }
                 }
             }
-            Box(Modifier.padding(24.dp)) {}
+
+            SettingsCard {
+                SettingRow(SettingsCopy.SEND_FEEDBACK, SettingsCopy.SEND_FEEDBACK_SUB, modifier = Modifier.testTag(SettingsCopy.FEEDBACK_TAG)) { onFeedback() }
+                // Locked while a run is up (the row would restart the tour under itself).
+                val running = TourEvents.running
+                SettingRow(
+                    SettingsCopy.REPLAY_TOUR, if (running) SettingsCopy.REPLAY_TOUR_RUNNING else SettingsCopy.REPLAY_TOUR_SUB,
+                    last = true, enabled = !running, lockedSub = SettingsCopy.REPLAY_TOUR_RUNNING,
+                    modifier = Modifier.testTag(SettingsCopy.TOUR_TAG),
+                ) { TourEvents.requestRestart() }
+            }
+
+            SettingsFooter()
+            Box(Modifier.height(24.dp))
         }
     }
 }
 
+/** The profile card: initials, name, and the email as its subtitle. */
 @Composable
-fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> Unit) {
+private fun AccountCard(name: String?, email: String?, onClick: () -> Unit) {
     val c = UTheme.colors
-    val s by vm.settings.collectAsStateWithLifecycle()
-    val context = LocalContext.current
-    Column(Modifier.fillMaxSize().background(c.bg)) {
-        AppBar(title = section.name.lowercase().replaceFirstChar { it.uppercase() }, leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp)) {
-            SectionLabel(section.eyebrow, color = c.primaryDeep, modifier = Modifier.padding(top = 4.dp))
-            Text(section.title, style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
-            when (section) {
-                SettingsSection.AREAS -> AreasContent(vm)
-                SettingsSection.TAGS -> TagsContent(vm)
-                SettingsSection.ACCOUNT -> AccountContent(vm)
-                SettingsSection.PEOPLE -> ConnectionsContent(vm)
-                SettingsSection.MEMORY -> FactsPanelContent(vm)
-                SettingsSection.CALLS -> CallsContent(vm)
-                SettingsSection.FOCUS -> SettingsCard {
-                    SegRow("Default focus length", listOf("15", "25", "45"), s.focusDefaultMin.toString()) { v ->
-                        vm.updateSettings { it.copy(focusDefaultMin = v.toIntOrNull() ?: 25) }
-                    }
-                    SegRow("Soft overrun", listOf("Off", "5", "10"), if (s.focusOverrunMin == 0) "Off" else s.focusOverrunMin.toString()) { v ->
-                        vm.updateSettings { it.copy(focusOverrunMin = v.toIntOrNull() ?: 0) }
-                    }
-                    SegRow("Remind me before tasks", listOf("Off", "5", "10", "15"), if (s.reminderLeadMin == 0) "Off" else s.reminderLeadMin.toString()) { v ->
-                        vm.updateSettings { it.copy(reminderLeadMin = v.toIntOrNull() ?: 0) }
-                        runCatching { tech.csalliance.unstuck.surface.ReminderScheduler.reschedule(context.applicationContext as tech.csalliance.unstuck.UnstuckApp) }
-                    }
-                    // tourAnchor: the guided tour's "You set how present it is"
-                    // step rings this notification-presence block (Android's
-                    // Calm/Balanced/Coach control lives here, not on a
-                    // dedicated Notifications screen).
-                    Column(Modifier.tourAnchor(TourAnchorIds.NOTIF_BODY)) {
-                        SegRow("Notifications", listOf("Calm", "Balanced", "Coach"), s.notificationLevel.label) { v ->
-                            vm.updateSettings { it.copy(notificationLevel = tech.csalliance.unstuck.NotificationLevel.fromLabel(v)) }
-                            runCatching { tech.csalliance.unstuck.surface.ReminderScheduler.reschedule(context.applicationContext as tech.csalliance.unstuck.UnstuckApp) }
-                        }
-                        Text(
-                            s.notificationLevel.blurb,
-                            style = UFont.sans(12, FontWeight.Normal),
-                            color = c.ink2,
-                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
-                        )
-                    }
-                    ExactAlarmRow(s)
-                    ToggleRow("Hide right rail while focusing", s.focusCollapseRail) { v -> vm.updateSettings { it.copy(focusCollapseRail = v) } }
-                    ToggleRow("Soft exit", s.focusSoftExit) { v -> vm.updateSettings { it.copy(focusSoftExit = v) } }
-                    ToggleRow("Pause reasons", s.focusPauseReasons) { v -> vm.updateSettings { it.copy(focusPauseReasons = v) } }
-                    // Hands-Free Focus Copilot (Phase 1, on-device, no LLM/network).
-                    ToggleRow("Spoken focus coach", s.focusCopilotSpeak) { v -> vm.updateSettings { it.copy(focusCopilotSpeak = v) } }
-                    Text(
-                        "Speaks short progress check-ins out loud during a focus block (halfway, five-to-go, time's up). On-device.",
-                        style = UFont.sans(12, FontWeight.Normal), color = c.ink2,
-                        modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = if (s.focusCopilotSpeak) 0.dp else 12.dp),
-                    )
-                    // Sub-toggle: only meaningful when the spoken coach is on (it adds the mic).
-                    if (s.focusCopilotSpeak) {
-                        ToggleRow("Voice replies", s.focusCopilotVoice, last = true) { v -> vm.updateSettings { it.copy(focusCopilotVoice = v) } }
-                        Text(
-                            "After a spoken question, listen for a hands-free reply (\"add five\", \"stop\", \"keep going\", \"note …\"). Uses the mic only for a few seconds; nothing is recorded or sent.",
-                            style = UFont.sans(12, FontWeight.Normal), color = c.ink2,
-                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
-                        )
-                    }
-                }
-                SettingsSection.SOUND -> SettingsCard {
-                    ToggleRow("Start chime", s.soundStartChime) { v -> vm.updateSettings { it.copy(soundStartChime = v) } }
-                    ToggleRow("Overrun bell", s.soundOverrunBell) { v -> vm.updateSettings { it.copy(soundOverrunBell = v) } }
-                    ToggleRow("Completion sound", s.soundCompletion) { v -> vm.updateSettings { it.copy(soundCompletion = v) } }
-                    SegRow("Ambient", listOf("off", "brown", "pink"), s.ambient, last = true) { v -> vm.updateSettings { it.copy(ambient = v) } }
-                }
-                SettingsSection.A11Y -> SettingsCard {
-                    ToggleRow("Reduce motion", s.reduceMotion) { v -> vm.updateSettings { it.copy(reduceMotion = v) } }
-                    ToggleRow("Larger type", s.largerType) { v -> vm.updateSettings { it.copy(largerType = v) } }
-                    ToggleRow("High contrast", s.highContrast) { v -> vm.updateSettings { it.copy(highContrast = v) } }
-                    ToggleRow("Keyboard hints", s.keyboardHints, last = true) { v -> vm.updateSettings { it.copy(keyboardHints = v) } }
-                }
-                SettingsSection.INTERFACE -> SettingsCard {
-                    SegRow("Theme", listOf("system", "light", "dark"), s.theme.name.lowercase()) { v ->
-                        vm.updateSettings { it.copy(theme = ThemePref.valueOf(v.uppercase())) }
-                    }
-                    // The AI Assistant kill-switch the privacy policy promises
-                    // ("Settings → Interface → AI Assistant. Turn it off entirely").
-                    // Same slot as web (directly under Theme); off unmounts the
-                    // launcher so nothing reaches the AI provider.
-                    ToggleRow("AI Assistant", s.assistantEnabled) { v -> vm.updateSettings { it.copy(assistantEnabled = v) } }
-                    // Realtime voice fallback (bargein.md §8): press-and-hold instead of
-                    // an open mic. Device-local (SettingsStore key voice.holdToTalk, same
-                    // slot as web "Voice: hold to talk"); a voice session reads it once
-                    // at start, and the in-call "Noisy room?" chip flips it too.
-                    if (s.assistantEnabled) {
-                        val voiceStore = remember { SettingsStore(context) }
-                        var holdToTalk by remember { mutableStateOf(voiceStore.voiceHoldToTalk()) }
-                        ToggleRow("Hold to talk", holdToTalk) { v -> holdToTalk = v; voiceStore.setVoiceHoldToTalk(v) }
-                        Text(
-                            "For noisy rooms: press and hold the orb to speak; release to send",
-                            style = UFont.sans(12, FontWeight.Normal), color = c.ink2,
-                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
-                        )
-                    }
-                    ClearAssistantHistoryRow(vm)
-                    SegRow("Accent", listOf("indigo", "rose", "forest"), accentKey(s.accent)) { v ->
-                        vm.updateSettings { it.copy(accent = accentFromKey(v)) }
-                    }
-                    SegRow("Density", listOf("compact", "regular", "comfy"), s.density.name.lowercase(), last = true) { v ->
-                        vm.updateSettings { it.copy(density = Density.valueOf(v.uppercase())) }
-                    }
-                }
-                SettingsSection.BACKUP -> BackupContent(vm)
-            }
-            Box(Modifier.padding(24.dp)) {}
-        }
-    }
-}
-
-// ── Calls from Unstuck (iOS App/Calls/CallSettingsView.swift, copy verbatim) ──
-
-/** The hub row / nav title. */
-internal const val CALLS_NAV_TITLE = "Calls from Unstuck"
-internal const val CALLS_EXPLAINER_TITLE = "Ask, and Unstuck calls you"
-internal const val CALLS_EXPLAINER_BODY = "Say \"call me at three about the James meeting — remind me about A, B and C\", or tick \"Call me about this\" on a task. Your phone rings like a normal call, the notes are read back, then you can tick things off, add a thought, start a timer, or ask for a call-back — all by voice. Nothing is booked unless you ask."
-internal const val CALLS_DEVICE_READY = "This phone can take calls."
-/** Android's analogue of the iOS "waiting for the call token" line: the API 34
- *  full-screen-intent grant is what lets the ring take the lock screen. */
-internal const val CALLS_FULL_SCREEN_OFF = "Full-screen calls are off for Unstuck — a call shows as a notification until you allow them."
-internal const val CALLS_FULL_SCREEN_ROW = "Allow full-screen calls"
-internal const val CALLS_FULL_SCREEN_ROW_SUB = "Lets a call take over the lock screen, like the phone app"
-/** The one-time nudge's explainer (Android's twin of the iOS VoIP-registration
- *  nudge): without the grant a call arrives as a notification you tap. */
-internal const val CALLS_FULL_SCREEN_NUDGE = "Calls need the full-screen permission on this phone — without it a call arrives as a notification you tap instead of a ring."
-internal const val CALLS_FULL_SCREEN_DISMISS = "Not now"
-internal const val CALLS_ENABLED_ROW = "Calls from Unstuck"
-internal const val CALLS_ENABLED_OFF_HINT = "Calls are declined quietly — you get the notes as a notification instead."
-internal const val CALLS_ASSISTANT_OFF_HINT = "Calls are part of the AI Assistant — turn it on under Settings → Interface to receive them."
-internal const val CALLS_HOURS_HINT_SUFFIX = "A call outside these hours is declined quietly and you get the notes as a notification instead."
-internal const val CALLS_LEAD_HINT = "\"Call me about this\" on a scheduled task rings this many minutes before it starts."
-internal const val CALLS_TEST_BODY = "Book a test call for one minute from now. Lock your phone — it rings through the real path (server → push → call screen)."
-// The three OPT-IN proactive calls (calls build-out 2026-09-20; iOS CallSettingsView.proactiveCard, copy verbatim).
-internal const val CALLS_PROACTIVE_SECTION = "Calls Unstuck can make on its own"
-internal const val CALLS_PROACTIVE_MORNING = "Morning planning call"
-internal const val CALLS_PROACTIVE_MORNING_SUB = "Rings to walk through the day and plan it with you."
-internal const val CALLS_PROACTIVE_EVENING = "Evening wrap-up call"
-internal const val CALLS_PROACTIVE_EVENING_SUB = "Rings to go over what got done and what moves to tomorrow."
-internal const val CALLS_PROACTIVE_AFTER_BLOCK = "Check in after a block"
-internal const val CALLS_PROACTIVE_AFTER_BLOCK_SUB = "Rings when a block ends without its task marked done — how did it go?"
-internal const val CALLS_PROACTIVE_AT = "At"
-/** The old line ("They ring within your allowed hours, on every phone where
- *  calls are on") was false: the dispatcher books 06:00–23:00 whatever the
- *  phone's hours, and the phone then declines (parity with iOS build 81,
- *  audit 2026-09-22 C12). */
-internal fun callsProactiveHint(clock: ClockMode): String {
-    val w = tech.csalliance.unstuck.core.logic.CallSettingsLogic.SERVER_WINDOW
-    return "All off unless you switch them on. Unstuck books them between " +
-        "${ClockFormat.time(w.start, clock)} and ${ClockFormat.time(w.endInclusive, clock)}; " +
-        "this phone still declines one outside the allowed hours above, or while Calls is off."
-}
-/** Under the Calls switch when the microphone was refused (iOS build 78): the
- *  phone rings, but the call can't hear them. A tap asks again while Android
- *  still offers the prompt, else opens the app's system page ([callsMicHint]). */
-internal const val CALLS_MIC_DENIED_HINT = "Calls need microphone access — turn it on in Android Settings, or you'll ring but can't be heard."
-/** The red [CALLS_MIC_DENIED_HINT] line and what a tap on it does. */
-internal enum class MicHint { NONE, ASK, OPEN_SETTINGS }
-
-/** iOS shows the line whenever the microphone is denied, from the moment the
- *  screen opens. Android reports a refusal only while it still offers the
- *  prompt ([canAskAgain] = shouldShowRequestPermissionRationale) — then a tap
- *  asks again. After "don't ask again" it can't be told from never asked, so
- *  the line shows once refused here, and a tap opens the app's system page. */
-internal fun callsMicHint(granted: Boolean, canAskAgain: Boolean, refusedHere: Boolean): MicHint = when {
-    granted -> MicHint.NONE
-    canAskAgain -> MicHint.ASK
-    refusedHere -> MicHint.OPEN_SETTINGS
-    else -> MicHint.NONE
-}
-/** "Test call now" without the microphone (iOS build 78). */
-internal const val CALLS_TEST_MIC_REFUSED = "Calls need microphone access — turn it on for Unstuck in Android Settings."
-internal const val CALLS_TEST_BUTTON = "Test call now"
-internal const val CALLS_TEST_BOOKING = "Booking…"
-internal const val CALLS_DND_HINT = "Under Do Not Disturb, a call only rings if Unstuck's Calls notifications are allowed to interrupt."
-internal const val CALLS_DND_ROW = "Calls notification channel"
-internal const val CALLS_DND_ROW_SUB = "Sound, vibration and Do Not Disturb for the ring"
-/** The ring channel CallRinger posts on (calls/CallNotifications, C1 ring-ui). */
-internal const val CALLS_CHANNEL_ID = "unstuck_calls"
-
-/** "Test call now" outcome — iOS `TestState`. */
-internal sealed class TestCallState {
-    data object Idle : TestCallState()
-    data object Booking : TestCallState()
-    data class Booked(val at: String) : TestCallState()
-    data class Failed(val why: String) : TestCallState()
-}
-
-/** Pure mapping of the request_call result → the card's state (iOS
- *  bookTestCall): an `ok:` carries the time the row landed on. */
-internal fun testCallStateFrom(result: String, clock: ClockMode): TestCallState {
-    val m = Regex("^ok: call booked \\S+ (\\d{2}:\\d{2})").find(result)
-    return if (m != null) TestCallState.Booked(m.groupValues[1])
-    else TestCallState.Failed(tech.csalliance.unstuck.ui.tasks.CallMeLogic.userMessage(result, clock).let { if (it.endsWith(".")) it else "$it." })
-}
-
-/** iOS "Booked — ringing at HH:MM. Lock your phone and wait." — [at] is the
- *  booked 'HH:MM', shown the phone's way ([clock]). */
-internal fun testCallBookedLine(at: String, clock: ClockMode) = "Booked — ringing at ${ClockFormat.time(at, clock)}. Lock your phone and wait."
-
-/** Allowed-hours sub-line: the user's hint + the server window, the phone's [clock]. */
-internal fun callsHoursHint(clock: ClockMode): String {
-    val w = tech.csalliance.unstuck.core.logic.CallSettingsLogic.SERVER_WINDOW
-    return "$CALLS_HOURS_HINT_SUFFIX Calls can only be booked between ${ClockFormat.time(w.start, clock)} and ${ClockFormat.time(w.endInclusive, clock)}."
-}
-
-/** API 34+: has the user (or Play's calling-app classification) allowed
- *  USE_FULL_SCREEN_INTENT? Below 34 the manifest permission is enough. */
-private fun canUseFullScreenIntent(context: android.content.Context): Boolean {
-    if (android.os.Build.VERSION.SDK_INT < 34) return true
-    val nm = context.getSystemService(android.content.Context.NOTIFICATION_SERVICE) as? android.app.NotificationManager ?: return true
-    return runCatching { nm.canUseFullScreenIntent() }.getOrDefault(true)
-}
-
-@Composable
-private fun CallsContent(vm: AppViewModel) {
-    val c = UTheme.colors
-    val context = LocalContext.current
-    val scope = rememberCoroutineScope()
-    val s by vm.settings.collectAsStateWithLifecycle()
-    val cs by vm.callSettings.collectAsStateWithLifecycle()
-    val proactive by vm.callProactivePrefs.collectAsStateWithLifecycle()
-    val nudgeDismissed by vm.ringNudgeDismissed.collectAsStateWithLifecycle()
-    // Every time on this screen — the hours, the proactive times, the pickers and
-    // the warnings — follows the phone's 12/24-hour setting.
-    val clock = tech.csalliance.unstuck.ui.components.clockMode()
-    var testState by remember { mutableStateOf<TestCallState>(TestCallState.Idle) }
-    // Ask for the microphone while they're looking at this screen: the first
-    // prompt otherwise lands mid-ring, over the lock screen (parity with iOS
-    // build 78, 0f24908; the Answer-time request stays as the backstop).
-    fun micGranted() = androidx.core.content.ContextCompat.checkSelfPermission(context, android.Manifest.permission.RECORD_AUDIO) ==
-        android.content.pm.PackageManager.PERMISSION_GRANTED
-    // A refusal from before this screen (at a ring's Answer, say) shows too, as
-    // iOS build 78 reads the denied state on open — Android reports one only
-    // while it still offers the prompt (callsMicHint).
-    fun micCanAskAgain(): Boolean {
-        var host: android.content.Context? = context
-        while (host is android.content.ContextWrapper && host !is android.app.Activity) host = host.baseContext
-        val activity = host as? android.app.Activity ?: return false
-        return androidx.core.app.ActivityCompat.shouldShowRequestPermissionRationale(activity, android.Manifest.permission.RECORD_AUDIO)
-    }
-    var micRefusedHere by remember { mutableStateOf(false) }
-    var micCheck by remember { androidx.compose.runtime.mutableIntStateOf(0) }
-    val micHint = remember(micCheck, micRefusedHere) { callsMicHint(micGranted(), micCanAskAgain(), micRefusedHere) }
-    var testAfterMic by remember { mutableStateOf(false) }
-    fun bookTest() {
-        testState = TestCallState.Booking
-        scope.launch { testState = testCallStateFrom(vm.bookTestCall(), clock) }
-    }
-    val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        micRefusedHere = !granted
-        micCheck++
-        if (testAfterMic) {
-            testAfterMic = false
-            if (granted) bookTest() else testState = TestCallState.Failed(CALLS_TEST_MIC_REFUSED)
-        }
-    }
-    fun ensureMicrophone() { if (!micGranted()) runCatching { micLauncher.launch(android.Manifest.permission.RECORD_AUDIO) } }
-    // The account's proactive calls: a toggle made on the web / iPhone reaches this screen.
-    androidx.compose.runtime.LaunchedEffect(Unit) { vm.refreshCallProactivePrefs() }
-    // Re-check the full-screen grant whenever we come back from the system page.
-    var fullScreenOk by remember { mutableStateOf(canUseFullScreenIntent(context)) }
-    val lifecycleOwner = androidx.lifecycle.compose.LocalLifecycleOwner.current
-    androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
-        val obs = androidx.lifecycle.LifecycleEventObserver { _, e ->
-            if (e == androidx.lifecycle.Lifecycle.Event.ON_RESUME) {
-                fullScreenOk = canUseFullScreenIntent(context)
-                // Back from the app's system page with the mic turned on.
-                micCheck++
-            }
-        }
-        lifecycleOwner.lifecycle.addObserver(obs)
-        onDispose { lifecycleOwner.lifecycle.removeObserver(obs) }
-    }
-
-    fun pickHour(current: String, commit: (String) -> Unit) {
-        val parts = current.split(":").mapNotNull { it.toIntOrNull() }
-        val h0 = parts.getOrNull(0) ?: 8
-        val m0 = parts.getOrNull(1) ?: 0
-        android.app.TimePickerDialog(context, { _, h, m -> commit(WireTime.hm(h, m)) }, h0, m0, clock == ClockMode.H24).show()
-    }
-
-    // Explainer (iOS `explainer` + `deviceStatus`)
-    Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.bg2).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+    val shown = name?.takeIf { it.isNotBlank() }
+    val initials = (shown ?: email ?: "U").split(' ', '.', '@').mapNotNull { it.firstOrNull()?.uppercaseChar() }.take(2).joinToString("").ifEmpty { "U" }
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface)
+            .border(1.dp, c.line, RoundedCornerShape(18.dp))
+            .testTag(SettingsSection.ACCOUNT.testTag)
+            .clickable(role = Role.Button, onClickLabel = "Open Account", onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Icon(Icons.Filled.Call, contentDescription = null, tint = c.primary, modifier = Modifier.size(18.dp))
-            Text(CALLS_EXPLAINER_TITLE, style = UFont.sans(16, FontWeight.SemiBold), color = c.ink)
+        Box(Modifier.size(44.dp).clip(CircleShape).background(c.bg2), contentAlignment = Alignment.Center) {
+            Text(initials, style = UFont.sans(15, FontWeight.SemiBold), color = c.ink2, modifier = Modifier.clearAndSetSemantics {})
         }
-        Text(CALLS_EXPLAINER_BODY, style = UFont.sans(13), color = c.ink2)
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp), modifier = Modifier.padding(top = 4.dp)) {
-            Box(Modifier.size(7.dp).clip(RoundedCornerShape(999.dp)).background(if (fullScreenOk) c.green else c.ink3))
-            Text(if (fullScreenOk) CALLS_DEVICE_READY else CALLS_FULL_SCREEN_OFF, style = UFont.sans(12), color = c.ink3)
+        Column(Modifier.weight(1f)) {
+            Text(shown ?: SettingsCopy.ACCOUNT_FALLBACK, style = UFont.sans(16, FontWeight.SemiBold), color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(email?.takeIf { it.isNotBlank() } ?: SettingsSection.ACCOUNT.rowSub, style = UFont.sans(12), color = c.ink3, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.padding(top = 2.dp))
         }
+        Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = c.ink3, modifier = Modifier.size(18.dp))
     }
+}
 
-    // Risk 1: on API 34 USE_FULL_SCREEN_INTENT is pre-granted only to apps Play
-    // classifies as calling/alarm; otherwise the ring degrades to a heads-up.
-    // The ONE-TIME nudge (iOS's VoIP-registration nudge, Android's shape): shown
-    // until the grant lands or the user says "Not now" — the status line above
-    // keeps saying calls degrade either way. Deep-links the per-app system page.
-    if (tech.csalliance.unstuck.core.logic.CallRingNudge.shouldShow(canRing = fullScreenOk, dismissed = nudgeDismissed)) {
-        SectionLabel("Permission", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
-        SettingsCard {
-            Text(CALLS_FULL_SCREEN_NUDGE, style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 14.dp, bottom = 4.dp))
-            SettingRow(CALLS_FULL_SCREEN_ROW, CALLS_FULL_SCREEN_ROW_SUB) {
-                runCatching {
-                    val i = android.content.Intent(android.provider.Settings.ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT)
-                        .setData(android.net.Uri.parse("package:${context.packageName}"))
-                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-                    context.startActivity(i)
-                }.onFailure {
-                    runCatching {
-                        context.startActivity(android.content.Intent(android.provider.Settings.ACTION_APP_NOTIFICATION_SETTINGS)
-                            .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
-                            .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
-                    }
-                }
-            }
-            SettingRow(CALLS_FULL_SCREEN_DISMISS, null, last = true) { vm.dismissRingNudge() }
+/** Terms · Privacy · Unstuck <version>. Terms and Privacy are real buttons
+ *  (48dp hit area, spoken labels) — one tap from the hub, as the stores ask. */
+@Composable
+private fun SettingsFooter() {
+    val c = UTheme.colors
+    val context = LocalContext.current
+    fun open(url: String) {
+        runCatching {
+            context.startActivity(
+                android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url))
+                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK),
+            )
         }
     }
-
-    // Kill-switch (risk 10: the assistant switch governs calls too).
-    SectionLabel("Calls", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
-    SettingsCard {
-        if (s.assistantEnabled) {
-            ToggleRow(CALLS_ENABLED_ROW, cs.enabled, last = true) { v ->
-                vm.updateCallSettings { it.copy(enabled = v) }
-                if (v) ensureMicrophone()
-            }
-        } else {
-            Text(CALLS_ASSISTANT_OFF_HINT, style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(16.dp))
-        }
-    }
-    if (s.assistantEnabled && !cs.enabled) {
-        Text(CALLS_ENABLED_OFF_HINT, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
-    }
-    if (s.assistantEnabled && cs.enabled && micHint != MicHint.NONE) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.Center) {
+        FooterLink(SettingsCopy.TERMS, SettingsCopy.TERMS_A11Y, "settings-footer-terms") { open(SettingsCopy.TERMS_URL) }
+        Text("·", style = UFont.sans(12), color = c.ink4, modifier = Modifier.clearAndSetSemantics {})
+        FooterLink(SettingsCopy.PRIVACY, SettingsCopy.PRIVACY_A11Y, "settings-footer-privacy") { open(SettingsCopy.PRIVACY_URL) }
+        Text("·", style = UFont.sans(12), color = c.ink4, modifier = Modifier.clearAndSetSemantics {})
         Text(
-            CALLS_MIC_DENIED_HINT, style = UFont.sans(12), color = c.red,
-            modifier = Modifier.padding(top = 10.dp).clickable {
-                if (micHint == MicHint.ASK) ensureMicrophone()
-                else runCatching {
-                    context.startActivity(android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-                        .setData(android.net.Uri.parse("package:${context.packageName}"))
-                        .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
-                }
-            },
+            SettingsCopy.version(BuildConfig.VERSION_NAME, BuildConfig.VERSION_CODE),
+            style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(horizontal = 8.dp),
         )
     }
-
-    // Allowed hours
-    SectionLabel("Allowed hours", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
-    SettingsCard {
-        SettingRow("From", ClockFormat.time(cs.hoursStart, clock)) { pickHour(cs.hoursStart) { hm -> vm.updateCallSettings { it.copy(hoursStart = hm) } } }
-        SettingRow("Until", ClockFormat.time(cs.hoursEnd, clock), last = true) { pickHour(cs.hoursEnd) { hm -> vm.updateCallSettings { it.copy(hoursEnd = hm) } } }
-    }
-    Text(callsHoursHint(clock), style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
-
-    // Default lead
-    SectionLabel("Default lead for task calls", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-        tech.csalliance.unstuck.calls.CallSettingsStore.LEAD_OPTIONS.forEach { m ->
-            tech.csalliance.unstuck.ui.tasks.SelectableChip("${m}m", selected = cs.defaultLeadMin == m, accent = c.primary) {
-                vm.updateCallSettings { it.copy(defaultLeadMin = m) }
-            }
-        }
-    }
-    Text(CALLS_LEAD_HINT, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
-
-    // Calls Unstuck can make on its own — ACCOUNT-wide, off by default
-    // (notification_preferences.call_*; AppViewModel.setCallProactivePrefs).
-    SectionLabel(CALLS_PROACTIVE_SECTION, color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
-    // Will it ring HERE? The amber line under each proactive call, read live
-    // from this screen's switch + hours: the pickers used to accept times the
-    // dispatcher never books or this phone declines every day (parity with iOS
-    // build 81, audit 2026-09-22 C12). A proactive call switched on also asks
-    // for the microphone — the master switch's prompt never ran on a phone
-    // where Calls was on by default.
-    fun proactiveOn(v: Boolean) { if (v && cs.enabled) ensureMicrophone() }
-    SettingsCard {
-        ToggleRow(CALLS_PROACTIVE_MORNING, proactive.morningEnabled, sub = CALLS_PROACTIVE_MORNING_SUB, last = !proactive.morningEnabled) { v ->
-            vm.setCallProactivePrefs(proactive.copy(morningEnabled = v)); proactiveOn(v)
-        }
-        if (proactive.morningEnabled) {
-            SettingRow(CALLS_PROACTIVE_AT, ClockFormat.time(proactive.morningTime, clock), last = true) {
-                pickHour(proactive.morningTime) { hm -> vm.setCallProactivePrefs(vm.callProactivePrefs.value.copy(morningTime = hm)) }
-            }
-            CallSettingsLogic.proactiveTimeWarning(proactive.morningTime, cs.enabled, cs.hoursStart, cs.hoursEnd, clock)?.let { ProactiveWarning(it) }
-        }
-        Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
-        ToggleRow(CALLS_PROACTIVE_EVENING, proactive.eveningEnabled, sub = CALLS_PROACTIVE_EVENING_SUB, last = !proactive.eveningEnabled) { v ->
-            vm.setCallProactivePrefs(proactive.copy(eveningEnabled = v)); proactiveOn(v)
-        }
-        if (proactive.eveningEnabled) {
-            SettingRow(CALLS_PROACTIVE_AT, ClockFormat.time(proactive.eveningTime, clock), last = true) {
-                pickHour(proactive.eveningTime) { hm -> vm.setCallProactivePrefs(vm.callProactivePrefs.value.copy(eveningTime = hm)) }
-            }
-            CallSettingsLogic.proactiveTimeWarning(proactive.eveningTime, cs.enabled, cs.hoursStart, cs.hoursEnd, clock)?.let { ProactiveWarning(it) }
-        }
-        Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
-        ToggleRow(CALLS_PROACTIVE_AFTER_BLOCK, proactive.afterBlockEnabled, sub = CALLS_PROACTIVE_AFTER_BLOCK_SUB, last = true) { v ->
-            vm.setCallProactivePrefs(proactive.copy(afterBlockEnabled = v)); proactiveOn(v)
-        }
-        if (proactive.afterBlockEnabled) CallSettingsLogic.afterBlockWarning(cs.enabled, cs.hoursStart, cs.hoursEnd, clock)?.let { ProactiveWarning(it) }
-    }
-    Text(callsProactiveHint(clock), style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
-
-    // Try it
-    SectionLabel("Try it", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
-    Column(
-        Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp)).padding(16.dp),
-        verticalArrangement = Arrangement.spacedBy(10.dp),
-    ) {
-        Text(CALLS_TEST_BODY, style = UFont.sans(13), color = c.ink2)
-        val booking = testState == TestCallState.Booking
-        UButton(
-            if (booking) CALLS_TEST_BOOKING else CALLS_TEST_BUTTON, kind = ButtonKind.PRIMARY, leadingIcon = Icons.Filled.Call,
-            enabled = !booking && vm.callsAvailable(),
-        ) {
-            // A test call that rings and then can't hear them is worse than none:
-            // ask first, while the app is in front of them (iOS build 78).
-            if (!micGranted()) {
-                testAfterMic = true
-                runCatching { micLauncher.launch(android.Manifest.permission.RECORD_AUDIO) }
-                    .onFailure { testAfterMic = false; testState = TestCallState.Failed(CALLS_TEST_MIC_REFUSED) }
-            } else bookTest()
-        }
-        when (val t = testState) {
-            is TestCallState.Booked -> Text(testCallBookedLine(t.at, clock), style = UFont.sans(12), color = c.green)
-            is TestCallState.Failed -> Text(t.why, style = UFont.sans(12), color = c.red)
-            else -> {}
-        }
-    }
-
-    // DND (risk 7): full-screen rings are suppressed under DND unless the channel may interrupt.
-    SectionLabel("Do Not Disturb", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
-    SettingsCard {
-        SettingRow(CALLS_DND_ROW, CALLS_DND_ROW_SUB, last = true) {
-            runCatching {
-                context.startActivity(android.content.Intent(android.provider.Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS)
-                    .putExtra(android.provider.Settings.EXTRA_APP_PACKAGE, context.packageName)
-                    .putExtra(android.provider.Settings.EXTRA_CHANNEL_ID, CALLS_CHANNEL_ID)
-                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
-            }
-        }
-    }
-    Text(CALLS_DND_HINT, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
 }
 
-/** The amber "will it ring here?" line under a proactive call (C12). */
 @Composable
-private fun ProactiveWarning(warning: String) {
-    Text(warning, style = UFont.sans(12), color = UTheme.colors.amberInk, modifier = Modifier.padding(start = 16.dp, end = 16.dp, bottom = 12.dp))
+private fun FooterLink(label: String, a11y: String, tag: String, onClick: () -> Unit) {
+    val c = UTheme.colors
+    Box(
+        Modifier.clip(RoundedCornerShape(8.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .minimumInteractiveComponentSize()
+            .semantics { contentDescription = a11y }
+            .testTag(tag)
+            .padding(horizontal = 8.dp),
+        contentAlignment = Alignment.Center,
+    ) { Text(label, style = UFont.sans(12, FontWeight.Medium), color = c.ink2, modifier = Modifier.clearAndSetSemantics {}) }
 }
+
+// ── A pushed screen ─────────────────────────────────────────────────────
+
+@Composable
+fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> Unit, onSection: (SettingsSection) -> Unit) {
+    val c = UTheme.colors
+    Column(Modifier.fillMaxSize().background(c.bg)) {
+        AppBar(title = section.title, leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
+        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp)) {
+            SectionLabel("${SettingsCopy.HUB_TITLE} · ${section.title}", color = c.primaryDeep, modifier = Modifier.padding(top = 4.dp))
+            Text(
+                section.heading, style = UFont.serifItalic(26), color = c.ink,
+                modifier = Modifier.padding(top = 4.dp, bottom = 12.dp).semantics { heading() },
+            )
+            when (section) {
+                SettingsSection.ACCOUNT -> AccountContent(vm)
+                SettingsSection.NOTIFICATIONS -> NotificationsCallsContent(vm, onSection)
+                SettingsSection.ASSISTANT -> AssistantPrivacyContent(vm, onSection)
+                SettingsSection.MEMORY -> {
+                    val s by vm.settings.collectAsStateWithLifecycle()
+                    FactsPanelContent(vm, canAdd = s.assistantEnabled)
+                }
+                SettingsSection.PEOPLE -> ConnectionsContent(vm)
+                SettingsSection.APPEARANCE -> AppearanceContent(vm)
+            }
+            Box(Modifier.padding(24.dp)) {}
+        }
+    }
+}
+
+// ── Appearance ──────────────────────────────────────────────────────────
+
+internal fun themeLabel(t: ThemePref): String = when (t) {
+    ThemePref.SYSTEM -> "System"
+    ThemePref.LIGHT -> "Light"
+    ThemePref.DARK -> "Dark"
+}
+
+internal fun themeFromLabel(l: String): ThemePref = when (l) {
+    "Light" -> ThemePref.LIGHT
+    "Dark" -> ThemePref.DARK
+    else -> ThemePref.SYSTEM
+}
+
+@Composable
+private fun AppearanceContent(vm: AppViewModel) {
+    val s by vm.settings.collectAsStateWithLifecycle()
+    SettingsCard {
+        SegBlock(SettingsCopy.THEME, SettingsCopy.THEME_OPTIONS, themeLabel(s.theme)) { v ->
+            vm.updateSettings { it.copy(theme = themeFromLabel(v)) }
+        }
+        SegBlock(SettingsCopy.TEXT_SIZE, TextSize.entries.map { it.label }, s.textSize.label, sub = SettingsCopy.TEXT_SIZE_SUB, last = true) { v ->
+            vm.updateSettings { it.copy(textSize = TextSize.fromLabel(v)) }
+        }
+    }
+    SettingsNote(SettingsCopy.APPEARANCE_NOTE)
+}
+
+// ── Assistant & privacy ─────────────────────────────────────────────────
+
+/** The whole screen stays when the AI is off (plan: only "Add a fact" hides):
+ *  what it remembers and the stored history are the user's to see and delete
+ *  either way. */
+@Composable
+private fun AssistantPrivacyContent(vm: AppViewModel, onSection: (SettingsSection) -> Unit) {
+    val s by vm.settings.collectAsStateWithLifecycle()
+    val consent by vm.aiConsent.collectAsStateWithLifecycle()
+    val sharing = vm.aiConsentGranted(consent)
+    SettingsCard {
+        // The kill-switch the privacy policy promises ("Assistant & privacy →
+        // AI Assistant. Turn it off entirely"): off unmounts the launcher, so
+        // nothing reaches the AI provider; calls are declined with it.
+        ToggleRow(SettingsCopy.AI_ASSISTANT, s.assistantEnabled, sub = SettingsCopy.AI_ASSISTANT_SUB, modifier = Modifier.testTag("settings-ai-assistant")) { v ->
+            vm.updateSettings { it.copy(assistantEnabled = v) }
+        }
+        // "AI data sharing" (core AIConsent; the policy's "Assistant & privacy →
+        // AI data sharing"): whether the account has agreed to its words and
+        // voice going to OpenAI. Off clears the OK on every device and turns
+        // Calls off; on shows the consent sheet. Locked during the tour.
+        ToggleRow(
+            SettingsCopy.AI_DATA_SHARING, sharing,
+            sub = if (sharing) SettingsCopy.AI_DATA_SHARING_ON else SettingsCopy.AI_DATA_SHARING_OFF,
+            enabled = !TourEvents.running,
+            modifier = Modifier.testTag(SettingsCopy.AI_DATA_SHARING_TAG),
+        ) { want ->
+            if (want) vm.withAIConsent(AIConsent.Action.SETTINGS, AIConsentHost.SETTINGS) {} else vm.revokeAIConsent()
+        }
+        AIConsentNoteLine(vm, AIConsentHost.SETTINGS, Modifier.padding(start = 16.dp, end = 16.dp, bottom = 10.dp))
+        SettingRow(SettingsSection.MEMORY.row, SettingsSection.MEMORY.rowSub, chevron = true, modifier = Modifier.testTag(SettingsSection.MEMORY.testTag)) {
+            onSection(SettingsSection.MEMORY)
+        }
+        ClearAssistantHistoryRow(vm)
+    }
+}
+
+// ── Delete conversation history (the privacy policy's §9.5 / §17 control) ──
+
+internal const val CLEAR_HISTORY_ROW = SettingsCopy.DELETE_HISTORY
+internal const val CLEAR_HISTORY_IDLE = "What you've said to it is kept 90 days. Delete it now."
+internal const val CLEAR_HISTORY_CLEARING = "Deleting…"
+internal const val CLEAR_HISTORY_FAILED = "Couldn't delete it. Try again."
+
+/** The row's sub-line: idle, deleting, or what the last delete did ([result]
+ *  = rows deleted, or the failure). */
+internal fun clearHistoryLine(clearing: Boolean, result: Result<Int>?): String = when {
+    clearing -> CLEAR_HISTORY_CLEARING
+    result == null -> CLEAR_HISTORY_IDLE
+    else -> result.fold(
+        onSuccess = { n -> if (n == 0) "Nothing was stored." else "Deleted $n stored line${if (n == 1) "" else "s"}." },
+        onFailure = { CLEAR_HISTORY_FAILED },
+    )
+}
+
+/** Conversations are kept 90 days; this deletes them now. Turning the
+ *  Assistant off only stops FUTURE logging, so the row shows whether the AI is
+ *  on or off; locked while the guided tour runs, like the other server-writing
+ *  rows. */
+@Composable
+private fun ClearAssistantHistoryRow(vm: AppViewModel) {
+    val scope = rememberCoroutineScope()
+    var clearing by remember { mutableStateOf(false) }
+    var result by remember { mutableStateOf<Result<Int>?>(null) }
+    SettingRow(CLEAR_HISTORY_ROW, clearHistoryLine(clearing, result), last = true, enabled = !TourEvents.running, modifier = Modifier.testTag("settings-delete-history")) {
+        if (clearing) return@SettingRow
+        clearing = true
+        result = null
+        scope.launch {
+            result = vm.clearAssistantHistory()
+            clearing = false
+        }
+    }
+}
+
+// ── Account ─────────────────────────────────────────────────────────────
 
 /** "Export everything" into the document at [uri]. The ViewModel reads and writes it
  *  off the main thread ([AppViewModel.exportTo]); the outcome goes to [show] and to a
@@ -609,79 +339,14 @@ private fun startExport(vm: AppViewModel, context: android.content.Context, uri:
 }
 
 @Composable
-private fun BackupContent(vm: AppViewModel) {
-    val c = UTheme.colors
-    val context = LocalContext.current
-    var msg by remember { mutableStateOf<String?>(null) }
-    var msgErr by remember { mutableStateOf(false) }
-    // Real export — the previous Backup card was inert ("Auto-export every Sunday"
-    // toggle + "Export now" both no-ops). There's no scheduled-backup backend, so we
-    // surface the one thing that actually works: an on-demand full JSON snapshot.
-    val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
-        if (uri != null) startExport(vm, context, uri) { m, failed -> msg = m; msgErr = failed }
-    }
-    // Guided tour: never reachable mid-run (the lockdown exemption is scoped to
-    // the step's own section, and this row stays disabled even so).
-    val tourRunning = TourEvents.running
-    SettingsCard {
-        SettingRow("Export everything", "A full JSON snapshot of your data.", last = true, enabled = !tourRunning) { exporter.launch("unstuck-export.json") }
-    }
-    Text("Your data is yours — export a complete copy any time.", style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 10.dp))
-    msg?.let { Text(it, style = UFont.sans(12), color = if (msgErr) c.red else c.green, modifier = Modifier.padding(top = 8.dp)) }
-}
-
-// ── Clear Assistant history (iOS InterfaceSettingsView, copy verbatim) ──
-
-internal const val CLEAR_HISTORY_ROW = "Clear Assistant history"
-internal const val CLEAR_HISTORY_IDLE = "Delete what you've said to it (kept 90 days)"
-internal const val CLEAR_HISTORY_CLEARING = "Clearing…"
-internal const val CLEAR_HISTORY_FAILED = "Couldn't clear it — try again"
-
-/** The row's sub-line: idle, clearing, or what the last clear did ([result]
- *  = rows deleted, or the failure). */
-internal fun clearHistoryLine(clearing: Boolean, result: Result<Int>?): String = when {
-    clearing -> CLEAR_HISTORY_CLEARING
-    result == null -> CLEAR_HISTORY_IDLE
-    else -> result.fold(
-        onSuccess = { n -> if (n == 0) "Nothing was stored" else "Cleared $n stored line${if (n == 1) "" else "s"}" },
-        onFailure = { CLEAR_HISTORY_FAILED },
-    )
-}
-
-/** The control the privacy policy promises (§9.5, §17): conversations are kept
- *  90 days, and the user can clear them now. Turning the Assistant off only
- *  stops FUTURE logging — before this there was no way to remove what was
- *  already stored short of deleting the account (audit 2026-09-21; parity with
- *  iOS build 78, 0f24908). Shown whether or not the Assistant is on, as on iOS;
- *  locked while the guided tour runs, like the other server-writing rows. */
-@Composable
-private fun ClearAssistantHistoryRow(vm: AppViewModel) {
-    val scope = rememberCoroutineScope()
-    var clearing by remember { mutableStateOf(false) }
-    var result by remember { mutableStateOf<Result<Int>?>(null) }
-    SettingRow(CLEAR_HISTORY_ROW, clearHistoryLine(clearing, result), enabled = !TourEvents.running) {
-        if (clearing) return@SettingRow
-        clearing = true
-        result = null
-        scope.launch {
-            result = vm.clearAssistantHistory()
-            clearing = false
-        }
-    }
-}
-
-@Composable
 private fun AccountContent(vm: AppViewModel) {
     val c = UTheme.colors
     val scope = rememberCoroutineScope()
     val context = LocalContext.current
+    val name by vm.currentNameState.collectAsStateWithLifecycle()
     var showName by remember { mutableStateOf(false) }
     var showPassword by remember { mutableStateOf(false) }
     var showDelete by remember { mutableStateOf(false) }
-    // Feedback used to be a tab inside the assistant sheet; it lives here now so
-    // it isn't gated behind (or lost with) the AI Assistant. Self-contained —
-    // the composer sheet is opened from this row alone.
-    var feedbackOpen by remember { mutableStateOf(false) }
     var msg by remember { mutableStateOf<String?>(null) }
     var msgErr by remember { mutableStateOf(false) }   // render failures in red, not success-green
     val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
@@ -692,28 +357,25 @@ private fun AccountContent(vm: AppViewModel) {
     // danger rows (Export / Delete / Sign out) are DISABLED — the tour's
     // settings-step exemption is scoped to the spotlighted section, and even a
     // path into Account (hub → Account, a deep link) must never expose a real
-    // destructive action from inside a guided demo. "Product tour" stays live.
+    // destructive action from inside a guided demo.
     val tourRunning = TourEvents.running
     SettingsCard {
-        SettingRow("Display name", vm.currentName ?: "Set a name", enabled = !tourRunning) { showName = true }
-        SettingRow("Signed in", vm.currentEmail ?: "—")   // static info — no tap
-        SettingRow(if (vm.hasPassword) "Change password" else "Add a password", "Update your sign-in password", enabled = !tourRunning) { showPassword = true }
-        // Guided tour re-entry for EVERY account (the auto-offer only arms for
-        // accounts that onboard after the tour shipped). TourHost routes this
-        // through resumeDecision: a paused/unfinished run offers the resume
-        // card at its saved step; a finished (or fresh) tour resets to the
-        // welcome card.
-        SettingRow("Product tour", "Resume or replay the guided tour") { TourEvents.requestRestart() }
-        SettingRow("Send feedback", "Bugs, ideas, anything — straight to the team.") { feedbackOpen = true }
-        SettingRow("Export everything", "One-shot JSON snapshot", enabled = !tourRunning) { exporter.launch("unstuck-export.json") }
-        SettingRow("Delete my account", "Permanently removes your data", enabled = !tourRunning) { showDelete = true }
-        SettingRow("Sign out", "End this session", last = true, enabled = !tourRunning) { vm.signOut() }
+        SettingRow(SettingsCopy.DISPLAY_NAME, name?.takeIf { it.isNotBlank() } ?: SettingsCopy.NAME_UNSET, enabled = !tourRunning) { showName = true }
+        SettingRow(
+            if (vm.hasPassword) SettingsCopy.CHANGE_PASSWORD else SettingsCopy.ADD_PASSWORD,
+            if (vm.hasPassword) SettingsCopy.CHANGE_PASSWORD_SUB else SettingsCopy.ADD_PASSWORD_SUB,
+            enabled = !tourRunning,
+        ) { showPassword = true }
+        SettingRow(SettingsCopy.EXPORT, SettingsCopy.EXPORT_SUB, enabled = !tourRunning, modifier = Modifier.testTag("settings-export")) { exporter.launch("unstuck-export.json") }
+        SettingRow(SettingsCopy.SIGN_OUT, SettingsCopy.SIGN_OUT_SUB, enabled = !tourRunning, modifier = Modifier.testTag("settings-sign-out")) { vm.signOut() }
+        SettingRow(
+            SettingsCopy.DELETE_ACCOUNT, SettingsCopy.DELETE_ACCOUNT_SUB, last = true, enabled = !tourRunning, danger = true,
+            modifier = Modifier.testTag("settings-delete-account"),
+        ) { showDelete = true }
     }
     msg?.let { Text(it, style = UFont.sans(12), color = if (msgErr) c.red else c.green, modifier = Modifier.padding(top = 10.dp)) }
 
-    if (feedbackOpen) FeedbackSheet(vm, currentScreen = "settings", onDismiss = { feedbackOpen = false })
-
-    if (showName) FieldDialog("Display name", "Your name", initial = vm.currentName ?: "", onSave = { showName = false; scope.launch { val r = vm.updateDisplayName(it); msgErr = r is AuthOutcome.Error; msg = if (r is AuthOutcome.Error) r.message else "Name updated." } }, onDismiss = { showName = false })
+    if (showName) FieldDialog(SettingsCopy.DISPLAY_NAME, "Your name", initial = name ?: "", onSave = { showName = false; scope.launch { val r = vm.updateDisplayName(it); msgErr = r is AuthOutcome.Error; msg = if (r is AuthOutcome.Error) r.message else "Name updated." } }, onDismiss = { showName = false })
     if (showPassword) PasswordDialog(
         hasPassword = vm.hasPassword,
         onSave = { current, newPw ->
@@ -736,9 +398,6 @@ private fun AccountContent(vm: AppViewModel) {
     if (showDelete) {
         var typed by remember { mutableStateOf("") }
         val email = vm.currentEmail ?: ""
-        // Fall back to typing DELETE when there's no email — otherwise the confirm button
-        // is permanently un-clickable for an email-less account, trapping the user.
-        val confirmWord = email.ifBlank { "DELETE" }
         AlertDialog(
             onDismissRequest = { showDelete = false },
             title = { Text("Delete your account?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
@@ -749,7 +408,7 @@ private fun AccountContent(vm: AppViewModel) {
                 }
             },
             confirmButton = {
-                TextButton(enabled = typed.trim().equals(confirmWord, ignoreCase = true), onClick = {
+                TextButton(enabled = deleteAccountConfirmed(typed, email), onClick = {
                     showDelete = false; scope.launch { val r = vm.deleteAccount(); if (r is AuthOutcome.Error) { msgErr = true; msg = r.message } }
                 }) { Text("Delete forever", color = c.red) }
             },
@@ -758,6 +417,12 @@ private fun AccountContent(vm: AppViewModel) {
         )
     }
 }
+
+/** Delete my account's confirm: the account's email typed back (any case,
+ *  stray spaces ignored) — or DELETE when the account has no email, so an
+ *  email-less account is never trapped behind a button it can't enable. */
+internal fun deleteAccountConfirmed(typed: String, email: String?): Boolean =
+    typed.trim().equals(email?.takeIf { it.isNotBlank() } ?: "DELETE", ignoreCase = true)
 
 @Composable
 private fun PasswordDialog(hasPassword: Boolean, onSave: (current: String, newPw: String) -> Unit, onDismiss: () -> Unit) {
@@ -773,7 +438,7 @@ private fun PasswordDialog(hasPassword: Boolean, onSave: (current: String, newPw
     val canSave = pw.length >= 8 && pw == confirm && (!hasPassword || current.isNotBlank())
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text(if (hasPassword) "Change password" else "Add a password", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+        title = { Text(if (hasPassword) SettingsCopy.CHANGE_PASSWORD else SettingsCopy.ADD_PASSWORD, style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 if (hasPassword) OutlinedTextField(value = current, onValueChange = { current = it }, label = { Text("Current password") }, singleLine = true, visualTransformation = PasswordVisualTransformation())
@@ -789,301 +454,163 @@ private fun PasswordDialog(hasPassword: Boolean, onSave: (current: String, newPw
 }
 
 @Composable
-private fun FieldDialog(title: String, label: String, initial: String = "", password: Boolean = false, onSave: (String) -> Unit, onDismiss: () -> Unit) {
+private fun FieldDialog(title: String, label: String, initial: String = "", onSave: (String) -> Unit, onDismiss: () -> Unit) {
     val c = UTheme.colors
     var value by remember { mutableStateOf(initial) }
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(title, style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
-        text = {
-            OutlinedTextField(
-                value = value, onValueChange = { value = it }, label = { Text(label) }, singleLine = true,
-                visualTransformation = if (password) PasswordVisualTransformation() else androidx.compose.ui.text.input.VisualTransformation.None,
-            )
-        },
+        text = { OutlinedTextField(value = value, onValueChange = { value = it }, label = { Text(label) }, singleLine = true) },
         confirmButton = { TextButton(enabled = value.isNotBlank(), onClick = { onSave(value.trim()) }) { Text("Save", color = c.primaryDeep) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = c.ink2) } },
         containerColor = c.surface,
     )
 }
 
+// ── Shared rows ─────────────────────────────────────────────────────────
+
 @Composable
-private fun AreasContent(vm: AppViewModel) {
+internal fun SettingsCard(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
     val c = UTheme.colors
-    val context = LocalContext.current
-    val areas by vm.lifeAreas.collectAsStateWithLifecycle()
-    val tasks by vm.tasks.collectAsStateWithLifecycle()
-    var draft by remember { mutableStateOf("") }
-    val palette = listOf("indigo", "coral", "green", "amber", "teal", "blue", "violet", "red")
-    Text("Areas filter the same list — flat on purpose.", style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(bottom = 14.dp))
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        areas.sortedBy { it.sortOrder }.forEach { a ->
-            val open = tasks.count { it.lifeArea == a.name && !it.done && it.recurrence == null }
-            var menu by remember(a.id) { mutableStateOf(false) }
-            var confirm by remember(a.id) { mutableStateOf(false) }
-            var editing by remember(a.id) { mutableStateOf(false) }
-            var nameDraft by remember(a.id) { mutableStateOf(a.name) }
-            var palOpen by remember(a.id) { mutableStateOf(false) }
-            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
-                Box {
-                    Box(
-                        Modifier.clickable(role = Role.Button, onClickLabel = "Change color") { palOpen = true }
-                            .minimumInteractiveComponentSize()
-                            .semantics { contentDescription = "Area color: ${a.color}" },
-                        contentAlignment = Alignment.Center,
-                    ) { ColorChip(c.areaColor(a.color), box = 30, dot = 9) }
-                    DropdownMenu(expanded = palOpen, onDismissRequest = { palOpen = false }) {
-                        Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            palette.forEach { col ->
-                                Box(
-                                    Modifier.clickable(role = Role.Button) { vm.recolorLifeArea(a, col); palOpen = false }
-                                        .minimumInteractiveComponentSize()
-                                        .semantics { contentDescription = col; selected = (col == a.color) },
-                                    contentAlignment = Alignment.Center,
-                                ) { ColorChip(c.areaColor(col), box = 26, dot = 8) }
-                            }
-                        }
-                    }
-                }
-                if (editing) {
-                    BasicTextField(value = nameDraft, onValueChange = { nameDraft = it }, textStyle = UFont.sans(14, FontWeight.SemiBold).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
-                    Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable(role = Role.Button) {
-                        val nm = nameDraft.trim()
-                        val dup = areas.any { it.id != a.id && it.name.equals(nm, ignoreCase = true) }
-                        when {
-                            // Blank / unchanged → just close the editor (no-op, no error noise).
-                            nm.isEmpty() -> { nameDraft = a.name; editing = false }
-                            nm == a.name -> editing = false
-                            dup -> android.widget.Toast.makeText(context, "An area named \"$nm\" already exists.", android.widget.Toast.LENGTH_SHORT).show()
-                            else -> { vm.renameLifeArea(a, nm); editing = false }
-                        }
-                    }.minimumInteractiveComponentSize().semantics { contentDescription = "Save name" }.padding(4.dp))
-                } else {
-                    Column(Modifier.weight(1f)) {
-                        Text(a.name, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink)
-                        Text("$open open", style = UFont.sans(11), color = c.ink3)
-                    }
-                }
-                Box {
-                    // Wrap the 20dp glyph in a 48dp clickable box so the hit target meets
-                    // the minimum without enlarging the drawn icon.
-                    Box(
-                        Modifier.clickable(role = Role.Button, onClickLabel = "Area options") { menu = true }.minimumInteractiveComponentSize(),
-                        contentAlignment = Alignment.Center,
-                    ) { Icon(Icons.Filled.MoreVert, contentDescription = "Area options", tint = c.ink3, modifier = Modifier.size(20.dp)) }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(text = { Text("Rename", style = UFont.sans(14), color = c.ink) }, onClick = { menu = false; nameDraft = a.name; editing = true })
-                        DropdownMenuItem(text = { Text("Delete area", style = UFont.sans(14), color = c.red) }, onClick = { menu = false; confirm = true })
-                    }
-                }
-            }
-            if (confirm) AlertDialog(
-                onDismissRequest = { confirm = false },
-                title = { Text("Delete \"${a.name}\"?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
-                text = { Text("Tasks keep their data — they just lose this area label.", style = UFont.sans(13), color = c.ink2) },
-                confirmButton = { TextButton(onClick = { confirm = false; vm.deleteLifeArea(a.id) }) { Text("Delete", color = c.red) } },
-                dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel", color = c.ink2) } },
-                containerColor = c.surface,
-            )
-        }
-        Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 10.dp)) {
-                BasicTextField(value = draft, onValueChange = { draft = it }, textStyle = UFont.sans(14).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), decorationBox = { inner -> if (draft.isEmpty()) Text("New area", style = UFont.sans(14), color = c.ink3); inner() })
-            }
-            UButton("Add", kind = ButtonKind.DARK, fill = false) {
-                val name = draft.trim()
-                // Skip a duplicate name (areas key tasks by name string → two same-named
-                // areas make filtering ambiguous). sortOrder = max+1 and color = first
-                // unused both avoid collisions after a delete shrinks `areas.size`.
-                if (name.isNotBlank() && areas.none { it.name.equals(name, ignoreCase = true) }) {
-                    val color = palette.firstOrNull { col -> areas.none { it.color == col } } ?: palette[areas.size % palette.size]
-                    val order = (areas.maxOfOrNull { it.sortOrder } ?: -1) + 1
-                    vm.upsertLifeArea(LifeArea(newUuid(), name, color, order)); draft = ""
-                }
-            }
-        }
-    }
+    Column(modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp))) { content() }
 }
 
 @Composable
-private fun TagsContent(vm: AppViewModel) {
-    val c = UTheme.colors
-    val context = LocalContext.current
-    val tags by vm.tags.collectAsStateWithLifecycle()
-    val tasks by vm.tasks.collectAsStateWithLifecycle()
-    var draft by remember { mutableStateOf("") }
-    val palette = listOf("indigo", "coral", "green", "amber", "teal", "blue", "violet", "red")
-    Text("Tags cut across areas — apply as many as you like.", style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(bottom = 14.dp))
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        tags.sortedBy { it.sortOrder }.forEach { tag ->
-            val uses = tasks.count { it.tags?.contains(tag.name) == true }
-            var menu by remember(tag.id) { mutableStateOf(false) }
-            var confirm by remember(tag.id) { mutableStateOf(false) }
-            var editing by remember(tag.id) { mutableStateOf(false) }
-            var nameDraft by remember(tag.id) { mutableStateOf(tag.name) }
-            var palOpen by remember(tag.id) { mutableStateOf(false) }
-            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).padding(horizontal = 14.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(11.dp)) {
-                Box {
-                    Box(
-                        Modifier.clickable(role = Role.Button, onClickLabel = "Change color") { palOpen = true }
-                            .minimumInteractiveComponentSize()
-                            .semantics { contentDescription = "Tag color: ${tag.color}" },
-                        contentAlignment = Alignment.Center,
-                    ) { ColorChip(c.areaColor(tag.color), box = 26, dot = 8) }
-                    DropdownMenu(expanded = palOpen, onDismissRequest = { palOpen = false }) {
-                        Row(Modifier.padding(8.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            palette.forEach { col ->
-                                Box(
-                                    Modifier.clickable(role = Role.Button) { vm.recolorTag(tag, col); palOpen = false }
-                                        .minimumInteractiveComponentSize()
-                                        .semantics { contentDescription = col; selected = (col == tag.color) },
-                                    contentAlignment = Alignment.Center,
-                                ) { ColorChip(c.areaColor(col), box = 26, dot = 8) }
-                            }
-                        }
-                    }
-                }
-                if (editing) {
-                    BasicTextField(value = nameDraft, onValueChange = { nameDraft = it }, textStyle = UFont.sans(14, FontWeight.SemiBold).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f))
-                    Text("✓", style = UFont.sans(16), color = c.green, modifier = Modifier.clickable(role = Role.Button) {
-                        val nm = nameDraft.trim()
-                        val dup = tags.any { it.id != tag.id && it.name.equals(nm, ignoreCase = true) }
-                        when {
-                            nm.isEmpty() -> { nameDraft = tag.name; editing = false }
-                            nm == tag.name -> editing = false
-                            dup -> android.widget.Toast.makeText(context, "A tag named \"$nm\" already exists.", android.widget.Toast.LENGTH_SHORT).show()
-                            else -> { vm.renameTag(tag, nm); editing = false }
-                        }
-                    }.minimumInteractiveComponentSize().semantics { contentDescription = "Save name" }.padding(4.dp))
-                } else {
-                    Text("#${tag.name}", style = UFont.sans(14, FontWeight.SemiBold), color = c.ink, modifier = Modifier.weight(1f).clickable { nameDraft = tag.name; editing = true })
-                }
-                Text("$uses", style = UFont.sans(12), color = c.ink3)
-                Box {
-                    Box(
-                        Modifier.clickable(role = Role.Button, onClickLabel = "Tag options") { menu = true }.minimumInteractiveComponentSize(),
-                        contentAlignment = Alignment.Center,
-                    ) { Icon(Icons.Filled.MoreVert, contentDescription = "Tag options", tint = c.ink3, modifier = Modifier.size(20.dp)) }
-                    DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
-                        DropdownMenuItem(text = { Text("Rename", style = UFont.sans(14), color = c.ink) }, onClick = { menu = false; nameDraft = tag.name; editing = true })
-                        DropdownMenuItem(text = { Text("Delete", style = UFont.sans(14), color = c.red) }, onClick = { menu = false; confirm = true })
-                    }
-                }
-            }
-            if (confirm) AlertDialog(
-                onDismissRequest = { confirm = false },
-                title = { Text("Delete #${tag.name}?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
-                text = { Text("It's removed from every task that uses it. This can't be undone.", style = UFont.sans(13), color = c.ink2) },
-                confirmButton = { TextButton(onClick = { confirm = false; vm.deleteTag(tag.id) }) { Text("Delete", color = c.red) } },
-                dismissButton = { TextButton(onClick = { confirm = false }) { Text("Cancel", color = c.ink2) } },
-                containerColor = c.surface,
-            )
-        }
-        Row(Modifier.fillMaxWidth().padding(top = 4.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.weight(1f).clip(RoundedCornerShape(10.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(10.dp)).padding(horizontal = 12.dp, vertical = 10.dp)) {
-                BasicTextField(value = draft, onValueChange = { draft = it }, textStyle = UFont.sans(14).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), decorationBox = { inner -> if (draft.isEmpty()) Text("New tag", style = UFont.sans(14), color = c.ink3); inner() })
-            }
-            UButton("Add", kind = ButtonKind.DARK, fill = false) {
-                val nm = draft.trim()
-                if (nm.isNotBlank() && tags.none { it.name.equals(nm, ignoreCase = true) }) {
-                    // max+1 / first-unused — same anti-collision as areas (tags.size reused
-                    // an existing sortOrder/color after a delete).
-                    val color = palette.firstOrNull { col -> tags.none { it.color == col } } ?: palette[tags.size % palette.size]
-                    val order = (tags.maxOfOrNull { it.sortOrder } ?: -1) + 1
-                    vm.upsertTag(TagRow(newUuid(), nm, color, order))
-                    draft = ""   // clear only on a real add — a duplicate keeps the text
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SettingsCard(content: @Composable () -> Unit) {
-    val c = UTheme.colors
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(18.dp))) { content() }
-}
-
-/** One tappable settings row. [enabled]=false renders it inert — no click
- *  handler at all (not a swallowed one), dimmed, marked disabled for screen
- *  readers, with an honest sub-line saying why (the guided tour is running). */
-@Composable
-private fun SettingRow(label: String, sub: String?, last: Boolean = false, enabled: Boolean = true, onClick: (() -> Unit)? = null) {
-    val c = UTheme.colors
-    val active = enabled && onClick != null
-    val shownSub = if (!enabled && onClick != null) TOUR_LOCKED_ROW_SUB else sub
-    Row(
-        Modifier.fillMaxWidth()
-            .then(if (active) Modifier.clickable(onClick = onClick!!) else Modifier)
-            .then(if (!enabled) Modifier.semantics { disabled() } else Modifier)
-            .padding(horizontal = 16.dp, vertical = 14.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f)) {
-            Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = if (enabled) c.ink else c.ink3)
-            if (shownSub != null) Text(shownSub, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 4.dp))
-        }
-    }
-    if (!last) Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
-}
-
-internal const val EXACT_ALARM_ROW = "Reminders may arrive late"
-internal const val EXACT_ALARM_ROW_SUB = "Allow “Alarms & reminders” so they arrive on time."
-
-/** Settings › Focus: the way back to "Alarms & reminders" after the one-time ask
- *  on Today (ui/ExactAlarmPrompt). Shown while reminders are on and Android 14+
- *  still withholds exact alarms; re-checked on return from the system page
- *  (Android audit 2026-09-23, A15). */
-@Composable
-private fun ExactAlarmRow(s: tech.csalliance.unstuck.SettingsState) {
-    val context = LocalContext.current
-    var granted by remember { mutableStateOf(ExactAlarms.granted(context)) }
-    androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) { granted = ExactAlarms.granted(context) }
-    if (granted || !ExactAlarms.wanted(s)) return
-    SettingRow(EXACT_ALARM_ROW, EXACT_ALARM_ROW_SUB) { ExactAlarms.openSystemPage(context) }
+internal fun CardDivider() {
+    Box(Modifier.fillMaxWidth().height(1.dp).background(UTheme.colors.line))
 }
 
 /** The sub-line a tour-locked row shows in place of its own. */
 internal const val TOUR_LOCKED_ROW_SUB = "Paused while the guided tour is running"
 
+/** One tappable settings row. [enabled]=false renders it inert — no click
+ *  handler at all (not a swallowed one), dimmed, marked disabled for screen
+ *  readers, with an honest sub-line saying why ([lockedSub]; the guided tour
+ *  by default). [danger] paints the label red (Delete my account). */
 @Composable
-private fun ToggleRow(label: String, value: Boolean, last: Boolean = false, sub: String? = null, onChange: (Boolean) -> Unit) {
+internal fun SettingRow(
+    label: String,
+    sub: String?,
+    last: Boolean = false,
+    enabled: Boolean = true,
+    chevron: Boolean = false,
+    danger: Boolean = false,
+    lockedSub: String = TOUR_LOCKED_ROW_SUB,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+) {
     val c = UTheme.colors
-    // The whole row is the switch for TalkBack ("<label>, switch, on") — the inner
-    // pill is decorative so it doesn't surface as a second nameless toggle.
+    val active = enabled && onClick != null
+    val shownSub = if (!enabled && onClick != null) lockedSub else sub
     Row(
-        Modifier.fillMaxWidth()
-            .toggleable(value = value, role = Role.Switch, onValueChange = onChange)
+        modifier.fillMaxWidth()
+            .then(if (active) Modifier.clickable(role = Role.Button, onClick = onClick!!) else Modifier)
+            .then(if (!enabled) Modifier.semantics { disabled() } else Modifier)
             .padding(horizontal = 16.dp, vertical = 14.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
         Column(Modifier.weight(1f)) {
-            Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
-            if (sub != null) Text(sub, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 4.dp))
+            Text(label, style = UFont.sans(14, FontWeight.Medium), color = when { !enabled -> c.ink3; danger -> c.red; else -> c.ink })
+            if (shownSub != null) Text(shownSub, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 3.dp))
         }
-        MdToggle(value, onChange, Modifier.clearAndSetSemantics {})
+        if (chevron) Icon(Icons.AutoMirrored.Filled.KeyboardArrowRight, contentDescription = null, tint = c.ink3, modifier = Modifier.size(18.dp))
     }
-    if (!last) Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
+    if (!last) CardDivider()
 }
 
 @Composable
-private fun SegRow(label: String, options: List<String>, selected: String, last: Boolean = false, onSelect: (String) -> Unit) {
+internal fun ToggleRow(
+    label: String,
+    value: Boolean,
+    last: Boolean = false,
+    sub: String? = null,
+    enabled: Boolean = true,
+    modifier: Modifier = Modifier,
+    onChange: (Boolean) -> Unit,
+) {
     val c = UTheme.colors
-    Row(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalAlignment = Alignment.CenterVertically) {
-        Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink, modifier = Modifier.weight(1f))
-        MdSegment(options, selected) { onSelect(it) }
+    // The whole row is the switch for TalkBack ("<label>, switch, on") — the inner
+    // pill is decorative so it doesn't surface as a second nameless toggle.
+    Row(
+        modifier.fillMaxWidth()
+            .toggleable(value = value, enabled = enabled, role = Role.Switch, onValueChange = onChange)
+            .padding(horizontal = 16.dp, vertical = 14.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Column(Modifier.weight(1f)) {
+            Text(label, style = UFont.sans(14, FontWeight.Medium), color = if (enabled) c.ink else c.ink3)
+            if (sub != null) Text(sub, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 3.dp))
+        }
+        MdToggle(value, { if (enabled) onChange(it) }, Modifier.clearAndSetSemantics {})
     }
-    if (!last) Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
+    if (!last) CardDivider()
 }
 
-private fun accentKey(a: AccentPalette): String = when (a) {
-    AccentPalette.INDIGO_CORAL -> "indigo"
-    AccentPalette.PERIWINKLE_ROSE -> "rose"
-    AccentPalette.FOREST_AMBER -> "forest"
+/** A label (and optional plain line) over a full-width segmented picker —
+ *  stacked, so three options never squeeze the label on a narrow phone. */
+@Composable
+internal fun SegBlock(label: String, options: List<String>, selected: String, sub: String? = null, last: Boolean = false, onSelect: (String) -> Unit) {
+    val c = UTheme.colors
+    Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(label, style = UFont.sans(14, FontWeight.Medium), color = c.ink)
+        EvenSegment(options, selected, label, onSelect)
+        if (sub != null) Text(sub, style = UFont.sans(12), color = c.ink3)
+    }
+    if (!last) CardDivider()
 }
 
-private fun accentFromKey(k: String): AccentPalette = when (k) {
-    "rose" -> AccentPalette.PERIWINKLE_ROSE
-    "forest" -> AccentPalette.FOREST_AMBER
-    else -> AccentPalette.INDIGO_CORAL
+/** The design system's segmented look (bg2 track, ink/bg selection) with the
+ *  options sharing the width evenly. */
+@Composable
+internal fun EvenSegment(options: List<String>, selected: String, groupLabel: String, onSelect: (String) -> Unit) {
+    val c = UTheme.colors
+    Row(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).background(c.bg2).selectableGroup().padding(2.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        options.forEach { opt ->
+            val active = opt == selected
+            Box(
+                Modifier.weight(1f).heightIn(min = 44.dp).clip(RoundedCornerShape(8.dp))
+                    .background(if (active) c.ink else Color.Transparent)
+                    .selectable(selected = active, role = Role.RadioButton) { onSelect(opt) }
+                    .semantics { contentDescription = "$groupLabel: $opt" }
+                    .padding(horizontal = 6.dp, vertical = 4.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(opt, style = UFont.sans(13, FontWeight.SemiBold), color = if (active) c.bg else c.ink2, maxLines = 1, modifier = Modifier.clearAndSetSemantics {})
+            }
+        }
+    }
+}
+
+/** A small plain line under a card. */
+@Composable
+internal fun SettingsNote(text: String, modifier: Modifier = Modifier) {
+    Text(text, style = UFont.sans(12), color = UTheme.colors.ink3, modifier = modifier.fillMaxWidth().padding(top = 10.dp, start = 4.dp, end = 4.dp))
+}
+
+/** A section label over a card (N&C's "Reminders" / "Calls"). */
+@Composable
+internal fun SettingsGroupLabel(text: String, modifier: Modifier = Modifier) {
+    SectionLabel(text, color = UTheme.colors.primaryDeep, modifier = modifier.padding(top = 4.dp, bottom = 8.dp).semantics { heading() })
+}
+
+/** A plain status line with a fix (only shown when something is wrong). */
+@Composable
+internal fun FixItLine(text: String, fix: String, tint: Color = UTheme.colors.amberInk, modifier: Modifier = Modifier, onFix: () -> Unit) {
+    val c = UTheme.colors
+    Row(
+        modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.bg2).padding(start = 14.dp, end = 4.dp, top = 4.dp, bottom = 4.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(text, style = UFont.sans(12), color = tint, modifier = Modifier.weight(1f).padding(vertical = 8.dp))
+        Box(
+            Modifier.clip(RoundedCornerShape(8.dp))
+                .clickable(role = Role.Button, onClickLabel = fix, onClick = onFix)
+                .minimumInteractiveComponentSize()
+                .padding(horizontal = 10.dp),
+            contentAlignment = Alignment.Center,
+        ) { Text(fix, style = UFont.sans(12, FontWeight.SemiBold), color = c.ink) }
+    }
 }

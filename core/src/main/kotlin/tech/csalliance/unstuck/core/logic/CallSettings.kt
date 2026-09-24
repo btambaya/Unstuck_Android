@@ -27,7 +27,7 @@ import java.time.ZoneId
 // the pending-push flag [CallProactiveSync] arbitrates).
 
 data class CallSettings(
-    /** The kill-switch for incoming calls on this device (Settings › Calls). */
+    /** The kill-switch for incoming calls on this device (Settings › Notifications & calls). */
     val enabled: Boolean = true,
     /** "HH:MM" — start of the allowed window (inclusive). */
     val hoursStart: String = DEFAULT_HOURS_START,
@@ -39,7 +39,9 @@ data class CallSettings(
     companion object {
         const val DEFAULT_HOURS_START = "06:00"
         const val DEFAULT_HOURS_END = "23:00"
-        const val DEFAULT_LEAD_MIN = 10
+        /** 15 on both phones (slim settings, 2026-09-24; iOS always was). A
+         *  lead picked on "Call me about this" is remembered over it. */
+        const val DEFAULT_LEAD_MIN = 15
         val DEFAULTS = CallSettings()
     }
 }
@@ -147,12 +149,12 @@ object CallSettingsLogic {
      *  "phone". */
     fun deviceGuard(callAtMs: Long, s: CallSettings, zone: ZoneId = ZoneId.systemDefault()): String? {
         if (!s.enabled) {
-            return "error: calls are off on this phone, so it would decline this call — tell them to switch Calls on in Settings › Calls first"
+            return "error: calls are off on this phone, so it would decline this call — tell them to switch Calls on in Settings › Notifications & calls first"
         }
         val hm = hhmm(callAtMs, zone)
         val t = minutesOfDay(hm) ?: return null
         if (!withinWindow(t, s.hoursStart, s.hoursEnd)) {
-            return "error: $hm is outside this phone's call hours (${hoursLabel(s.hoursStart, s.hoursEnd, t, ClockMode.H24)}), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Calls"
+            return "error: $hm is outside this phone's call hours (${hoursLabel(s.hoursStart, s.hoursEnd, t, ClockMode.H24)}), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Notifications & calls"
         }
         return null
     }
@@ -280,7 +282,7 @@ object CallProactiveSync {
     fun shouldPush(pendingPush: Boolean): Boolean = pendingPush
 }
 
-/** The one-time Settings › Calls nudge for a phone whose ring cannot be a real
+/** The one-time Settings › Notifications & calls nudge for a phone whose ring cannot be a real
  *  ring — Android's twin of the iOS VoIP-registration nudge: on API 34+ the
  *  USE_FULL_SCREEN_INTENT special access is pre-granted only to apps Play
  *  classifies as calling / alarm; without it the ring degrades to a heads-up
@@ -290,7 +292,7 @@ object CallRingNudge {
     fun shouldShow(canRing: Boolean, dismissed: Boolean): Boolean = !canRing && !dismissed
 }
 
-/** Settings › Calls "Test call now": the row it books and the rows a retry
+/** Settings › Notifications & calls "Test call now": the row it books and the rows a retry
  *  replaces (iOS CallSettingsView.testCallLabel / previousTestCalls). */
 object TestCallLogic {
     const val LABEL = "Test call"

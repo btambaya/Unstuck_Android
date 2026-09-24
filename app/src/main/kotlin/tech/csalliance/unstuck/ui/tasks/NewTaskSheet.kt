@@ -155,8 +155,12 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     var pickedDate by rememberSaveable { mutableStateOf(prefillDate?.takeIf { it != todayIso && it != tmrwIso } ?: tmrwIso) }
     var pickedTime by rememberSaveable { mutableStateOf(prefillTime) }
     var autoTime by rememberSaveable { mutableStateOf(prefillTime == null) }  // false once the user/prefill sets a time
+    // Starts at the last estimate picked here (slim settings, 2026-09-24: the
+    // sheet remembers it in the old "default focus length" key, so the
+    // assistant's set_focus_defaults still sets it).
     var estimate by rememberSaveable { mutableStateOf(settings.focusDefaultMin) }
     var area by rememberSaveable { mutableStateOf<String?>(null) }
+    var showNewArea by rememberSaveable { mutableStateOf(false) }
     var recurrence by rememberSaveable(stateSaver = RecurrenceSaver) { mutableStateOf<Recurrence?>(null) }
     // The "Starts" chip tapped (its week's Monday); null = the first chip. Kept
     // apart from the rule so a later change of day re-derives week one
@@ -222,6 +226,8 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
         if (whenSel != "Later" && firstDate != null && pickedTime != null) {
             vm.scheduleTask(t, firstDate, pickedTime!!, reanchor = false)
         }
+        // Remember this estimate for the next new task.
+        if (estimate != settings.focusDefaultMin) vm.updateSettings { it.copy(focusDefaultMin = estimate) }
         onDismiss()
     }
 
@@ -312,6 +318,8 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                     Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         tech.csalliance.unstuck.design.component.FilterPill("Unassigned", area == null) { area = null }
                         areas.forEach { a -> tech.csalliance.unstuck.design.component.FilterPill(a.name, area == a.name, dotColor = c.areaColor(a.color)) { area = if (area == a.name) null else a.name } }
+                        // Make one without leaving the sheet.
+                        SelectableChip("+ New area", selected = false) { showNewArea = true }
                     }
                 }
             }
@@ -412,6 +420,35 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
             },
             dismissButton = { TextButton(onClick = { showTimePicker = false }) { Text("Cancel") } },
             text = { Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) { TimePicker(state = tpState) } },
+            containerColor = c.surface,
+        )
+    }
+
+    if (showNewArea) {
+        var v by rememberSaveable { mutableStateOf("") }
+        val trimmed = v.trim()
+        val existing = areas.firstOrNull { it.name.equals(trimmed, ignoreCase = true) }
+        fun saveArea() {
+            if (trimmed.isEmpty()) return
+            // An existing name is picked, never duplicated (areas key tasks by name).
+            if (existing != null) { area = existing.name; showNewArea = false; return }
+            val order = (areas.maxOfOrNull { it.sortOrder } ?: -1) + 1
+            vm.upsertLifeArea(tech.csalliance.unstuck.core.model.LifeArea(tech.csalliance.unstuck.core.logic.newUuid(), trimmed, nextPaletteColor(areas.map { it.color }), order))
+            area = trimmed
+            showNewArea = false
+        }
+        androidx.compose.material3.AlertDialog(
+            onDismissRequest = { showNewArea = false },
+            title = { Text("New area") },
+            text = {
+                OutlinedTextField(
+                    value = v, onValueChange = { v = it.take(40) }, singleLine = true, label = { Text("Name") },
+                    keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done),
+                    keyboardActions = KeyboardActions(onDone = { saveArea() }),
+                )
+            },
+            confirmButton = { TextButton(enabled = trimmed.isNotEmpty(), onClick = { saveArea() }) { Text(if (existing != null) "Use it" else "Add") } },
+            dismissButton = { TextButton(onClick = { showNewArea = false }) { Text("Cancel") } },
             containerColor = c.surface,
         )
     }

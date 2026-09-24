@@ -4,6 +4,36 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
+## 2026-09-24 (branch `settings/android`, NOT shipped) — slim Settings + the AI data-sharing OK
+
+- **Settings (PLAN.md, Ahmad-approved):** hub = Account card · Notifications & calls · Assistant & privacy · People ·
+  Appearance · Send feedback · Replay the tour · footer Terms · Privacy · version (`ui/settings/SettingsModel.kt` holds the
+  sections, fixed test tags `settings-row-*`, the copy and the ONE `unstuck://settings…` parser — bare = hub, `/people`,
+  `/areas`, `?section=` with every old name as an alias). Focus options → the Focus screen's ⋯ Options + speaker button;
+  areas & tags → the Tasks Edit pill (`ui/tasks/AreasTagsSheet.kt`); hold-to-talk → Talk; the call lead / focus length are
+  remembered by "Call me about this" / the New Task sheet. Accent, density, larger type, reduce motion, high contrast,
+  keyboard hints, hide rail and the three sounds are gone (stored values unread, never wiped).
+- **AI data sharing (core `AIConsent`, iOS build 91 / web parity):** the OK lives in auth user_metadata
+  (`ai_consent_at`, `ai_consent_version` = "2026-09-24"); `AIConsentStore` + `AIConsentSync` (on the graph) keep a device copy
+  in step (session on sign-in, a fresh /user read at launch / sign-in / foreground ≤ 1/min, a change made here stays pending
+  until it lands). `AppViewModel.withAIConsent(action, host)` is the gate: assistant send + chips + dictation, Talk (sheet +
+  Today), the Calls switch, proactive calls, the test call, "Call me about this"; backstops in `sendAssistant` / the queue
+  drain / `tourAsk` (canned answers) / the Talk session / `CallVoiceService.dial`. MainScaffold hosts the ONE
+  `AIConsentSheet`; app open asks once when Calls are on without the OK ("Not now" turns them off + a dialog). A call without
+  the OK is declined on receipt (`CallEnv.aiConsent`, quiet note with the way on); one turned off while it rang hangs up at
+  the answer (`CallEndReason.NoAIConsent`). Settings → Assistant & privacy → **AI data sharing** (`settings-ai-data-sharing`):
+  off clears the OK and turns Calls off. No server-side enforcement yet (older builds keep working).
+- **Needs a device pass:** the consent sheet over the Assistant sheet, app open with a booked call, a call rung after
+  turning sharing off on the web. The tour clip `tour_personalization.m4a` (and `tour_finish_more.m4a`) still need
+  re-recording from the new copy (parked in `TOUR_STEPS_AWAITING_NARRATION` / `TOUR_MORE_AWAITING_NARRATION`).
+- **Copy canon (web · iOS · Android, `COPY-CANON.md`):** Notifications & calls, the Calls block, Focus ⋯ Options and the
+  leave question share one wording; Voice replies stays in place greyed out while the spoken coach is off; the leave question
+  is "Leave this session?" with Leave / Leave and don't ask again / Stay. Section links reduce a name to letters and digits
+  (`settingsAliasKey`: lowercase, "&" → "and") before matching, so "ai-assistant", "calls_from_unstuck" and "areas+tags" land.
+  The assistant says routines by name (Morning plan, …) in `get_settings` / `set_ritual`, as iOS and the web do.
+- **Merged with main's one clock:** the Calls block's time chips, pickers, warnings and test-call line go through
+  `ClockFormat` with the phone's `clockMode()` (the old Settings › Calls screen they were ported onto is gone).
+
 ## 2026-09-24 (branch `clock/android`, NOT shipped) — one clock: every time on screen follows the phone's 12/24-hour setting
 
 - **Why:** Ahmad's phone was on 24-hour ("14:02") while Today said "THURSDAY · 2:02 PM", the Day grid "2:00 PM" and the Week

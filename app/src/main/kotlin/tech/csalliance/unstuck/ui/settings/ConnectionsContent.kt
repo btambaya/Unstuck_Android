@@ -32,6 +32,9 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.Role
+import androidx.compose.material3.minimumInteractiveComponentSize
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.semantics.contentDescription
@@ -120,7 +123,8 @@ fun ConnectionsContent(vm: AppViewModel) {
     var addErr by remember { mutableStateOf<String?>(null) }
     var copiedKey by remember { mutableStateOf<String?>(null) }   // which link was just copied
 
-    // Redeem-a-code state.
+    // Redeem-a-code state (the field opens from "Have an invite code?").
+    var redeemOpen by remember { mutableStateOf(false) }
     var code by remember { mutableStateOf("") }
     var redeeming by remember { mutableStateOf(false) }
     var redeemMsg by remember { mutableStateOf<Pair<Boolean, String>?>(null) }
@@ -340,16 +344,28 @@ fun ConnectionsContent(vm: AppViewModel) {
             }
         }
 
-        // ── Redeem an invite someone sent you ──
-        SectionLabel("Have an invite?", modifier = Modifier.padding(top = 4.dp))
-        Text("Paste the invite link or code someone sent you to join their connections.", style = UFont.sans(12), color = c.ink3)
-        OutlinedTextField(
-            value = code, onValueChange = { code = it },
-            label = { Text("Invite link or code") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { submitRedeem() }),
-        )
-        redeemMsg?.let { (ok, text) -> Text(text, style = UFont.sans(12), color = if (ok) c.greenInk else c.red) }
-        UButton(if (redeeming) "Joining…" else "Join", kind = ButtonKind.DARK, fill = false, enabled = !redeeming && code.isNotBlank()) { submitRedeem() }
+        // ── Redeem an invite someone sent you — behind a link (most people
+        // arrive through the invite link itself) ──
+        if (!redeemOpen && redeemMsg == null) {
+            Text(
+                "Have an invite code?", style = UFont.sans(13, FontWeight.Medium), color = c.ink2,
+                modifier = Modifier.padding(top = 4.dp).clip(RoundedCornerShape(8.dp))
+                    .clickable(role = Role.Button) { redeemOpen = true }
+                    .minimumInteractiveComponentSize()
+                    .padding(horizontal = 4.dp)
+                    .testTag("people-invite-code"),
+            )
+        } else {
+            SectionLabel("Have an invite code?", modifier = Modifier.padding(top = 4.dp))
+            Text("Paste the invite link or code someone sent you to join their connections.", style = UFont.sans(12), color = c.ink3)
+            OutlinedTextField(
+                value = code, onValueChange = { code = it },
+                label = { Text("Invite link or code") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Done), keyboardActions = KeyboardActions(onDone = { submitRedeem() }),
+            )
+            redeemMsg?.let { (ok, text) -> Text(text, style = UFont.sans(12), color = if (ok) c.greenInk else c.red) }
+            UButton(if (redeeming) "Joining…" else "Join", kind = ButtonKind.DARK, fill = false, enabled = !redeeming && code.isNotBlank()) { submitRedeem() }
+        }
     }
 
     removeTarget?.let { m ->

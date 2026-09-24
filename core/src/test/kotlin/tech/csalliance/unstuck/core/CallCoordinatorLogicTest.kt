@@ -32,8 +32,8 @@ class CallCoordinatorLogicTest {
     /** The iOS FakeEnvironment defaults: signed in, inside hours, no focus, anchor live. */
     private fun env(
         signedIn: Boolean = true, assistantEnabled: Boolean = true, withinHours: Boolean = true,
-        focusLive: Boolean = false, anchorExists: Boolean? = true, callsEnabled: Boolean = true,
-    ) = CallEnv(signedIn, assistantEnabled, withinHours, focusLive, anchorExists, callsEnabled)
+        focusLive: Boolean = false, anchorExists: Boolean? = true, callsEnabled: Boolean = true, aiConsent: Boolean = true,
+    ) = CallEnv(signedIn, assistantEnabled, withinHours, focusLive, anchorExists, callsEnabled, aiConsent)
 
     private fun payload(taskId: String? = "task-1", notes: List<String> = listOf("Ask about the invoice", "Confirm Friday")) =
         IncomingCallPayload(
@@ -146,13 +146,40 @@ class CallCoordinatorLogicTest {
         val n = CallNotificationCopy.of(r.notify!!, payload())
         assertEquals("I called about speak to James", n.title)
         assertTrue(n.body.contains("outside your call hours"))
-        assertEquals("Ask about the invoice\nConfirm Friday\n(outside your call hours — Settings › Calls)", n.body)
+        assertEquals("Ask about the invoice\nConfirm Friday\n(outside your call hours — Settings › Notifications & calls)", n.body)
     }
 
     @Test fun `the kill-switches decline with the same notice`() {
         assertTrue(CallCoordinatorLogic.decide(payload(), env(assistantEnabled = false)) is CallDecision.Declined)
         assertTrue(CallCoordinatorLogic.decide(payload(), env(callsEnabled = false)) is CallDecision.Declined)
         assertEquals(CallOutcome.DECLINED, CallCoordinatorLogic.reportFor(CallDecision.Declined("assistant off"))!!.outcome)
+    }
+
+    /** A call is a conversation with the assistant: without the account's
+     *  AI-consent OK it never connects — declined quietly, the notes land with
+     *  the way to turn sharing on (iOS CallCoordinator order: after the switch,
+     *  before the hours). */
+    @Test fun `no AI-consent OK declines the call, after the switches and before the hours`() {
+        val d = CallCoordinatorLogic.decide(payload(), env(aiConsent = false))
+        assertEquals(CallDecision.Declined(CallCoordinatorLogic.NO_AI_CONSENT), d)
+        assertFalse(d.rings)
+        assertEquals(CallDecision.Declined("calls off"), CallCoordinatorLogic.decide(payload(), env(callsEnabled = false, aiConsent = false)))
+        assertEquals(CallDecision.Declined(CallCoordinatorLogic.NO_AI_CONSENT), CallCoordinatorLogic.decide(payload(), env(aiConsent = false, withinHours = false)))
+        assertTrue(CallCoordinatorLogic.decide(payload(), env(signedIn = false, aiConsent = false)) is CallDecision.Silent)
+        val n = CallNotificationCopy.noAIConsent(payload())
+        assertEquals("unstuck.call.consent.$callId", n.id)
+        assertEquals("I called about speak to James", n.title)
+        assertTrue(n.body.endsWith("(calls use the assistant — turn on AI data sharing in Settings › Assistant & privacy to take them)"))
+        assertTrue(n.body.startsWith("Ask about the invoice\nConfirm Friday"))
+    }
+
+    /** The OK turned off between the ring and the answer: nothing reached the
+     *  assistant — done, with the reason on the row, and a notice. */
+    @Test fun `an answer without the OK reports done with the reason and notifies`() {
+        val r = CallCoordinatorLogic.endOutcome(CallEndReason.NoAIConsent)
+        assertEquals(CallOutcome.DONE, r.outcome)
+        assertEquals(listOf("no AI consent"), r.outcomeNotes)
+        assertEquals(CallNotificationKind.NO_AI_CONSENT, r.notify)
     }
 
     @Test fun `a signed-out device drops the call silently — no outcome, no notes`() {

@@ -1,22 +1,21 @@
 package tech.csalliance.unstuck
 
 import android.content.Context
-import tech.csalliance.unstuck.core.model.Density
 import tech.csalliance.unstuck.core.model.FocusTreatment
 import tech.csalliance.unstuck.core.model.ThemePref
-import tech.csalliance.unstuck.design.theme.AccentPalette
 
 /**
- * How proactively the app notifies (Settings → Focus). Calm = only what you
- * can't miss; Balanced = the default helpful set; Coach = maximum prompting.
+ * How much Unstuck checks in (Settings → Notifications & calls). Calm = only
+ * the reminders you set; Balanced = the default helpful set; Coach = a second
+ * nudge too. It also sets how often the spoken focus coach talks.
  * The booleans below are the single source of truth for which moments each
  * level enables — read by ReminderScheduler, PausedCheckinScheduler, the
  * in-app nudge surface, and (synced to the server) the morning brief.
  */
 enum class NotificationLevel(val label: String, val blurb: String) {
-    CALM("Calm", "Only the essentials — pre-task reminders and your session recap."),
-    BALANCED("Balanced", "Reminders, a start-now nudge with Start/Reschedule, paused check-ins, the morning brief, and quiet in-app nudges."),
-    COACH("Coach", "Everything in Balanced, plus a nudge if you haven't started on time and more proactive prompts.");
+    CALM("Calm", "Only the reminders you set, and a recap."),
+    BALANCED("Balanced", "Also a nudge when a task should start, a check-in if you've paused a while, and a morning summary."),
+    COACH("Coach", "Also a second nudge if you haven't started 10 minutes in.");
 
     /** A "starts now" notification (Start / Reschedule) at the block's start time. */
     val atStart: Boolean get() = this != CALM
@@ -47,30 +46,53 @@ enum class NotificationLevel(val label: String, val blurb: String) {
     }
 }
 
+/** One in-app text size (Settings → Appearance), folded into the sp scale on
+ *  top of the phone's own font size. It replaces Density + "Larger type",
+ *  which both fed the same multiplier (slim-settings plan, Decision 1). */
+enum class TextSize(val label: String, val scale: Float) {
+    SMALLER("Smaller", 0.94f),
+    DEFAULT("Default", 1.0f),
+    LARGER("Larger", 1.15f);
+
+    companion object {
+        fun fromLabel(l: String): TextSize = entries.firstOrNull { it.label == l } ?: DEFAULT
+
+        /** A device that never picked a text size keeps what its old Density /
+         *  "Larger type" pair showed: comfy or larger type → Larger, compact →
+         *  Smaller. The old keys are read for this only and never wiped. */
+        fun fromLegacy(density: String?, largerType: Boolean): TextSize = when {
+            largerType -> LARGER
+            density.equals("COMFY", ignoreCase = true) -> LARGER
+            density.equals("COMPACT", ignoreCase = true) -> SMALLER
+            else -> DEFAULT
+        }
+    }
+}
+
 /**
- * Device-local user preferences (theme / density / accent / focus / sound /
- * accessibility), persisted to SharedPreferences. Mirrors the web
- * `theme-context` + `STORAGE_KEYS` PREF_* scalars. Read once into a
- * [SettingsState] that the UI observes via AppViewModel; every setter writes
- * straight back here so the value survives relaunch.
+ * Device-local user preferences (theme / text size / focus / sound),
+ * persisted to SharedPreferences. Read once into a [SettingsState] that the
+ * UI observes via AppViewModel; every setter writes straight back here so the
+ * value survives relaunch.
+ *
+ * Retired 2026-09-24 (slim settings): accent, density, larger type, reduce
+ * motion, high contrast, keyboard hints, hide-right-rail and the three focus
+ * sounds. Their stored values are left where they are — nothing wipes them —
+ * and nothing reads them any more (density + larger type only seed the first
+ * [TextSize]). The system's own animation and font settings cover the rest.
  */
 data class SettingsState(
     val theme: ThemePref = ThemePref.SYSTEM,
-    val accent: AccentPalette = AccentPalette.INDIGO_CORAL,
-    val density: Density = Density.REGULAR,
-    val largerType: Boolean = false,
-    val reduceMotion: Boolean = false,
-    val highContrast: Boolean = false,
-    val keyboardHints: Boolean = true,
+    val textSize: TextSize = TextSize.DEFAULT,
+    /** Also the New Task sheet's last-picked estimate (it remembers it here, so
+     *  the assistant's set_focus_defaults keeps working on the same key). */
     val focusDefaultMin: Int = 25,
     val focusOverrunMin: Int = 5,          // 0 = Never
-    val focusCollapseRail: Boolean = true,
     val focusSoftExit: Boolean = true,
     val focusPauseReasons: Boolean = true,
-    val soundStartChime: Boolean = true,
-    val soundOverrunBell: Boolean = true,
-    val soundCompletion: Boolean = false,
-    val ambient: String = "off",           // off | brown | pink
+    /** Background noise during focus — the speaker button on the Focus screen.
+     *  Stored as "off" | "brown"; an old "pink" reads as on. */
+    val ambient: String = "off",
     val treatment: FocusTreatment = FocusTreatment.AMBIENT,
     val reminderLeadMin: Int = 10,         // default "remind me N min before a scheduled task"; 0 = Off
     val notificationLevel: NotificationLevel = NotificationLevel.BALANCED,
@@ -78,24 +100,26 @@ data class SettingsState(
     val focusCopilotSpeak: Boolean = true, // spoken progress coach during a block (speak-only)
     val focusCopilotVoice: Boolean = false, // also LISTEN for a hands-free reply (mic) — opt-in
     /**
-     * AI Assistant kill-switch (Settings → Interface → AI Assistant). The published
-     * privacy policy promises this on every platform: turning it off unmounts the
-     * assistant launcher and ignores open-assistant events, so nothing is ever sent
-     * to the AI provider. Device-local (mirrors web's `use-assistant-enabled`), and
-     * DEFAULT ON — an existing install must not silently lose the assistant.
+     * AI Assistant kill-switch (Settings → Assistant & privacy → AI Assistant). The
+     * published privacy policy promises this on every platform: turning it off
+     * unmounts the assistant launcher and ignores open-assistant events, so nothing
+     * is ever sent to the AI provider. Device-local (mirrors web's
+     * `use-assistant-enabled`), and DEFAULT ON — an existing install must not
+     * silently lose the assistant.
      */
     val assistantEnabled: Boolean = true,
 ) {
-    /** density + larger-type folded into one sp multiplier (web parity). */
-    val fontScale: Float
-        get() {
-            val d = when (density) {
-                Density.COMPACT -> 0.94f
-                Density.REGULAR -> 1.0f
-                Density.COMFY -> 1.08f
-            }
-            return d * (if (largerType) 1.15f else 1.0f)
-        }
+    /** The in-app text size as one sp multiplier. */
+    val fontScale: Float get() = textSize.scale
+
+    /** The Focus screen's speaker button is on. */
+    val ambientOn: Boolean get() = ambient != AMBIENT_OFF
+
+    companion object {
+        const val AMBIENT_OFF = "off"
+        /** What "on" stores (the one bundled noise bed). */
+        const val AMBIENT_ON = "brown"
+    }
 }
 
 class SettingsStore(context: Context) {
@@ -103,20 +127,12 @@ class SettingsStore(context: Context) {
 
     fun load(): SettingsState = SettingsState(
         theme = enumOf(p.getString("theme", null), ThemePref.SYSTEM),
-        accent = enumOf(p.getString("accent", null), AccentPalette.INDIGO_CORAL),
-        density = enumOf(p.getString("density", null), Density.REGULAR),
-        largerType = p.getBoolean("largerType", false),
-        reduceMotion = p.getBoolean("reduceMotion", false),
-        highContrast = p.getBoolean("highContrast", false),
-        keyboardHints = p.getBoolean("keyboardHints", true),
+        textSize = enumOrNull<TextSize>(p.getString("textSize", null))
+            ?: TextSize.fromLegacy(p.getString("density", null), p.getBoolean("largerType", false)),
         focusDefaultMin = p.getInt("focusDefaultMin", 25),
         focusOverrunMin = p.getInt("focusOverrunMin", 5),
-        focusCollapseRail = p.getBoolean("focusCollapseRail", true),
         focusSoftExit = p.getBoolean("focusSoftExit", true),
         focusPauseReasons = p.getBoolean("focusPauseReasons", true),
-        soundStartChime = p.getBoolean("soundStartChime", true),
-        soundOverrunBell = p.getBoolean("soundOverrunBell", true),
-        soundCompletion = p.getBoolean("soundCompletion", false),
         ambient = p.getString("ambient", "off") ?: "off",
         treatment = enumOf(p.getString("treatment", null), FocusTreatment.AMBIENT),
         reminderLeadMin = p.getInt("reminderLeadMin", 10),
@@ -126,23 +142,16 @@ class SettingsStore(context: Context) {
         assistantEnabled = p.getBoolean("assistantEnabled", true),
     )
 
+    /** Writes only the live keys: the retired ones (accent, density, …) keep
+     *  whatever they held, unread. */
     fun save(s: SettingsState) {
         p.edit()
             .putString("theme", s.theme.name)
-            .putString("accent", s.accent.name)
-            .putString("density", s.density.name)
-            .putBoolean("largerType", s.largerType)
-            .putBoolean("reduceMotion", s.reduceMotion)
-            .putBoolean("highContrast", s.highContrast)
-            .putBoolean("keyboardHints", s.keyboardHints)
+            .putString("textSize", s.textSize.name)
             .putInt("focusDefaultMin", s.focusDefaultMin)
             .putInt("focusOverrunMin", s.focusOverrunMin)
-            .putBoolean("focusCollapseRail", s.focusCollapseRail)
             .putBoolean("focusSoftExit", s.focusSoftExit)
             .putBoolean("focusPauseReasons", s.focusPauseReasons)
-            .putBoolean("soundStartChime", s.soundStartChime)
-            .putBoolean("soundOverrunBell", s.soundOverrunBell)
-            .putBoolean("soundCompletion", s.soundCompletion)
             .putString("ambient", s.ambient)
             .putString("treatment", s.treatment.name)
             .putInt("reminderLeadMin", s.reminderLeadMin)
@@ -260,5 +269,8 @@ class SettingsStore(context: Context) {
     }
 
     private inline fun <reified T : Enum<T>> enumOf(name: String?, fallback: T): T =
-        name?.let { runCatching { enumValueOf<T>(it) }.getOrNull() } ?: fallback
+        enumOrNull<T>(name) ?: fallback
+
+    private inline fun <reified T : Enum<T>> enumOrNull(name: String?): T? =
+        name?.let { runCatching { enumValueOf<T>(it) }.getOrNull() }
 }

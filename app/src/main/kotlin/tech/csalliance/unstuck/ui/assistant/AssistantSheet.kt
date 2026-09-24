@@ -88,6 +88,7 @@ import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.sync.ChatMessage
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.core.logic.AIConsent
 
 /**
  * The assistant "cockpit" (redesign 2026-08-02, port of
@@ -107,14 +108,14 @@ import tech.csalliance.unstuck.ui.AppViewModel
  *  THIS composer once the sheet has settled (nothing is typed on Today). */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AssistantSheet(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit, onDismiss: () -> Unit, handoff: Boolean = false, focusComposer: Boolean = false) {
+fun AssistantSheet(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit, onDismiss: () -> Unit, handoff: Boolean = false, focusComposer: Boolean = false, draft: String? = null) {
     val c = UTheme.colors
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     ModalBottomSheet(
         onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = SheetScrim,
         dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } },
     ) {
-        AssistantChat(vm, onNavigate = { onNavigate(it); onDismiss() }, handoff = handoff, focusComposer = focusComposer)
+        AssistantChat(vm, onNavigate = { onNavigate(it); onDismiss() }, handoff = handoff, focusComposer = focusComposer, draft = draft)
     }
 }
 
@@ -128,7 +129,7 @@ private sealed interface ThreadRow {
 }
 
 @Composable
-private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit, handoff: Boolean = false, focusComposer: Boolean = false) {
+private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -> Unit, handoff: Boolean = false, focusComposer: Boolean = false, draft: String? = null) {
     val c = UTheme.colors
     val context = LocalContext.current
     val voice = rememberVoiceController()
@@ -185,7 +186,8 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     // The interview asks its question only once the reply (or error) has landed.
     LaunchedEffect(sending) { if (!sending) interview.turnFinished() }
 
-    var input by rememberSaveable { mutableStateOf("") }
+    // A chat moment parked here unsent (no AI-consent OK yet): Send asks first.
+    var input by rememberSaveable { mutableStateOf(draft.orEmpty()) }
     var listening by remember { mutableStateOf(false) }
     var speakReplies by rememberSaveable { mutableStateOf(false) }
     var note by remember { mutableStateOf<String?>(null) }
@@ -275,16 +277,20 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
     fun ask(text: String) {
         val t = text.trim()
         if (t.isEmpty()) return
-        input = ""
-        note = null
-        showChips = false
         // Drop the keyboard on send. It used to stay up for the whole
         // exchange, so the reply you just asked for landed behind it (found on
         // iOS while capturing marketing shots; Android had the same gap).
         // Tap the field again to keep typing.
         keyboard?.hide()
-        vm.sendAssistant(t)
-        interview.userSent()
+        // The first message asks for the AI-consent OK; "Not now" leaves the
+        // text in the field, unsent (iOS AssistantSheet.send).
+        vm.withAIConsent(AIConsent.Action.CHAT, AIConsentHost.ASSISTANT) {
+            if (input.trim() == t) input = ""
+            note = null
+            showChips = false
+            vm.sendAssistant(t)
+            interview.userSent()
+        }
     }
 
     fun startMic() {
@@ -332,7 +338,10 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
             if (vm.voiceConfigured()) {
                 Row(
                     Modifier.clip(RoundedCornerShape(999.dp)).background(c.coral)
-                        .clickable(role = Role.Button, onClickLabel = "Talk to the assistant") { voiceOpen = true }
+                        // Talk sends their voice to OpenAI — the first time, it asks.
+                        .clickable(role = Role.Button, onClickLabel = "Talk to the assistant") {
+                            vm.withAIConsent(AIConsent.Action.TALK, AIConsentHost.ASSISTANT) { voiceOpen = true }
+                        }
                         .minimumInteractiveComponentSize()
                         // One spoken label for the icon+text pill.
                         .semantics(mergeDescendants = true) { contentDescription = "Talk" }
@@ -440,6 +449,9 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
                 }
             }
         }
+
+        // "Not now" on the AI-consent sheet: what didn't happen, and why.
+        AIConsentNoteLine(vm, AIConsentHost.ASSISTANT, Modifier.fillMaxWidth().padding(horizontal = 22.dp, vertical = 4.dp))
 
         // Local notes (mic permission) or the last turn's error off the VM (which
         // survives close/reopen). Polite live region so TalkBack announces failures.
@@ -748,6 +760,7 @@ private fun RoundIcon(
 
 internal fun friendlyError(code: String): String = when (code) {
     "not_configured" -> "The assistant isn't set up yet."
+    tech.csalliance.unstuck.ui.ASSISTANT_CONSENT_ERROR -> tech.csalliance.unstuck.core.logic.AIConsent.decline(tech.csalliance.unstuck.core.logic.AIConsent.Action.CHAT).note
     "network" -> "Couldn't reach the assistant — check your connection."
     "timeout" -> "That took too long — try again."
     "upstream" -> "The assistant had a hiccup. Try again."

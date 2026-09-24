@@ -29,7 +29,7 @@ import tech.csalliance.unstuck.ui.tour.initialPhase
 internal const val EXACT_ALARM_ASK_TITLE = "Get reminders on time"
 internal const val EXACT_ALARM_ASK_BODY =
     "Android holds reminders back until Unstuck may set alarms. Turn on “Alarms & reminders” so " +
-        "“Coming up” and “Time to start” arrive when they should. You can do this later in Settings › Focus."
+        "“Coming up” and “Time to start” arrive when they should. You can do this later in Settings › Notifications & calls."
 
 /** Whether the one-time ask still waits on the guided tour: only for its welcome
  *  card, which can land a beat after onboarding. A PAUSED run stays paused until
@@ -44,7 +44,7 @@ internal fun exactAlarmAskWaitsForTour(tour: TourState): Boolean = initialPhase(
  * onboarded ([screenFree]: Today, no pushed screen, no focus), after the guided
  * tour has had its turn. It replaces MainActivity.onCreate's prompt, which ran
  * before the session restore knew the user was onboarded, so it was skipped and
- * then fired on a later rotation (Android audit 2026-09-23, A15). Settings › Focus
+ * then fired on a later rotation (Android audit 2026-09-23, A15). Settings › Notifications & calls
  * keeps a row for it after that.
  *
  * Also re-arms reminders on every resume once the grant has landed (the user

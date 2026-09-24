@@ -90,15 +90,15 @@ class TaskDetailCallMeLogicTest {
         assertNull(CallMeLogic.hoursHint(localMs("20:00"), narrow, ClockMode.H24))
         assertNull(CallMeLogic.hoursHint(null, narrow, ClockMode.H24))
         assertEquals(
-            "21:00 is outside this phone's call hours (08:00–21:00; the latest it rings is 20:59), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Calls.",
+            "21:00 is outside this phone's call hours (08:00–21:00; the latest it rings is 20:59), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Notifications & calls.",
             CallMeLogic.hoursHint(localMs("21:00"), narrow, ClockMode.H24),
         )
         assertEquals(
-            "07:45 is outside this phone's call hours (08:00–21:00), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Calls.",
+            "07:45 is outside this phone's call hours (08:00–21:00), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Notifications & calls.",
             CallMeLogic.hoursHint(localMs("07:45"), narrow, ClockMode.H24),
         )
         assertEquals(
-            "Calls are off on this phone, so it would decline this call. Switch them on in Settings › Calls.",
+            "Calls are off on this phone, so it would decline this call. Switch them on in Settings › Notifications & calls.",
             CallMeLogic.hoursHint(localMs("12:00"), tech.csalliance.unstuck.core.logic.CallSettings(enabled = false), ClockMode.H24),
         )
     }
@@ -109,7 +109,7 @@ class TaskDetailCallMeLogicTest {
             java.util.Locale.setDefault(java.util.Locale.US)
             val narrow = tech.csalliance.unstuck.core.logic.CallSettings(hoursStart = "08:00", hoursEnd = "21:00")
             assertEquals(
-                "7:45 AM is outside this phone's call hours (8:00 AM–9:00 PM), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Calls.",
+                "7:45 AM is outside this phone's call hours (8:00 AM–9:00 PM), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Notifications & calls.",
                 CallMeLogic.hoursHint(localMs("07:45"), narrow, ClockMode.H12),
             )
             val utc = java.time.ZoneId.of("UTC")

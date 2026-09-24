@@ -98,7 +98,7 @@ enum class CallStatus(val wire: String) {
 enum class CallKind(val wire: String) {
     /** The user asked — the assistant's request_call, the task editor's "Call me about this". */
     REQUESTED("requested"),
-    /** Settings › Calls "Test call now". Never retried after a miss. */
+    /** Settings › Notifications & calls "Test call now". Never retried after a miss. */
     TEST("test"),
     /** The opt-in morning planning call (dispatch_proactive_calls). */
     MORNING("morning"),

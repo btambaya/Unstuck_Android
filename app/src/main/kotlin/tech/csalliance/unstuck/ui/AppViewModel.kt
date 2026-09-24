@@ -748,10 +748,16 @@ class AppViewModel(
      * - recurring tasks diff via regenerateForTask instead of blindly inserting a
      *   whole new horizon every tap.
      */
-    fun scheduleTask(task: TaskItem, date: String, startTime: String) = launchWrite { scheduleTaskNow(task, date, startTime) }
+    fun scheduleTask(task: TaskItem, date: String, startTime: String, reanchor: Boolean = true) =
+        launchWrite { scheduleTaskNow(task, date, startTime, reanchor) }
 
-    /** [scheduleTask], committed before returning. */
-    private suspend fun scheduleTaskNow(caller: TaskItem, date: String, startTime: String) {
+    /** [scheduleTask], committed before returning. [reanchor] = false is the
+     *  create sheet's: its rule already carries the week one picked in
+     *  "Starts", and the picked day is placed as it is (a later chip keeps it
+     *  as a one-off before its weeks — web's create modal, canonical;
+     *  RecurrenceEditorModel.createStart). Every other caller schedules a
+     *  series "from here" and re-anchors (spec §5). */
+    private suspend fun scheduleTaskNow(caller: TaskItem, date: String, startTime: String, reanchor: Boolean = true) {
         // The row as STORED, not the caller's copy: the task sheet hands over the row
         // it had when the date dialog opened, and the whole-row writes below reverted
         // an edit synced in while the pickers were up (parity with iOS build 81,
@@ -772,7 +778,8 @@ class AppViewModel(
         // week as week one. Only an off-week choice changes anything; the row is
         // written (with the un-park, in one write) BEFORE the plan and any top-up
         // read the rule, and every whole-row write below builds on it.
-        val reanchored = tech.csalliance.unstuck.core.logic.reanchorForSchedule((cleared ?: original).recurrence, date)
+        val reanchored = if (!reanchor) null
+            else tech.csalliance.unstuck.core.logic.reanchorForSchedule((cleared ?: original).recurrence, date)
         val rowWrite = reanchored?.let { (cleared ?: original).copy(recurrence = it, updatedAt = isoNow()) } ?: cleared
         rowWrite?.let { write?.upsertTask(it) }
         val task = rowWrite ?: original

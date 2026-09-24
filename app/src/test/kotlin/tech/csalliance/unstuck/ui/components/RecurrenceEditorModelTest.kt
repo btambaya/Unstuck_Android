@@ -22,6 +22,9 @@ class RecurrenceEditorModelTest {
         assertEquals(listOf(1, 2, 3, 4), m.intervalChoices(1))
         assertEquals(listOf(1, 2, 3, 4), m.intervalChoices(3))
         assertEquals(listOf(1, 2, 3, 4, 6), m.intervalChoices(6))
+        // Any stored N past 4 keeps its fifth chip, as on web and iOS (a
+        // hand-written 12 is still shown, selected, rather than no chip at all).
+        assertEquals(listOf(1, 2, 3, 4, 12), m.intervalChoices(12))
         assertEquals(listOf("Every week", "2 weeks", "3 weeks", "4 weeks", "Every 6 weeks"),
             m.intervalChoices(6).map(m::intervalLabel))
         assertEquals(2, m.intervalOf(v1))
@@ -85,13 +88,15 @@ class RecurrenceEditorModelTest {
         assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-10-05"), m.rule(v1, listOf(4), 2, null, "2026-09-30", "2026-09-30", anchor = "2026-10-05"))
     }
 
-    /** The create sheet schedules the first chip on the picked day (a one-off on
-     *  an off weekday, as for weekly), a later chip on its own day — the weeks
-     *  the Schedule step's re-anchor lands on are the chip's either way. */
-    @Test fun `create starts on the picked day, or on a later chip's day`() {
+    /** The create sheet schedules the picked day for every chip (a one-off on an
+     *  off weekday, as for weekly): a later chip only moves week one, and the
+     *  picked day keeps its slot before it — web's create modal, canonical
+     *  (cross-platform verification 2026-09-24). The sheet schedules it with
+     *  reanchor = false, so the weeks stay the chip's. */
+    @Test fun `create starts on the picked day, whichever chip`() {
         assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28") to "2026-09-25",
             m.createStart(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28"), "2026-09-25"))
-        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-10-05") to "2026-10-08",
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-10-05") to "2026-09-25",
             m.createStart(Recurrence.EveryNWeeks(2, listOf(4), "2026-10-05"), "2026-09-25"))
         // A stale anchor with the same weeks is written as the chip's Monday.
         assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28") to "2026-09-25",
@@ -108,8 +113,8 @@ class RecurrenceEditorModelTest {
     @Test fun `create re-derives week one when the day changes after the rhythm`() {
         val tappedOnThursday = m.rule(null, listOf(4), 2, null, "2026-09-24", "2026-09-24")
         assertEquals("2026-09-21", (tappedOnThursday as Recurrence.EveryNWeeks).anchor)
-        // The regression: the stale rule on its own.
-        assertEquals("2026-10-08", m.createStart(tappedOnThursday, "2026-09-25").second)
+        // The regression: the stale rule on its own names the second chip's weeks.
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-10-05"), m.createStart(tappedOnThursday, "2026-09-25").first)
         // The sheet shows and saves createRule's rule: the first chip of the new day.
         val shown = m.createRule(tappedOnThursday, null, "2026-09-25") as Recurrence.EveryNWeeks
         assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28"), shown)
@@ -122,7 +127,7 @@ class RecurrenceEditorModelTest {
     @Test fun `a Starts pick holds while it is still a chip`() {
         val v = Recurrence.EveryNWeeks(2, listOf(4), "2026-09-21")
         assertEquals("2026-10-05", (m.createRule(v, "2026-10-05", "2026-09-25") as Recurrence.EveryNWeeks).anchor)
-        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-10-05") to "2026-10-08",
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-10-05") to "2026-09-25",
             m.createStart(m.createRule(v, "2026-10-05", "2026-09-25"), "2026-09-25"))
         // A day toggle keeps it (Mon + Thu: the chips' weeks are the same).
         assertEquals("2026-10-05", (m.createRule(v.copy(daysOfWeek = listOf(1, 4)), "2026-10-05", "2026-09-25") as Recurrence.EveryNWeeks).anchor)

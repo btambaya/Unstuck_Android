@@ -2623,6 +2623,42 @@ class AppViewModelTest {
         assertEquals("…and so do the focus minutes", 300, moved.totalFocused)
     }
 
+    /** The create sheet with a LATER "Starts" chip (web's create modal, canonical
+     *  where the spec is silent; cross-platform verification 2026-09-24): the
+     *  picked day keeps its slot as a one-off and the series runs on the chip's
+     *  weeks — scheduled with reanchor = false, which never moves week one back
+     *  to the picked day's week. Every other caller re-anchors (spec §5). */
+    @Test fun scheduleTask_createSheetsLaterStartsChip_keepsThePickedDayAndTheChipsWeeks() = runTest(dispatcher) {
+        // Real clock: regenerateForTask filters on Clock.todayIso().
+        val picked = Clock.dateIso(System.currentTimeMillis() + 2 * 86_400_000L)
+        val dow = java.time.LocalDate.parse(picked).dayOfWeek.value % 7   // 0 = Sunday
+        val chipWeek = addDaysIso(tech.csalliance.unstuck.core.logic.mondayIso(picked), 7)
+        val (rule, day) = tech.csalliance.unstuck.ui.components.RecurrenceEditorModel.createStart(
+            Recurrence.EveryNWeeks(2, listOf(dow), chipWeek), picked)
+        assertEquals("the sheet schedules the picked day", picked, day)
+        val t = task("tpl", name = "Office Focus", recurrence = rule)
+        val other = task("tpl2", name = "Standup", recurrence = rule)
+        seedTask(t)
+        seedTask(other)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+
+        vm.scheduleTask(t, picked, "10:30", reanchor = false)
+        advanceUntilIdle()
+        val mine = awaitBlocks { l ->
+            val b = l.filter { it.taskId == "tpl" }.map { it.date }
+            picked in b && addDaysIso(picked, 7) in b && addDaysIso(picked, 21) in b
+        }.filter { it.taskId == "tpl" }.map { it.date }.toSet()
+        assertTrue("the chip's weeks, not the picked day's: $mine", addDaysIso(picked, 14) !in mine)
+        assertEquals("week one stays the chip's", rule, loadTask("tpl")!!.recurrence)
+
+        // Any other scheduling of the same day re-anchors the series there.
+        vm.scheduleTask(other, picked, "10:30")
+        advanceUntilIdle()
+        val moved = awaitTask("tpl2") { (it.recurrence as? Recurrence.EveryNWeeks)?.anchor != chipWeek }
+        assertEquals(tech.csalliance.unstuck.core.logic.mondayIso(picked), (moved.recurrence as Recurrence.EveryNWeeks).anchor)
+    }
+
     @Test fun scheduleTask_leavesARecurringTemplatesLaterFlagAlone() = runTest(dispatcher) {
         // A template's occurrence blocks are generated horizon fill, not a
         // per-task scheduling decision (and projected rows are later=false already).

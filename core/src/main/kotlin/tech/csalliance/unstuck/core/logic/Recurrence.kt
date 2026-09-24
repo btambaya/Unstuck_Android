@@ -186,7 +186,8 @@ const val MAX_STARTS_CHIPS = 8
 fun startsChips(days: List<Int>, interval: Int, baseIso: String): List<StartsChip> {
     val base = RecurrenceSerializer.strictYmd(baseIso) ?: return emptyList()
     val valid = days.filter { it in 0..6 }.toSet()
-    if (valid.isEmpty() || interval < 1) return emptyList()
+    // None below N = 2: every week has no Starts row (web's rule, a shared vector).
+    if (valid.isEmpty() || interval < 2) return emptyList()
     val first = RecurrenceSerializer.strictYmd(seriesAnchor(days, baseIso)) ?: return emptyList()
     val out = ArrayList<StartsChip>()
     for (k in 0 until minOf(interval, MAX_STARTS_CHIPS)) {
@@ -394,11 +395,17 @@ fun regenerateForTask(
     val deleteSet = toDelete.filterTo(HashSet()) { it !in keepIds }
     val existingById = LinkedHashMap<String, CalBlock>()
     for (b in existing) existingById.putIfAbsent(b.id, b)
+    // A day that keeps its done or skipped occurrence is settled: a new open one
+    // there (at the new time, or when that row carries another id — a legacy
+    // random one) would twin it. One block per task per day (web's settledDates;
+    // cross-platform verification 2026-09-24).
+    val settledDates = futureExisting.filter { it.done || it.skipped }.mapTo(HashSet()) { it.date }
 
     val toUpsert = ArrayList<CalBlock>()
     val toRetime = ArrayList<CalBlock>()
     for (o in desired) {
         if ("${o.date}|${o.startTime}" in existingFutureKeys) continue
+        if (o.date in settledDates) continue
         val id = occurrenceId(task.id, o.date)
         val row = existingById[id]
         if (row != null && id in deleteSet) {

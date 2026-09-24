@@ -247,8 +247,9 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     fun submit() {
         if (!canSubmit) return
         // Every N weeks: week one is the "Starts" chip shown as picked (the first
-        // unless one was tapped), and a later chip's day is where the series is
-        // scheduled from (spec §5).
+        // unless one was tapped); the series is scheduled from the picked day,
+        // never re-anchored, so a later chip keeps that day as a one-off before
+        // its weeks (spec §5; web's create modal, canonical).
         val model = tech.csalliance.unstuck.ui.components.RecurrenceEditorModel
         val (rule, firstDate) = if (effectiveDate != null) {
             model.createStart(model.createRule(recurrence, startsPick, effectiveDate), effectiveDate)
@@ -260,7 +261,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
             shares = shareLevels.toMap(),
         )
         if (whenSel != "Later" && firstDate != null && pickedTime != null) {
-            vm.scheduleTask(t, firstDate, pickedTime!!)
+            vm.scheduleTask(t, firstDate, pickedTime!!, reanchor = false)
         }
         onDismiss()
     }

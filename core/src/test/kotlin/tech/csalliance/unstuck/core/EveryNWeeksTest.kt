@@ -94,6 +94,7 @@ class EveryNWeeksTest {
             id = id, taskId = taskId, taskName = "Office Focus", startTime = b.str("startTime")!!, durationMinutes = 60,
             date = b.str("date")!!, kind = CalBlockKind.TASK,
             done = (o["done"] as? JsonPrimitive)?.booleanOrNull == true,
+            skipped = (o["skipped"] as? JsonPrimitive)?.booleanOrNull == true,
         )
     }
 
@@ -196,11 +197,12 @@ class EveryNWeeksTest {
         e["toDelete"]!!.jsonArray.map { it.jsonPrimitive.content }.sorted(),
     )
 
-    @Test fun regenerateVectors_E1toE3_withTheSpecStart_andTheDraftRegression() {
-        assertEquals(3, arr("regenerate").size)
+    @Test fun regenerateVectors_E1toE4_withTheSpecStart_andTheDraftRegression() {
+        assertEquals(4, arr("regenerate").size)
         for (v in arr("regenerate")) {
             val id = v.str("id")
-            val before = rule(v.jsonObject["before"])!! as Recurrence.EveryNWeeks
+            // E4 converts a weekly series: `before` is any rule.
+            val before = rule(v.jsonObject["before"])
             val after = rule(v.jsonObject["after"])!! as Recurrence.EveryNWeeks
             val today = v.str("today")!!
             // The start the app computes is the vector's: today, 56 days, the series' time.

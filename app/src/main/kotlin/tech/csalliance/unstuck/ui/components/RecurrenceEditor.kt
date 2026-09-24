@@ -68,8 +68,10 @@ internal object RecurrenceEditorModel {
         else -> emptyList()
     }
 
-    /** The interval chips: 1–4, plus a 5–8 rhythm the assistant set. */
-    fun intervalChoices(current: Int): List<Int> = listOf(1, 2, 3, 4) + (if (current in 5..8) listOf(current) else emptyList())
+    /** The interval chips: 1–4, plus a fifth for a rhythm past 4 the assistant
+     *  (5–8) or another writer set — web's `intervalOptions` and iOS's
+     *  weeksRow show it for any stored N above 4. */
+    fun intervalChoices(current: Int): List<Int> = listOf(1, 2, 3, 4) + (if (current > 4) listOf(current) else emptyList())
 
     fun intervalLabel(n: Int): String = when (n) {
         1 -> "Every week"
@@ -105,17 +107,22 @@ internal object RecurrenceEditorModel {
     /**
      * The create sheet's save (spec §5, "Create sheet"): the rule with week one
      * set to the "Starts" chip it shows as picked, and the day the first
-     * occurrence is scheduled on — the picked day for the first chip (as for
-     * weekly: an off-pattern day gets its one-off), else that chip's day, so the
-     * Schedule step's re-anchor (AppViewModel.scheduleTaskNow) lands on the same
-     * weeks. Any other rule is returned as it is, on [dateIso].
+     * occurrence is scheduled on — ALWAYS the picked day [dateIso], as for
+     * weekly (an off-pattern day gets its one-off) and as web's create modal
+     * does (web is canonical where the spec is silent; cross-platform
+     * verification 2026-09-24). A LATER chip only moves week one: the picked
+     * day keeps its slot as a one-off before the chip's weeks (Today + "Starts
+     * Thu 1 Oct" → today, then 1 Oct, 15 Oct …). The sheet schedules it with
+     * `reanchor = false` (AppViewModel.scheduleTask), or placing the picked day
+     * would move week one back to that day's week. Any other rule is returned
+     * as it is.
      */
     fun createStart(value: Recurrence?, dateIso: String): Pair<Recurrence?, String> {
         if (value !is Recurrence.EveryNWeeks || value.interval < 2) return value to dateIso
         val chips = startsChips(value.daysOfWeek, value.interval, dateIso)
         val i = chips.indexOfFirst { sameSeriesWeeks(it.anchor, value.anchor, value.interval) }
         if (i < 0) return value to dateIso
-        return value.copy(anchor = chips[i].anchor) to (if (i == 0) dateIso else chips[i].date)
+        return value.copy(anchor = chips[i].anchor) to dateIso
     }
 
     /** The "Starts" chips for [value], each with whether it is the rule's weeks.

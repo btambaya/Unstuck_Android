@@ -218,9 +218,9 @@ class CallScriptTest {
         assertEquals("Hi Ahmad — Board prep was on till 3:15pm. How did it go?", opening(p.copy(endTime = "2026-09-02T15:15:00Z")))
         val i = CallScript.instructions(p, nowMs = now, zone = utc)
         assertTrue(i.startsWith("THIS IS THE CHECK-IN AFTER A BLOCK the user opted into: the block ended and its task isn't marked done"))
-        assertTrue(i.contains("done → complete_task (or complete_occurrence for a recurring one)"))
+        assertTrue(i.contains("Tick it off (complete_task, or complete_occurrence for a recurring one) ONLY when they clearly say they finished it"))
         assertTrue(i.contains("skip_occurrence / set_task_later"))
-        assertTrue(i.contains("schedule_task or block_time for a new slot"))
+        assertTrue(i.contains("schedule_task or block_time, only when they say so"))
         assertTrue(i.contains("- kind: after_block"))
         val iso = CallScript.instructions(p.copy(endTime = "2026-09-02T15:15:00Z"), nowMs = now, zone = utc)
         assertTrue(iso, iso.contains("- block ended at: 2026-09-02 15:15"))
@@ -310,5 +310,16 @@ class CallScriptTest {
         assertTrue(i, i.contains("NEVER ask them what got done"))
         assertTrue(i, i.contains("read from the app as the call connected"))
         assertTrue(CallScript.instructions(payload(callKind = "morning"), nowMs = now, zone = utc).contains("read today's plan from the call context"))
+    }
+
+    // Zubair's after-block calls, 2026-09-24 10:31 + 11:43: a vague answer ("It went
+    // well.", a misheard "I always do that.") was ticked off at once. Now: one question first.
+    @Test fun `after-block ticks off only a clear done and asks on a vague answer`() {
+        val r = CallScript.conversationRule(CallKind.AFTER_BLOCK)
+        assertTrue(r, r.contains("ONLY when they clearly say they finished it"))
+        assertTrue(r, r.contains("Want me to mark it done?"))
+        assertTrue(r, r.contains("Never change anything they didn't ask for"))
+        assertFalse(r, r.contains("settle it in one move"))
+        assertTrue(CallScript.conversationRule(CallKind.EVENING).contains("complete_task only for something they clearly say they finished"))
     }
 }

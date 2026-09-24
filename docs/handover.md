@@ -18,6 +18,9 @@ Single source of truth for "where is the Android build?". Update as phases land.
   "due/by" times + picker; Insights heatmap axis; Settings › Calls (hours rows, proactive times, pickers, warnings, hints, test
   call); the "Rescheduled" and late-reminder notifications; assistant receipts + the harness's own closing line; the
   text reply polish (`PolishOptions.clock`: a 24-hour phone keeps the model's "14:30" instead of the "2:30pm" rewrite).
+  Review pass: the interview's never-schedule chips ("Before 9am" / "After 9pm" → `InterviewChip.displayLabel`: "Before
+  09:00" on a 24-hour phone; the echoed answer matches; the SAVED fact keeps the web's words for cross-device parity) and the
+  "Plan a quiet weekend" suggestion's message, which lands in the thread as the user's turn ("nothing before 10:00").
 - **Left 24-hour on purpose (machine / model text):** `WireTime` storage + sync, tool args/results and every `ok:`/`error:`
   string the model reads (`deviceGuard`, `snoozeRefusal`, `timeGuard` pass `ClockMode.H24`), the assistant context
   (goldenHours, patterns, get_insights' "Peak slot" via `hourLabel`), the call script/opening and TTS (`spokenTime`), Google/ICS

@@ -112,8 +112,10 @@ object ClockFormat {
     private const val NO_MERIDIEM = "(?![\\d:])(?!\\s?(?i:[ap]\\.?m\\b))"
     /** …nor the start of a 12-hour range whose end carries it ("10:00–11:00 PM"). */
     private const val NOT_RANGE_START_12H = "(?!\\s?[–-]\\s?\\d{1,2}:\\d{2}\\s?(?i:[ap]\\.?m\\b))"
-    private val WIRE_RANGE = Regex("(?<![\\d:.])$WIRE_HM\\s?[–-]\\s?$WIRE_HM$NO_MERIDIEM")
-    private val WIRE_TIME = Regex("(?<![\\d:.])$WIRE_HM$NO_MERIDIEM$NOT_RANGE_START_12H")
+    /** Not inside a number, a longer time, or an ISO stamp's "…T14:05". */
+    private const val NOT_AFTER = "(?<![\\d:.T])"
+    private val WIRE_RANGE = Regex("$NOT_AFTER$WIRE_HM\\s?[–-]\\s?$WIRE_HM$NO_MERIDIEM")
+    private val WIRE_TIME = Regex("$NOT_AFTER$WIRE_HM$NO_MERIDIEM$NOT_RANGE_START_12H")
 
     /** Every standalone wire time ("14:05") and wire range ("08:00–21:00")
      *  inside [text], shown in [mode] ([time] / [range]). For the one place

@@ -9,6 +9,9 @@ import tech.csalliance.unstuck.core.logic.INTERVIEW_QUESTIONS
 import tech.csalliance.unstuck.core.logic.InterviewCopy
 import tech.csalliance.unstuck.core.logic.InterviewFlag
 import tech.csalliance.unstuck.core.logic.InterviewScript
+import tech.csalliance.unstuck.core.logic.displayLabel
+import tech.csalliance.unstuck.core.time.ClockMode
+import java.util.Locale
 import tech.csalliance.unstuck.core.model.ProfileFactCategory
 
 // The pure half of the get-to-know-you interview — translation of the script /
@@ -202,5 +205,26 @@ class InterviewTest {
         assertFalse("facts from another device / chat: the pill nudges instead", InterviewFlag.shouldAutoOpen(1, done = false))
         assertFalse(InterviewFlag.shouldAutoOpen(0, done = true))
         assertFalse("parked ≠ pop back open on the next launch", InterviewFlag.shouldAutoOpen(0, done = false, hasResumeStep = true))
+    }
+    @Test fun `the never-schedule hours read the phone's way, the saved fact keeps the web's words`() {
+        // Ahmad, 2026-09-24: one clock app-wide — "Before 9am" on a 24-hour phone
+        // was the only 12-hour time left in the interview.
+        val nogo = q["nogo"]!!.chips
+        assertEquals(
+            listOf("Before 09:00", "After 21:00", "Weekends", "No hard limits"),
+            nogo.map { it.displayLabel(ClockMode.H24, Locale.US) },
+        )
+        assertEquals(
+            listOf("Before 9am", "After 9pm", "Weekends", "No hard limits"),
+            nogo.map { it.displayLabel(ClockMode.H12, Locale.US) },
+        )
+        // The label and the saved fact stay verbatim (web parity, refine-in-place).
+        assertEquals("Never schedule anything before 9am", nogo[0].fact)
+        assertEquals("Before 9am", nogo[0].label)
+        // Every other chip shows its label as-is, in both modes.
+        for (question in INTERVIEW_QUESTIONS) for (c in question.chips) if (c.clockHour == null) {
+            assertEquals(c.label, c.displayLabel(ClockMode.H24, Locale.US))
+            assertEquals(c.label, c.displayLabel(ClockMode.H12, Locale.US))
+        }
     }
 }

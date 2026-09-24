@@ -10,6 +10,8 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.INTERVIEW_QUESTIONS
 import tech.csalliance.unstuck.core.logic.InterviewChip
+import tech.csalliance.unstuck.core.logic.displayLabel
+import tech.csalliance.unstuck.core.time.ClockMode
 import tech.csalliance.unstuck.core.logic.InterviewCopy
 import tech.csalliance.unstuck.core.logic.InterviewFlag
 import tech.csalliance.unstuck.core.logic.InterviewThreadCopy
@@ -62,13 +64,14 @@ class InterviewThreadDriverTest {
         ready: Boolean = true,
         factCount: Int = 0,
         firstName: String? = "Maya",
+        labelOf: (InterviewChip) -> String = { it.label },
     ) {
         var ready = ready
         var factCount = factCount
         val driver = InterviewThreadDriver(
             controller = InterviewFlowController(host), host = host, firstName = firstName,
             ready = { this.ready }, factCount = { this.factCount },
-            post = thread::post, echo = { thread.echoes += it },
+            post = thread::post, echo = { thread.echoes += it }, labelOf = labelOf,
         )
     }
 
@@ -159,6 +162,16 @@ class InterviewThreadDriverTest {
         assertEquals(3, r.thread.posts.size)                     // greeting, Q1, Q2 — no second greeting
         assertEquals("a3", r.driver.promptTurnId)
         assertEquals(1, r.host.parkedStep)
+    }
+
+    @Test fun `a chip naming an hour echoes it the phone's way, the fact keeps the web's words`() = runTest {
+        // Ahmad, 2026-09-24: one clock app-wide — a 24-hour phone reads "Before 09:00".
+        val r = armed(Rig(labelOf = { it.displayLabel(ClockMode.H24, java.util.Locale.US) }))
+        repeat(5) { r.driver.skip() }                            // rhythm … commitments → nogo
+        assertEquals("nogo", r.driver.controller.current!!.key)
+        r.driver.answer(chip(r, "Before 9am"))
+        assertEquals("Before 09:00", r.thread.echoes.last())
+        assertEquals("Never schedule anything before 9am", r.host.saved.last().second)
     }
 
     @Test fun `a null-fact chip saves nothing but still moves on`() = runTest {

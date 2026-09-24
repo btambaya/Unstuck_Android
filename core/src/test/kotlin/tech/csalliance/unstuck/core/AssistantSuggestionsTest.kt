@@ -1,6 +1,7 @@
 package tech.csalliance.unstuck.core
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -10,6 +11,7 @@ import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.time.ClockMode
 
 // 1:1 with lib/assistant/suggestions.test.ts. Every chip must derive from the
 // user's real data and only appear when applicable — the panel never lies.
@@ -137,6 +139,26 @@ class AssistantSuggestionsTest {
         val msg = g.planAndSchedule.first { it.label == "Plan a quiet weekend" }.message
         assertTrue(Regex("\\d{4}-\\d{2}-\\d{2} and \\d{4}-\\d{2}-\\d{2}").containsMatchIn(msg))
         assertTrue(msg.contains("2026-08-08 and 2026-08-09"))
+    }
+
+    @Test fun `the weekend chip's hour reads the phone's way`() {
+        // The message lands in the thread as the user's own turn (Ahmad,
+        // 2026-09-24: one clock app-wide) — "10:00" on a 24-hour phone.
+        val light = listOf(
+            task(lifeArea = "Home", estimateMin = 30),
+            task(lifeArea = "Personal", estimateMin = 20),
+        )
+        fun msg(clock: ClockMode) = buildSuggestions(light, emptyList(), emptyList(), today, clock)
+            .planAndSchedule.first { it.label == "Plan a quiet weekend" }.message
+        assertTrue(msg(ClockMode.H24), msg(ClockMode.H24).contains("nothing before 10:00,"))
+        assertFalse(msg(ClockMode.H24), msg(ClockMode.H24).contains("10am"))
+        val prev = java.util.Locale.getDefault()
+        try {
+            java.util.Locale.setDefault(java.util.Locale.US)
+            assertTrue(msg(ClockMode.H12), msg(ClockMode.H12).contains("nothing before 10am,"))
+        } finally {
+            java.util.Locale.setDefault(prev)
+        }
     }
 
     @Test fun `on a Saturday the weekend starts today`() {

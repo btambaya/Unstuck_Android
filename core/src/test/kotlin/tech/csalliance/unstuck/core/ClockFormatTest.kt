@@ -104,6 +104,7 @@ class ClockFormatTest {
         )
         assertEquals("booked 2026-09-07 2:31 PM", ClockFormat.localizeTimes("booked 2026-09-07 14:31", H12, us))
         assertEquals("an ISO stamp is left alone", "at 2026-09-07T14:31:00Z", ClockFormat.localizeTimes("at 2026-09-07T14:31:00Z", H12, us))
+        assertEquals("a minute-precision ISO stamp too", "at 2026-09-07T14:31Z", ClockFormat.localizeTimes("at 2026-09-07T14:31Z", H12, us))
         assertEquals("a ratio or score is left alone", "ran 3:1 and 99:99", ClockFormat.localizeTimes("ran 3:1 and 99:99", H12, us))
         assertEquals(
             "ranges go through range()",

@@ -63,7 +63,7 @@ class PeriodReviewTest {
 
     @Test fun everySharedVectorMatchesExactly() {
         val vectors = root["vectors"]!!.jsonArray
-        assertEquals(25, vectors.size)
+        assertEquals(26, vectors.size)   // V20: a fortnightly series (every-n-weeks spec §8.2)
         val failures = ArrayList<String>()
         for (e in vectors) {
             val v = e.jsonObject

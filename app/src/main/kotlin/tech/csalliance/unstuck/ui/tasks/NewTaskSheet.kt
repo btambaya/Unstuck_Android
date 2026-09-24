@@ -170,6 +170,10 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     var estimate by rememberSaveable { mutableStateOf(settings.focusDefaultMin) }
     var area by rememberSaveable { mutableStateOf<String?>(null) }
     var recurrence by rememberSaveable(stateSaver = RecurrenceSaver) { mutableStateOf<Recurrence?>(null) }
+    // The "Starts" chip tapped (its week's Monday); null = the first chip. Kept
+    // apart from the rule so a later change of day re-derives week one
+    // (RecurrenceEditorModel.createRule).
+    var startsPick by rememberSaveable { mutableStateOf<String?>(null) }
     var showDatePicker by rememberSaveable { mutableStateOf(false) }
     var showTimePicker by rememberSaveable { mutableStateOf(false) }
     var showEstimate by rememberSaveable { mutableStateOf(false) }
@@ -242,11 +246,13 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     // silently dropped, the live T2 bug). Failures are logged, not swallowed.
     fun submit() {
         if (!canSubmit) return
-        // Every N weeks: week one is the "Starts" chip shown as picked, and a later
-        // chip's day is where the series is scheduled from (spec §5).
+        // Every N weeks: week one is the "Starts" chip shown as picked (the first
+        // unless one was tapped), and a later chip's day is where the series is
+        // scheduled from (spec §5).
+        val model = tech.csalliance.unstuck.ui.components.RecurrenceEditorModel
         val (rule, firstDate) = if (effectiveDate != null) {
-            tech.csalliance.unstuck.ui.components.RecurrenceEditorModel.createStart(recurrence, effectiveDate)
-        } else recurrence to null
+            model.createStart(model.createRule(recurrence, startsPick, effectiveDate), effectiveDate)
+        } else model.createRule(recurrence, startsPick, todayIso) to null
         val t = vm.addTask(
             name = name, estimateMin = estimate, lifeArea = area, tags = tags.toList().ifEmpty { null },
             firstPhysicalAction = null, recurrence = rule,
@@ -436,9 +442,17 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                     SectionLabel("Tags")
                     tech.csalliance.unstuck.ui.components.TagPicker(vm, tags.toList()) { tags.clear(); tags.addAll(it) }
 
+                    val repeatModel = tech.csalliance.unstuck.ui.components.RecurrenceEditorModel
+                    val repeatBase = effectiveDate ?: todayIso
                     tech.csalliance.unstuck.ui.components.RecurrenceEditor(
-                        recurrence, todayIso = todayIso, startIso = effectiveDate ?: todayIso,
-                    ) { recurrence = it }
+                        repeatModel.createRule(recurrence, startsPick, repeatBase), todayIso = todayIso, startIso = repeatBase,
+                        onStartsPick = { startsPick = it },
+                    ) { r ->
+                        // A new rhythm starts from its first chip again (web parity);
+                        // a day toggle keeps the pick while it is still a chip.
+                        if (repeatModel.intervalOf(r) != repeatModel.intervalOf(recurrence)) startsPick = null
+                        recurrence = r
+                    }
                 }
             }
 

@@ -192,10 +192,12 @@ fun nWeeksBase(current: Recurrence?, newInterval: Int, todayIso: String, startIs
  * Week one (the anchor Monday) an every-[newInterval]-weeks rule on [newDays] is
  * written with when no "Starts" chip was picked (spec §5): the STORED anchor for
  * an edit that keeps N (days, time or until changed — such an edit never moves
- * the weeks, E2), else [seriesAnchor] from [nWeeksBase].
+ * the weeks, E2), written as its Monday (spec §0 rule 3: writers normalise;
+ * readers take the Monday of any anchor, so the weeks are the same) — else
+ * [seriesAnchor] from [nWeeksBase].
  */
 fun nWeeksAnchor(current: Recurrence?, newDays: List<Int>, newInterval: Int, todayIso: String, startIso: String): String =
-    if (current is Recurrence.EveryNWeeks && isValidEveryNWeeks(current) && current.interval == newInterval) current.anchor
+    if (current is Recurrence.EveryNWeeks && isValidEveryNWeeks(current) && current.interval == newInterval) mondayIso(current.anchor)
     else seriesAnchor(newDays, nWeeksBase(current, newInterval, todayIso, startIso))
 
 /**

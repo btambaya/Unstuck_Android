@@ -204,6 +204,41 @@ class EveryNWeeksExecutorTest {
         assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-21"), run.stored())
     }
 
+    private suspend fun Run.recur(vararg args: Pair<String, JsonElement>): String =
+        call(JsonObject(mapOf("tool" to JsonPrimitive("set_task_recurrence"), "args" to JsonObject(mapOf(*args)))))
+
+    /** The checks run in web's and iOS's order — a whole number, then weekly
+     *  only, then 1…8 — so the same call gets the same line on every platform. A
+     *  whole number past Int (1e10, 12345678901) is out of range, not "not whole"
+     *  (web Number.isInteger, iOS Int(exactly:)). Nothing is written either way. */
+    @Test fun `intervalWeeks is checked in the same order as web and iOS`() = runTest {
+        val run = setup(cases["X7"]!!)
+        val days = "daysOfWeek" to JsonArray(listOf(JsonPrimitive(4)))
+        assertEquals("error: every N weeks only goes with kind weekly and its days — nothing changed",
+            run.recur("kind" to JsonPrimitive("daily"), "intervalWeeks" to JsonPrimitive(9)))
+        assertEquals("error: every N weeks only goes with kind weekly and its days — nothing changed",
+            run.recur("kind" to JsonPrimitive("monthly"), "intervalWeeks" to JsonPrimitive(2.0)))
+        assertEquals("error: intervalWeeks must be a whole number of weeks (2 = every other week) — nothing changed",
+            run.recur("kind" to JsonPrimitive("daily"), "intervalWeeks" to JsonPrimitive(2.5)))
+        for (big in listOf(JsonPrimitive(1e10), JsonPrimitive(12345678901L), JsonPrimitive(-1e18), Json.parseToJsonElement("1e300"))) {
+            assertEquals("$big", "error: every N weeks goes up to every 8 weeks — nothing changed; tell the user this rhythm isn't available",
+                run.recur("kind" to JsonPrimitive("weekly"), days, "intervalWeeks" to big))
+        }
+        // daily with 1 is just daily (1 = every week, which daily already is).
+        assertTrue(run.recur("kind" to JsonPrimitive("daily"), "intervalWeeks" to JsonPrimitive(1)).startsWith("ok: \"Office Focus\" now repeats daily"))
+    }
+
+    /** A series with no timed slot names no "next" dates, only that it has no
+     *  slot (web + iOS): an untimed block on a rule date is not an occurrence. */
+    @Test fun `no slot names no next dates`() = runTest {
+        val run = setup(cases["X3"]!!)
+        run.state.tasks[0] = run.state.tasks[0].copy(recurrence = null)
+        run.state.blocks.clear()
+        run.state.blocks += CalBlock("untimed", taskId, "Office Focus", "", 60, "2026-10-08", kind = CalBlockKind.TASK)
+        val ok = run.recur("kind" to JsonPrimitive("weekly"), "daysOfWeek" to JsonArray(listOf(JsonPrimitive(4))), "intervalWeeks" to JsonPrimitive(2))
+        assertEquals("ok: \"Office Focus\" now repeats every 2 weeks on Thu — it has no calendar slot yet; schedule_task it to place the first one", ok)
+    }
+
     /** intervalWeeks is offered on set_task_recurrence, and this build reports
      *  the capability that makes the server offer it on the text path. */
     @Test fun `the registry offers intervalWeeks and the build reports recurrence_interval`() {

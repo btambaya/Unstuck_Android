@@ -148,8 +148,18 @@ object RecurrenceSerializer : KSerializer<Recurrence> {
     override fun deserialize(decoder: Decoder): Recurrence {
         val json = decoder as? JsonDecoder ?: throw SerializationException("Recurrence needs JSON")
         val obj = json.decodeJsonElement().jsonObject
+        val kind = obj["kind"]?.jsonPrimitive?.content
+        // Every N weeks is read strictly (spec §2, "readers are total"): an `until`
+        // that is neither absent, null nor a string makes the whole rule unreadable
+        // — inert, never a throw (`jsonPrimitive` threw on an array or object and
+        // the task vanished) and never a number read as an end date that no
+        // YYYY-MM-DD ever passes. iOS's codec does the same.
+        if (kind == EVERY_N_WEEKS) {
+            val u = obj["until"]
+            if (u != null && u !is JsonNull && !(u is JsonPrimitive && u.isString)) return Recurrence.Daily(until = UNKNOWN_UNTIL)
+        }
         val until = obj["until"]?.jsonPrimitive?.contentOrNull
-        return when (obj["kind"]?.jsonPrimitive?.content) {
+        return when (kind) {
             "daily" -> Recurrence.Daily(until)
             "monthly" -> Recurrence.Monthly(until)
             "weekly" -> Recurrence.Weekly(

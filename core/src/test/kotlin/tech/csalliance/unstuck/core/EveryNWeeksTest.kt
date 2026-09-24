@@ -310,8 +310,38 @@ class EveryNWeeksTest {
         assertTrue(RecurrenceSerializer.isUnknown(t.recurrence))
     }
 
-    /** vc107's decoder + encoder, as shipped (Models.kt at 7042ea9): the input to
-     *  migration 081's test. It turns V1 into the sentinel, a fixed point. */
+    /** Readers are total (spec §0 rule 4), `until` included: a number, an array,
+     *  an object or a boolean there makes the every-N-weeks rule unreadable —
+     *  inert, as iOS decodes it — never a throw that drops the task (an array or
+     *  object did: `jsonPrimitive`), and never a number read as an end date no
+     *  YYYY-MM-DD passes. A null until is no end. */
+    @Test fun codecMalformedUntil_isTheSentinel_neverAThrow() {
+        for (u in listOf("20261231", "[\"2026-12-31\"]", "{\"d\":\"2026-12-31\"}", "true")) {
+            val s = """{"kind":"everyNWeeks","interval":2,"daysOfWeek":[4],"anchor":"2026-09-21","until":$u}"""
+            val r = Json.decodeFromString(Recurrence.serializer(), s)
+            assertTrue(u, RecurrenceSerializer.isUnknown(r))
+            assertEquals(u, emptyList<Any>(), materializeOccurrences(r, ymdMs("2026-09-24"), "10:30", 56))
+            val row = """{"id":"t1","name":"Ship","estimateMin":25,"recurrence":$s,"createdAt":"2026-09-24T00:00:00Z","updatedAt":"2026-09-24T00:00:00Z"}"""
+            assertEquals(u, "Ship", Json.decodeFromString(TaskItem.serializer(), row).name)
+        }
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-21"),
+            Json.decodeFromString(Recurrence.serializer(), """{"kind":"everyNWeeks","interval":2,"daysOfWeek":[4],"anchor":"2026-09-21","until":null}"""))
+    }
+
+    /** Writers store week one as a Monday (spec §0 rule 3). An edit that keeps N
+     *  keeps the stored WEEKS — and writes a non-Monday anchor another writer
+     *  left (V7's 2026-09-24) as its Monday; the dates are the same. */
+    @Test fun anEditKeepingN_writesTheStoredWeeksAsTheirMonday() {
+        val v7 = Recurrence.EveryNWeeks(2, listOf(4), "2026-09-24")
+        assertEquals("2026-09-21", nWeeksAnchor(v7, listOf(5), 2, "2026-09-24", "2026-09-24"))
+        val fri = Recurrence.EveryNWeeks(2, listOf(5), nWeeksAnchor(v7, listOf(5), 2, "2026-09-24", "2026-09-24"))
+        assertEquals(materializeOccurrences(v7.copy(daysOfWeek = listOf(5)), ymdMs("2026-09-24"), "10:30", 56),
+            materializeOccurrences(fri, ymdMs("2026-09-24"), "10:30", 56))
+    }
+
+    /** The installed builds' decoder + encoder — vc107, and vc108 (Models.kt at
+     *  7042ea9, the same code): the input to migration 081's test. It turns V1
+     *  into the sentinel, a fixed point. */
     private fun vc107Decode(s: String): JsonObject {
         val o = Json.parseToJsonElement(s).jsonObject
         val until = o["until"]?.jsonPrimitive?.contentOrNull

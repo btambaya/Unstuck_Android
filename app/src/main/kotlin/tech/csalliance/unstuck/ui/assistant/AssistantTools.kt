@@ -10,6 +10,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.intOrNull
 import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import tech.csalliance.unstuck.core.logic.CallSettingsLogic
 import tech.csalliance.unstuck.core.logic.IsoDate
@@ -471,14 +472,19 @@ fun unknownToolResult(name: String): String =
 const val MAX_INTERVAL_WEEKS = 8
 
 /** A JSON number with a whole value (2 or 2.0), else null: never the string
- *  "2", never true, never 2.5 rounded to 3 the way [ToolArgs.int] would. */
+ *  "2", never true, never 2.5 rounded to 3 the way [ToolArgs.int] would. A
+ *  huge whole number (1e10) is still whole — the range check refuses it, as
+ *  web's Number.isInteger and iOS's Int(exactly:) do. */
 internal fun wholeNumberArg(e: kotlinx.serialization.json.JsonElement?): Long? {
     val p = e as? JsonPrimitive ?: return null
     if (p.isString || p is JsonNull) return null
     if (p.booleanOrNull != null) return null
+    p.longOrNull?.let { return it }
     val d = p.doubleOrNull ?: return null
-    if (!d.isFinite() || d != Math.floor(d) || kotlin.math.abs(d) > 1.0E9) return null
-    return d.toLong()
+    if (!d.isFinite() || d != Math.floor(d)) return null
+    // Past ±2^53 a double has no fractional part at all; clamp so the range
+    // check (1…8) answers instead of a Long overflow.
+    return if (kotlin.math.abs(d) > 9.0E15) (if (d > 0) Long.MAX_VALUE else Long.MIN_VALUE) else d.toLong()
 }
 
 /** "every week" / "every 2 weeks" — the rhythm an ok line names. */
@@ -665,13 +671,15 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             // intervalWeeks (every-n-weeks spec §7.2). kind none ignores it, like a
             // stray daysOfWeek: Zubair's own cancel carried daysOfWeek [4]
             // (2026-09-24), and refusing a cancel over a leftover param is wrong.
-            // Anything else checks it as given — never through the rounding int().
+            // Anything else checks it as given — never through the rounding int() —
+            // in web's and iOS's order: a whole number, then weekly only, then 1…8
+            // (daily with intervalWeeks 9 is "weekly only" on all three).
             var intervalWeeks: Int? = null
             if (kind != "none" && args.has("intervalWeeks") && !args.isNull("intervalWeeks")) {
                 val n = wholeNumberArg(args.raw["intervalWeeks"])
                     ?: return "error: intervalWeeks must be a whole number of weeks (2 = every other week) — nothing changed"
-                if (n < 1 || n > MAX_INTERVAL_WEEKS) return "error: every N weeks goes up to every 8 weeks — nothing changed; tell the user this rhythm isn't available"
                 if (kind != "weekly" && n >= 2) return "error: every N weeks only goes with kind weekly and its days — nothing changed"
+                if (n < 1 || n > MAX_INTERVAL_WEEKS) return "error: every N weeks goes up to every 8 weeks — nothing changed; tell the user this rhythm isn't available"
                 intervalWeeks = n.toInt()
             }
             if (kind == "weekly") {
@@ -802,8 +810,9 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 val rhythmNote = if (newN != null && currentN != null && newN != currentN) " — ${rhythmName(newN)} now; it was ${rhythmName(currentN)}" else ""
                 // The next two dates the saved rule has AND that hold a live
                 // occurrence, from the store after the writes; today's counts while
-                // it is open — Zubair's 10:30 was still ahead at 07:02.
-                val next = if (rec is Recurrence.EveryNWeeks) {
+                // it is open — Zubair's 10:30 was still ahead at 07:02. Only for a
+                // series that has a slot (web + iOS): with none, the line says so.
+                val next = if (rec is Recurrence.EveryNWeeks && anchored) {
                     val dates = liveRuleDates(rec, t.id, api.getBlocks(), api.todayIso())
                     if (dates.isEmpty()) "" else " — next " + dates.mapIndexed { i, d ->
                         (if (i > 0) "then " else "") + shortDayLabel(d) + (if (d == api.todayIso()) " (today)" else "")

@@ -16,6 +16,7 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import tech.csalliance.unstuck.core.logic.StartsChip
 import tech.csalliance.unstuck.core.logic.everyNWeeksDays
+import tech.csalliance.unstuck.core.logic.mondayIso
 import tech.csalliance.unstuck.core.logic.nWeeksAnchor
 import tech.csalliance.unstuck.core.logic.nWeeksBase
 import tech.csalliance.unstuck.core.logic.sameSeriesWeeks
@@ -40,7 +41,8 @@ private fun withUntil(r: Recurrence?, until: String?): Recurrence? = when (r) {
     is Recurrence.Daily -> Recurrence.Daily(until)
     is Recurrence.Weekly -> Recurrence.Weekly(r.daysOfWeek, until)
     is Recurrence.Monthly -> Recurrence.Monthly(until)
-    is Recurrence.EveryNWeeks -> r.copy(until = until)
+    // An until-only edit keeps the weeks; week one is written as its Monday.
+    is Recurrence.EveryNWeeks -> r.copy(anchor = mondayIso(r.anchor), until = until)
     null -> null
 }
 
@@ -83,6 +85,23 @@ internal object RecurrenceEditorModel {
         else Recurrence.EveryNWeeks(n, days, anchor ?: nWeeksAnchor(stored, days, n, todayIso, startIso), until)
 
     /**
+     * The create sheet's rule as shown and saved (spec §6: the default is the
+     * FIRST "Starts" chip on create): week one is the chip the user tapped
+     * ([pick], its anchor) while it is still one of the chips for the current
+     * days and [baseIso], else the first chip. The pick is held apart from the
+     * rule, as web holds it: a week one computed when the rhythm was chosen went
+     * stale when the day was changed afterwards — Today (Thu 24 Sep) → 2 weeks →
+     * Tomorrow showed "Thu 8 Oct" as picked and scheduled the series from 8 Oct
+     * instead of the day chosen, with 1 Oct left out.
+     */
+    fun createRule(value: Recurrence?, pick: String?, baseIso: String): Recurrence? {
+        if (value !is Recurrence.EveryNWeeks || value.interval < 2) return value
+        val chips = startsChips(value.daysOfWeek, value.interval, baseIso)
+        val anchor = chips.firstOrNull { it.anchor == pick }?.anchor ?: chips.firstOrNull()?.anchor ?: return value
+        return value.copy(anchor = anchor)
+    }
+
+    /**
      * The create sheet's save (spec §5, "Create sheet"): the rule with week one
      * set to the "Starts" chip it shows as picked, and the day the first
      * occurrence is scheduled on — the picked day for the first chip (as for
@@ -121,6 +140,10 @@ fun RecurrenceEditor(
     todayIso: String = Clock.todayIso(),
     /** Create: the picked day; edit: the edit's own start (see [RecurrenceEditorModel]). */
     startIso: String = todayIso,
+    /** The create sheet keeps a "Starts" tap apart from the rule
+     *  ([RecurrenceEditorModel.createRule]); null (the task sheet) saves it as the
+     *  rule's week one. */
+    onStartsPick: ((String) -> Unit)? = null,
     onChange: (Recurrence?) -> Unit,
 ) {
     val c = UTheme.colors
@@ -183,7 +206,10 @@ fun RecurrenceEditor(
                         Text("Starts", style = UFont.sans(12), color = c.ink3)
                         chips.forEach { (chip, on) ->
                             SelectableChip(shortDayLabel(chip.date), selected = on, a11yLabel = "Starts ${shortDayLabel(chip.date)}") {
-                                if (!on) onChange(weekly(days, interval, anchor = chip.anchor))
+                                if (!on) {
+                                    if (onStartsPick != null) onStartsPick(chip.anchor)
+                                    else onChange(weekly(days, interval, anchor = chip.anchor))
+                                }
                             }
                         }
                     }

@@ -76,6 +76,40 @@ class RecurrenceEditorModelTest {
         assertEquals(Recurrence.Weekly(listOf(4)) to "2026-09-25", m.createStart(Recurrence.Weekly(listOf(4)), "2026-09-25"))
     }
 
+    /** Create, the rhythm picked first and the day changed after (Today, Thu 24
+     *  Sep → 2 weeks → Tomorrow): week one is re-derived from the day now shown,
+     *  so the default is still the FIRST chip (Thu 1 Oct) and the series starts
+     *  on the day picked. With the week one computed when "2 weeks" was tapped
+     *  (21 Sep), the second chip read as picked and the task was scheduled from
+     *  Thu 8 Oct instead, 1 Oct left out. */
+    @Test fun `create re-derives week one when the day changes after the rhythm`() {
+        val tappedOnThursday = m.rule(null, listOf(4), 2, null, "2026-09-24", "2026-09-24")
+        assertEquals("2026-09-21", (tappedOnThursday as Recurrence.EveryNWeeks).anchor)
+        // The regression: the stale rule on its own.
+        assertEquals("2026-10-08", m.createStart(tappedOnThursday, "2026-09-25").second)
+        // The sheet shows and saves createRule's rule: the first chip of the new day.
+        val shown = m.createRule(tappedOnThursday, null, "2026-09-25") as Recurrence.EveryNWeeks
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28"), shown)
+        assertEquals(listOf(true, false), m.starts(null, shown, "2026-09-24", "2026-09-25").map { it.second })
+        assertEquals(shown to "2026-09-25", m.createStart(shown, "2026-09-25"))
+    }
+
+    /** A tapped Starts chip holds while it is still a chip for the day and days
+     *  shown; once it is not (the day moved past its week), the first chip. */
+    @Test fun `a Starts pick holds while it is still a chip`() {
+        val v = Recurrence.EveryNWeeks(2, listOf(4), "2026-09-21")
+        assertEquals("2026-10-05", (m.createRule(v, "2026-10-05", "2026-09-25") as Recurrence.EveryNWeeks).anchor)
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-10-05") to "2026-10-08",
+            m.createStart(m.createRule(v, "2026-10-05", "2026-09-25"), "2026-09-25"))
+        // A day toggle keeps it (Mon + Thu: the chips' weeks are the same).
+        assertEquals("2026-10-05", (m.createRule(v.copy(daysOfWeek = listOf(1, 4)), "2026-10-05", "2026-09-25") as Recurrence.EveryNWeeks).anchor)
+        // Picked the week of 28 Sep, then the day moved to Fri 2 Oct: no longer a chip.
+        assertEquals("2026-10-05", (m.createRule(v, "2026-09-28", "2026-10-02") as Recurrence.EveryNWeeks).anchor)
+        // Anything but every N weeks is untouched.
+        assertEquals(Recurrence.Weekly(listOf(4)), m.createRule(Recurrence.Weekly(listOf(4)), "2026-10-05", "2026-09-25"))
+        assertEquals(null, m.createRule(null, "2026-10-05", "2026-09-25"))
+    }
+
     /** The create sheet's draft survives a rotation with its rhythm and weeks. */
     @Test fun `the draft saver round-trips every N weeks`() {
         val scope = object : SaverScope { override fun canBeSaved(value: Any) = true }

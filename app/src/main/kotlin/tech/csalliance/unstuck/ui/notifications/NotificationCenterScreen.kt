@@ -76,15 +76,17 @@ fun NotificationCenterScreen(vm: AppViewModel, onBack: () -> Unit, onOpenTask: (
     // Tick ~every 30s so the "Xm ago" / "in Xm" labels don't freeze at screen-open time.
     var now by androidx.compose.runtime.remember { androidx.compose.runtime.mutableLongStateOf(vm.nowMs()) }
     androidx.compose.runtime.LaunchedEffect(Unit) { while (true) { now = vm.nowMs(); kotlinx.coroutines.delay(30_000) } }
-    // The server's call cards — a call rung on another device, or one this phone
-    // couldn't take (parity with iOS build 72). Read on open and on every return
-    // to the foreground while open (no realtime channel here, and
-    // postgres_changes has no replay). Best-effort: offline keeps what it had.
-    var callCards by remember { androidx.compose.runtime.mutableStateOf(emptyList<tech.csalliance.unstuck.surface.NotificationLog.Entry>()) }
+    // The server's cards — a call rung on another device or one this phone
+    // couldn't take, and every sharing/collaboration event whose push went
+    // elsewhere, was held back, or never rang (parity with iOS and the web).
+    // Read on open and on every return to the foreground while open (no
+    // realtime channel here, and postgres_changes has no replay). Best-effort:
+    // offline keeps what it had.
+    var serverCards by remember { androidx.compose.runtime.mutableStateOf(emptyList<tech.csalliance.unstuck.surface.NotificationLog.Entry>()) }
     var cardsTick by remember { androidx.compose.runtime.mutableIntStateOf(0) }
     androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) { cardsTick++ }
-    androidx.compose.runtime.LaunchedEffect(cardsTick) { vm.callQueueCards()?.let { callCards = it } }
-    val recent = remember(notifs, callCards) { NotificationQueueCards.mergeRecent(notifs, callCards) }
+    androidx.compose.runtime.LaunchedEffect(cardsTick) { vm.bellQueueCards()?.let { serverCards = it } }
+    val recent = remember(notifs, serverCards) { NotificationQueueCards.mergeRecent(notifs, serverCards) }
 
     val upcoming = remember(blocks, tasks) { upcomingReminders(blocks, tasks, now) }
 
@@ -160,6 +162,11 @@ private fun kindLabel(kind: String): String = when (kind) {
     // the server's call cards — they used to read "Reminder" (parity with iOS
     // build 72).
     "call", "call_missed", "call_busy", "call_outside_hours", "call_voice_failed", "call_off" -> "Call from Unstuck"
+    // Sharing + collaboration (pushes, and the server's cards for them).
+    "task_share", "shared_task_done" -> "Shared task"
+    "shared_session_start", "shared_session_end" -> "Shared session"
+    "collection_share" -> "Shared list"
+    "circle_invite", "invite_claimed" -> "People"
     else -> "Reminder"
 }
 
@@ -168,6 +175,9 @@ private fun accentFor(kind: String, c: tech.csalliance.unstuck.design.theme.Unst
     "session_recap" -> c.green
     // Neutral: these were indigo (owner decision 2026-09-24).
     "morning_brief", "evening_preview", "daily_nudge" -> c.ink2
+    // Neutral too: coral is kept for what needs you now, not for chatter.
+    "task_share", "shared_task_done", "shared_session_start", "shared_session_end",
+    "collection_share", "circle_invite", "invite_claimed" -> c.ink2
     else -> c.coral
 }
 

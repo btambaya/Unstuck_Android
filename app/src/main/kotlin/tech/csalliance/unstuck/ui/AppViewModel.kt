@@ -4750,14 +4750,14 @@ class AppViewModel(
             .map { rows -> tech.csalliance.unstuck.ui.tasks.CallMeLogic.liveForTask(rows, taskId) }
             .distinctUntilChanged()
 
-    /** The bell's "Unstuck called you about X" cards (notification_queue,
-     *  moment `call`), matched to the local call mirror. Null = couldn't read
-     *  (offline / signed out) — the bell keeps what it had (parity with iOS
-     *  build 72). */
-    suspend fun callQueueCards(): List<tech.csalliance.unstuck.surface.NotificationLog.Entry>? {
+    /** The bell's server cards (notification_queue, every moment the bell
+     *  shows — NotificationQueueCards.BELL_MOMENTS); call cards are matched to
+     *  the local call mirror. Null = couldn't read (offline / signed out) —
+     *  the bell keeps what it had (parity with iOS and the web bell). */
+    suspend fun bellQueueCards(): List<tech.csalliance.unstuck.surface.NotificationLog.Entry>? {
         val n = graph.coordinator?.notifications ?: return null
         if (currentUid() == null) return null
-        val cards = runCatching { n.queueCards(tech.csalliance.unstuck.ui.notifications.NotificationQueueCards.CALL_MOMENT) }.getOrNull() ?: return null
+        val cards = runCatching { n.queueCards(tech.csalliance.unstuck.ui.notifications.NotificationQueueCards.BELL_MOMENTS) }.getOrNull() ?: return null
         val calls = runCatching { CallRequestsMirror(store).all() }.getOrDefault(emptyList())
         return cards.map { tech.csalliance.unstuck.ui.notifications.NotificationQueueCards.entry(it, calls) }
     }

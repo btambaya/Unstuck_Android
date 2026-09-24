@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 114
-        versionName = "0.5.30"
+        versionCode = 115
+        versionName = "0.5.31"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.30 — Calendar: tap a task block to Mark done, Start focus or Open task (Week view too). New task: sharing is one \"Share with…\" row. Lists: an item you edit near the bottom stays above the keyboard. Every switch is now coral."
+    releaseNotes = "v0.5.31 — A task opened on one day of a repeating series shows that day's date. The + button is easier to tap."
 }
 
 dependencies {

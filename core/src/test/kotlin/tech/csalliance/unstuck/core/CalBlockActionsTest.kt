@@ -8,7 +8,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.CalBlockSheetActions
 import tech.csalliance.unstuck.core.logic.SHARED_BLOCK_ID_PREFIX
+import tech.csalliance.unstuck.core.logic.blockIsDone
 import tech.csalliance.unstuck.core.logic.calBlockSheetActions
+import tech.csalliance.unstuck.core.logic.taskAfterSettingRecurrence
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.Recurrence
@@ -109,5 +111,84 @@ class CalBlockActionsTest {
         val a = calBlockSheetActions(block(), listOf(mkTask(id = "t1")), assignedOut = mapOf("t2" to "zubair@example.com"))
         assertTrue(a.canComplete)
         assertTrue(a.canFocus)
+    }
+
+    // ── blockIsDone: the strike rule of the Day / Week grids and the Month peek
+    //    (web lib/occurrences blockIsDone, iOS Occurrences.swift blockIsDone) ──
+
+    @Test fun blockIsDone_aRepeatingDayIsItsOwnBlock() {
+        val tpl = mkTask(id = "tpl").copy(recurrence = Recurrence.Daily())
+        assertTrue(blockIsDone(block(id = "occ", taskId = "tpl", done = true), tpl))
+        assertFalse(blockIsDone(block(id = "occ", taskId = "tpl"), tpl))
+        // A series the old path ENDED (template done): its days read their own block.
+        assertFalse(
+            "an ended series' flag never strikes its days",
+            blockIsDone(block(id = "occ", taskId = "tpl"), tpl.copy(done = true)),
+        )
+    }
+
+    @Test fun blockIsDone_aOneOffFollowsItsTask() {
+        assertTrue(blockIsDone(block(), mkTask(id = "t1", done = true)))
+        assertFalse(
+            "a stale done left on a one-off's block never strikes it",
+            blockIsDone(block(done = true), mkTask(id = "t1")),
+        )
+    }
+
+    @Test fun blockIsDone_noTaskIsNotDone() {
+        assertFalse(blockIsDone(block(taskId = "gone", done = true), null))
+        assertFalse(blockIsDone(block(kind = CalBlockKind.EXTERNAL, taskId = null, externalEventId = "g1", done = true), null))
+    }
+
+    @Test fun anEndedSeriesDayOffersMarkDone() {
+        val a = calBlockSheetActions(block(id = "occ", taskId = "tpl"), listOf(mkTask(id = "tpl", done = true).copy(recurrence = Recurrence.Daily())))
+        assertEquals("occ", a.row!!.id)
+        assertFalse(a.done)
+        assertEquals("Mark done", a.completeLabel)
+    }
+
+    /** The sheet's done and the grid's strike are one rule. */
+    @Test fun theSheetAndTheGridAgree() {
+        val tpl = mkTask(id = "tpl", done = true).copy(recurrence = Recurrence.Daily())
+        val cases = listOf(
+            block(id = "occ-a", taskId = "tpl") to tpl,
+            block(id = "occ-b", taskId = "tpl", done = true) to tpl,
+            block(id = "occ-c", taskId = "tpl", done = true) to tpl.copy(done = false),
+            block(id = "b1", taskId = "t1", done = true) to mkTask(id = "t1"),
+            block(id = "b2", taskId = "t2") to mkTask(id = "t2", done = true),
+            block(id = "b3", taskId = "t3", done = true) to mkTask(id = "t3", done = true),
+        )
+        for ((b, t) in cases) assertEquals(b.id, blockIsDone(b, t), calBlockSheetActions(b, listOf(t)).done)
+    }
+
+    /**
+     * The reported repro: today's day of a repeating task ticked, then its repeat
+     * set to Never ([taskAfterSettingRecurrence] carries the tick onto the task;
+     * the block keeps done = true), then Mark not done from the calendar. The old
+     * grid rule (`block.done || task.done`) kept the block struck; blockIsDone
+     * follows the task, like the sheet.
+     */
+    @Test fun aDayTickedThenRepeatNeverThenMarkNotDone_unstrikesTheBlock() {
+        val today = "2026-09-24"
+        val tpl = mkTask(id = "tpl", name = "Meds").copy(recurrence = Recurrence.Daily())
+        val ticked = block(id = "occ", taskId = "tpl", done = true)
+        assertTrue("the ticked day is struck", blockIsDone(ticked, tpl))
+
+        val oneOff = taskAfterSettingRecurrence(tpl, null, listOf(ticked), today, "2026-09-24T10:00:00.000Z")
+        assertNull(oneOff.recurrence)
+        assertTrue("the tick carries onto the task", oneOff.done)
+        assertTrue("still struck, now by its task", blockIsDone(ticked, oneOff))
+        val before = calBlockSheetActions(ticked, listOf(oneOff))
+        assertEquals("the sheet acts on the task now", "tpl", before.row!!.id)
+        assertEquals("Mark not done", before.completeLabel)
+
+        // Mark not done flips the task (AppViewModel.toggleDone); the block keeps its done.
+        val reopened = oneOff.copy(done = false, completedAt = null)
+        assertTrue("the block row is untouched", ticked.done)
+        assertTrue("the old rule kept it struck", ticked.done || reopened.done)
+        assertFalse("the grid un-strikes it", blockIsDone(ticked, reopened))
+        val after = calBlockSheetActions(ticked, listOf(reopened))
+        assertFalse(after.done)
+        assertEquals("Mark done", after.completeLabel)
     }
 }

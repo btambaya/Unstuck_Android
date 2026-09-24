@@ -244,6 +244,27 @@ fun exactTaskLink(id: String): String = "unstuck://task/$id$EXACT_TASK_LINK_SUFF
 /** Whether a task link asks for the exact row ([exactTaskLink]). */
 fun isExactTaskLink(link: String): Boolean = link.substringBefore('#').endsWith(EXACT_TASK_LINK_SUFFIX)
 
+/**
+ * Is this calendar slot done? Port of web `blockIsDone` (lib/occurrences.ts) and
+ * iOS `blockIsDone` (Occurrences.swift). A repeating task's day is done on its
+ * OWN block: the template's flag never counts (ticking Tuesday must not strike
+ * Wednesday, and a series the old path ended must not strike every day it still
+ * has). A one-off's slot is done when the TASK is: a stale `done` left on its
+ * block (a day ticked while the task repeated, then the repeat set to Never,
+ * which carries the tick onto the task, then Mark not done) never strikes it.
+ * No task → not done.
+ *
+ * [task] is the block's own task (by `taskId`), not the [taskForBlock] row. The
+ * Day and Week grids, the Month peek and the Edit-block sheet
+ * ([calBlockSheetActions]) all read this, so a block the sheet just ticked or
+ * reopened shows it. A block shared with me is not mine to judge: callers keep
+ * its own `done`.
+ */
+fun blockIsDone(block: CalBlock, task: TaskItem?): Boolean {
+    if (task == null) return false
+    return if (task.recurrence != null) block.done else task.done
+}
+
 /** The row to open when a calendar block is tapped: the per-day OCCURRENCE
  *  (id = block id) when the block belongs to a recurring template, else the
  *  normal task. Lets the detail sheet treat it as an occurrence. */

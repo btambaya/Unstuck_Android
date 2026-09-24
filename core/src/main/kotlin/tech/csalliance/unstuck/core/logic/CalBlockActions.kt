@@ -29,12 +29,13 @@ data class CalBlockSheetActions(
     /** Who a task I assigned out now belongs to; the task is view-only here, as
      *  on the task screen (AppViewModel refuses both writes too). */
     val assignedTo: String? = null,
+    /** The block's done by [blockIsDone]: the day's for an occurrence, the
+     *  task's otherwise. The rule the Day / Week grids and the Month peek strike
+     *  the block by, so the sheet and the block behind it never disagree. */
+    val done: Boolean = row?.done == true,
 ) {
     /** Open task is offered. */
     val canOpen: Boolean get() = row != null
-
-    /** The row's done: the day's for an occurrence, the task's otherwise. */
-    val done: Boolean get() = row?.done == true
 
     /** "Mark done", or "Mark not done" once it is done: one toggle, like the
      *  task screen's. */
@@ -64,5 +65,8 @@ fun calBlockSheetActions(
     // plain task can match. Its recipient does it now: no Mark done, no Focus.
     val assignedTo = assignedOut[row.id]
     val canAct = assignedTo == null
-    return CalBlockSheetActions(row = row, canComplete = canAct, canFocus = canAct, assignedTo = assignedTo)
+    return CalBlockSheetActions(
+        row = row, canComplete = canAct, canFocus = canAct, assignedTo = assignedTo,
+        done = blockIsDone(block, tasks.firstOrNull { it.id == block.taskId }),
+    )
 }

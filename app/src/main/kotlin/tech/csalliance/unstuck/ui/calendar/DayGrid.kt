@@ -53,6 +53,7 @@ import tech.csalliance.unstuck.core.logic.CalBlockSheetActions
 import tech.csalliance.unstuck.core.logic.SHARED_BLOCK_ID_PREFIX
 import tech.csalliance.unstuck.core.logic.asCalBlock
 import tech.csalliance.unstuck.core.logic.asSharedWithMe
+import tech.csalliance.unstuck.core.logic.blockIsDone
 import tech.csalliance.unstuck.core.logic.calBlockSheetActions
 import tech.csalliance.unstuck.core.logic.isSharedBlockId
 import tech.csalliance.unstuck.core.logic.isTaskBlock
@@ -289,8 +290,10 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
                         // Shared FIRST: an owner's block is display-only here.
                         val sb = sharedById[b.id]
                         val bt = if (sb == null && isTaskBlock(b)) b.taskId?.let { tasksById[it] } else null
-                        // For a recurring occurrence the completion lives on the block.
-                        val done = b.done || bt?.done == true
+                        // A repeating day is done on its own block, a one-off when its task
+                        // is (blockIsDone, the Edit-block sheet's rule, so the block it just
+                        // ticked or reopened shows it). A shared block keeps the owner's done.
+                        val done = if (sb != null) b.done else blockIsDone(b, bt)
                         val fill = when {
                             sb != null -> c.primarySoft.copy(alpha = 0.45f)
                             b.kind == CalBlockKind.EXTERNAL -> c.blueSoft
@@ -431,7 +434,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
  *  Start focus is the shell's focus entry, Open task is the task route. */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-private fun CalBlockEditSheet(vm: AppViewModel, block: CalBlock, onOpen: (TaskItem) -> Unit, onStartFocus: (TaskItem) -> Unit, onDismiss: () -> Unit) {
+internal fun CalBlockEditSheet(vm: AppViewModel, block: CalBlock, onOpen: (TaskItem) -> Unit, onStartFocus: (TaskItem) -> Unit, onDismiss: () -> Unit) {
     val c = UTheme.colors
     val sheet = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val blocks by vm.blocks.collectAsStateWithLifecycle()

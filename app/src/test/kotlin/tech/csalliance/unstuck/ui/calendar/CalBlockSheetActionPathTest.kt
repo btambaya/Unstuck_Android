@@ -28,6 +28,7 @@ import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
 import tech.csalliance.unstuck.AppGraph
 import tech.csalliance.unstuck.core.logic.CalBlockSheetActions
+import tech.csalliance.unstuck.core.logic.blockIsDone
 import tech.csalliance.unstuck.core.logic.calBlockSheetActions
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.CalBlockKind
@@ -244,5 +245,54 @@ class CalBlockSheetActionPathTest {
         val live = awaitLive { it?.sessionStart != null }!!
         assertEquals("t1", live.taskId)
         assertNull(live.occurrenceBlockId)
+    }
+
+    /**
+     * The reported repro, through the real VM paths: today's day of a repeating
+     * task ticked from the sheet, its repeat set to Never (setRecurrence →
+     * taskAfterSettingRecurrence carries the tick onto the task; the block keeps
+     * done = true), then Mark not done from the calendar. The task reopens and the
+     * block keeps its done, so the grids' old `block.done || task.done` kept it
+     * struck; [blockIsDone] (the Day / Week grids and Month peek) and the sheet
+     * both read it open.
+     */
+    @Test fun aDayTickedThenRepeatNever_markNotDone_unstrikesTheBlock() = runTest(dispatcher) {
+        val today = Clock.todayIso()
+        seed(task("tpl", name = "Meds", recurrence = Recurrence.Daily()))
+        seed(block("occ1", "tpl", date = today))
+        val vm = vm()
+        subscribeReads(vm)
+
+        // 1. Mark done on today's block: ticks that day.
+        vm.toggleDone(actionsFor(vm, "occ1").row!!)
+        advanceUntilIdle()
+        awaitBlock("occ1") { it.done }
+        vm.blocks.first { l -> l.any { it.id == "occ1" && it.done } }   // setRecurrence reads the VM's list
+
+        // 2. Repeat → Never: the tick carries onto the task, the block keeps done.
+        assertTrue(vm.setRecurrence(storedTask("tpl"), null))
+        advanceUntilIdle()
+        awaitTask("tpl") { it.recurrence == null && it.done }
+        vm.tasks.first { l -> l.any { it.id == "tpl" && it.recurrence == null && it.done } }
+        assertTrue("the block keeps its tick", storedBlock("occ1").done)
+        val before = actionsFor(vm, "occ1")
+        assertEquals("the sheet acts on the task now", "tpl", before.row!!.id)
+        assertEquals("Mark not done", before.completeLabel)
+        assertTrue("struck on the grid", blockIsDone(storedBlock("occ1"), storedTask("tpl")))
+
+        // 3. Mark not done from the calendar.
+        vm.toggleDone(before.row!!)
+        advanceUntilIdle()
+        awaitTask("tpl") { !it.done }
+        vm.tasks.first { l -> l.any { it.id == "tpl" && !it.done } }
+
+        val blk = storedBlock("occ1")
+        val t = storedTask("tpl")
+        assertTrue("the block row itself still says done", blk.done)
+        assertTrue("so the old grid rule kept it struck", blk.done || t.done)
+        assertFalse("the grids no longer strike it", blockIsDone(blk, t))
+        val after = actionsFor(vm, "occ1")
+        assertFalse(after.done)
+        assertEquals("the sheet agrees", "Mark done", after.completeLabel)
     }
 }

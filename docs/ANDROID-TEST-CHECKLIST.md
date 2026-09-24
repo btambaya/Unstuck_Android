@@ -226,6 +226,8 @@ The must-pass set. If any item fails, do not ship.
 - [ ] Block edit (task block): Mark done ticks the task (block struck through, sheet closes); on a done task it reads "Mark not done" and reopens it. A repeating task's block ticks/unticks THAT day only — the series and its other days stay open.
 - [ ] Block edit (task block): Open task opens the task screen (a repeating task's block opens that day's occurrence).
 - [ ] Block edit: a task I assigned out shows "You assigned this to … — view only" and only Open task (no Start focus / Mark done).
+- [ ] Week view: tapping a task block opens the same Edit-block sheet (Start focus / Mark done / Open task / time / duration / Unschedule); Google events and reserved time keep their old behaviour; a shared block opens the shared detail.
+- [ ] Strike rule (Day, Week, Month peek, sheet agree): a repeating task's day is struck by its own block, a one-off by its task. Tick today's day of a repeating task → set repeat to Never → tap the block → Mark not done → the block is no longer struck.
 - [ ] External/Google events render blue (blueSoft), read-only — no tap/drag, grid behind not tappable.
 - [ ] Google Calendar connect/sync/disconnect flow with busy state + offline error ("Couldn't reach Google…").
 - [ ] Dead Google connection (needs_reauth): the bar becomes the card "Google Calendar stopped syncing" + plain body naming the account, ink "Reconnect" pill (disclosure → consent) + quiet "Disconnect" (confirm); never a raw "invalid_grant (400)".

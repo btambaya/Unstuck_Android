@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 109
-        versionName = "0.5.25"
+        versionCode = 110
+        versionName = "0.5.26"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.25 — Calls: on a check-in after a block, the assistant only ticks the task off when you clearly say it's done; if you just say how it went, it asks first. Replies after an action say plainly what changed."
+    releaseNotes = "v0.5.26 — Repeat a task every 2, 3 or 4 weeks (Repeat → Every week · 2 · 3 · 4 weeks) and pick the starting week with the Starts chips; moving a repeating task to other days keeps its rhythm; the assistant can set these up too (\"every other Thursday\"). Today always shows your week pill now — tap it to open Insights."
 }
 
 dependencies {

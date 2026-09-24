@@ -79,13 +79,14 @@ import kotlinx.coroutines.flow.drop
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.core.logic.HAND_OVER_EXPLAINER
+import tech.csalliance.unstuck.core.logic.NewTaskShares
 import tech.csalliance.unstuck.core.logic.ShareAccess
 import tech.csalliance.unstuck.core.logic.ShareItemKind
 import tech.csalliance.unstuck.core.logic.SharePendingRow
 import tech.csalliance.unstuck.core.logic.SharePersonRow
+import tech.csalliance.unstuck.core.logic.shareHeldEmailStatus
 import tech.csalliance.unstuck.core.logic.sharePeopleCandidates
 import tech.csalliance.unstuck.core.logic.sharePeopleSplit
-import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.design.component.ButtonKind
 import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.component.SheetHandle
@@ -127,10 +128,13 @@ import tech.csalliance.unstuck.ui.AppViewModel
 // task sheet's one "Share with…" row, before the task exists: picks are held
 // locally and handed back to the sheet, whose "Add task" applies them (the
 // grade switch, the people card and the searchable picker are unchanged). A
-// picked person's menu adds "Hand over" (the sheet always offered Assign) and
-// drops Report / Block; "Someone new" is the circle invite the sheet's inline
-// "Add someone" panel sent; Share a link and the pending invites are hidden —
-// there is no task to link to or invite into yet.
+// picked person's menu is Can edit / Can view / Hand over / Remove (no Report
+// / Block). "Someone new" HOLDS a typed address ("Add") — listed as "Gets it
+// when you add the task · <grade>" — and "Add task" shares THIS task with it;
+// nothing is sent if the task is cancelled. Share a link is replaced by the
+// connect-only "Invite with a link" (there is no task to link to yet), and
+// "Manage people" is left out (it would leave the unsaved task behind). One
+// behaviour on iOS, Android and web (2026-09-24).
 //
 // Colours (memory brand-colour-coral-only): selection is the app's black-and-
 // white pair — a chosen grade / a person who holds the item is `ink` filled
@@ -149,18 +153,18 @@ fun ShareScreen(
     vm: AppViewModel,
     target: ShareTarget,
     mode: ShareMode = ShareMode.SHARE,
-    /** PRE-CREATE ([ShareTarget.NewTask]) only: the New task sheet's picks, and
-     *  where every change goes — live, so however the screen is closed (Done,
-     *  swipe, back) the sheet already holds what was picked. */
-    picks: Map<String, ShareLevel> = emptyMap(),
-    onPicks: (Map<String, ShareLevel>) -> Unit = {},
+    /** PRE-CREATE ([ShareTarget.NewTask]) only: what the New task sheet holds,
+     *  and where every change goes — live, so however the screen is closed
+     *  (Done, swipe, back) the sheet already holds what was picked. */
+    shares: NewTaskShares = NewTaskShares(),
+    onShares: (NewTaskShares) -> Unit = {},
     onDismiss: () -> Unit,
 ) {
     val c = UTheme.colors
     val scope = rememberCoroutineScope()
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val transport = LocalShareTransport.current
-    val model = remember(target, mode) { ShareScreenModel(target, mode, transport ?: LiveShareTransport(vm), initialPicks = picks) }
+    val model = remember(target, mode) { ShareScreenModel(target, mode, transport ?: LiveShareTransport(vm), initialShares = shares) }
     val s by model.state.collectAsStateWithLifecycle()
 
     LaunchedEffect(model) { model.load() }
@@ -171,9 +175,9 @@ fun ShareScreen(
     val badges by vm.shareBadges.collectAsStateWithLifecycle()
     LaunchedEffect(model) { snapshotFlow { circle to badges }.drop(1).collect { model.load() } }
     // Pre-create: hand every change of the picks straight back to the sheet.
-    val latestOnPicks by rememberUpdatedState(onPicks)
+    val latestOnShares by rememberUpdatedState(onShares)
     LaunchedEffect(model) {
-        if (model.preCreate) model.state.map { it.picks }.distinctUntilChanged().drop(1).collect { latestOnPicks(it) }
+        if (model.preCreate) model.state.map { it.shares }.distinctUntilChanged().drop(1).collect { latestOnShares(it) }
     }
 
     var showPicker by remember { mutableStateOf(false) }
@@ -250,9 +254,11 @@ fun ShareScreen(
 
 /** The Share screen's content, outside its bottom sheet (so a render test can
  *  draw it). Every mode shares it; PRE-CREATE ([ShareScreenModel.preCreate])
- *  hides what needs a real task — Share a link, the pending email invites,
- *  Report and Block — adds "Hand over" to a picked person's menu, and turns
- *  "Someone new" into the circle invite the New task sheet always had. */
+ *  hides what needs a real task — Share a link, Report and Block — adds "Hand
+ *  over" to a picked person's menu, holds "Someone new" addresses for "Add
+ *  task", and offers the connect-only "Invite with a link". [onManagePeople]
+ *  (Settings › People) is left out in pre-create: it would leave the unsaved
+ *  task behind. */
 @Composable
 internal fun ShareScreenBody(
     model: ShareScreenModel,
@@ -277,14 +283,11 @@ internal fun ShareScreenBody(
     val anyBusy = s.busyId != null
 
     /** Copy the link + hand it to the system share sheet. */
-    fun shareLink(url: String) {
+    fun shareLink(url: String, title: String = "Share a link") {
         clipboard.setText(AnnotatedString(url))
         val send = Intent(Intent.ACTION_SEND).apply { type = "text/plain"; putExtra(Intent.EXTRA_TEXT, url) }
-        runCatching { context.startActivity(Intent.createChooser(send, "Share a link")) }
+        runCatching { context.startActivity(Intent.createChooser(send, title)) }
     }
-    // Pre-create: a circle-invite link is copied the moment it's made (the
-    // sheet's old inline panel did the same) and shown under "Someone new".
-    LaunchedEffect(s.lastLink) { if (preCreate) s.lastLink?.let { clipboard.setText(AnnotatedString(it)) } }
 
     Column(
         modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 28.dp),
@@ -347,7 +350,7 @@ internal fun ShareScreenBody(
                 s.people.isEmpty() -> Text(
                     when {
                         handOver -> "No one to hand this to yet — connect with someone from the Share screen first."
-                        preCreate -> "No one yet — invite someone below."
+                        preCreate -> "No one yet — add someone by email below, or invite them with a link."
                         else -> "No one yet — add someone by email below, or share a link."
                     },
                     style = UFont.sans(13), color = c.ink3,
@@ -374,37 +377,51 @@ internal fun ShareScreenBody(
         }
 
         if (!handOver && preCreate) {
-            // ── SOMEONE NEW (pre-create): the circle invite — there's no task to
-            // share by email yet. Email → added at once / emailed; blank → a link.
-            val emailBusy = s.busyId == ShareScreenModel.EMAIL_BUSY_ID
+            // ── SOMEONE NEW (pre-create): the address is HELD — "Add task"
+            // shares this task with it; nothing is sent before (or at all, if
+            // the task is cancelled). ──
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                 SectionLabel("Someone new")
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     OutlinedTextField(
                         value = s.email, onValueChange = model::setEmail,
-                        placeholder = { Text("name@example.com (optional)", style = UFont.sans(14), color = c.ink3) },
+                        placeholder = { Text("name@example.com", style = UFont.sans(14), color = c.ink3) },
                         singleLine = true, modifier = Modifier.weight(1f).semantics { contentDescription = "Email address" },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Send),
-                        keyboardActions = KeyboardActions(onSend = { focus.clearFocus(); scope.launch { model.shareWithEmail() } }),
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { focus.clearFocus(); scope.launch { model.shareWithEmail() } }),
                     )
-                    UButton(
-                        when { emailBusy -> "Inviting…"; s.email.isBlank() -> "Get link"; else -> "Invite" },
-                        kind = ButtonKind.DARK, fill = false, enabled = !emailBusy,
-                    ) { focus.clearFocus(); scope.launch { model.shareWithEmail() } }
-                }
-                Text(
-                    "Has an account? They join your people right away. No account yet? We email them an invite. Leave it blank for a link you send yourself.",
-                    style = UFont.sans(12), color = c.ink3,
-                )
-                s.lastLink?.let { link ->
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(
-                            link, style = UFont.sans(12), color = c.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis,
-                            modifier = Modifier.weight(1f).clip(RoundedCornerShape(8.dp)).background(c.bg2).padding(horizontal = 10.dp, vertical = 8.dp),
-                        )
-                        UButton("Copy link", kind = ButtonKind.DARK, fill = false) { clipboard.setText(AnnotatedString(link)) }
+                    UButton("Add", kind = ButtonKind.DARK, fill = false, enabled = s.email.isNotBlank()) {
+                        focus.clearFocus(); scope.launch { model.shareWithEmail() }
                     }
                 }
+                Text(
+                    "Has an account? They get it when you add the task. No account yet? We email them an invite then — it's theirs the moment they sign up.",
+                    style = UFont.sans(12), color = c.ink3,
+                )
+                s.pending.forEach { p ->
+                    PendingRow(p, busy = false, held = true) { scope.launch { model.cancelPending(p) } }
+                }
+            }
+
+            // ── INVITE WITH A LINK: a connect-only join link (no task yet) ──
+            val linkBusy = s.busyId == ShareScreenModel.LINK_BUSY_ID
+            Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                SectionLabel("Invite with a link")
+                Row(
+                    Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.bg2).border(1.dp, c.line, RoundedCornerShape(12.dp))
+                        .clickable(enabled = !linkBusy) { scope.launch { model.makeInviteLink()?.let { shareLink(it, "Invite with a link") } } }
+                        .padding(horizontal = 14.dp, vertical = 12.dp)
+                        .semantics { contentDescription = "Invite with a link" },
+                    verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Icon(Icons.Filled.Link, contentDescription = null, tint = c.ink, modifier = Modifier.size(16.dp))
+                    Text(if (linkBusy) "Making a link…" else "Invite with a link", style = UFont.sans(14, FontWeight.Medium), color = c.ink, modifier = Modifier.weight(1f))
+                    Icon(Icons.Filled.Share, contentDescription = null, tint = c.ink, modifier = Modifier.size(16.dp))
+                }
+                Text(
+                    "Not connected yet? Whoever opens it becomes one of your people — then pick them above, or share the task with them once it's created.",
+                    style = UFont.sans(12), color = c.ink3,
+                )
             }
         } else if (!handOver) {
             // ── SOMEONE NEW: email + Share, then the pending invites ──
@@ -455,8 +472,9 @@ internal fun ShareScreenBody(
             }
         }
 
-        // Everyone you share with, in one place: Settings → People.
-        if (onManagePeople != null) {
+        // Everyone you share with, in one place: Settings → People (slim
+        // settings). Not before the task exists — it would leave it behind.
+        if (onManagePeople != null && !preCreate) {
             Text(
                 MANAGE_PEOPLE, style = UFont.sans(13, FontWeight.Medium), color = c.ink2,
                 modifier = Modifier.clip(RoundedCornerShape(8.dp))
@@ -604,9 +622,11 @@ private fun ChooseRow(handOver: Boolean, count: Int, enabled: Boolean, onClick: 
     }
 }
 
-/** A pending email invite under "Someone new": the address, what they'll get, and Cancel. */
+/** A pending email invite under "Someone new": the address, what they'll get,
+ *  and Cancel. [held] (pre-create): an address waiting for "Add task" — not
+ *  sent yet, so no amber "waiting" state, and the ✕ takes it off. */
 @Composable
-private fun PendingRow(p: SharePendingRow, busy: Boolean, onCancel: () -> Unit) {
+private fun PendingRow(p: SharePendingRow, busy: Boolean, held: Boolean = false, onCancel: () -> Unit) {
     val c = UTheme.colors
     Row(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.bg2).padding(horizontal = 12.dp, vertical = 8.dp),
@@ -614,11 +634,12 @@ private fun PendingRow(p: SharePendingRow, busy: Boolean, onCancel: () -> Unit) 
     ) {
         Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
             Text(p.email, style = UFont.sans(13), color = c.ink2, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Text("Invited · waiting for them to sign up · ${p.access.label.lowercase()}", style = UFont.sans(11), color = c.amberInk)
+            if (held) Text(shareHeldEmailStatus(p.access.taskLevel), style = UFont.sans(11), color = c.ink3)
+            else Text("Invited · waiting for them to sign up · ${p.access.label.lowercase()}", style = UFont.sans(11), color = c.amberInk)
         }
         if (busy) CircularProgressIndicator(Modifier.size(16.dp), color = c.ink2, strokeWidth = 2.dp)
         else Icon(
-            Icons.Filled.Close, contentDescription = "Cancel invite to ${p.email}", tint = c.ink3,
+            Icons.Filled.Close, contentDescription = if (held) "Remove ${p.email}" else "Cancel invite to ${p.email}", tint = c.ink3,
             modifier = Modifier.size(32.dp).clip(CircleShape).clickable(onClick = onCancel).padding(8.dp),
         )
     }

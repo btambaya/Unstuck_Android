@@ -29,8 +29,13 @@ import org.junit.runners.model.Statement
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
+import androidx.compose.ui.test.hasSetTextAction
+import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.unit.dp
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
+import tech.csalliance.unstuck.core.logic.NewTaskShares
 import tech.csalliance.unstuck.core.logic.SharePick
-import tech.csalliance.unstuck.core.logic.shareWithSummary
 import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.design.theme.UnstuckTheme
 
@@ -74,7 +79,7 @@ class ShareWithRowTest {
     @Test
     fun theRowIsOneButtonThatAnnouncesItsSummary() {
         var opened = 0
-        compose.setContent { UnstuckTheme(dark = false) { ShareWithRow(shareWithSummary(emptyList())) { opened++ } } }
+        compose.setContent { UnstuckTheme(dark = false) { ShareWithRow(emptyList()) { opened++ } } }
         compose.onNodeWithContentDescription("Share with, Only you")
             .assertIsDisplayed()
             .assertHasClickAction()
@@ -86,35 +91,83 @@ class ShareWithRowTest {
     @Test
     fun theRowReadsBackWhoIsPicked() {
         val picks = listOf(SharePick("James Wilson", ShareLevel.PARTNER), SharePick("Anna Okafor", ShareLevel.VIEW))
-        compose.setContent { UnstuckTheme(dark = true) { ShareWithRow(shareWithSummary(picks)) {} } }
+        compose.setContent { UnstuckTheme(dark = true) { ShareWithRow(picks) {} } }
         compose.onNodeWithContentDescription("Share with, James · edit, Anna · view").assertIsDisplayed()
+    }
+
+    @Test
+    fun monogramsShowOnlyWhenTheyFitBesideTheSummary() {
+        // 3 discs: 22 + 18 + 18 = 58dp, + an 8dp gap.
+        assertEquals(58.dp, monogramStackWidth(3))
+        assertEquals(22.dp, monogramStackWidth(1))
+        assertEquals(0.dp, monogramStackWidth(0))
+        assertTrue(monogramsFit(3, summaryWidth = 100.dp, room = 166.dp))
+        assertFalse("too narrow: the summary wins", monogramsFit(3, summaryWidth = 100.dp, room = 165.dp))
+        assertFalse("nobody picked: no discs", monogramsFit(0, summaryWidth = 10.dp, room = 500.dp))
     }
 
     // ── the Share screen it opens, in pre-create mode ───────────────────────
 
     private fun screen(picks: Map<String, ShareLevel>): ShareScreenModel {
-        val m = ShareScreenModel(ShareTarget.NewTask("Plan the Lisbon trip"), transport = PreCreateFakeTransport(roster), initialPicks = picks)
+        val m = ShareScreenModel(ShareTarget.NewTask("Plan the Lisbon trip"), transport = PreCreateFakeTransport(roster), initialShares = NewTaskShares(picks))
         runBlocking { m.load() }
         compose.setContent {
             UnstuckTheme(dark = false) {
                 val s by m.state.collectAsState()
-                ShareScreenBody(m, s, onDone = {}, onChoose = {}, onReport = {}, onBlock = {})
+                ShareScreenBody(m, s, onDone = {}, onChoose = {}, onReport = {}, onBlock = {}, onManagePeople = {})
             }
         }
         return m
     }
 
     @Test
-    fun preCreateHidesWhatNeedsATaskAndKeepsTheInvite() {
+    fun preCreateHidesWhatNeedsATaskAndOffersTheInviteLink() {
         screen(emptyMap())
         compose.onNodeWithText("Anyone you pick gets this task in their “Shared with you” once you add it.").assertIsDisplayed()
         compose.onNodeWithText("Can edit").assertIsDisplayed()
         compose.onNodeWithText("Can view").assertIsDisplayed()
         compose.onNodeWithContentDescription("Choose someone, 3 people. Opens a searchable list").assertHasClickAction()
-        // "Someone new" is the circle invite; a blank field makes a link.
-        compose.onNodeWithText("Get link").assertIsDisplayed()
+        // "Someone new" holds an address ("Add"); the link is its own row.
+        compose.onNodeWithText("Add").assertIsDisplayed()
+        compose.onNodeWithText("Get link").assertDoesNotExist()
+        compose.onNodeWithText("INVITE WITH A LINK").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Invite with a link").assertHasClickAction()
         compose.onNodeWithText("SHARE A LINK").assertDoesNotExist()
         compose.onNodeWithText("Share a link").assertDoesNotExist()
+        // Settings › People would leave the unsaved task behind.
+        compose.onNodeWithText("Manage people").assertDoesNotExist()
+    }
+
+    @Test
+    fun aTypedAddressIsHeldAndListedUntilTheTaskIsAdded() {
+        val m = screen(emptyMap())
+        // The one text field on the pre-create screen: Someone new's address.
+        compose.onNode(hasSetTextAction()).performTextInput("maya@example.com")
+        compose.onNodeWithText("Add").performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitForIdle()
+        assertEquals(mapOf("maya@example.com" to ShareLevel.PARTNER), m.state.value.shares.emails)
+        compose.onNodeWithText("maya@example.com").assertIsDisplayed()
+        compose.onNodeWithText("Gets it when you add the task · can edit").assertIsDisplayed()
+        compose.onNodeWithText("✓ maya@example.com gets it when you add the task — they can edit.").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Remove maya@example.com").performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitForIdle()
+        assertTrue(m.state.value.shares.isEmpty)
+        compose.onNodeWithText("Gets it when you add the task · can edit").assertDoesNotExist()
+    }
+
+    @Test
+    fun aRealTasksScreenKeepsManagePeople() {
+        val m = ShareScreenModel(ShareTarget.Task("t1", "Plan the Lisbon trip"), transport = PreCreateFakeTransport(roster))
+        var managed = 0
+        compose.setContent {
+            UnstuckTheme(dark = false) {
+                val s by m.state.collectAsState()
+                ShareScreenBody(m, s, onDone = {}, onChoose = {}, onReport = {}, onBlock = {}, onManagePeople = { managed++ })
+            }
+        }
+        compose.onNodeWithText("Manage people").performSemanticsAction(SemanticsActions.OnClick)
+        assertEquals(1, managed)
+        compose.onNodeWithText("INVITE WITH A LINK").assertDoesNotExist()
     }
 
     @Test

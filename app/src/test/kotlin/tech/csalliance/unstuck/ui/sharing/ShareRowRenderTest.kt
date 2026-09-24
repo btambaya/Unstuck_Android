@@ -43,10 +43,11 @@ import org.robolectric.Shadows.shadowOf
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import tech.csalliance.unstuck.AppGraph
+import tech.csalliance.unstuck.core.logic.NewTaskShares
 import tech.csalliance.unstuck.core.logic.SharePick
 import tech.csalliance.unstuck.core.logic.sharePeopleSplit
-import tech.csalliance.unstuck.core.logic.shareWithSummary
 import tech.csalliance.unstuck.core.model.ShareLevel
+import tech.csalliance.unstuck.core.model.ShareLevel.ASSIGN
 import tech.csalliance.unstuck.core.model.ShareLevel.PARTNER
 import tech.csalliance.unstuck.core.model.ShareLevel.VIEW
 import tech.csalliance.unstuck.data.LocalStore
@@ -117,52 +118,77 @@ class ShareRowRenderTest {
         db?.close()
     }
 
-    private fun precreate(picks: Map<String, ShareLevel>) =
-        ShareScreenModel(ShareTarget.NewTask("Plan the Lisbon trip"), transport = PreCreateFakeTransport(roster), initialPicks = picks)
+    private fun precreate(picks: Map<String, ShareLevel>, emails: Map<String, ShareLevel> = emptyMap()) =
+        ShareScreenModel(ShareTarget.NewTask("Plan the Lisbon trip"), transport = PreCreateFakeTransport(roster), initialShares = NewTaskShares(picks, emails))
             .also { runBlocking { it.load() } }
 
     // ── the row ─────────────────────────────────────────────────────────────
 
+    /** Every form of the one rule: 0 / 1 / 2 same / 2 mixed / 3+ same / 3+
+     *  mixed / a long name / a held address / 2 mixed with a hand-over. */
     private val rowStates: List<List<SharePick>> = listOf(
         emptyList(),
         listOf(SharePick("James Wilson", PARTNER)),
         listOf(SharePick("James Wilson", PARTNER), SharePick("Anna Okafor", PARTNER)),
         listOf(SharePick("James Wilson", PARTNER), SharePick("Anna Okafor", VIEW)),
         listOf(SharePick("James Wilson", PARTNER), SharePick("Anna Okafor", PARTNER), SharePick("Zubair", PARTNER), SharePick("Sam", PARTNER)),
-        // 3 picked, mixed grades: too long in full, no single grade to show.
         listOf(SharePick("James Wilson", PARTNER), SharePick("Anna Okafor", VIEW), SharePick("Zubair Kazaure", PARTNER)),
         listOf(SharePick("Bartholomew-Alexandros Papadopoulos", PARTNER)),
+        listOf(SharePick("maya@example.com", VIEW)),
+        listOf(SharePick("Anna Okafor", PARTNER), SharePick("Maya Chen", ASSIGN)),
+        listOf(SharePick("Mo", PARTNER), SharePick("Wu", PARTNER), SharePick("Al", PARTNER)),
     )
 
     private fun rows(file: String, dark: Boolean) = shoot(file, dark) {
         Column(Modifier.fillMaxWidth().padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             SectionLabel("Share")
-            rowStates.forEach { ShareWithRow(shareWithSummary(it)) {} }
+            rowStates.forEach { ShareWithRow(it) {} }
         }
     }
 
-    @Test fun rowStatesLight() = rows("share-row-states-light.png", dark = false)
-    @Test fun rowStatesDark() = rows("share-row-states-dark.png", dark = true)
+    @Test fun rowStatesLight() = rows("row-states-light.png", dark = false)
+    @Test fun rowStatesDark() = rows("row-states-dark.png", dark = true)
 
     @Config(qualifiers = "w360dp-h1400dp-xxhdpi")
-    @Test fun rowStatesSmallPhone() = rows("share-row-states-360dp-light.png", dark = false)
+    @Test fun rowStatesSmallPhoneLight() = rows("row-states-360dp-light.png", dark = false)
+
+    @Config(qualifiers = "w360dp-h1400dp-xxhdpi")
+    @Test fun rowStatesSmallPhoneDark() = rows("row-states-360dp-dark.png", dark = true)
+
+    /** The monograms up close (every letter whole under the next disc). */
+    @Config(qualifiers = "w411dp-h400dp-xxxhdpi")
+    @Test fun monogramsZoom() = shoot("row-monograms-zoom-light.png", dark = false) {
+        Column(Modifier.fillMaxWidth().padding(22.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+            ShareWithRow(listOf(SharePick("Maya Chen", PARTNER), SharePick("Zubair", VIEW))) {}
+            ShareWithRow(listOf(SharePick("Mo", PARTNER), SharePick("Wu", PARTNER), SharePick("Al", PARTNER))) {}
+        }
+    }
 
     // ── the pre-create Share screen ─────────────────────────────────────────
 
     private fun screen(file: String, dark: Boolean, model: ShareScreenModel) = shoot(file, dark) {
         val s by model.state.collectAsState()
-        ShareScreenBody(model, s, onDone = {}, onChoose = {}, onReport = {}, onBlock = {}, modifier = Modifier.padding(top = 20.dp))
+        ShareScreenBody(model, s, onDone = {}, onChoose = {}, onReport = {}, onBlock = {}, modifier = Modifier.padding(top = 20.dp), onManagePeople = {})
     }
 
-    /** Opened from a sheet that already holds James (edit) + Anna (view), then
-     *  Zubair picked from "Choose someone". */
-    private fun pickedModel() = precreate(mapOf("u2" to PARTNER, "u3" to VIEW)).also { m ->
+    /** Opened from a sheet that already holds James (edit) + Anna (view) and a
+     *  held address, then Zubair picked from "Choose someone". */
+    private fun pickedModel() = precreate(mapOf("u2" to PARTNER, "u3" to VIEW), mapOf("new.friend@example.com" to VIEW)).also { m ->
         runBlocking { m.tap(m.state.value.people.first { it.name == "Zubair Kazaure" }) }
     }
 
-    @Test fun screenPickedLight() = screen("share-precreate-picked-light.png", dark = false, model = pickedModel())
-    @Test fun screenPickedDark() = screen("share-precreate-picked-dark.png", dark = true, model = pickedModel())
-    @Test fun screenFreshLight() = screen("share-precreate-fresh-light.png", dark = false, model = precreate(emptyMap()))
+    /** "Someone new" just added an address (the ✓ line + its held row). */
+    private fun heldModel() = precreate(mapOf("u2" to PARTNER)).also { m ->
+        m.setEmail("maya@example.com")
+        runBlocking { m.shareWithEmail() }
+    }
+
+    @Test fun screenPickedLight() = screen("precreate-picked-light.png", dark = false, model = pickedModel())
+    @Test fun screenPickedDark() = screen("precreate-picked-dark.png", dark = true, model = pickedModel())
+    @Test fun screenFreshLight() = screen("precreate-fresh-light.png", dark = false, model = precreate(emptyMap()))
+    @Test fun screenFreshDark() = screen("precreate-fresh-dark.png", dark = true, model = precreate(emptyMap()))
+    @Test fun screenHeldAddressLight() = screen("precreate-held-address-light.png", dark = false, model = heldModel())
+    @Test fun screenHeldAddressDark() = screen("precreate-held-address-dark.png", dark = true, model = heldModel())
 
     private fun picker(file: String, dark: Boolean) {
         val m = precreate(mapOf("u2" to PARTNER, "u3" to VIEW))
@@ -172,21 +198,24 @@ class ShareRowRenderTest {
         }
     }
 
-    @Test fun pickerLight() = picker("share-precreate-choose-someone-light.png", dark = false)
-    @Test fun pickerDark() = picker("share-precreate-choose-someone-dark.png", dark = true)
+    @Test fun pickerLight() = picker("precreate-choose-someone-light.png", dark = false)
+    @Test fun pickerDark() = picker("precreate-choose-someone-dark.png", dark = true)
 
     /** A picked person's menu: Can edit ✓ / Can view / Hand over / Remove. */
-    @Test fun personMenuLight() {
+    private fun personMenu(file: String, dark: Boolean) {
         assumeTrue("set UNSTUCK_RENDER_DIR to write the PNGs", outDir != null)
         val m = precreate(mapOf("u2" to PARTNER, "u3" to VIEW))
-        setShot(dark = false) {
+        setShot(dark = dark) {
             val s by m.state.collectAsState()
             ShareScreenBody(m, s, onDone = {}, onChoose = {}, onReport = {}, onBlock = {}, modifier = Modifier.padding(top = 20.dp))
         }
         compose.onNodeWithContentDescription("James Wilson, Can edit. Change access").performSemanticsAction(SemanticsActions.OnClick)
         compose.waitForIdle()
-        save("share-precreate-person-menu-light.png", crop(captureAllWindows(), tagBounds()))
+        save(file, crop(captureAllWindows(), tagBounds()))
     }
+
+    @Test fun personMenuLight() = personMenu("precreate-person-menu-light.png", dark = false)
+    @Test fun personMenuDark() = personMenu("precreate-person-menu-dark.png", dark = true)
 
     // ── in context: the real New task sheet, More options open ──────────────
 
@@ -213,10 +242,10 @@ class ShareRowRenderTest {
     }
 
     @Config(qualifiers = "w411dp-h891dp-xxhdpi")
-    @Test fun newTaskSheetLight() = sheetInContext("new-task-sheet-share-row-light.png", dark = false)
+    @Test fun newTaskSheetLight() = sheetInContext("new-task-sheet-light.png", dark = false)
 
     @Config(qualifiers = "w411dp-h891dp-xxhdpi")
-    @Test fun newTaskSheetDark() = sheetInContext("new-task-sheet-share-row-dark.png", dark = true)
+    @Test fun newTaskSheetDark() = sheetInContext("new-task-sheet-dark.png", dark = true)
 
     // ── plumbing ────────────────────────────────────────────────────────────
 

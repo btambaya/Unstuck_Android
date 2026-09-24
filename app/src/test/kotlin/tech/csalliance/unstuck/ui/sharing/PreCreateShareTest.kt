@@ -5,9 +5,10 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tech.csalliance.unstuck.core.logic.NewTaskShares
 import tech.csalliance.unstuck.core.logic.ShareAccess
+import tech.csalliance.unstuck.core.logic.newTaskSharePicks
 import tech.csalliance.unstuck.core.logic.sharePeopleSplit
-import tech.csalliance.unstuck.core.logic.sharePicksInRosterOrder
 import tech.csalliance.unstuck.core.logic.shareWithSummary
 import tech.csalliance.unstuck.core.model.CircleMember
 import tech.csalliance.unstuck.core.model.CircleStatus
@@ -23,20 +24,20 @@ import tech.csalliance.unstuck.sync.TaskSharePendingInvite
 // The Share screen's PRE-CREATE mode — the New task sheet's "Share with…" row
 // (Ahmad, 2026-09-24: "One row + picker"). The task doesn't exist yet, so the
 // screen must never touch a share RPC: every pick is local and comes back to the
-// sheet as userId → level, which "Add task" hands to AppViewModel.addTask(shares=)
-// exactly as the old inline cards did. "Someone new" is the circle invite.
+// sheet as NewTaskShares (connections by user id + HELD typed addresses), which
+// "Add task" hands to AppViewModel.addTask(shares=, shareEmails=). "Someone new"
+// holds an address for this task; "Invite with a link" is the connect-only link.
+// One behaviour on iOS, Android and web (2026-09-24).
 
-/** A transport whose share calls FAIL the test: pre-create must not send anything. */
+/** A transport whose share calls FAIL the test: pre-create must not send
+ *  anything. The only call it takes is the connect-only invite link. */
 internal class PreCreateFakeTransport(var circle: List<CircleMember>) : ShareScreenTransport {
     var inviteResult: InviteResult = InviteResult(ok = true, link = "https://unstucknow.io/circle/join?code=abc")
     val invites = mutableListOf<String?>()
-    /** Who joins the roster when an existing account is invited (`added`). */
-    var joinsOnInvite: CircleMember? = null
 
     override suspend fun listCircle(): List<CircleMember> = circle
     override suspend fun inviteToCircle(email: String?): InviteResult {
         invites += email
-        if (inviteResult.added == true) joinsOnInvite?.let { circle = circle + it }
         return inviteResult
     }
 
@@ -70,8 +71,8 @@ class PreCreateShareTest {
     )
     private val fake = PreCreateFakeTransport(roster)
 
-    private fun model(picks: Map<String, ShareLevel> = emptyMap()) =
-        ShareScreenModel(ShareTarget.NewTask("Plan the Lisbon trip"), transport = fake, initialPicks = picks)
+    private fun model(picks: Map<String, ShareLevel> = emptyMap(), emails: Map<String, ShareLevel> = emptyMap()) =
+        ShareScreenModel(ShareTarget.NewTask("Plan the Lisbon trip"), transport = fake, initialShares = NewTaskShares(picks, emails))
 
     private fun ShareScreenModel.row(name: String) = state.value.people.first { it.name == name }
 
@@ -107,13 +108,14 @@ class PreCreateShareTest {
         assertTrue("a hand-over reads as handed over", m.row("Maya Chen").handedOver)
 
         m.setAccess(m.row("James Wilson"), null)              // the row's menu: Remove
-        val picks = m.state.value.picks
-        assertEquals("keyed by USER id — what task_share takes", mapOf("u3" to ShareLevel.PARTNER, "u1" to ShareLevel.ASSIGN), picks)
-        // …and the row on the New task sheet reads them back in roster order
-        // ("Maya · handed over, Anna · edit" is too long for the row).
-        assertEquals("Maya + 1 more", shareWithSummary(sharePicksInRosterOrder(roster, picks)))
+        val shares = m.state.value.shares
+        assertEquals("keyed by USER id — what task_share takes", mapOf("u3" to ShareLevel.PARTNER, "u1" to ShareLevel.ASSIGN), shares.people)
+        assertEquals("pick order", listOf("u3", "u1"), shares.people.keys.toList())
+        // …and the row on the New task sheet reads them back in PICK order; the
+        // pair is too long for the row, so the names are cut and both grades kept.
+        assertEquals("An… · edit, M… · handed over", shareWithSummary(newTaskSharePicks(roster, shares)))
         m.setAccess(m.row("Maya Chen"), null)
-        assertEquals("Anna · can edit", shareWithSummary(sharePicksInRosterOrder(roster, m.state.value.picks)))
+        assertEquals("Anna · can edit", shareWithSummary(newTaskSharePicks(roster, m.state.value.shares)))
         assertNull(m.state.value.error)
     }
 
@@ -170,58 +172,101 @@ class PreCreateShareTest {
         assertEquals(mapOf("u1" to ShareLevel.PARTNER), m.state.value.picks)
     }
 
-    // ── Someone new = the circle invite the sheet always had ────────────────
+    // ── Someone new: the address is HELD for this task until "Add task" ────
 
-    @Test fun `someone new with an account joins and is picked at the chosen grade`() = runTest {
-        fake.inviteResult = InviteResult(ok = true, added = true)
-        fake.joinsOnInvite = preCreateMember("c4", "u4", "Zubair Kazaure")
+    @Test fun `someone new holds the address at the chosen grade and sends nothing`() = runTest {
         val m = model()
         m.load()
         m.setAccess(ShareAccess.VIEW)
-        m.setEmail("  Zubair@Example.com ")
+        m.setEmail("  Maya@Example.com ")
         m.shareWithEmail()
-        assertEquals(listOf<String?>("zubair@example.com"), fake.invites)
         val s = m.state.value
-        assertEquals(mapOf("u4" to ShareLevel.VIEW), s.picks)
-        assertEquals("Added Zubair to your people. Zubair can view once you add the task.", s.result)
+        assertEquals(mapOf("maya@example.com" to ShareLevel.VIEW), s.shares.emails)
+        assertTrue("connections untouched", s.shares.people.isEmpty())
         assertEquals("", s.email)
         assertNull(s.busyId)
+        assertEquals("maya@example.com gets it when you add the task — they can view.", s.result)
+        // Listed where the pending invites would be — held, not sent.
+        assertEquals(listOf("email:maya@example.com"), s.pending.map { it.id })
+        assertEquals(ShareAccess.VIEW, s.pending.single().access)
+        assertTrue("no round trip before Add task", fake.invites.isEmpty())
+        // …and counted in the row's summary as the part before the @.
+        assertEquals("maya · can view", shareWithSummary(newTaskSharePicks(roster, s.shares)))
     }
 
-    @Test fun `someone new without an account is emailed the invite`() = runTest {
-        fake.inviteResult = InviteResult(ok = true, emailed = true)
+    @Test fun `adding the same address again changes its grade, not the count`() = runTest {
         val m = model()
         m.load()
-        m.setEmail("new@x.com")
+        m.setEmail("a@b.co"); m.shareWithEmail()
+        m.setAccess(ShareAccess.VIEW)
+        m.setEmail("A@B.co"); m.shareWithEmail()
+        assertEquals(mapOf("a@b.co" to ShareLevel.VIEW), m.state.value.shares.emails)
+        assertEquals(1, m.state.value.pending.size)
+    }
+
+    @Test fun `a held address comes off with its cross`() = runTest {
+        val m = model(emails = mapOf("a@b.co" to ShareLevel.PARTNER, "c@d.co" to ShareLevel.VIEW))
+        m.load()
+        assertEquals(listOf("a@b.co", "c@d.co"), m.state.value.pending.map { it.email })
+        m.cancelPending(m.state.value.pending.first())
+        assertEquals(mapOf("c@d.co" to ShareLevel.VIEW), m.state.value.shares.emails)
+        assertEquals(listOf("c@d.co"), m.state.value.pending.map { it.email })
+        assertEquals("a@b.co won't get this task.", m.state.value.result)
+    }
+
+    @Test fun `people and addresses come back together to the sheet`() = runTest {
+        val m = model(picks = mapOf("u2" to ShareLevel.PARTNER), emails = mapOf("x@y.io" to ShareLevel.VIEW))
+        m.load()
+        m.tap(m.row("Anna"))
+        m.setEmail("z@y.io"); m.shareWithEmail()
+        val shares = m.state.value.shares
+        assertEquals(mapOf("u2" to ShareLevel.PARTNER, "u3" to ShareLevel.PARTNER), shares.people)
+        assertEquals(listOf("x@y.io", "z@y.io"), shares.emails.keys.toList())
+        assertEquals("James + 3 more", shareWithSummary(newTaskSharePicks(roster, shares)))
+    }
+
+    @Test fun `a blank field adds nothing and a bad address says why`() = runTest {
+        val m = model()
+        m.load()
         m.shareWithEmail()
-        assertEquals("Invite sent to new@x.com — share the task with them once they've joined.", m.state.value.result)
-        assertTrue(m.state.value.picks.isEmpty())
-    }
-
-    @Test fun `a blank field makes a join link`() = runTest {
-        val m = model()
-        m.load()
-        m.shareWithEmail()
-        assertEquals(listOf<String?>(null), fake.invites)
-        assertEquals("https://unstucknow.io/circle/join?code=abc", m.state.value.lastLink)
-        assertEquals("Invite link copied — send it to them; it's the only way in.", m.state.value.result)
-    }
-
-    @Test fun `a bad address or a refused invite says why`() = runTest {
-        val m = model()
-        m.load()
+        assertTrue(m.state.value.shares.isEmpty)
+        assertNull(m.state.value.error)
         m.setEmail("not-an-email")
         m.shareWithEmail()
         assertEquals("That doesn't look like an email address.", m.state.value.error)
+        assertTrue(m.state.value.shares.isEmpty)
+        assertEquals("the field keeps what was typed", "not-an-email", m.state.value.email)
         assertTrue("no round trip for a bad address", fake.invites.isEmpty())
+    }
 
+    // ── Invite with a link: the connect-only join link ──────────────────────
+
+    @Test fun `invite with a link makes a connect-only link`() = runTest {
+        val m = model()
+        m.load()
+        assertEquals("https://unstucknow.io/circle/join?code=abc", m.makeInviteLink())
+        assertEquals("no address — a link I send myself", listOf<String?>(null), fake.invites)
+        assertEquals("https://unstucknow.io/circle/join?code=abc", m.state.value.lastLink)
+        assertEquals(ShareScreenModel.INVITE_LINK_COPIED, m.state.value.result)
+        assertNull(m.state.value.busyId)
+        assertTrue("the link carries nothing about the task", m.state.value.shares.isEmpty)
+    }
+
+    @Test fun `a refused invite link says why`() = runTest {
+        val m = model()
+        m.load()
         fake.inviteResult = InviteResult(error = "circle_full")
-        m.setEmail("a@b.co")
-        m.shareWithEmail()
+        assertNull(m.makeInviteLink())
         assertEquals("Your circle is full.", m.state.value.error)
         fake.inviteResult = InviteResult(error = "server_error")
-        m.shareWithEmail()
-        assertEquals("Could not create invite.", m.state.value.error)
+        assertNull(m.makeInviteLink())
+        assertEquals("Couldn't make a link — try again.", m.state.value.error)
         assertNull(m.state.value.busyId)
+    }
+
+    @Test fun `a real task's screen never makes an invite link`() = runTest {
+        val m = ShareScreenModel(ShareTarget.Task("t1", "x"), transport = fake)
+        assertNull(m.makeInviteLink())
+        assertTrue(fake.invites.isEmpty())
     }
 }

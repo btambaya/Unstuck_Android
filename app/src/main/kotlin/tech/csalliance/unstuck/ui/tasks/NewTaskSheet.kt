@@ -30,14 +30,12 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateListOf
-import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
-import androidx.compose.runtime.snapshots.SnapshotStateMap
 import androidx.compose.runtime.toMutableStateList
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -55,10 +53,9 @@ import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.findConflicts
 import tech.csalliance.unstuck.core.logic.findFreeSlotsForDate
 import tech.csalliance.unstuck.core.logic.newTaskNeedsTime
-import tech.csalliance.unstuck.core.logic.sharePicksInRosterOrder
-import tech.csalliance.unstuck.core.logic.shareWithSummary
+import tech.csalliance.unstuck.core.logic.NewTaskShares
+import tech.csalliance.unstuck.core.logic.newTaskSharePicks
 import tech.csalliance.unstuck.core.model.Recurrence
-import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.time.ClockFormat
 import tech.csalliance.unstuck.core.time.ClockMode
@@ -112,17 +109,12 @@ private val TagsSaver = listSaver<SnapshotStateList<String>, String>(
     restore = { it.toMutableStateList() },
 )
 
-/** Pending "Share with…" picks save as "userId|LEVEL" strings (not picked = absent —
- *  nothing is shared until "Add task", so there's no unshare to remember). */
-private val ShareLevelsSaver = listSaver<SnapshotStateMap<String, ShareLevel>, String>(
-    save = { m -> m.map { (id, level) -> "$id|${level.name}" } },
-    restore = { saved ->
-        val m = mutableStateMapOf<String, ShareLevel>()
-        saved.forEach { s ->
-            runCatching { ShareLevel.valueOf(s.substringAfterLast("|")) }.getOrNull()?.let { m[s.substringBeforeLast("|")] = it }
-        }
-        m
-    },
+/** Pending "Share with…" picks (connections + held addresses, pick order) save as
+ *  NewTaskShares.toSaved() strings — nothing is shared until "Add task", so
+ *  there's no unshare to remember. */
+private val NewTaskSharesSaver = listSaver<NewTaskShares, String>(
+    save = { it.toSaved() },
+    restore = { NewTaskShares.fromSaved(it) },
 )
 
 private fun tomorrowIso(now: Long): String = Clock.dateIso(Time.addDaysMillis(Time.startOfDayMillis(now), 1))
@@ -171,7 +163,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     var showEstimate by rememberSaveable { mutableStateOf(false) }
     var moreOpen by rememberSaveable { mutableStateOf(false) }
     val tags = rememberSaveable(saver = TagsSaver) { mutableStateListOf<String>() }
-    val shareLevels = rememberSaveable(saver = ShareLevelsSaver) { mutableStateMapOf<String, ShareLevel>() }
+    var shares by rememberSaveable(stateSaver = NewTaskSharesSaver) { mutableStateOf(NewTaskShares()) }
     // The Share screen in its pre-create mode, over this sheet (the "Share with…" row).
     var showShare by rememberSaveable { mutableStateOf(false) }
 
@@ -203,10 +195,11 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     val focusManager = LocalFocusManager.current
 
     // Shared by the "Add task" button AND the name field's IME Done.
-    // Pending share picks are handed to addTask, which applies them AFTER the
-    // task row lands on the server, IN THE SAME write coroutine as the upsert
-    // — so task_share can't race the not-yet-committed insert (not_your_task →
-    // silently dropped, the live T2 bug). Failures are logged, not swallowed.
+    // Pending share picks (connections + held addresses) are handed to addTask,
+    // which applies them AFTER the task row lands on the server, IN THE SAME
+    // write coroutine as the upsert — so task_share / share-task add can't race
+    // the not-yet-committed insert (not_your_task → silently dropped, the live
+    // T2 bug). Failures are logged, not swallowed. A closed sheet sends nothing.
     fun submit() {
         if (!canSubmit) return
         // Every N weeks: week one is the "Starts" chip shown as picked (the first
@@ -221,7 +214,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
             name = name, estimateMin = estimate, lifeArea = area, tags = tags.toList().ifEmpty { null },
             firstPhysicalAction = null, recurrence = rule,
             later = whenSel == "Later",
-            shares = shareLevels.toMap(),
+            shares = shares.people, shareEmails = shares.emails,
         )
         if (whenSel != "Later" && firstDate != null && pickedTime != null) {
             vm.scheduleTask(t, firstDate, pickedTime!!, reanchor = false)
@@ -342,7 +335,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                     // in its pre-create mode (the per-person Off/View/Partner/Assign
                     // cards were "terrible", Ahmad 2026-09-24).
                     SectionLabel("Share")
-                    ShareWithRow(shareWithSummary(sharePicksInRosterOrder(members, shareLevels))) { showShare = true }
+                    ShareWithRow(newTaskSharePicks(members, shares)) { showShare = true }
 
                     SectionLabel("Tags")
                     tech.csalliance.unstuck.ui.components.TagPicker(vm, tags.toList()) { tags.clear(); tags.addAll(it) }
@@ -378,8 +371,8 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
         // Picks come back live, so the sheet holds them however the screen closes;
         // submit() hands them to addTask exactly as before.
         ShareScreen(
-            vm, ShareTarget.NewTask(name), picks = shareLevels.toMap(),
-            onPicks = { p -> shareLevels.clear(); shareLevels.putAll(p) },
+            vm, ShareTarget.NewTask(name), shares = shares,
+            onShares = { shares = it },
             onDismiss = { showShare = false },
         )
     }

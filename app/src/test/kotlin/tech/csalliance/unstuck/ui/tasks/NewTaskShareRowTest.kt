@@ -11,11 +11,14 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.assertCountEquals
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
@@ -128,10 +131,14 @@ class NewTaskShareRowTest {
         // The grade switch, with Can edit the default…
         compose.onNodeWithText("Can edit").assertIsDisplayed()
         compose.onNodeWithText("Can view").assertIsDisplayed()
-        // …"Someone new" as the circle invite (a blank field makes a link)…
-        compose.onNodeWithText("Get link").assertExists()
+        // …"Someone new" holds an address for this task ("Add"), the link is
+        // the connect-only "Invite with a link"…
+        compose.onNodeWithText("Add").assertExists()
+        compose.onNodeWithText("Get link").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Invite with a link").assertExists()
         // …and nothing that needs a task that doesn't exist yet.
         compose.onNodeWithText("SHARE A LINK").assertDoesNotExist()
+        compose.onNodeWithText("Manage people").assertDoesNotExist()
     }
 
     /** The glue the model tests can't see: a pick made on the pre-create
@@ -175,6 +182,15 @@ class NewTaskShareRowTest {
         compose.waitForIdle()
         compose.onNodeWithContentDescription("James Wilson, Can edit. Change access").assertExists()
         compose.onNodeWithContentDescription("Choose someone, 1 people. Opens a searchable list").assertExists()
+
+        // Someone new: a typed address is held and counted on the row too.
+        compose.onNode(hasSetTextAction() and hasContentDescription("Email address")).performTextInput("maya@example.com")
+        compose.onNodeWithText("Add").performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitForIdle()
+        compose.onNodeWithText("Gets it when you add the task · can edit").assertExists()
+        compose.onNodeWithText("Done").performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("Share with, Someone, maya · can edit").performScrollTo().assertIsDisplayed()
         assertTrue("nothing was sent before Add task", fake.invites.isEmpty())
     }
 

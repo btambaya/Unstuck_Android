@@ -96,6 +96,10 @@ fun CalendarScreen(
     vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (SharedWithMe) -> Unit, onSearch: () -> Unit,
     onMenu: () -> Unit, onAvatar: () -> Unit, onNotifications: () -> Unit, notifUnread: Int, avatarInitials: String,
     onCreateAt: (String, String) -> Unit,
+    /** Start focus on a row from the Day view's Edit-block sheet — the shell's
+     *  one focus entry (Today's), handed the row Today shows (an occurrence for a
+     *  series' block). */
+    onStartFocus: (TaskItem) -> Unit,
     /** One-shot Day/Week/Month request from the assistant's `open_screen` (week | month). */
     requestedView: String? = null,
     onViewApplied: () -> Unit = {},
@@ -118,7 +122,7 @@ fun CalendarScreen(
         }
         CalendarSyncBar(vm)
         when (view) {
-            "Day" -> DayGridScreen(vm, onOpen, onOpenShared, onCreateAt, initialDate = jumpDate)
+            "Day" -> DayGridScreen(vm, onOpen, onOpenShared, onCreateAt, onStartFocus = onStartFocus, initialDate = jumpDate)
             "Week" -> WeekView(vm, onOpen, onOpenShared, onCreateAt)
             // Month gets the same onOpen / onOpenShared the other two views take: a row
             // in its day peek opens the task (or the read-only shared detail) directly.

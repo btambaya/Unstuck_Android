@@ -19,6 +19,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Check
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.outlined.RadioButtonUnchecked
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -37,13 +41,19 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.role
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.IntOffset
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import tech.csalliance.unstuck.core.logic.CalBlockSheetActions
 import tech.csalliance.unstuck.core.logic.SHARED_BLOCK_ID_PREFIX
 import tech.csalliance.unstuck.core.logic.asCalBlock
 import tech.csalliance.unstuck.core.logic.asSharedWithMe
+import tech.csalliance.unstuck.core.logic.calBlockSheetActions
 import tech.csalliance.unstuck.core.logic.isSharedBlockId
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.liveSharedBlocks
@@ -56,8 +66,11 @@ import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.core.time.ClockFormat
+import tech.csalliance.unstuck.core.time.ClockMode
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.core.time.WireTime
+import tech.csalliance.unstuck.design.component.ButtonKind
+import tech.csalliance.unstuck.design.component.UButton
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
@@ -108,7 +121,7 @@ internal fun layoutLanes(blocks: List<CalBlock>): List<Laid> {
 /** Day grid with drag-to-schedule: long-press an unscheduled task in the tray
  *  and drop it onto an hour slot to create a cal_block at that time. */
 @Composable
-fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (SharedWithMe) -> Unit, onCreateAt: (String, String) -> Unit, initialDate: String? = null) {
+fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (SharedWithMe) -> Unit, onCreateAt: (String, String) -> Unit, onStartFocus: (TaskItem) -> Unit, initialDate: String? = null) {
     val c = UTheme.colors
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val blocksRaw by vm.blocks.collectAsStateWithLifecycle()
@@ -402,20 +415,33 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
         // The edit sheet is for MY blocks only — a shared block can never open it (its
         // render branch sets no editingBlock), and this guard keeps that true even if a
         // future path assigns one.
-        editingBlock?.takeUnless { isSharedBlockId(it.id) }?.let { blk -> CalBlockEditSheet(vm, blk) { editingBlock = null } }
+        editingBlock?.takeUnless { isSharedBlockId(it.id) }?.let { blk ->
+            CalBlockEditSheet(vm, blk, onOpen = onOpen, onStartFocus = onStartFocus) { editingBlock = null }
+        }
     }
 }
 
-/** Tap a scheduled block → reschedule (free-slot chips), resize (duration chips),
- *  or unschedule. Mirrors the web cal-block-edit-modal. */
+/** Tap a scheduled block → finish it, focus on it or open it; reschedule
+ *  (free-slot chips), resize (duration chips) or unschedule. Mirrors the web
+ *  cal-block-edit-modal (Start now · Mark complete · Open in tasks).
+ *
+ *  Every task action goes through the path Today and the task screen use, on the
+ *  row Today shows ([calBlockSheetActions]): Mark done / Mark not done is
+ *  vm.toggleDone (a series' block ticks THAT day's occurrence, never the series),
+ *  Start focus is the shell's focus entry, Open task is the task route. */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-private fun CalBlockEditSheet(vm: AppViewModel, block: CalBlock, onDismiss: () -> Unit) {
+private fun CalBlockEditSheet(vm: AppViewModel, block: CalBlock, onOpen: (TaskItem) -> Unit, onStartFocus: (TaskItem) -> Unit, onDismiss: () -> Unit) {
     val c = UTheme.colors
     val sheet = androidx.compose.material3.rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val blocks by vm.blocks.collectAsStateWithLifecycle()
+    val tasks by vm.tasks.collectAsStateWithLifecycle()
+    val assignedOut by vm.assignedOut.collectAsStateWithLifecycle()
     // Track the live block so sequential edits compose + the selection follows.
     val live = blocks.firstOrNull { it.id == block.id } ?: block
+    // Re-read per change, so a tick made elsewhere (Today, another device) flips
+    // the label while the sheet is up.
+    val actions = remember(live, tasks, assignedOut) { calBlockSheetActions(live, tasks, assignedOut) }
     // Full-day window (not the default 08:00–18:00) so an early-morning / evening block
     // can be rescheduled within its own time band.
     val clock = tech.csalliance.unstuck.ui.components.clockMode()
@@ -425,22 +451,97 @@ private fun CalBlockEditSheet(vm: AppViewModel, block: CalBlock, onDismiss: () -
         onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = tech.csalliance.unstuck.design.component.SheetScrim,
         dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { tech.csalliance.unstuck.design.component.SheetHandle() } },
     ) {
-        Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            tech.csalliance.unstuck.design.component.SectionLabel("Edit block")
-            Text(live.taskName, style = UFont.sans(18, FontWeight.SemiBold), color = c.ink)
-
-            tech.csalliance.unstuck.design.component.SectionLabel("Start time")
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                times.forEach { t -> tech.csalliance.unstuck.ui.tasks.SelectableChip(ClockFormat.time(t, clock), selected = live.startTime == t) { vm.moveBlock(live, live.date, t) } }
-            }
-
-            tech.csalliance.unstuck.design.component.SectionLabel("Duration")
-            Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                listOf(15, 25, 45, 60, 90).forEach { m -> tech.csalliance.unstuck.ui.tasks.SelectableChip("${m}m", selected = live.durationMinutes == m) { vm.resizeBlock(live, m) } }
-            }
-
-            tech.csalliance.unstuck.design.component.UButton("Unschedule", kind = tech.csalliance.unstuck.design.component.ButtonKind.DANGER, fill = false) { vm.unschedule(live.id); onDismiss() }
-        }
+        CalBlockEditSheetBody(
+            taskName = live.taskName, actions = actions, times = times, startTime = live.startTime,
+            durationMinutes = live.durationMinutes, clock = clock,
+            // Like the web modal, a tick closes the sheet: the block behind it shows
+            // the new state (struck through when done).
+            onToggleDone = { actions.row?.let { vm.toggleDone(it) }; onDismiss() },
+            onStartFocus = { actions.row?.let { row -> onDismiss(); onStartFocus(row) } },
+            onOpenTask = { actions.row?.let { row -> onDismiss(); onOpen(row) } },
+            onPickTime = { t -> vm.moveBlock(live, live.date, t) },
+            onPickDuration = { m -> vm.resizeBlock(live, m) },
+            onUnschedule = { vm.unschedule(live.id); onDismiss() },
+        )
     }
 }
 
+/** The Edit-block sheet's content, stateless (rendered by the sheet above and by
+ *  CalBlockEditSheetTest). The task actions sit first, under the name: Start
+ *  focus (coral — Focus is a coral surface) and Mark done / Mark not done, then
+ *  Open task; a block with no task behind it ([CalBlockSheetActions.NONE]) shows
+ *  none of them. */
+@Composable
+internal fun CalBlockEditSheetBody(
+    taskName: String,
+    actions: CalBlockSheetActions,
+    times: List<String>,
+    startTime: String,
+    durationMinutes: Int,
+    clock: ClockMode,
+    onToggleDone: () -> Unit,
+    onStartFocus: () -> Unit,
+    onOpenTask: () -> Unit,
+    onPickTime: (String) -> Unit,
+    onPickDuration: (Int) -> Unit,
+    onUnschedule: () -> Unit,
+) {
+    val c = UTheme.colors
+    Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        tech.csalliance.unstuck.design.component.SectionLabel("Edit block")
+        // Struck through once done, like the block on the grid.
+        Text(
+            taskName, style = UFont.sans(18, FontWeight.SemiBold), color = if (actions.done) c.ink3 else c.ink,
+            textDecoration = if (actions.done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
+        )
+
+        if (actions.canFocus || actions.canComplete) {
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (actions.canFocus) {
+                    UButton(
+                        CalBlockSheetActions.START_FOCUS, kind = ButtonKind.CORAL, leadingIcon = Icons.Filled.PlayArrow,
+                        modifier = Modifier.weight(1f).actionSemantics("Start focus on $taskName"),
+                        onClick = onStartFocus,
+                    )
+                }
+                if (actions.canComplete) {
+                    UButton(
+                        actions.completeLabel, kind = ButtonKind.OUTLINED,
+                        leadingIcon = if (actions.done) Icons.Outlined.RadioButtonUnchecked else Icons.Filled.Check,
+                        modifier = Modifier.weight(1f).actionSemantics(if (actions.done) "Mark $taskName not done" else "Mark $taskName done"),
+                        onClick = onToggleDone,
+                    )
+                }
+            }
+        }
+        actions.assignedTo?.let { who ->
+            // In place of Start focus / Mark done, the task screen's words: its
+            // recipient does it now.
+            Text("You assigned this to ${who.substringBefore('@')} — view only", style = UFont.sans(12), color = c.ink3)
+        }
+        if (actions.canOpen) {
+            UButton(
+                CalBlockSheetActions.OPEN_TASK, kind = ButtonKind.TEXT,
+                modifier = Modifier.actionSemantics("Open $taskName"),
+                onClick = onOpenTask,
+            )
+        }
+
+        tech.csalliance.unstuck.design.component.SectionLabel("Start time")
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            times.forEach { t -> tech.csalliance.unstuck.ui.tasks.SelectableChip(ClockFormat.time(t, clock), selected = startTime == t) { onPickTime(t) } }
+        }
+
+        tech.csalliance.unstuck.design.component.SectionLabel("Duration")
+        Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            listOf(15, 25, 45, 60, 90).forEach { m -> tech.csalliance.unstuck.ui.tasks.SelectableChip("${m}m", selected = durationMinutes == m) { onPickDuration(m) } }
+        }
+
+        UButton("Unschedule", kind = ButtonKind.DANGER, fill = false, onClick = onUnschedule)
+    }
+}
+
+/** A sheet action's spoken name (with the task, so TalkBack says what it acts on)
+ *  and its button role. */
+private fun Modifier.actionSemantics(label: String): Modifier =
+    semantics { contentDescription = label; role = Role.Button }

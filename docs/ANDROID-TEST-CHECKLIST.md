@@ -222,6 +222,10 @@ The must-pass set. If any item fails, do not ship.
 - [ ] Block edit: full-day window (00:00–23:45) free-slot chips; morning/evening blocks editable, not clamped to business hours.
 - [ ] Block edit: resize duration (15/25/45/60/90), height scales, moveCount unchanged.
 - [ ] Block edit: Unschedule removes block; task returns to unscheduled tray.
+- [ ] Block edit (task block): Start focus (coral) opens Focus on that task; for a repeating task's block, Done ticks that day only.
+- [ ] Block edit (task block): Mark done ticks the task (block struck through, sheet closes); on a done task it reads "Mark not done" and reopens it. A repeating task's block ticks/unticks THAT day only — the series and its other days stay open.
+- [ ] Block edit (task block): Open task opens the task screen (a repeating task's block opens that day's occurrence).
+- [ ] Block edit: a task I assigned out shows "You assigned this to … — view only" and only Open task (no Start focus / Mark done).
 - [ ] External/Google events render blue (blueSoft), read-only — no tap/drag, grid behind not tappable.
 - [ ] Google Calendar connect/sync/disconnect flow with busy state + offline error ("Couldn't reach Google…").
 - [ ] Dead Google connection (needs_reauth): the bar becomes the card "Google Calendar stopped syncing" + plain body naming the account, ink "Reconnect" pill (disclosure → consent) + quiet "Disconnect" (confirm); never a raw "invalid_grant (400)".

@@ -65,7 +65,11 @@ import kotlin.math.sqrt
 //      asked at that done, before the output: Zubair's morning call
 //      (2026-09-24 07:02:50, iOS) heard "I tried to cancel the repeat, but it
 //      didn't go through" over an ok, and the continuation then collided
-//      with it ("already has an active response").
+//      with it ("already has an active response"). Calls are tracked by id,
+//      so a late output (after the 10 s wait gave up on it) never stands in
+//      for a call still running; a reply we did not cancel is never asked
+//      over (its done asks); and nothing is asked while hold-to-talk is held
+//      (the release asks, with the continuation riding on it).
 //
 // The loudspeaker is FULL-DUPLEX again (it was half-duplex — mic muted for
 // the whole reply — from 2026-09-17): the platform echo canceller keeps the
@@ -224,11 +228,13 @@ sealed class BargeInEvent {
      *  was asked at the done of the reply carrying set_task_recurrence, 70 ms
      *  before the ok went out: "I tried to cancel the repeat, but it didn't go
      *  through"). Arrives before that reply's done (same socket, same order). */
-    object ToolCallStarted : BargeInEvent()
+    data class ToolCallStarted(val callId: String) : BargeInEvent()
     /** That call's `function_call_output` has been SENT. With none left
      *  running, ONE reply is asked for — the continuation that reads the
-     *  results, and answers any turn the user took meanwhile. */
-    object ToolCallFinished : BargeInEvent()
+     *  results, and answers any turn the user took meanwhile. By id: a late
+     *  output of a call the wait gave up on is read, but never counts against
+     *  a call that is still running. */
+    data class ToolCallFinished(val callId: String) : BargeInEvent()
 }
 
 sealed class BargeInCommand {
@@ -452,8 +458,9 @@ class BargeInController(
      *  reply. A new turn keeps it: asked before the reset, it only fails again. */
     var retryNotBefore: Long? = null; private set
 
-    /** Tool calls running whose `function_call_output` has not gone out. */
-    var toolsInFlight = 0; private set
+    /** Tool calls (by call id) running whose `function_call_output` has not gone out. */
+    private val toolCalls = LinkedHashSet<String>()
+    val toolsInFlight: Int get() = toolCalls.size
     /** When the first of [toolsInFlight] started (for [TOOL_WAIT_MAX_MS]). */
     private var toolsSince: Long? = null
     /** The last tool output went out at this time and no reply has been asked
@@ -465,7 +472,10 @@ class BargeInController(
     /** A tool call is running or its results are still to be read: the next
      *  reply is the continuation, and nothing else may ask before it. The
      *  client holds the integrity corrective for it on this. */
-    val toolsPending: Boolean get() = toolsInFlight > 0 || continuationSince != null
+    val toolsPending: Boolean get() = toolCalls.isNotEmpty() || continuationSince != null
+    /** The reply generating now is one we cancelled: its done may never come
+     *  (the fallback's case). A reply we did not cancel always sends its done. */
+    private val activeCancelled: Boolean get() = activeResponseId != null && activeResponseId == cancelledResponseId
 
     /** Echo reference: the words of the reply on air and of the one before
      *  it (a reply's tail echoes after the next response was created). Not a
@@ -604,7 +614,12 @@ class BargeInController(
                         out += ask
                         if (ask.none { it == BargeInCommand.CreateResponse || it == BargeInCommand.CommitAndRespond }) {
                             if (pendingCreate) out += BargeInCommand.StartTimer(TURN_HOLD_MS)
-                            ui(if (playbackQueued) BargeInUi.SPEAKING else BargeInUi.THINKING, out)
+                            // Holding the orb: they are talking — never "Thinking" over them.
+                            ui(when {
+                                phase == BargeInPhase.HOLD -> BargeInUi.LISTENING
+                                playbackQueued -> BargeInUi.SPEAKING
+                                else -> BargeInUi.THINKING
+                            }, out)
                         }
                     } else if (pendingCreate) {
                         // The reply we cancelled is finished server-side: the user's
@@ -645,7 +660,7 @@ class BargeInController(
                     if (phase == BargeInPhase.SPEAKING) phase = BargeInPhase.IDLE
                     // "One moment." has played; the tool it announced is still
                     // working, or its results are about to be read.
-                    ui(if (toolsPending) BargeInUi.THINKING else BargeInUi.LISTENING, out)
+                    ui(if (toolsPending && phase != BargeInPhase.HOLD) BargeInUi.THINKING else BargeInUi.LISTENING, out)
                 }
             }
             BargeInEvent.GateOpen -> {
@@ -733,32 +748,37 @@ class BargeInController(
                     pttPressed = false
                     out += BargeInCommand.ForceGate(false)
                     // A tool still running (or its results unread): the commit
-                    // and its ask wait for the outputs and go out as the
-                    // continuation — a create now would beat them.
-                    if (toolsPending) pttCommitOwed = true else out += BargeInCommand.CommitAndRespond
+                    // and its ask go out as the continuation — a create now would
+                    // beat the outputs. Outputs that came in while the orb was
+                    // held (nothing is asked over a hold) are read right here.
+                    val ask = if (toolsPending) { pttCommitOwed = true; tryAsk(t) } else listOf(BargeInCommand.CommitAndRespond)
+                    out += ask
                     answeredTurns += 1
-                    ui(BargeInUi.THINKING, out)
+                    if (ask.none { it is BargeInCommand.Ui }) ui(BargeInUi.THINKING, out)
                 }
             }
-            BargeInEvent.ToolCallStarted -> {
-                if (toolsInFlight == 0) {
+            is BargeInEvent.ToolCallStarted -> {
+                if (toolCalls.isEmpty()) {
                     toolsSince = t
                     // The tick that stops waiting for a tool that never answers.
                     out += BargeInCommand.StartTimer(TOOL_WAIT_MAX_MS + 1)
                 }
-                toolsInFlight += 1
+                toolCalls += event.callId
             }
-            BargeInEvent.ToolCallFinished -> {
-                // Never below zero: a late output after the wait gave up on it.
-                toolsInFlight = max(0, toolsInFlight - 1)
+            is BargeInEvent.ToolCallFinished -> {
+                // A late output (the wait gave up on it) is still read, but it
+                // never stands in for another call that is still running.
+                toolCalls -= event.callId
                 continuationSince = t
-                if (toolsInFlight == 0) {
+                if (toolCalls.isEmpty()) {
                     toolsSince = null
                     // Coalesced: the tick asks CONTINUE_DELAY_MS after the LAST
-                    // output — or the carrying reply's done does, if it is still
-                    // generating (then a done that never comes gets the fallback).
+                    // output — or the done of the reply still generating does. A
+                    // create into that reply is refused, and the continuation
+                    // went with it: only one we cancelled (whose done may never
+                    // come) gets the 2.5 s fallback; one we did not, 10 s.
                     out += BargeInCommand.StartTimer(CONTINUE_DELAY_MS)
-                    if (responseActive) out += BargeInCommand.StartTimer(PENDING_CREATE_FALLBACK_MS + 1)
+                    if (responseActive) out += BargeInCommand.StartTimer((if (activeCancelled) PENDING_CREATE_FALLBACK_MS else TOOL_WAIT_MAX_MS) + 1)
                 }
             }
         }
@@ -952,18 +972,27 @@ class BargeInController(
         // A tool is still running: a reply asked for now is generated without
         // its result (Zubair's morning call, 2026-09-24). Its output's
         // ToolCallFinished asks; one that never answers is waited out.
-        if (toolsInFlight > 0) {
+        if (toolCalls.isNotEmpty()) {
             val since = toolsSince
             if (since != null && t - since < TOOL_WAIT_MAX_MS) return emptyList()
-            toolsInFlight = 0
+            toolCalls.clear()
             toolsSince = null
         }
+        // Holding the orb: nothing is asked over them. The release commits
+        // their words and asks, and the continuation rides on it — asked here,
+        // its reply played over the hold and the release's create collided
+        // with it (their turn went unanswered).
+        if (phase == BargeInPhase.HOLD && turn == null) return emptyList()
         val notBefore = retryNotBefore
         if (notBefore != null && t < notBefore) return listOf(BargeInCommand.StartTimer(notBefore - t))
         if (responseActive) {
             // The fallback, from the turn (as ever) or, with none, the outputs.
+            // The continuation alone never goes into a reply we did not cancel
+            // before 10 s: its done comes and asks (afterDone); a create into
+            // it would only be refused, and the continuation lost with it.
             val since = turn ?: cont ?: return emptyList()
-            if (t - since < PENDING_CREATE_FALLBACK_MS) return emptyList()
+            val wait = if (turn == null && !activeCancelled) TOOL_WAIT_MAX_MS else PENDING_CREATE_FALLBACK_MS
+            if (t - since < wait) return emptyList()
             responseActive = false
         } else {
             if (turn != null && (t - turn < TURN_HOLD_MS || serverSpeaking)) return emptyList()

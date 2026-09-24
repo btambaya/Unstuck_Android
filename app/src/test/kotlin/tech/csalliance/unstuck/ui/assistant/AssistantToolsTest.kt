@@ -2577,4 +2577,67 @@ class AssistantToolsTest {
         val r = skipped.run("schedule_task", "taskId" to "s", "date" to TOMORROW, "startTime" to "08:00")
         assertFalse(r, r.contains("nothing to change"))
     }
+
+    /** Review of the no-op (2026-09-24, web parity): scheduling un-parks a
+     *  task from Later, so a parked task put back into the slot it kept is a
+     *  real change — "already there" left it parked, off Today, over an ok. */
+    @Test fun `a task parked in Later that is scheduled into the slot it kept comes back - never already there`() = runTest {
+        val h = makeApi { tasks += task("f", "Office Focus", later = true); blocks += block("b1", "f", TOMORROW, "10:30") }
+        val r = h.run("schedule_task", "taskId" to "f", "date" to TOMORROW, "startTime" to "10:30")
+        assertEquals("ok: scheduled \"Office Focus\" $TOMORROW 10:30", r)
+        assertEquals(false, h.state.tasks.first { it.id == "f" }.later)
+    }
+
+    /** Only 'H:MM' / 'HH:MM[:SS]' is a time: "10:30pm" is never read as the
+     *  10:30 slot; seconds on the stored slot still match, and the ok names
+     *  the time as asked, HH:MM. */
+    @Test fun `only an HH MM time matches the slot, seconds and all`() = runTest {
+        val h = makeApi { tasks += task("f", "Office Focus"); blocks += block("b1", "f", TOMORROW, "10:30") }
+        val pm = h.run("schedule_task", "taskId" to "f", "date" to TOMORROW, "startTime" to "10:30pm")
+        assertFalse(pm, pm.contains("nothing to change"))
+        val s = makeApi { tasks += task("g", "Gym"); blocks += block("g1", "g", TOMORROW, "07:05:00") }
+        assertEquals("ok: \"Gym\" is already on $TOMORROW at 07:05 — nothing to change",
+            s.run("schedule_task", "taskId" to "g", "date" to TOMORROW, "startTime" to "7:05"))
+        assertEquals("07:05", slotHm("07:05:00"))
+        assertNull(slotHm("10:30pm"))
+        assertNull(slotHm("half ten"))
+    }
+
+    /** Zubair's morning call itself, replayed call by call through the Android
+     *  executor with the prod arguments (assistant_turns, session 1cbfac75,
+     *  2026-09-24 07:02–07:03 UTC; web d7441b7). One voice session = one
+     *  scratch; today stands in for his Thursday. */
+    @Test fun `Zubair's morning call replayed - create, same-slot schedule, weekly, stop, stop again`() = runTest {
+        val h = makeApi()
+        val dow = jsDayOfWeek(TODAY)
+        val made = h.run("create_task", "date" to TODAY, "name" to "Office Focus", "startTime" to "10:30", "estimateMin" to 60)
+        val id = Regex("id=(\\S+)").find(made)!!.groupValues[1]
+        assertTrue(made, made.contains("— scheduled $TODAY 10:30"))
+        assertEquals("Created “Office Focus”", receipt("create_task", made, h)?.label)
+
+        val sched = h.run("schedule_task", "date" to TODAY, "taskId" to id, "startTime" to "10:30")
+        assertEquals("ok: \"Office Focus\" is already on $TODAY at 10:30 — nothing to change", sched)
+        assertNull(receipt("schedule_task", sched, h, taskId = id, date = TODAY, startTime = "10:30"))
+        assertEquals(1, h.state.blocks.count { it.taskId == id })
+
+        val weekly = h.run("set_task_recurrence", "kind" to "weekly", "taskId" to id, "daysOfWeek" to listOf(dow))
+        assertTrue(weekly, Regex("^ok: \"Office Focus\" now repeats weekly on \\w+ at 10:30$").matches(weekly))
+        assertEquals("Repeats weekly — “Office Focus”", receipt("set_task_recurrence", weekly, h, taskId = id, kind = "weekly")?.label)
+        assertTrue(h.state.blocks.any { it.taskId == id && it.date > TODAY })
+
+        // "No, just cancel the recurring. I'll just leave it in only for today."
+        val stop = h.run("set_task_recurrence", "kind" to "none", "taskId" to id, "daysOfWeek" to listOf(dow))
+        assertEquals("ok: \"Office Focus\" no longer repeats (future occurrences removed)", stop)
+        assertEquals("Repeat removed — “Office Focus”", receipt("set_task_recurrence", stop, h, taskId = id, kind = "none")?.label)
+        assertNull(h.state.tasks.first { it.id == id }.recurrence)
+        assertEquals("today stays, nothing after it", listOf("$TODAY 10:30"),
+            h.state.blocks.filter { it.taskId == id && !it.done && !it.skipped }.map { "${it.date} ${it.startTime}" })
+
+        // "Were you able to cancel the recurring tasks?" — asked again.
+        val before = h.state.tasks.toList() to h.state.blocks.toList()
+        val again = h.run("set_task_recurrence", "kind" to "none", "taskId" to id)
+        assertEquals("ok: \"Office Focus\" already doesn't repeat — nothing to change", again)
+        assertNull(receipt("set_task_recurrence", again, h, taskId = id, kind = "none"))
+        assertEquals(before, h.state.tasks.toList() to h.state.blocks.toList())
+    }
 }

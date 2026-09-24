@@ -414,6 +414,44 @@ class VoiceRealtimeClientTest {
         assertEquals("one create after the output", 2, s.creates())
     }
 
+    /** Hold-to-talk over "One moment.": the press cancels the reply, its tool
+     *  keeps running and its output lands while the orb is still held. The
+     *  continuation used to be asked right then (a reply over the hold), and
+     *  the release's commit + create then collided with it — their turn went
+     *  unanswered. On the wire now: nothing while held; the release commits
+     *  and asks ONCE, after the output. */
+    @Test
+    fun `hold-to-talk - a tool output that lands while the orb is held is read with the release, never over it`() {
+        SettingsStore(app).setVoiceHoldToTalk(true)
+        val gate = CompletableDeferred<Unit>()
+        val engine = FakeEngine(app)
+        val factory = FakeFactory()
+        val c = client(engine, factory, mutableListOf(), runTool = { _, _ -> gate.await(); "ok: \"Office Focus\" no longer repeats (future occurrences removed)" })
+        c.start(); factory.open()
+        assertTrue(c.holdToTalk)
+        val s = factory.socket!!
+        factory.created("r0"); factory.done("r0")
+        factory.created("r1")
+        factory.transcript("r1", "One moment.")
+        factory.toolCall("set_task_recurrence", "c1")
+        c.pttDown()
+        assertEquals("the press cancels the reply", "response.cancel", s.types().last())
+        factory.done("r1", "cancelled")
+        gate.complete(Unit)
+        awaitToolOutput(s, 1)
+        Thread.sleep(100)                        // ToolCallFinished, a beat after the output
+        idle(1_000)
+        val output = s.sent.indexOfFirst { it.contains("function_call_output") }
+        assertEquals("nothing asked over the hold", 0, s.types().drop(output).count { it == "response.create" })
+        c.pttUp()
+        assertEquals(1, engine.drains.size)
+        engine.drains.single().invoke()
+        assertEquals(listOf("input_audio_buffer.commit", "response.create"), s.types().drop(output + 1))
+        factory.created("r2")
+        idle(5_000)
+        assertEquals("one ask for the release and the output", 1, s.types().drop(output).count { it == "response.create" })
+    }
+
     // ── pure guard (mirrors the iOS VoiceIntegrityGuard test) ──
 
     @Test

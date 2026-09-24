@@ -1094,7 +1094,7 @@ class VoiceRealtimeClient(
         }.getOrDefault(JsonObject(emptyMap()))
         // Before the reply's done (same socket thread, wire order): no reply
         // may be asked for until this call's output is in the conversation.
-        dispatch(BargeInEvent.ToolCallStarted)
+        dispatch(BargeInEvent.ToolCallStarted(callId))
         scope.launch {
             val result = runCatching { runCallAwareTool(name, args) }.getOrElse { "error: ${it.message ?: "failed"}" }
             // Feed the tool result back; the reply after it is tool-backed only
@@ -1110,7 +1110,7 @@ class VoiceRealtimeClient(
             synchronized(ctlLock) { guard.toolFinished(name, result) }
             // The output is on the wire: the controller asks for the ONE reply
             // that reads the results once none is left running.
-            dispatch(BargeInEvent.ToolCallFinished)
+            dispatch(BargeInEvent.ToolCallFinished(callId))
         }
     }
 

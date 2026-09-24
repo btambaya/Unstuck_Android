@@ -182,19 +182,26 @@ fun nextLiveBlock(blocks: List<CalBlock>, today: String, taskId: String): CalBlo
 
 suspend fun nextLiveBlock(api: AssistantApi, taskId: String): CalBlock? = nextLiveBlock(api.getBlocks(), api.todayIso(), taskId)
 
-/** 'H:MM' / 'HH:MM[:SS]' → 'HH:MM'; anything else unchanged (web `hhmm`). */
-internal fun slotHm(s: String): String {
-    val m = Regex("^(\\d{1,2}):(\\d{2})").find(s.trim()) ?: return s
+private val SLOT_HM = Regex("^(\\d{1,2}):(\\d{2})(?::\\d{2})?$")
+
+/** 'H:MM' / 'HH:MM[:SS]' → 'HH:MM'; anything else (e.g. "10:30pm") → null:
+ *  never read as a time it might not be (web `hhmm`). */
+internal fun slotHm(s: String): String? {
+    val m = SLOT_HM.find(s.trim()) ?: return null
     return m.groupValues[1].padStart(2, '0') + ":" + m.groupValues[2]
 }
 
 /** The task's open (not done, not skipped) calendar slot at exactly this day
  *  and time, if it has one — the slot a schedule_task there would not change
- *  (web `liveBlockAt`, 2026-09-24). */
-internal fun liveBlockAt(blocks: List<CalBlock>, taskId: String, date: String, startTime: String): CalBlock? {
-    val at = slotHm(startTime)
+ *  (web `liveBlockAt`, 2026-09-24). Never for a task parked in Later:
+ *  scheduling un-parks it (scheduleTask → clearLaterOnSchedule), so "put it
+ *  back on Thursday at 10:30" over the slot it kept in Later is a real change,
+ *  not "already there" — the no-op left it parked, off Today, over an ok. */
+internal fun liveBlockAt(blocks: List<CalBlock>, task: TaskItem, date: String, startTime: String): CalBlock? {
+    val at = slotHm(startTime) ?: return null
+    if (task.later == true) return null
     return blocks.firstOrNull {
-        it.taskId == taskId && isTaskBlock(it) && !it.done && !it.skipped && it.date == date &&
+        it.taskId == task.id && isTaskBlock(it) && !it.done && !it.skipped && it.date == date &&
             it.startTime.isNotEmpty() && slotHm(it.startTime) == at
     }
 }
@@ -512,9 +519,9 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             // receipt, never a second block. It still anchors a
             // set_task_recurrence after it, the way a placement would (web parity).
             if (startTime != null) {
-                liveBlockAt(api.getBlocks(), t.id, date, startTime)?.let { same ->
+                liveBlockAt(api.getBlocks(), t, date, startTime)?.let { same ->
                     scratch.placedBlocks[t.id] = same.id
-                    return "ok: \"${t.name}\" is already on $date at ${same.startTime}$NOTHING_TO_CHANGE"
+                    return "ok: \"${t.name}\" is already on $date at ${slotHm(startTime)}$NOTHING_TO_CHANGE"
                 }
             }
             // A weekly series onto a day it doesn't repeat on is refused ONCE,

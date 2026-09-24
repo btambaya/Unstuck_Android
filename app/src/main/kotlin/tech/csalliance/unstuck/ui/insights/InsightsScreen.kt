@@ -66,6 +66,7 @@ import tech.csalliance.unstuck.core.logic.insightsTrend
 import tech.csalliance.unstuck.core.logic.interruptionBins
 import tech.csalliance.unstuck.core.logic.localToday
 import tech.csalliance.unstuck.core.logic.pauseAnatomy
+import tech.csalliance.unstuck.core.logic.pauseBarLabel
 import tech.csalliance.unstuck.core.logic.periodDur
 import tech.csalliance.unstuck.core.logic.periodFmtDay
 import tech.csalliance.unstuck.core.logic.periodMinutes
@@ -268,7 +269,7 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                                 val max = if (byMinutes) pauses.maxOf { it.minutes }.coerceAtLeast(0.001) else pauses.maxOf { it.count }.toDouble().coerceAtLeast(1.0)
                                 pauses.forEach { p ->
                                     val v = if (byMinutes) p.minutes else p.count.toDouble()
-                                    LabeledBar(p.reason, (v / max).toFloat(), if (byMinutes) "${p.minutes.roundToInt()}m · ${p.count}×" else "${p.count}×", c.ink2)
+                                    LabeledBar(p.reason, (v / max).toFloat(), pauseBarLabel(p, byMinutes), c.ink2)
                                 }
                                 if (!byMinutes) Text("Pause lengths fill in as you resume from a pause.", style = UFont.sans(11), color = c.ink3)
                             }

@@ -521,7 +521,8 @@ class AssistantToolsTest {
         assertEquals(
             "error: \"Park run\" repeats every Saturday, but 2026-09-20 is a Sunday — nothing was scheduled. " +
                 "The nearest Saturdays: Saturday 2026-09-19, Saturday 2026-09-26. " +
-                "Call schedule_task again with the day the user meant; only if they asked for Sunday itself (a one-off move off its usual day), call it again with 2026-09-20 unchanged.",
+                "Call schedule_task again with the day the user meant; only if they asked for Sunday itself (a one-off move off its usual day), call it again with 2026-09-20 unchanged. " +
+                "To change the days it repeats on, call set_task_recurrence instead.",
             h.run("schedule_task", "taskId" to "p", "date" to "2026-09-20", "startTime" to "08:30"),
         )
         assertTrue("nothing was written", h.state.blocks.isEmpty())
@@ -565,6 +566,48 @@ class AssistantToolsTest {
         }
         assertEquals("ok: scheduled \"Park run\" 2026-09-20 10:00", h.run("schedule_task", "taskId" to "p", "date" to "2026-09-20", "startTime" to "10:00"))
         assertEquals("10:00", h.state.blocks.first { it.id == "moved" }.startTime)
+    }
+
+    /** The create-then-repeat variant of James's Park run: create_task on
+     *  "Saturday" sent as Sunday the 20th, then weekly on Saturday. The series
+     *  used to start from the Sunday slot and skip the coming Saturday. Refused
+     *  before anything is written; moved to the Saturday, the same call places
+     *  the series from the 19th. */
+    @Test fun `set_task_recurrence refuses weekly days that leave out the slot placed this turn`() = runTest {
+        val h = makeApi { today = "2026-09-13" }
+        val made = h.run("create_task", "name" to "Park run", "date" to "2026-09-20", "startTime" to "08:30")
+        val id = Regex("id=([\\w-]+)").find(made)!!.groupValues[1]
+        val tasksBefore = h.state.tasks.toList()
+        val blocksBefore = h.state.blocks.toList()
+        val refused = h.run("set_task_recurrence", "taskId" to id, "kind" to "weekly", "daysOfWeek" to listOf(6))
+        assertTrue(refused, refused.startsWith("error: \"Park run\" was just put on Sunday 2026-09-20, but weekly on Saturday leaves out Sundays — nothing changed. The nearest Saturdays: Saturday 2026-09-19, Saturday 2026-09-26."))
+        assertEquals("the task still doesn't repeat", tasksBefore, h.state.tasks.toList())
+        assertEquals("no slot moved", blocksBefore, h.state.blocks.toList())
+        // The model moves it to the Saturday the user meant, then repeats it.
+        assertEquals("ok: scheduled \"Park run\" 2026-09-19 08:30", h.run("schedule_task", "taskId" to id, "date" to "2026-09-19", "startTime" to "08:30"))
+        assertEquals("ok: \"Park run\" now repeats weekly on Sat at 08:30", h.run("set_task_recurrence", "taskId" to id, "kind" to "weekly", "daysOfWeek" to listOf(6)))
+        assertEquals("2026-09-19", h.state.blocks.minOf { it.date })
+        assertTrue("every occurrence on a Saturday", h.state.blocks.all { jsDayOfWeek(it.date) == 6 && it.startTime == "08:30" })
+    }
+
+    /** "Every Saturday, starting this Sunday" is possible: after the refusal the
+     *  SAME call goes through; a fresh turn is checked again. */
+    @Test fun `the same set_task_recurrence again starts the series from the placed day`() = runTest {
+        val h = makeApi { today = "2026-09-13" }
+        val made = h.run("create_task", "name" to "Park run", "date" to "2026-09-20", "startTime" to "08:30")
+        val id = Regex("id=([\\w-]+)").find(made)!!.groupValues[1]
+        val first = h.run("set_task_recurrence", "taskId" to id, "kind" to "weekly", "daysOfWeek" to listOf(6))
+        assertTrue(first, first.startsWith("error: \"Park run\" was just put on Sunday 2026-09-20"))
+        // The identical call is the model's "yes, from that Sunday".
+        assertEquals("ok: \"Park run\" now repeats weekly on Sat at 08:30",
+            h.run("set_task_recurrence", "taskId" to id, "kind" to "weekly", "daysOfWeek" to listOf(6)))
+        assertTrue(h.state.tasks.first { it.id == id }.recurrence is Recurrence.Weekly)
+        // A new turn whose slot is on a series day is not refused.
+        val later = makeApi { today = "2026-09-13" }
+        val made2 = later.run("create_task", "name" to "Swim", "date" to "2026-09-19", "startTime" to "07:00")
+        val id2 = Regex("id=([\\w-]+)").find(made2)!!.groupValues[1]
+        assertEquals("ok: \"Swim\" now repeats weekly on Sun, Sat at 07:00",
+            later.run("set_task_recurrence", "taskId" to id2, "kind" to "weekly", "daysOfWeek" to listOf(6, 0)))
     }
 
     /** A lapsed series re-placed at an explicit time takes THAT time for the

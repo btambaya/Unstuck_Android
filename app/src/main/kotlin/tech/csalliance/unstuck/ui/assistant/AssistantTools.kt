@@ -20,6 +20,7 @@ import tech.csalliance.unstuck.core.logic.jsDayOfWeek
 import tech.csalliance.unstuck.core.logic.rejectPastDate
 import tech.csalliance.unstuck.core.logic.rejectPastTime
 import tech.csalliance.unstuck.core.logic.rejectOffSeriesDay
+import tech.csalliance.unstuck.core.logic.rejectOffSeriesPlacement
 import tech.csalliance.unstuck.core.logic.ReceiptArgs
 import tech.csalliance.unstuck.core.logic.ChosenDateAction
 import tech.csalliance.unstuck.core.logic.ChosenDateWrite
@@ -95,9 +96,10 @@ class TurnScratch {
     /** Task id → the block schedule_task placed for it, which a
      *  set_task_recurrence after it takes as the series' day and time. */
     val placedBlocks = HashMap<String, String>()
-    /** "taskId|date" pairs schedule_task refused as off a weekly series' days
-     *  ([rejectOffSeriesDay]). The SAME call again is the model's deliberate
-     *  one-off move after reading the refusal, and goes through. */
+    /** Off-day calls already refused: schedule_task's "schedule|taskId|date" ([rejectOffSeriesDay])
+     *  and set_task_recurrence's "recurrence|taskId|date|days" ([rejectOffSeriesPlacement]).
+     *  The SAME call again is the model's deliberate choice after reading the
+     *  refusal (a one-off move / a series that starts there), and goes through. */
     val offDayRefused = HashSet<String>()
     fun clear() { newTasks.clear(); newLists.clear(); placedBlocks.clear(); offDayRefused.clear() }
 }
@@ -493,7 +495,7 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             var offDay: String? = null
             if (api.getBlocks().none { it.taskId == t.id && isTaskBlock(it) && it.date == date }) {
                 rejectOffSeriesDay(t.name, t.recurrence, date, api.todayIso())?.let { refusal ->
-                    if (scratch.offDayRefused.add("${t.id}|$date")) return refusal
+                    if (scratch.offDayRefused.add("schedule|${t.id}|$date")) return refusal
                     offDay = WEEKDAY_NAMES_CAP[jsDayOfWeek(date)]
                 }
             }
@@ -583,6 +585,23 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 if (days.any { it !in 0..6 }) return "error: daysOfWeek must be 0=Sunday … 6=Saturday"
             }
             if (kind == "none" && t.recurrence == null) return "error: \"${t.name}\" doesn't repeat — nothing changed"
+            // The slot placed for it earlier THIS turn (create_task / schedule_task
+            // with a date) on a day the new weekly days leave out: the Park run
+            // variant — create_task on Sunday 2026-09-20, then weekly on Saturday,
+            // started the series from the Sunday and never placed the coming
+            // Saturday. Refused ONCE before anything is written (web + iOS do the
+            // same); the same call again means the series really starts there.
+            if (kind == "weekly" && days != null) {
+                val today = api.todayIso()
+                val placed = scratch.placedBlocks[t.id]?.let { id ->
+                    api.getBlocks().firstOrNull { it.id == id && !it.done && !it.skipped && it.date >= today }
+                }
+                if (placed != null) {
+                    rejectOffSeriesPlacement(t.name, placed.date, days, today)?.let { refusal ->
+                        if (scratch.offDayRefused.add("recurrence|${t.id}|${placed.date}|${days.joinToString(",")}")) return refusal
+                    }
+                }
+            }
             val rec: Recurrence? = when (kind) {
                 "daily" -> Recurrence.Daily(until)
                 "weekly" -> Recurrence.Weekly(days ?: emptyList(), until)

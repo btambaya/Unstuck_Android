@@ -187,24 +187,13 @@ private fun weekdayList(days: List<Int>): String {
     return if (names.size <= 1) names.joinToString("") else names.dropLast(1).joinToString(", ") + " and " + names.last()
 }
 
-/**
- * A weekly series asked onto a day it doesn't repeat on — the model's date
- * maths gone wrong ("Saturday" → 2026-09-20, a Sunday: James's Park run,
- * TestFlight build 51, 2026-09-13). The executor used to write that date
- * exactly as given, so the series' first occurrence landed on the Sunday and
- * the coming Saturday had none. Refuse, naming the matching days on either
- * side of [date] (the nearest one on or after [today] before it, and the first
- * after it) in plain words, so the model re-calls with the right one. Null =
- * fine: not weekly, a day in the series, or a malformed date (the date
- * checks own that). Shared wording on web, iOS and Android.
- */
-fun rejectOffSeriesDay(taskName: String, recurrence: Recurrence?, date: String, today: String): String? {
-    val weekly = recurrence as? Recurrence.Weekly ?: return null
-    if (!ISO_DATE_RE.matches(date) || IsoDate.parse(date) == null) return null
-    val days = weekly.daysOfWeek.filter { it in 0..6 }.distinct().sorted()
-    if (days.isEmpty()) return null
-    val dow = IsoDate.dayOfWeek(date)
-    if (dow in days) return null
+/** The weekly days that are real (0..6), distinct and sorted. */
+private fun cleanWeekdays(days: List<Int>): List<Int> = days.filter { it in 0..6 }.distinct().sorted()
+
+/** "The nearest Saturdays: Saturday 2026-09-19, Saturday 2026-09-26." — the
+ *  series day just before [date] (only when it isn't before [today]) and the
+ *  first one after it. */
+private fun nearestSeriesDaysText(days: List<Int>, date: String, today: String): String {
     val nearest = ArrayList<String>()
     for (back in 1..6) {
         val d = IsoDate.addDays(date, -back)
@@ -215,11 +204,55 @@ fun rejectOffSeriesDay(taskName: String, recurrence: Recurrence?, date: String, 
         val d = IsoDate.addDays(date, ahead)
         if (IsoDate.dayOfWeek(d) in days) { nearest += d; break }
     }
-    val asked = WEEKDAY_NAMES_CAP[dow]
     val label = if (days.size == 1) "${WEEKDAY_NAMES_CAP[days[0]]}s" else "matching days"
+    return "The nearest $label: ${nearest.joinToString(", ") { "${WEEKDAY_NAMES_CAP[IsoDate.dayOfWeek(it)]} $it" }}."
+}
+
+/**
+ * A weekly series asked onto a day it doesn't repeat on — the model's date
+ * maths gone wrong ("Saturday" → 2026-09-20, a Sunday: James's Park run,
+ * TestFlight build 51, 2026-09-13). The executor used to write that date
+ * exactly as given, so the series' first occurrence landed on the Sunday and
+ * the coming Saturday had none. Refuse, naming the matching days on either
+ * side of [date] (the nearest one on or after [today] before it, and the first
+ * after it) in plain words, so the model re-calls with the right one. Null =
+ * fine: not weekly, a day in the series, or a malformed date (the date
+ * checks own that). The same rule as web (weekday-guard.ts) and iOS
+ * (SeriesWeekday.swift); each platform words it its own way.
+ */
+fun rejectOffSeriesDay(taskName: String, recurrence: Recurrence?, date: String, today: String): String? {
+    val weekly = recurrence as? Recurrence.Weekly ?: return null
+    if (!ISO_DATE_RE.matches(date) || IsoDate.parse(date) == null) return null
+    val days = cleanWeekdays(weekly.daysOfWeek)
+    if (days.isEmpty()) return null
+    val dow = IsoDate.dayOfWeek(date)
+    if (dow in days) return null
+    val asked = WEEKDAY_NAMES_CAP[dow]
     return "error: \"$taskName\" repeats every ${weekdayList(days)}, but $date is a $asked — nothing was scheduled. " +
-        "The nearest $label: ${nearest.joinToString(", ") { "${WEEKDAY_NAMES_CAP[IsoDate.dayOfWeek(it)]} $it" }}. " +
-        "Call schedule_task again with the day the user meant; only if they asked for $asked itself (a one-off move off its usual day), call it again with $date unchanged."
+        "${nearestSeriesDaysText(days, date, today)} " +
+        "Call schedule_task again with the day the user meant; only if they asked for $asked itself (a one-off move off its usual day), call it again with $date unchanged. " +
+        "To change the days it repeats on, call set_task_recurrence instead."
+}
+
+/**
+ * set_task_recurrence's twin of [rejectOffSeriesDay]: the task was placed
+ * THIS turn (create_task / schedule_task with a date) on [placedDate], and
+ * the new weekly [daysOfWeek] leave that day out — the Park run variant:
+ * create_task on Sunday 2026-09-20, then "every Saturday", started the series
+ * from the Sunday slot and never placed the coming Saturday. Refused before
+ * anything is written, naming the matching days around it. Null = fine.
+ */
+fun rejectOffSeriesPlacement(taskName: String, placedDate: String, daysOfWeek: List<Int>, today: String): String? {
+    if (!ISO_DATE_RE.matches(placedDate) || IsoDate.parse(placedDate) == null) return null
+    val days = cleanWeekdays(daysOfWeek)
+    if (days.isEmpty()) return null
+    val dow = IsoDate.dayOfWeek(placedDate)
+    if (dow in days) return null
+    val placed = WEEKDAY_NAMES_CAP[dow]
+    return "error: \"$taskName\" was just put on $placed $placedDate, but weekly on ${weekdayList(days)} leaves out ${placed}s — nothing changed. " +
+        "${nearestSeriesDaysText(days, placedDate, today)} " +
+        "If the user meant one of those, schedule_task \"$taskName\" to it first, then call set_task_recurrence again; " +
+        "only if the series really starts on $placed $placedDate, call set_task_recurrence again unchanged."
 }
 
 // ---- Context dates

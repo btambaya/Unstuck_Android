@@ -5,6 +5,7 @@ import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.rejectOffSeriesDay
+import tech.csalliance.unstuck.core.logic.rejectOffSeriesPlacement
 import tech.csalliance.unstuck.core.model.Recurrence
 
 /**
@@ -18,7 +19,8 @@ class OffSeriesDayTest {
         assertEquals(
             "error: \"Park run\" repeats every Saturday, but 2026-09-20 is a Sunday — nothing was scheduled. " +
                 "The nearest Saturdays: Saturday 2026-09-19, Saturday 2026-09-26. " +
-                "Call schedule_task again with the day the user meant; only if they asked for Sunday itself (a one-off move off its usual day), call it again with 2026-09-20 unchanged.",
+                "Call schedule_task again with the day the user meant; only if they asked for Sunday itself (a one-off move off its usual day), call it again with 2026-09-20 unchanged. " +
+                "To change the days it repeats on, call set_task_recurrence instead.",
             rejectOffSeriesDay("Park run", Recurrence.Weekly(listOf(6)), "2026-09-20", "2026-09-13"),
         )
     }
@@ -45,5 +47,24 @@ class OffSeriesDayTest {
         val two = rejectOffSeriesDay("Swim", Recurrence.Weekly(listOf(6, 0)), "2026-09-23", "2026-09-13")!!
         assertTrue(two, two.contains("repeats every Sunday and Saturday, but 2026-09-23 is a Wednesday"))
         assertTrue(two, two.contains("The nearest matching days: Sunday 2026-09-20, Saturday 2026-09-26. "))
+    }
+
+    /** The create-then-repeat variant: created on Sunday the 20th, then "every
+     *  Saturday" — the series would start from the Sunday slot. */
+    @Test fun `a slot placed this turn on a day the new weekly days leave out is named`() {
+        assertEquals(
+            "error: \"Park run\" was just put on Sunday 2026-09-20, but weekly on Saturday leaves out Sundays — nothing changed. " +
+                "The nearest Saturdays: Saturday 2026-09-19, Saturday 2026-09-26. " +
+                "If the user meant one of those, schedule_task \"Park run\" to it first, then call set_task_recurrence again; " +
+                "only if the series really starts on Sunday 2026-09-20, call set_task_recurrence again unchanged.",
+            rejectOffSeriesPlacement("Park run", "2026-09-20", listOf(6), "2026-09-13"),
+        )
+        assertNull(rejectOffSeriesPlacement("Park run", "2026-09-19", listOf(6), "2026-09-13"))
+        assertNull(rejectOffSeriesPlacement("Gym", "2026-09-21", listOf(3, 1, 5), "2026-09-13"))
+        assertNull(rejectOffSeriesPlacement("Odd", "2026-09-20", emptyList(), "2026-09-13"))
+        assertNull(rejectOffSeriesPlacement("Odd", "Sunday", listOf(6), "2026-09-13"))
+        val many = rejectOffSeriesPlacement("Gym", "2026-09-22", listOf(5, 1, 3), "2026-09-22")!!
+        assertTrue(many, many.contains("weekly on Monday, Wednesday and Friday leaves out Tuesdays"))
+        assertTrue(many, many.contains("The nearest matching days: Wednesday 2026-09-23. "))
     }
 }

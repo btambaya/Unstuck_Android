@@ -10,6 +10,8 @@ import tech.csalliance.unstuck.core.logic.PeriodRange
 import tech.csalliance.unstuck.core.logic.earliestActivityDay
 import tech.csalliance.unstuck.core.logic.goldenHours
 import tech.csalliance.unstuck.core.logic.interruptionBins
+import tech.csalliance.unstuck.core.logic.pauseAnatomy
+import tech.csalliance.unstuck.core.logic.pauseBarLabel
 import tech.csalliance.unstuck.core.logic.periodMinutes
 import tech.csalliance.unstuck.core.logic.renderInsights
 import tech.csalliance.unstuck.core.logic.seriesRhythm
@@ -145,6 +147,10 @@ class CrossPlatformRulesTest {
         val now = Instant.parse("2026-09-22T18:00:00Z").toEpochMilli()
         val out = renderInsights(emptyList(), emptyList(), emptyList(), logs, emptyList(), now, InsightsWindow.WEEK, utc)
         assertTrue(out, out.contains("Pauses: 3 reasons logged; top: phone 3x (2m)."))
+        // The "What pauses you" card reads the same seconds with the same rule.
+        val bar = pauseAnatomy(logs).single()
+        assertEquals(90, bar.sec)
+        assertEquals("2m · 3×", pauseBarLabel(bar, byMinutes = true))
         // Focus 99 min 30 s reads 1h 40m, like the page's Focused card.
         val t = task("w", "Report", "Work")
         val focus = renderInsights(listOf(t), listOf(session("a", "w", 5970, "2026-09-21T10:00:00Z")), emptyList(), emptyList(), emptyList(), now, InsightsWindow.WEEK, utc, areas = listOf("Work"))

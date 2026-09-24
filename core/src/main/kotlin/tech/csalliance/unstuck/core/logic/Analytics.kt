@@ -187,10 +187,14 @@ fun hourLabel(h: Int): String = when {
 
 // H5 — pause anatomy
 
-data class PauseBar(val reason: String, val minutes: Double, val count: Int)
+/** One reason's pauses: [sec] is the summed measured length (whole seconds),
+ *  [minutes] the same as a fraction for the bar's width. Shown as
+ *  [periodMinutes] of [sec] on the card AND in get_insights — one rounding,
+ *  floor((sec + 30) / 60), never a sum of per-pause fractions. */
+data class PauseBar(val reason: String, val minutes: Double, val count: Int, val sec: Int = Math.round(minutes * 60).toInt())
 
 fun pauseAnatomy(reasonLogs: List<ReasonLog>): List<PauseBar> {
-    val minutesByReason = HashMap<String, Double>()
+    val secByReason = HashMap<String, Int>()
     val countByReason = HashMap<String, Int>()
     val order = mutableListOf<String>()
     for (r in reasonLogs) {
@@ -198,13 +202,18 @@ fun pauseAnatomy(reasonLogs: List<ReasonLog>): List<PauseBar> {
         if (countByReason[key] == null) order.add(key)
         countByReason[key] = (countByReason[key] ?: 0) + 1
         val dur = r.durationSec
-        if (dur != null && dur > 0) minutesByReason[key] = (minutesByReason[key] ?: 0.0) + dur / 60.0
+        if (dur != null && dur > 0) secByReason[key] = (secByReason[key] ?: 0) + dur
     }
     return order
-        .map { PauseBar(it, minutesByReason[it] ?: 0.0, countByReason[it] ?: 0) }
+        .map { val sec = secByReason[it] ?: 0; PauseBar(it, sec / 60.0, countByReason[it] ?: 0, sec) }
         .sortedWith(compareByDescending<PauseBar> { it.minutes }.thenByDescending { it.count })
         .take(6)
 }
+
+/** The "What pauses you" card's value: minutes as get_insights says them
+ *  ([periodMinutes] of the summed seconds) when any pause was measured, else
+ *  the count. */
+fun pauseBarLabel(p: PauseBar, byMinutes: Boolean): String = if (byMinutes) "${periodMinutes(p.sec)}m · ${p.count}×" else "${p.count}×"
 
 // H6 — how fast you come back (analytics decision D5)
 

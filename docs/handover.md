@@ -7,19 +7,24 @@ Single source of truth for "where is the Android build?". Update as phases land.
 ## 2026-09-24 (overnight, branch `polish/android`, NOT shipped) — James's assistant reports + the cross-platform analytics rules
 
 - **Wrong date (James, TestFlight b51):** schedule_task refuses a weekly series onto a day it doesn't repeat on
-  (`rejectOffSeriesDay`, :core AssistantTime.kt), naming the nearest matching days; nothing is written. The same call again in
-  the turn/voice session is a deliberate one-off move (result says "a one-off on a Sunday, off the days it repeats on"). A day
-  that already holds an occurrence is retimed as before.
+  (`rejectOffSeriesDay`, :core AssistantTime.kt), naming the nearest matching days; nothing is written. set_task_recurrence
+  weekly is refused the same way when the slot placed THIS turn (create_task / schedule_task with a date) is on a day the new
+  days leave out (`rejectOffSeriesPlacement` — the create-on-Sunday-then-"every Saturday" variant). The same call again in
+  the turn/voice session goes through (a one-off move — the result says "a one-off on a Sunday, off the days it repeats on" —
+  or a series that really starts there); web + iOS do the same. A day that already holds an occurrence is retimed as before.
 - **Stray deletes (James, b51):** confirm-first is enforced in the TEXT harness (`ConfirmFirstRules`, :core
   AssistantConfirmFirst.kt; pinned to ToolRegistry.CONFIRM_FIRST): a delete/cancel/leave runs only when the user's latest
-  message asked for THIS thing (verb + its name / "it" / "all" / a plural / a pick among things the last reply named), or said a
-  short yes to the assistant's question proposing it. Otherwise `error: not confirmed — …` and the model asks. Voice and calls
-  are not gated (a hold-to-talk transcript can arrive after the tool call). "Undo all" was already current-turn-only (A17).
+  message asked for THIS thing (verb + its name, or a set: "all" / a plural), or used "it"/"that"/a pick when the previous reply
+  named this thing, or said a short yes (or little more than its name) to the previous reply's LAST question proposing it — a
+  message opening with no / keep / wait is never that yes. Otherwise `error: not confirmed — …` and the model asks. Voice and
+  calls are not gated (a hold-to-talk transcript can arrive after the tool call; web gates Talk). "Undo all" was already
+  current-turn-only (A17).
 - **Analytics rules (all three platforms):** off-list areas are their own series by name (chart + get_insights); repeating
   series order kept → due → name; All time starts at the earliest task created / task done / counted session; get_insights
-  minutes floor((sec+30)/60) incl. pause minutes from summed seconds; runaway start = completedAt − real length (already
-  Android's). The voice recap ends only when the app answers a real user turn (`BargeInController.answeredTurns`), never on a
-  raw speech_started. Vectors: `core/.../CrossPlatformRulesTest.kt`.
+  minutes floor((sec+30)/60) incl. pause minutes from summed seconds — the "What pauses you" card uses the same
+  (`pauseBarLabel`); runaway start = completedAt − real length (already Android's). The voice recap ends only when the app
+  answers a real user turn (`BargeInController.answeredTurns`), never on a raw speech_started. Vectors:
+  `core/.../CrossPlatformRulesTest.kt`.
 
 ## 2026-09-24 (overnight, branch `analytics/android`, NOT shipped) — Insights on real data + the assistant's period review
 

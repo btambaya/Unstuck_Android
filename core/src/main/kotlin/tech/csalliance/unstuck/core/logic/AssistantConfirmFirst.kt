@@ -12,19 +12,22 @@ package tech.csalliance.unstuck.core.logic
 // for it, or said yes to the assistant's question proposing it; otherwise the
 // call is refused (nothing runs) and the model asks instead.
 //
-// The rule:
+// The rule (the same three cases as web confirm-first.ts and iOS
+// ConfirmFirst.swift):
 //  • the user's message carries the action's verb (delete / remove / cancel /
 //    leave …), not negated ("don't delete it" is no request), AND points at
-//    THIS thing: its name; a pronoun, "all" or a plural right after the verb
-//    ("delete it", "remove them all", "delete my done tasks"); or a pick
-//    ("delete the first one") among things the assistant's previous reply
-//    named, this one included. When the
-//    target has no name to check (cancel_focus: there is only the running
-//    session), the verb is enough;
-//  • OR the assistant's previous reply ASKED about the action (a question with
-//    the verb, naming this thing or "it"/"them"/"all"), and the user's message
-//    says yes ("yes", "sure", "go ahead", "do it" — a short answer) or names it
-//    ("just Gym").
+//    THIS thing: its name, or a set right after the verb ("remove them all",
+//    "delete my done tasks"). When the target has no name to check
+//    (cancel_focus: there is only the running session), the verb is enough;
+//  • OR the verb with "it"/"that"/"them" or a pick ("delete the first one")
+//    when the assistant's previous reply named this thing — "delete it" never
+//    reaches a task nobody mentioned;
+//  • OR the assistant's previous reply ASKED about the action — its last
+//    question has the verb and names this thing (or "it"/"them" for a thing
+//    the reply named, or all of them) — and the user's message says yes
+//    ("yes", "sure", "go ahead", "do it" — a short answer) or is little more
+//    than its name ("just Gym"). A message opening with no / keep / wait /
+//    don't is never that answer ("No, keep Gym").
 // A refused call is `error:` — no receipt, and it never disarms the
 // fabrication guard.
 
@@ -67,10 +70,16 @@ object ConfirmFirstRules {
      *  text right before the verb ends in a negation (+ up to two words). */
     private val NEGATION = Regex("\\b(?:don'?t|do not|never|not|no need to|without|stop)\\s+(?:[\\p{L}']+\\s+){0,2}$")
 
-    /** What may follow the verb to point at the thing without naming it. For
-     *  leave_list, "leave it" means "keep it" — only the list itself counts. */
-    private val POINTER = Regex("^\\s*(?:[\\p{L}']+\\s+){0,2}?(?:it|that|this|these|those|them|both|all|everything|every|each|tasks|lists|areas|tags|items|ones)\\b")
-    private val LEAVE_POINTER = Regex("^\\s*(?:[\\p{L}']+\\s+){0,2}?(?:list|lists|group|them|both|all)\\b")
+    /** A set right after the verb — the user asked for the lot, whichever
+     *  ones: "remove them all", "delete my done tasks", "clear the old ones". */
+    private val SET = Regex("^\\s*(?:[\\p{L}']+\\s+){0,2}?(?:all|everything|every|each|both|tasks|lists|areas|tags|items|ones)\\b")
+    private val LEAVE_SET = Regex("^\\s*(?:[\\p{L}']+\\s+){0,2}?(?:all|both|lists|groups)\\b")
+
+    /** A pointer right after the verb — "delete it", "remove that task" —
+     *  which only means THIS thing when the previous reply named it. For
+     *  leave_list, "leave it" means "keep it": only the list itself counts. */
+    private val REFERENT = Regex("^\\s*(?:[\\p{L}']+\\s+){0,2}?(?:it|that|this|these|those|them)\\b")
+    private val LEAVE_REFERENT = Regex("^\\s*(?:[\\p{L}']+\\s+){0,2}?(?:list|group|them)\\b")
 
     /** "delete the first one", "remove the other": the thing the assistant's
      *  previous reply named, picked without naming it. */
@@ -80,6 +89,12 @@ object ConfirmFirstRules {
         "^(?:yes|yeah|yep|yup|yea|sure|ok|okay|go ahead|go for it|do it|please do|confirm(?:ed)?|correct|absolutely|" +
             "definitely|of course|affirmative|that'?s right|that'?s fine|y)\\b",
     )
+
+    /** An answer that opens by declining is never a yes — "No, keep Gym". */
+    private val DECLINE = Regex("^(?:no|nope|nah|not|don'?t|do not|keep|wait|hold on|hang on|never ?mind|leave it|stop)\\b")
+
+    /** A "no" anywhere in a short answer — "yes, don't" is no yes. */
+    private val NEGATES = Regex("\\b(?:no|nope|nah|not|don'?t|do not|never|wait|keep)\\b")
 
     private val STOPWORDS = setOf("the", "and", "for", "with", "my", "your", "our", "list", "task", "area", "tag")
 
@@ -110,15 +125,34 @@ object ConfirmFirstRules {
     private fun verbMatches(tool: String, t: String): List<MatchResult> =
         verbRe(tool).findAll(t).filter { m -> !NEGATION.containsMatchIn(t.substring(0, m.range.first)) }.toList()
 
-    /** "delete it", "remove them all", "delete my done tasks": the verb, then a
-     *  pointer within a few words. */
-    private fun pointsAfterVerb(tool: String, t: String, pointer: Regex = if (tool == "leave_list") LEAVE_POINTER else POINTER): Boolean =
+    /** The verb, then [pointer] within a few words ("delete it", "remove them all"). */
+    private fun pointsAfterVerb(tool: String, t: String, pointer: Regex): Boolean =
         verbMatches(tool, t).any { m -> pointer.containsMatchIn(t.substring(m.range.last + 1)) }
 
-    /** A short yes ("yes", "sure, go ahead", "yep do it") — never "ok, add milk to my list". */
+    private fun setRe(tool: String) = if (tool == "leave_list") LEAVE_SET else SET
+    private fun referentRe(tool: String) = if (tool == "leave_list") LEAVE_REFERENT else REFERENT
+
+    /** A short yes ("yes", "sure, go ahead", "yep do it") — never "ok, add milk
+     *  to my list", never "yes, don't". */
     fun affirms(text: String): Boolean {
         val t = norm(text).trimStart('"', '\'', '(', ' ')
-        return AFFIRM.containsMatchIn(t) && words(t).size <= 4
+        return AFFIRM.containsMatchIn(t) && words(t).size <= 4 && !NEGATES.containsMatchIn(t)
+    }
+
+    /** What the assistant's reply last ASKED: its last question sentence
+     *  ("Gym has no slots left. Delete it?" → "Delete it?"), null when it asked
+     *  nothing. A report before an unrelated question ("I deleted X. Want me to
+     *  move Gym?") proposes no delete. A '.' inside a time ("8.30") doesn't end
+     *  a sentence. */
+    fun lastQuestion(text: String): String? {
+        val q = text.lastIndexOf('?')
+        if (q < 0) return null
+        var start = 0
+        for (i in q - 1 downTo 0) {
+            val ch = text[i]
+            if (ch == '\n' || ((ch == '.' || ch == '!' || ch == '?') && text.getOrNull(i + 1)?.isWhitespace() == true)) { start = i + 1; break }
+        }
+        return text.substring(start, q + 1).trim()
     }
 
     /**
@@ -134,15 +168,21 @@ object ConfirmFirstRules {
         val user = norm(userText)
         val prev = previousAssistant?.let(::norm).orEmpty()
         val named = target != null && mentions(user, target)
-        // The user asked for it this turn.
+        val prevNamed = target != null && mentions(prev, target)
+        // The user asked for it this turn: by name or as a set — or with "it" /
+        // a pick when the previous reply named this thing.
         if (asksFor(tool, user) &&
-            (target == null || named || pointsAfterVerb(tool, user) || (pointsAfterVerb(tool, user, PICK) && mentions(prev, target)))
+            (target == null || named || pointsAfterVerb(tool, user, setRe(tool)) ||
+                (prevNamed && (pointsAfterVerb(tool, user, referentRe(tool)) || pointsAfterVerb(tool, user, PICK))))
         ) return null
-        // They said yes to (or named the thing in answer to) the assistant's
-        // question proposing it.
-        val proposed = prev.contains('?') && asksFor(tool, prev) &&
-            (target == null || mentions(prev, target) || pointsAfterVerb(tool, prev))
-        if (proposed && (affirms(user) || named)) return null
+        // They said yes to (or answered with the name of) the thing the
+        // assistant's last question proposed doing this to.
+        val question = previousAssistant?.let(::lastQuestion)?.let(::norm)
+        val proposed = question != null && asksFor(tool, question) &&
+            (target == null || mentions(question, target) || pointsAfterVerb(tool, question, setRe(tool)) ||
+                (prevNamed && pointsAfterVerb(tool, question, referentRe(tool))))
+        val answersWithName = named && words(user).size <= words(target!!).size + 2
+        if (proposed && !DECLINE.containsMatchIn(user) && (affirms(user) || answersWithName)) return null
         val what = when {
             tool == "cancel_focus" -> "the focus session${if (target != null) " on \"$target\"" else ""}"
             target != null -> "\"$target\""

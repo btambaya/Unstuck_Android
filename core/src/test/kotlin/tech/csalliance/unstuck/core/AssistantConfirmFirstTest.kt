@@ -40,7 +40,8 @@ class AssistantConfirmFirstTest {
         assertNull(refusal("delete_task", "Gym", "Please remove the Gym task"))
         assertNull(refusal("delete_task", "Park run", "get rid of park runs"))
         assertNull(refusal("delete_task", "Pack ski gear checklist", "can you delete the ski gear one"))
-        assertNull(refusal("delete_task", "Gym", "delete it"))
+        assertNull(refusal("delete_task", "Gym", "delete it", "Gym is on Friday at 7am."))
+        assertNull(refusal("delete_task", "Pack ski gear checklist", "No, delete the first one", "You have \"Pack ski gear checklist\" and \"Gym\" left."))
         assertNull(refusal("delete_task", "Gym", "delete all my done tasks"))
         assertNull(refusal("delete_task", "Gym", "remove them all"))
         assertNull(refusal("delete_list", "Groceries", "delete my groceries list"))
@@ -58,6 +59,18 @@ class AssistantConfirmFirstTest {
         assertNotNull(refusal("delete_list", "Groceries", "delete the books list"))
         // A skier's trip isn't the ski gear checklist just because they share letters.
         assertNotNull(refusal("delete_task", "Pack ski gear checklist", "delete the Skipton trip"))
+    }
+
+    /** "delete it" means the thing just talked about: it never reaches a task
+     *  the previous reply didn't name (the stray-delete shape: the model picks
+     *  another task than the one "it" was). Web + iOS rule. */
+    @Test fun `delete it reaches only a thing the previous reply named`() {
+        assertNotNull(refusal("delete_task", "Gym", "delete it"))
+        assertNotNull(refusal("delete_task", "Gym", "delete it", "Park run is on Saturday at 8:30."))
+        assertNotNull(refusal("delete_task", "Gym", "remove that one", "Park run is on Saturday at 8:30."))
+        assertNull(refusal("delete_task", "Park run", "remove that one", "Park run is on Saturday at 8:30."))
+        // A set needs no naming: "all my done tasks" is the lot, whichever ones.
+        assertNull(refusal("delete_task", "Gym", "clear my completed tasks"))
     }
 
     @Test fun `a negated verb is no request`() {
@@ -93,6 +106,23 @@ class AssistantConfirmFirstTest {
         // A long "ok, …" is a new request, not the yes.
         assertNotNull(refusal("delete_task", "Gym", "ok, add milk to my shopping list", "Delete \"Gym\"?"))
         assertNotNull(refusal("delete_task", "Gym", "no, keep it", "Delete \"Gym\"?"))
+        // Naming the thing while declining is no answer to "delete it?".
+        assertNotNull(refusal("delete_task", "Gym", "No, keep Gym", "Delete \"Gym\"?"))
+        assertNotNull(refusal("delete_task", "Gym", "keep gym", "Should I delete \"Gym\" or \"Park run\"?"))
+        assertNotNull(refusal("delete_task", "Gym", "yes, don't", "Delete \"Gym\"?"))
+        // A report of an earlier delete, then an unrelated question: the yes is
+        // to the question, not a delete.
+        assertNotNull(refusal("delete_task", "Gym", "yes", "I deleted \"Pack ski gear checklist\". Want me to move \"Gym\" to Friday?"))
+        assertNotNull(refusal("delete_task", "Gym", "yes", "I removed \"Gym\" from Later. Want me to schedule it for Friday?"))
+    }
+
+    @Test fun `the yes answers the reply's LAST question`() {
+        assertNull(refusal("delete_task", "Gym", "yes", "\"Gym\" has had no slots for 3 weeks. Delete it?"))
+        assertNull(refusal("delete_task", "Gym", "yes", "Delete \"Gym\" at 8.30? It's the only one left."))
+        assertNull(refusal("delete_task", "Gym", "yep", "Want me to delete \"Gym\"?\nIt has 3 slots."))
+        assertEquals("Delete it?", ConfirmFirstRules.lastQuestion("Gym has no slots. Delete it?"))
+        assertEquals("Delete Gym at 8.30?", ConfirmFirstRules.lastQuestion("Delete Gym at 8.30? It's the last one."))
+        assertNull(ConfirmFirstRules.lastQuestion("Deleted Gym."))
     }
 
     @Test fun `tools outside the confirm-first set are never checked`() {

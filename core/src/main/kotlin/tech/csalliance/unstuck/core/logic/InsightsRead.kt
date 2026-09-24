@@ -221,10 +221,9 @@ fun renderInsights(
         lines += "Pauses: none logged in this window."
     } else {
         // Minutes on the page's rule, floor((sec + 30) / 60), from the summed
-        // seconds — a sum of per-pause fractions (20 s + 10 s → 0.4999…) could
-        // round the other way.
+        // seconds — the "What pauses you" card shows the same number.
         val top = pauses.take(MAX_PAUSES)
-            .joinToString(", ") { "${it.reason} ${it.count}x${if (it.minutes > 0) " (${periodMinutes(Math.round(it.minutes * 60).toInt())}m)" else ""}" }
+            .joinToString(", ") { "${it.reason} ${it.count}x${if (it.sec > 0) " (${periodMinutes(it.sec)}m)" else ""}" }
         lines += "Pauses: ${plural(reasonLogs.size, "reason")} logged; top: $top."
     }
 

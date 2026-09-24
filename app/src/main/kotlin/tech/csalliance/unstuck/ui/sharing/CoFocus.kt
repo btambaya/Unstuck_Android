@@ -46,6 +46,7 @@ import tech.csalliance.unstuck.core.model.coFocusPeopleLabel
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import androidx.compose.foundation.border
 
 // Co-focus / body-doubling UI — the "Partner" promise made live ("focus
 // together"). Two surfaces, one presence channel (sync/CoFocusPresence):
@@ -190,7 +191,8 @@ fun PartnerPresence(vm: AppViewModel, taskId: String, modifier: Modifier = Modif
             Row(
                 Modifier
                     .clip(RoundedCornerShape(999.dp))
-                    .background(if (sitting) c.primary else c.primarySoft)
+                    .background(if (sitting) c.ink else c.bg2)
+                    .border(1.dp, if (sitting) c.ink else c.line2, RoundedCornerShape(999.dp))
                     .clickable(role = Role.Button) { sitting = !sitting }
                     .padding(horizontal = 10.dp, vertical = 3.dp),
                 verticalAlignment = Alignment.CenterVertically,
@@ -198,12 +200,12 @@ fun PartnerPresence(vm: AppViewModel, taskId: String, modifier: Modifier = Modif
             ) {
                 Icon(
                     Icons.Filled.People, contentDescription = null,
-                    tint = if (sitting) Color.White else c.primaryDeep, modifier = Modifier.size(12.dp),
+                    tint = if (sitting) c.bg else c.ink2, modifier = Modifier.size(12.dp),
                 )
                 Text(
                     if (sitting) "Sitting with them" else "Sit with them",
                     style = UFont.sans(11, FontWeight.Bold),
-                    color = if (sitting) Color.White else c.primaryDeep,
+                    color = if (sitting) c.bg else c.ink2,
                 )
             }
         }

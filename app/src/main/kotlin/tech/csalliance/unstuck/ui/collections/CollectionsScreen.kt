@@ -148,7 +148,7 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onNewCollectio
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.Top) {
                         ColorChip(color, box = 26, dot = 8)
                         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            if (shared) Text("SHARED", style = UFont.sans(8, FontWeight.Bold), color = c.primaryDeep)
+                            if (shared) Text("SHARED", style = UFont.sans(8, FontWeight.Bold), color = c.ink2)
                             Text("${col.items.size}", style = UFont.sans(11), color = c.ink3)
                         }
                     }

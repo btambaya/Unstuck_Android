@@ -164,7 +164,10 @@ fun TourSpotlight(
 
     val dim = Color(0x33141228)      // rgba(20,18,40,0.20)
     val whisper = Color(0x24141228)  // rgba(20,18,40,0.14)
-    val primary = c.primary
+    // The ring is ink — it was indigo, and indigo is no longer an accent (owner
+    // decision 2026-09-24). Ink is near-black in light, near-white in dark, so
+    // it stands off the light scrim in both.
+    val ring = c.ink
 
     Canvas(Modifier.fillMaxSize()) {
         if (targetRect == null) {
@@ -185,14 +188,14 @@ fun TourSpotlight(
         drawRect(dim, topLeft = Offset(0f, y + h), size = Size(size.width, (size.height - (y + h)).coerceAtLeast(0f)))
         // Soft outer glow + crisp ring (web box-shadow 2px primary + 6px 22%).
         drawRoundRect(
-            color = primary.copy(alpha = 0.22f * pulse),
+            color = ring.copy(alpha = 0.22f * pulse),
             topLeft = Offset(x - glowPx / 2f, y - glowPx / 2f),
             size = Size(w + glowPx, h + glowPx),
             cornerRadius = CornerRadius(cornerPx + glowPx / 2f),
             style = Stroke(width = glowPx),
         )
         drawRoundRect(
-            color = primary.copy(alpha = 0.6f + 0.4f * pulse),
+            color = ring.copy(alpha = 0.6f + 0.4f * pulse),
             topLeft = Offset(x, y),
             size = Size(w, h),
             cornerRadius = CornerRadius(cornerPx),

@@ -96,7 +96,7 @@ fun OnboardingScreen(vm: AppViewModel, onDone: () -> Unit) {
         }
         Spacer(Modifier.height(22.dp))
         Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(24.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(24.dp)).padding(horizontal = 22.dp, vertical = 24.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
-            SectionLabel("STEP ${step + 1} OF $ONBOARDING_STEPS", color = c.primaryDeep)
+            SectionLabel("STEP ${step + 1} OF $ONBOARDING_STEPS")
             when (step) {
                 0 -> {
                     Text("Welcome.", style = UFont.serifItalic(32), color = c.ink)
@@ -133,7 +133,7 @@ fun OnboardingScreen(vm: AppViewModel, onDone: () -> Unit) {
                     Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).border(1.dp, c.line2, RoundedCornerShape(10.dp)).padding(horizontal = 16.dp, vertical = 14.dp)) {
                         BasicTextField(value = firstTask, onValueChange = { firstTask = it }, textStyle = UFont.sans(16).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), decorationBox = { inner -> if (firstTask.isEmpty()) Text("Reply to landlord about parking", style = UFont.sans(16), color = c.ink3); inner() })
                     }
-                    SectionLabel("FIRST STEP", color = c.primaryDeep)
+                    SectionLabel("FIRST STEP")
                     Box(Modifier.fillMaxWidth().clip(RoundedCornerShape(10.dp)).border(1.dp, c.line2, RoundedCornerShape(10.dp)).padding(horizontal = 16.dp, vertical = 14.dp)) {
                         BasicTextField(value = firstAction, onValueChange = { firstAction = it }, textStyle = UFont.sans(15).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), decorationBox = { inner -> if (firstAction.isEmpty()) Text("The smallest first move (optional)", style = UFont.sans(15), color = c.ink3); inner() })
                     }

@@ -676,7 +676,7 @@ private fun TourResumeChip(onResume: () -> Unit, onDismissForever: () -> Unit) {
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.spacedBy(7.dp),
             ) {
-                Box(Modifier.size(22.dp).clip(CircleShape).background(c.primarySoft), contentAlignment = Alignment.Center) {
+                Box(Modifier.size(22.dp).clip(CircleShape).background(c.bg2), contentAlignment = Alignment.Center) {
                     Orbit(size = 14)
                 }
                 Text("Resume tour", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
@@ -705,7 +705,7 @@ private fun TourWelcomeCard(
     val c = UTheme.colors
     TourCardShell {
         Column(Modifier.fillMaxWidth()) {
-            Box(Modifier.size(44.dp).clip(CircleShape).background(c.primarySoft), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(44.dp).clip(CircleShape).background(c.bg2), contentAlignment = Alignment.Center) {
                 Orbit(size = 26)
             }
             Text("Welcome to Unstuck", style = UFont.serifItalic(30), color = c.ink, modifier = Modifier.padding(top = 16.dp))
@@ -754,7 +754,7 @@ private fun TourResumeCard(step: TourStep, onContinue: () -> Unit, onStartOver: 
     val c = UTheme.colors
     TourCardShell(maxWidth = 400.dp) {
         Column(Modifier.fillMaxWidth()) {
-            Box(Modifier.size(40.dp).clip(CircleShape).background(c.primarySoft), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(40.dp).clip(CircleShape).background(c.bg2), contentAlignment = Alignment.Center) {
                 Orbit(size = 22)
             }
             Text("Continue your tour?", style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.padding(top = 14.dp))

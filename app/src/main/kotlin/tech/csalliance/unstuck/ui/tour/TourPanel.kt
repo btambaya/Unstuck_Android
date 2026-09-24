@@ -71,6 +71,7 @@ import tech.csalliance.unstuck.design.component.Orbit
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.sync.ChatMessage
+import tech.csalliance.unstuck.design.component.neutralPill
 
 // TourPanel — the running step's card, plus the shared modal shell + rows the
 // welcome / paused surfaces use. Ported from the web tour-panel.tsx +
@@ -81,11 +82,13 @@ import tech.csalliance.unstuck.sync.ChatMessage
 
 /* ============================================================
  * FIXED answer-bubble colors — deliberately THEME-INDEPENDENT
- * (web's dark-mode fix, iOS parity): a constant light-lavender
- * surface with constant dark ink reads correctly in BOTH themes.
- * oklch(0.93 0.04 280) / oklch(0.25 0.02 280) / oklch(0.42 0.02 280).
+ * (web's dark-mode fix, iOS parity): a constant light surface
+ * with constant dark ink reads correctly in BOTH themes.
+ * oklch(0.93 0.005 280) / oklch(0.25 0.02 280) / oklch(0.42 0.02 280).
+ * The surface was lavender (chroma 0.04) until the no-indigo
+ * rule (owner, 2026-09-24); now the neutrals' own 0.005, as on web.
  * ============================================================ */
-val TourAnswerBg: Color = oklch(0.93, 0.04, 280.0)
+val TourAnswerBg: Color = oklch(0.93, 0.005, 280.0)
 val TourAnswerInk: Color = oklch(0.25, 0.02, 280.0)
 val TourThinkingInk: Color = oklch(0.42, 0.02, 280.0)
 
@@ -199,7 +202,7 @@ fun TourPanel(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Box(Modifier.size(26.dp).clip(CircleShape).background(c.primarySoft), contentAlignment = Alignment.Center) {
+            Box(Modifier.size(26.dp).clip(CircleShape).background(c.bg2), contentAlignment = Alignment.Center) {
                 Orbit(size = 16)
             }
             Column(Modifier.weight(1f)) {
@@ -216,7 +219,7 @@ fun TourPanel(
                                 .width(if (i == index) 16.dp else 6.dp)
                                 .height(6.dp)
                                 .clip(RoundedCornerShape(999.dp))
-                                .background(if (i == index) c.primary else if (i < index) c.primarySoft else c.line2),
+                                .background(if (i == index) c.ink else if (i < index) c.ink3 else c.line2),
                         )
                     }
                 }
@@ -455,7 +458,7 @@ private fun TourListenBar(audio: TourAudioController, speed: Float, onCycleSpeed
                 contentAlignment = Alignment.Center,
             ) { Icon(Icons.Filled.Replay, contentDescription = "Replay step", tint = c.ink3, modifier = Modifier.size(15.dp)) }
             Box(Modifier.weight(1f).height(4.dp).clip(RoundedCornerShape(999.dp)).background(c.line2)) {
-                Box(Modifier.fillMaxWidth(audio.progress.coerceIn(0f, 1f)).height(4.dp).clip(RoundedCornerShape(999.dp)).background(c.primary))
+                Box(Modifier.fillMaxWidth(audio.progress.coerceIn(0f, 1f)).height(4.dp).clip(RoundedCornerShape(999.dp)).background(c.ink))
             }
             Box(
                 Modifier.clip(RoundedCornerShape(999.dp)).clickable(onClick = onCycleSpeed).padding(horizontal = 9.dp, vertical = 6.dp)
@@ -556,7 +559,7 @@ fun TourModeRow(title: String, sub: String, meta: String? = null, recommended: B
             .fillMaxWidth()
             .clip(RoundedCornerShape(14.dp))
             .background(c.surface)
-            .border(if (recommended) 1.5.dp else 1.dp, if (recommended) c.primary else c.line, RoundedCornerShape(14.dp))
+            .border(if (recommended) 1.5.dp else 1.dp, if (recommended) c.ink else c.line, RoundedCornerShape(14.dp))
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 15.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -566,8 +569,8 @@ fun TourModeRow(title: String, sub: String, meta: String? = null, recommended: B
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(title, style = UFont.sans(14, FontWeight.Bold), color = c.ink)
                 if (recommended) {
-                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
-                        Text("SUGGESTED", style = UFont.mono(9, FontWeight.Medium).copy(letterSpacing = 0.6.sp), color = c.primaryDeep)
+                    Box(Modifier.neutralPill(c).padding(horizontal = 7.dp, vertical = 2.dp)) {
+                        Text("SUGGESTED", style = UFont.mono(9, FontWeight.Medium).copy(letterSpacing = 0.6.sp), color = c.ink2)
                     }
                 }
             }

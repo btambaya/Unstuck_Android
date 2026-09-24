@@ -39,7 +39,7 @@ fun ReflectSheet(elapsedSec: Int, onDismiss: () -> Unit) {
             Modifier.padding(horizontal = 16.dp).clip(RoundedCornerShape(28.dp)).background(c.surface).clickable(enabled = false) {}.padding(horizontal = 22.dp, vertical = 24.dp),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            SectionLabel("SESSION COMPLETE · ${(elapsedSec / 60.0).let { Math.round(it).toInt() }}M", color = c.primaryDeep)
+            SectionLabel("SESSION COMPLETE · ${(elapsedSec / 60.0).let { Math.round(it).toInt() }}M")
             Text("Nicely done.", style = UFont.serifItalic(24), color = c.ink)
             Text(
                 "That block is behind you. Take a breath before the next one.",

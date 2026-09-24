@@ -156,8 +156,9 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     // Pick a "by" time (platform dialog), then promote keep-in-loop with that ISO time.
     fun pickByTimeThen(item: CollectionItem) {
         val now = java.time.LocalTime.now()
-        // Match the app theme so the dialog isn't light-on-light in dark mode.
-        val dialogTheme = if (c.isDark) android.R.style.Theme_Material_Dialog else android.R.style.Theme_Material_Light_Dialog
+        // Match the app theme so the dialog isn't light-on-light in dark mode —
+        // with the ink accent, not the platform's teal (res/values/themes.xml).
+        val dialogTheme = if (c.isDark) tech.csalliance.unstuck.R.style.Theme_Unstuck_PickerDark else tech.csalliance.unstuck.R.style.Theme_Unstuck_PickerLight
         android.app.TimePickerDialog(context, dialogTheme, { _, h, m ->
             // A "by" time earlier than now means tomorrow — otherwise the task is
             // born already-overdue and fires a late nudge on the next cron tick.
@@ -259,7 +260,7 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
             if (shared) {
                 Text(
                     if (owner) "Shared with $memberCount" else if (canEdit) "Shared with you · you can edit" else "Shared with you · view only",
-                    style = UFont.sans(12, FontWeight.SemiBold), color = c.primaryDeep,
+                    style = UFont.sans(12, FontWeight.SemiBold), color = c.ink2,
                     modifier = Modifier.padding(top = 8.dp, start = 2.dp),
                 )
             }
@@ -360,7 +361,7 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
             onDismissRequest = { promoteTarget = null },
             title = { Text("Move to task", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
             text = { Text("“${target.body}” becomes a task in your list. Keep everyone in the loop and the others can see when it's done — you'll pick a “by” time.", style = UFont.sans(13), color = c.ink2) },
-            confirmButton = { TextButton(onClick = { promoteTarget = null; pickByTimeThen(target) }) { Text("Keep everyone in the loop", color = c.primaryDeep) } },
+            confirmButton = { TextButton(onClick = { promoteTarget = null; pickByTimeThen(target) }) { Text("Keep everyone in the loop", color = c.ink) } },
             dismissButton = { TextButton(onClick = { promoteTarget = null; vm.moveItemToTask(col, target, AppViewModel.PromoteMode.SELF) }) { Text("Just me", color = c.ink2) } },
             containerColor = c.surface,
         )
@@ -646,7 +647,7 @@ private fun CollItemRow(
                 promotedLabel?.let { label ->
                     Text(
                         label, style = UFont.sans(11, FontWeight.Medium),
-                        color = if (overdue) c.red else if (promotedDone) c.greenInk else c.primaryDeep,
+                        color = if (overdue) c.red else if (promotedDone) c.greenInk else c.ink2,
                         modifier = Modifier.padding(top = 2.dp),
                     )
                 }

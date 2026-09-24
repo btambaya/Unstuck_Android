@@ -64,6 +64,7 @@ import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.components.areaColorFor
+import tech.csalliance.unstuck.design.component.neutralPill
 
 // SharedTaskDetailSheet (T1) — a RECIPIENT's read-only window onto a task someone
 // shared with them. A "Shared with you" row used to be just a title + status chip;
@@ -189,8 +190,8 @@ fun SharedTaskDetailSheet(
             // From + level chip.
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text("from $ownerName", style = UFont.sans(13), color = c.ink3)
-                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 9.dp, vertical = 3.dp)) {
-                    Text(shareStatusLabel(level, done), style = UFont.sans(10, FontWeight.Bold), color = c.primaryDeep)
+                Box(Modifier.neutralPill(c).padding(horizontal = 9.dp, vertical = 3.dp)) {
+                    Text(shareStatusLabel(level, done), style = UFont.sans(10, FontWeight.Bold), color = c.ink2)
                 }
             }
 
@@ -225,7 +226,7 @@ fun SharedTaskDetailSheet(
             // detail wins; until it lands the row seeds it. Nothing to plan → no line.
             val slot: ShareSlot = shared.openedFrom ?: d ?: shared
             plannedLabel(slot, Clock.todayIso(), tech.csalliance.unstuck.ui.components.clockMode())?.let { planned ->
-                Text(planned, style = UFont.sans(12, FontWeight.Medium), color = if (planned.endsWith("overdue")) c.amberInk else c.primaryDeep)
+                Text(planned, style = UFont.sans(12, FontWeight.Medium), color = if (planned.endsWith("overdue")) c.amberInk else c.ink2)
             }
 
             // Steps / subtasks (read-only).
@@ -253,8 +254,8 @@ fun SharedTaskDetailSheet(
             d?.tags?.takeIf { it.isNotEmpty() }?.let { tags ->
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     tags.take(6).forEach { tn ->
-                        Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 8.dp, vertical = 3.dp)) {
-                            Text("#$tn", style = UFont.sans(11, FontWeight.Medium), color = c.primaryDeep)
+                        Box(Modifier.neutralPill(c).padding(horizontal = 8.dp, vertical = 3.dp)) {
+                            Text("#$tn", style = UFont.sans(11, FontWeight.Medium), color = c.ink2)
                         }
                     }
                 }

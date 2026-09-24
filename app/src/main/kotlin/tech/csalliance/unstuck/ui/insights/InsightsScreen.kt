@@ -146,7 +146,7 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
         AppBar(leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
             item {
-                SectionLabel("REFLECTION · ${periodName.uppercase()}", color = c.primaryDeep, modifier = Modifier.padding(top = 4.dp))
+                SectionLabel("REFLECTION · ${periodName.uppercase()}", modifier = Modifier.padding(top = 4.dp))
                 Text(if (deep) "Let's look closer. Calmly." else "Observations, not a score.", style = UFont.serifItalic(28), color = c.ink, modifier = Modifier.padding(top = 4.dp))
                 Box(Modifier.padding(top = 12.dp)) { MdSegment(listOf("Report", "Deep dive"), if (deep) "Deep dive" else "Report") { onToggleDeep(it == "Deep dive") } }
                 PeriodSelector(
@@ -298,7 +298,7 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                         Card(Modifier.fillMaxWidth(), radius = 14) {
                             Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                                 val max = breakdown.values.maxOrNull()?.coerceAtLeast(1) ?: 1
-                                breakdown.entries.forEach { (tag, n) -> LabeledBar(tag.name.lowercase().replace('_', '-'), n.toFloat() / max, "$n", c.primary) }
+                                breakdown.entries.forEach { (tag, n) -> LabeledBar(tag.name.lowercase().replace('_', '-'), n.toFloat() / max, "$n", c.ink2) }
                             }
                         }
                     }

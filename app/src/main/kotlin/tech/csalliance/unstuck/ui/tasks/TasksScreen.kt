@@ -68,6 +68,7 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
+import tech.csalliance.unstuck.design.component.neutralPill
 
 // Tab order mirrors the web TaskListPane: Backlog first (the triage stack),
 // then All / Today / Upcoming / Later / Completed. Default is Today.
@@ -162,11 +163,12 @@ fun TasksScreen(
                 TAB_ORDER.forEach { v ->
                     val active = v == view
                     // Per-tab accent (web parity: Backlog=amber, Completed=green, …).
+                    // Later has none (like All): it was indigo, and indigo is no longer an
+                    // accent (owner decision 2026-09-24) — its selected state is ink / bg.
                     val pair: Pair<Color, Color>? = when (v) {
                         TaskListView.BACKLOG -> c.amberSoft to c.amberInk
                         TaskListView.TODAY -> c.coralSoft to c.ink
                         TaskListView.UPCOMING -> c.blueSoft to c.blueInk
-                        TaskListView.LATER -> c.primarySoft to c.primaryDeep
                         TaskListView.RECURRING -> c.blueSoft to c.blueInk
                         TaskListView.COMPLETED -> c.greenSoft to c.greenInk
                         else -> null
@@ -190,16 +192,16 @@ fun TasksScreen(
             }
             if (activeTag != null) {
                 Row(
-                    Modifier.padding(bottom = 12.dp).clip(RoundedCornerShape(999.dp)).background(c.primarySoft)
+                    Modifier.padding(bottom = 12.dp).clip(RoundedCornerShape(999.dp)).background(c.ink)
                         .clickable(onClickLabel = "Clear tag filter", role = Role.Button) { activeTag = null }
                         // One spoken label for the whole pill so the "✕" glyph isn't read literally.
                         .semantics(mergeDescendants = true) { contentDescription = "Filtering by tag #$activeTag" }
                         .padding(horizontal = 11.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    Text("Filtering by tag ", style = UFont.sans(12), color = c.primaryDeep)
-                    Text("#${activeTag}", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
-                    Text("✕", style = UFont.sans(12), color = c.primaryDeep)
+                    Text("Filtering by tag ", style = UFont.sans(12), color = c.bg)
+                    Text("#${activeTag}", style = UFont.sans(12, FontWeight.SemiBold), color = c.bg)
+                    Text("✕", style = UFont.sans(12), color = c.bg)
                 }
             }
         }
@@ -236,8 +238,8 @@ fun TasksScreen(
                                 if (t.recurrence != null) Text("· ↻", style = UFont.sans(12), color = c.ink3)
                                 // Tags inline on the same line as the area.
                                 t.tags?.take(3)?.forEach { tn ->
-                                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).clickable { activeTag = tn }.padding(horizontal = 7.dp, vertical = 2.dp)) {
-                                        Text("#$tn", style = UFont.sans(10, FontWeight.Medium), color = c.primaryDeep)
+                                    Box(Modifier.neutralPill(c).clickable { activeTag = tn }.padding(horizontal = 7.dp, vertical = 2.dp)) {
+                                        Text("#$tn", style = UFont.sans(10, FontWeight.Medium), color = c.ink2)
                                     }
                                 }
                             }

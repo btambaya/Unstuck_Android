@@ -71,6 +71,7 @@ import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.sharing.ShareScreen
 import tech.csalliance.unstuck.ui.sharing.ShareTarget
 import tech.csalliance.unstuck.ui.sharing.ShareWithRow
+import androidx.compose.foundation.border
 
 // Savers so the draft survives a config change (rotation / dark-mode flip / locale /
 // split-screen): Activity recreation must not silently discard a half-typed task.

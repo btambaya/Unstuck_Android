@@ -78,7 +78,7 @@ fun CommandPalette(vm: AppViewModel, onDismiss: () -> Unit, onOpenTask: (TaskIte
                 Icon(Icons.Outlined.Search, contentDescription = null, tint = c.ink3, modifier = Modifier.size(15.dp))
                 BasicTextField(value = query, onValueChange = { query = it }, textStyle = UFont.sans(15).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink), modifier = Modifier.weight(1f), decorationBox = { inner -> if (query.isEmpty()) Text("Search tasks + actions", style = UFont.sans(15), color = c.ink3); inner() })
             }
-            Text("Cancel", style = UFont.sans(14, FontWeight.SemiBold), color = c.primaryDeep, modifier = Modifier.clickable(role = Role.Button, onClick = onDismiss).minimumInteractiveComponentSize())
+            Text("Cancel", style = UFont.sans(14, FontWeight.SemiBold), color = c.ink, modifier = Modifier.clickable(role = Role.Button, onClick = onDismiss).minimumInteractiveComponentSize())
         }
         Box(Modifier.fillMaxWidth().padding(horizontal = 10.dp)) {
             LazyColumn {

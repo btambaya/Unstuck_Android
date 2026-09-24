@@ -99,6 +99,7 @@ import tech.csalliance.unstuck.design.component.MdToggle
 import tech.csalliance.unstuck.sync.CallRequest
 import tech.csalliance.unstuck.ui.assistant.CallToolLogic
 import tech.csalliance.unstuck.ui.assistant.nextLiveBlock
+import tech.csalliance.unstuck.design.component.neutralPill
 
 /** Full-screen task detail — editable (name / first action / estimate / area /
  *  repeat / tags), with session history and capture management. */
@@ -405,7 +406,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                     keyboardActions = KeyboardActions(onDone = { saveEstimate() }),
                 )
             },
-            confirmButton = { TextButton(onClick = { saveEstimate() }) { Text("Save", color = c.primaryDeep) } },
+            confirmButton = { TextButton(onClick = { saveEstimate() }) { Text("Save", color = c.ink) } },
             dismissButton = { TextButton(onClick = { showEstimate = false }) { Text("Cancel", color = c.ink2) } },
             containerColor = c.surface,
         )
@@ -472,14 +473,17 @@ private fun CaptureRow(cap: Capture, now: Long, onPromote: () -> Unit, onDiscard
     val (bg, fg) = captureTagColors(cap.tag)
     Column(Modifier.fillMaxWidth().padding(vertical = 4.dp).clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp)).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            Box(Modifier.clip(RoundedCornerShape(999.dp)).background(bg).padding(horizontal = 8.dp, vertical = 3.dp)) {
+            // follow-up is the neutral pill (bg2 + line2 ring: bg2 alone vanishes on this
+            // surface card in dark mode); the other tags keep their soft hue.
+            val pill = if (captureTagKey(cap.tag) == 0) Modifier.neutralPill(c) else Modifier.clip(RoundedCornerShape(999.dp)).background(bg)
+            Box(pill.padding(horizontal = 8.dp, vertical = 3.dp)) {
                 Text(cap.tag.name.lowercase().replace('_', '-'), style = UFont.sans(10, FontWeight.Medium), color = fg)
             }
             Text(relativeTime(cap.at, now), style = UFont.mono(10), color = c.ink3)
         }
         Text(cap.body, style = UFont.sans(14), color = c.ink)
         Row(horizontalArrangement = Arrangement.spacedBy(14.dp)) {
-            Text("Promote to task →", style = UFont.sans(12, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clickable(onClick = onPromote))
+            Text("Promote to task →", style = UFont.sans(12, FontWeight.Medium), color = c.ink, modifier = Modifier.clickable(onClick = onPromote))
             Text("Discard", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clickable(onClick = onDiscard))
         }
     }
@@ -536,7 +540,8 @@ private fun captureTagColors(tag: CaptureTag): Pair<androidx.compose.ui.graphics
         2 -> c.blueSoft to c.blueInk
         3 -> c.greenSoft to c.greenInk
         4 -> c.coralSoft to c.ink
-        else -> c.primarySoft to c.primaryDeep
+        // follow-up: the neutral pair — it was indigo (owner decision 2026-09-24).
+        else -> c.bg2 to c.ink2
     }
 }
 
@@ -575,7 +580,7 @@ internal fun StartRepeatingPrompt(onPick: () -> Unit, onCancel: () -> Unit) {
         onDismissRequest = onCancel,
         title = { Text("Start repeating", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
         text = { Text("A repeating task needs a day and a time. Pick when it starts.", style = UFont.sans(13), color = c.ink2) },
-        confirmButton = { TextButton(onClick = onPick) { Text("Pick day and time", color = c.primaryDeep) } },
+        confirmButton = { TextButton(onClick = onPick) { Text("Pick day and time", color = c.ink) } },
         dismissButton = { TextButton(onClick = onCancel) { Text("Cancel", color = c.ink2) } },
         containerColor = c.surface,
     )

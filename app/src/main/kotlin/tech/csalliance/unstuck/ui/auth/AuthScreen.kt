@@ -108,7 +108,7 @@ fun AuthScreen(vm: AppViewModel) {
     ) {
         Orbit(size = 36)
         Spacer(Modifier.height(16.dp))
-        SectionLabel(if (signUp) "BEGIN AGAIN" else "WELCOME BACK", color = c.primaryDeep)
+        SectionLabel(if (signUp) "BEGIN AGAIN" else "WELCOME BACK")
         Text(
             if (signUp) "You don't need more discipline." else "Pick up where\nyou left off.",
             style = UFont.serifItalic(40), color = c.ink, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 8.dp),
@@ -159,7 +159,7 @@ fun AuthScreen(vm: AppViewModel) {
                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
                     Text(
                         "Sign in instead",
-                        style = UFont.sans(13, FontWeight.SemiBold), color = c.primaryDeep,
+                        style = UFont.sans(13, FontWeight.SemiBold), color = c.ink,
                         modifier = Modifier.clickable(enabled = !busy) {
                             signUp = false; message = null; messageOk = false; accountExists = false
                         }.semantics { role = Role.Button }.padding(horizontal = 10.dp, vertical = 12.dp),
@@ -196,7 +196,7 @@ fun AuthScreen(vm: AppViewModel) {
         Text(
             if (signUp) "Already have an account? Sign in" else "New here? Create an account",
             // Clear any stale error/success banner when switching modes; ≥44dp touch target.
-            style = UFont.sans(13, FontWeight.Medium), color = c.primaryDeep,
+            style = UFont.sans(13, FontWeight.Medium), color = c.ink,
             modifier = Modifier.clickable { signUp = !signUp; message = null; messageOk = false; accountExists = false }.padding(vertical = 10.dp),
         )
         Text("Email me a magic link instead", style = UFont.sans(13), color = c.ink3, modifier = Modifier.clickable(enabled = !busy) {
@@ -247,7 +247,7 @@ fun SetNewPasswordScreen(vm: AppViewModel) {
     ) {
         Orbit(size = 36)
         Spacer(Modifier.height(16.dp))
-        SectionLabel("SET A NEW PASSWORD", color = c.primaryDeep)
+        SectionLabel("SET A NEW PASSWORD")
         Text("Choose a new password.", style = UFont.serifItalic(34), color = c.ink, textAlign = TextAlign.Center, modifier = Modifier.padding(top = 8.dp))
         Spacer(Modifier.height(22.dp))
         MdField(pw, { pw = it }, "New password", password = true, imeAction = ImeAction.Next)

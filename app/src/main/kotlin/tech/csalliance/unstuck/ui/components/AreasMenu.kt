@@ -53,7 +53,7 @@ fun AreasMenu(vm: AppViewModel, onPick: (String?) -> Unit, onDismiss: () -> Unit
         dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } },
     ) {
         Column(Modifier.fillMaxWidth().padding(bottom = 24.dp)) {
-            SectionLabel("Areas", color = c.primaryDeep, modifier = Modifier.padding(start = 20.dp, bottom = 4.dp))
+            SectionLabel("Areas", modifier = Modifier.padding(start = 20.dp, bottom = 4.dp))
             AreaRow(c.ink4, "All tasks", tasks.count { !it.done && it.recurrence == null }) { onPick(null) }
             areas.sortedBy { it.sortOrder }.forEach { a ->
                 val open = tasks.count { it.lifeArea == a.name && !it.done && it.recurrence == null }

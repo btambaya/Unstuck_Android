@@ -96,7 +96,7 @@ fun SettingsHub(vm: AppViewModel, onBack: () -> Unit, onSection: (SettingsSectio
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Column {
-                SectionLabel(SettingsCopy.HUB_TITLE, color = c.primaryDeep, modifier = Modifier.padding(top = 4.dp))
+                SectionLabel(SettingsCopy.HUB_TITLE, modifier = Modifier.padding(top = 4.dp))
                 Text(SettingsCopy.HUB_HEADING, style = UFont.serifItalic(28), color = c.ink, modifier = Modifier.padding(top = 4.dp).semantics { heading() })
             }
             AccountCard(name = name, email = email) { onSection(SettingsSection.ACCOUNT) }
@@ -200,7 +200,7 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(title = section.title, leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
         Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
-            SectionLabel("${SettingsCopy.HUB_TITLE} · ${section.title}", color = c.primaryDeep, modifier = Modifier.padding(top = 4.dp))
+            SectionLabel("${SettingsCopy.HUB_TITLE} · ${section.title}", modifier = Modifier.padding(top = 4.dp))
             Text(
                 section.heading, style = UFont.serifItalic(26), color = c.ink,
                 modifier = Modifier.padding(top = 4.dp, bottom = 12.dp).semantics { heading() },
@@ -447,7 +447,7 @@ private fun PasswordDialog(hasPassword: Boolean, onSave: (current: String, newPw
                 error?.let { Text(it, style = UFont.sans(12), color = c.red) }
             }
         },
-        confirmButton = { TextButton(enabled = canSave, onClick = { onSave(current, pw) }) { Text("Save", color = c.primaryDeep) } },
+        confirmButton = { TextButton(enabled = canSave, onClick = { onSave(current, pw) }) { Text("Save", color = c.ink) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = c.ink2) } },
         containerColor = c.surface,
     )
@@ -461,7 +461,7 @@ private fun FieldDialog(title: String, label: String, initial: String = "", onSa
         onDismissRequest = onDismiss,
         title = { Text(title, style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
         text = { OutlinedTextField(value = value, onValueChange = { value = it }, label = { Text(label) }, singleLine = true) },
-        confirmButton = { TextButton(enabled = value.isNotBlank(), onClick = { onSave(value.trim()) }) { Text("Save", color = c.primaryDeep) } },
+        confirmButton = { TextButton(enabled = value.isNotBlank(), onClick = { onSave(value.trim()) }) { Text("Save", color = c.ink) } },
         dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel", color = c.ink2) } },
         containerColor = c.surface,
     )
@@ -541,7 +541,10 @@ internal fun ToggleRow(
             Text(label, style = UFont.sans(14, FontWeight.Medium), color = if (enabled) c.ink else c.ink3)
             if (sub != null) Text(sub, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 3.dp))
         }
-        MdToggle(value, { if (enabled) onChange(it) }, Modifier.clearAndSetSemantics {})
+        // Disabled (e.g. Voice replies while the spoken coach is off, AI data
+        // sharing during the tour): the switch dims too, so an ON one doesn't
+        // read as a live full-coral switch next to a greyed label.
+        MdToggle(value, { if (enabled) onChange(it) }, Modifier.clearAndSetSemantics {}, enabled = enabled)
     }
     if (!last) CardDivider()
 }
@@ -593,7 +596,7 @@ internal fun SettingsNote(text: String, modifier: Modifier = Modifier) {
 /** A section label over a card (N&C's "Reminders" / "Calls"). */
 @Composable
 internal fun SettingsGroupLabel(text: String, modifier: Modifier = Modifier) {
-    SectionLabel(text, color = UTheme.colors.primaryDeep, modifier = modifier.padding(top = 4.dp, bottom = 8.dp).semantics { heading() })
+    SectionLabel(text, modifier = modifier.padding(top = 4.dp, bottom = 8.dp).semantics { heading() })
 }
 
 /** A plain status line with a fix (only shown when something is wrong). */

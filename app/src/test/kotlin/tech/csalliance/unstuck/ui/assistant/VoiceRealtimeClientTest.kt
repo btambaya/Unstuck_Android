@@ -3,6 +3,7 @@ package tech.csalliance.unstuck.ui.assistant
 import android.content.Context
 import android.os.Looper
 import androidx.test.core.app.ApplicationProvider
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.boolean
@@ -150,23 +151,36 @@ class VoiceRealtimeClientTest {
     private fun FakeFactory.toolCall(name: String, callId: String) =
         message("""{"type":"response.function_call_arguments.done","name":"$name","call_id":"$callId","arguments":"{}"}""")
 
-    /** The tool runs on Dispatchers.IO: wait for its output, then let the
-     *  coalesced response.create fire on the (paused) main looper.
-     *
-     *  That continue is POSTED from the same IO coroutine a beat AFTER the
-     *  output reaches the socket, so a single `idleFor` can run before the post
-     *  and leave the runnable scheduled past the already-advanced clock — the
-     *  flaky "expected response.create but was conversation.item.create". Pump
-     *  until it has actually landed (bounded, like the wait above). */
+    /** The tool runs on Dispatchers.IO: wait for its output only. The
+     *  continuation that reads it is asked by the barge-in controller once
+     *  every output is out AND the reply that carried the call is done — never
+     *  before (Zubair's morning call, 2026-09-24) — so a test sends that done
+     *  and then [awaitContinuation]. */
     private fun awaitToolOutput(s: FakeSocket, expected: Int) {
         var waited = 0
         while (s.toolOutputs() < expected && waited < 5_000) { Thread.sleep(10); waited += 10 }
         assertEquals("tool output sent", expected, s.toolOutputs())
-        waited = 0
-        while (s.types().lastOrNull() != "response.create" && waited < 5_000) {
+    }
+
+    /** Let the continuation's response.create land: ToolCallFinished is
+     *  dispatched from the IO coroutine a beat AFTER the output reaches the
+     *  socket and arms the controller's 120 ms tick on the (paused) main
+     *  looper, so a single `idleFor` can run before it is posted. Pump until
+     *  a create follows the last output (bounded). */
+    private fun awaitContinuation(s: FakeSocket) {
+        var waited = 0
+        fun landed(): Boolean {
+            val t = s.types()
+            val lastOutput = s.sent.indexOfLast { raw ->
+                Json.parseToJsonElement(raw).jsonObject["item"]?.jsonObject?.get("type")?.jsonPrimitive?.contentOrNull == "function_call_output"
+            }
+            return t.withIndex().any { (i, ty) -> i > lastOutput && ty == "response.create" }
+        }
+        while (!landed() && waited < 5_000) {
             shadowOf(Looper.getMainLooper()).idleFor(Duration.ofMillis(VoiceRealtimeClient.CONTINUE_DELAY_MS + 50))
             Thread.sleep(10); waited += 10
         }
+        assertTrue("a response.create after the last tool output", landed())
     }
 
     private fun openSession(runTool: suspend (String, kotlinx.serialization.json.JsonObject) -> String = { _, _ -> "ok" }): Pair<FakeFactory, FakeSocket> {
@@ -209,9 +223,10 @@ class VoiceRealtimeClientTest {
         factory.created("r1")
         factory.toolCall("create_task", "c1")
         awaitToolOutput(s, 1)
-        assertEquals("one coalesced response.create after the tool output", "response.create", s.types().last())
         factory.transcript("r1", "Done — added it.")
         factory.done("r1")
+        awaitContinuation(s)
+        assertEquals("one response.create after the tool output", "response.create", s.types().last())
         assertEquals(0, s.correctives())
         // The reply AFTER the tool result (the confirmation) is tool-backed too.
         factory.created("r2")
@@ -233,7 +248,15 @@ class VoiceRealtimeClientTest {
         awaitToolOutput(s, 1)
         factory.transcript("r1", "Done — moved it.")
         factory.done("r1")
+        awaitContinuation(s)
         assertEquals("get_schedule + a claim is still a fabrication", 1, s.correctives())
+        // It rides on the continuation: after the output, with ONE forced create.
+        val t = s.types()
+        val corrective = s.sent.indexOfFirst { it.contains(VoiceIntegrityGuard.correctiveText.take(40)) }
+        val output = s.sent.indexOfFirst { it.contains("function_call_output") }
+        assertTrue("corrective after the output", corrective > output)
+        assertEquals("response.create", t[corrective + 1])
+        assertEquals(1, t.drop(output).count { it == "response.create" })
         // Follow-up of the corrective: not scored.
         factory.created("r2"); factory.transcript("r2", "Moved it now."); factory.done("r2")
         assertEquals(1, s.correctives())
@@ -242,6 +265,7 @@ class VoiceRealtimeClientTest {
         factory.toolCall("delete_task", "c2")
         awaitToolOutput(s, 2)
         factory.done("r3")
+        awaitContinuation(s)
         factory.created("r4"); factory.transcript("r4", "I've deleted it."); factory.done("r4")
         assertEquals(2, s.correctives())
     }
@@ -287,6 +311,7 @@ class VoiceRealtimeClientTest {
         factory.toolCall("get_period_review", "c1")
         awaitToolOutput(s, 1)
         factory.done("r1")
+        awaitContinuation(s)
         // Nothing on air (no audio was queued): a speech start here is what the
         // review's echo tail looks like on a loudspeaker.
         factory.message("""{"type":"input_audio_buffer.speech_started","item_id":"echo1"}""")
@@ -308,12 +333,85 @@ class VoiceRealtimeClientTest {
         factory.toolCall("create_task", "c1")
         factory.message("""{"type":"response.output_item.done","item":{"type":"function_call","name":"create_task","call_id":"c1","arguments":"{}"}}""")
         awaitToolOutput(s, 1)
+        factory.done("r1")
+        awaitContinuation(s)
         assertEquals(1, runs)
-        assertEquals(listOf("conversation.item.create", "response.create"), s.types().takeLast(2))
+        // (The greeting's done also removed the opening primer: an item.delete in between.)
+        assertEquals("response.create", s.types().last())
+        assertEquals("one continuation", 1, s.types().drop(s.sent.indexOfFirst { it.contains("function_call_output") }).count { it == "response.create" })
         // A function call delivered ONLY on output_item.done still executes.
         factory.message("""{"type":"response.output_item.done","item":{"type":"function_call","name":"complete_task","call_id":"c2","arguments":"{}"}}""")
         awaitToolOutput(s, 2)
         assertEquals(2, runs)
+    }
+
+    /** Zubair's iOS morning call, 2026-09-24 07:02:44–53 (session 1cbfac75):
+     *  his turn was still pending at the done of the reply that carried
+     *  set_task_recurrence, and was asked for right there — 70 ms before the
+     *  tool's ok went out. That reply read the call as failed ("I tried to
+     *  cancel the repeat, but it didn't go through") and the continuation
+     *  collided with it ("already has an active response"). Android ran the
+     *  same controller: nothing may be asked while a tool runs, and the ONE
+     *  reply after the output answers the turn too. */
+    @Test
+    fun `a turn pending at the done of a reply carrying a tool call is asked for only after the tool's output`() {
+        val gate = CompletableDeferred<Unit>()
+        val (factory, s) = openSession { name, _ ->
+            gate.await()
+            if (name == "set_task_recurrence") "ok: \"Office Focus\" no longer repeats (future occurrences removed)" else "ok"
+        }
+        factory.created("r0"); factory.done("r0")
+        idle(2_000)
+        factory.speechStarted("u1"); factory.speechStopped()
+        factory.completed("u1", "No, just cancel the recurring.")
+        idle(BargeInController.TURN_HOLD_MS + 20)
+        assertEquals("the turn is asked for", 2, s.creates())
+        // A segment that starts after that create, with nothing on air, keeps
+        // the turn pending past it (the controller's "they go on talking").
+        idle(50)
+        factory.speechStarted("n")
+        factory.created("r1")
+        factory.speechStopped()
+        factory.completed("n", "")
+        factory.transcript("r1", "We'll stop it repeating. One moment.")
+        factory.toolCall("set_task_recurrence", "c1")
+        factory.done("r1")
+        idle(3_000)
+        assertEquals("nothing asked while the tool runs", 2, s.creates())
+        gate.complete(Unit)
+        awaitToolOutput(s, 1)
+        awaitContinuation(s)
+        assertEquals("one reply reads the ok and answers the turn", 3, s.creates())
+        factory.created("r2")
+        idle(5_000)
+        assertEquals("never a second ask", 3, s.creates())
+    }
+
+    /** The integrity corrective at the done of a reply that also carried a
+     *  read: sent there, its forced create beat the read's output exactly as
+     *  the turn's did. It rides on the continuation instead. */
+    @Test
+    fun `guard - a corrective owed while the reply's read tool still runs goes out after its output`() {
+        val gate = CompletableDeferred<Unit>()
+        val (factory, s) = openSession { _, _ -> gate.await(); "ok:\nMonday" }
+        factory.created("r1")
+        factory.toolCall("get_schedule", "c1")
+        factory.transcript("r1", "Done — moved it.")
+        factory.done("r1")
+        idle(1_000)
+        assertEquals("held: nothing before the output", 0, s.correctives())
+        assertEquals("only the opening create", 1, s.creates())
+        gate.complete(Unit)
+        awaitToolOutput(s, 1)
+        awaitContinuation(s)
+        assertEquals(1, s.correctives())
+        val output = s.sent.indexOfFirst { it.contains("function_call_output") }
+        val corrective = s.sent.indexOfFirst { it.contains(VoiceIntegrityGuard.correctiveText.take(40)) }
+        assertTrue("after the output", corrective > output)
+        val forced = Json.parseToJsonElement(s.sent[corrective + 1]).jsonObject
+        assertEquals("response.create", forced["type"]?.jsonPrimitive?.contentOrNull)
+        assertEquals("required", forced["response"]?.jsonObject?.get("tool_choice")?.jsonPrimitive?.contentOrNull)
+        assertEquals("one create after the output", 2, s.creates())
     }
 
     // ── pure guard (mirrors the iOS VoiceIntegrityGuard test) ──
@@ -712,6 +810,7 @@ class VoiceRealtimeClientTest {
         factory.toolCall("create_task", "c1")
         awaitToolOutput(s, 1)
         factory.done("r1")
+        awaitContinuation(s)
         factory.created("r2")
         factory.failed("r2", "rate_limit_exceeded", rateLimitText)
         idle(VoiceRealtimeClient.retryAfterMs(rateLimitText, null) + 20)

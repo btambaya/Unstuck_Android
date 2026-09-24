@@ -89,7 +89,13 @@ object AssistantHarnessRules {
     // that adds a read tool fails a test instead of silently arming the guard.
 
     /** Reads never disarm the fabrication guard and earn no receipt. */
-    val READ_ONLY_TOOLS: Set<String> = setOf("get_tasks", "find_tasks", "get_schedule", "get_lists", "get_captures", "get_settings", "get_insights", "get_calls")
+    val READ_ONLY_TOOLS: Set<String> = setOf("get_tasks", "find_tasks", "get_schedule", "get_lists", "get_captures", "get_settings", "get_insights", "get_period_review", "get_calls")
+
+    /** Did a get_period_review of THIS turn return `ok:`? Then the reply is a
+     *  recap of the user's own past actions and the guard neutralises
+     *  user-subject verbs (week-review-spec §5.4). */
+    fun reviewedThisTurn(results: List<Pair<HarnessToolCall, String>>): Boolean =
+        results.any { (call, result) -> call.name == "get_period_review" && result.startsWith("ok:") }
 
     /** Tools that only NAVIGATE — no data changes, no staged card. Neither a
      *  write (they must not disarm the guard) nor "nothing changed" (the
@@ -265,7 +271,9 @@ class AssistantHarness(
 
             val content = reply.text ?: ""
             // FABRICATION GUARD (a stable qwen failure mode, 2026-08-29).
-            if (reply.toolCalls.isEmpty() && !corrected && !writeSucceeded && AssistantGuard.looksLikeActionClaim(content)) {
+            if (reply.toolCalls.isEmpty() && !corrected && !writeSucceeded &&
+                AssistantGuard.looksLikeActionClaim(content, recap = AssistantHarnessRules.reviewedThisTurn(results))
+            ) {
                 corrected = true
                 working += HarnessMessage("assistant", content)
                 working += HarnessMessage("user", AssistantHarnessRules.CORRECTIVE)

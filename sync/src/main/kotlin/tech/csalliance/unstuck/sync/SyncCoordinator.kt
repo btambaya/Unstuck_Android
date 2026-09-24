@@ -612,6 +612,12 @@ class SyncCoordinator(
         hydrateLock = hydrateMutex,
     )
 
+    /** True when the last cal_blocks read returned PostgREST's row cap (1,000),
+     *  so the local store may be missing slots — the assistant's
+     *  get_period_review says so in a note (week-review-spec §3.6). False before
+     *  any read this session. */
+    fun calBlocksMayBeTruncated(): Boolean = hydrator.calBlocksPull?.mayBeTruncated == true
+
     /** The recurrence horizon top-up (stage 2 — "same id for same day", Ahmad
      *  2026-09-23): extends every repeating task's tail with deterministic ids after
      *  a good cal_blocks pull, once per local day. See RecurrenceHorizonTopUp. */

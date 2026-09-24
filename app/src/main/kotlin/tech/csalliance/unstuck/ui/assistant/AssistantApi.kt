@@ -198,6 +198,10 @@ interface AssistantApi {
     suspend fun getSessions(): List<Session>
     suspend fun getReasonLogs(): List<ReasonLog>
     fun getStruggles(): List<String>
+    /** True when this device's last cal_blocks read hit PostgREST's 1,000-row
+     *  cap, so the store may be missing slots — get_period_review adds a note
+     *  (week-review-spec §3.6). Default false so every fake keeps compiling. */
+    suspend fun calBlocksMayBeTruncated(): Boolean = false
 
     // ── captures ──
     suspend fun getCaptures(): List<Capture>

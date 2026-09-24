@@ -15,6 +15,58 @@ import tech.csalliance.unstuck.core.logic.AssistantGuard.stripSelfCorrection
 // answers about existing state.
 class AssistantGuardTest {
 
+    // ---- the period-review recap (week-review-spec §5.4): the 16 cases, each
+    // with and without `recap`
+
+    private val recapOnly = listOf(
+        "You finished \"Draft chapter 3\" and the bank call.",
+        "You skipped \"Stretch\" once on purpose.",
+        "You've also completed \"Tax return\".",
+        "You finished \"Draft chapter 3\" and skipped \"Stretch\" once.",
+        "You finished \"Draft chapter 3\", then moved on to \"Tax return\".",
+    )
+    private val alwaysClaims = listOf(
+        "Completed three tasks last week.",
+        "Added \"Milk\" to Groceries.",
+        "I've added \"Milk\" to your list.",
+        "Moved \"Dentist\" to Friday.",
+        "Done — added it.",
+        "Created \"Email Sarah\" for 2pm.",
+        "The task has been created.",
+        "Scheduled \"Gym\" for Thursday at 6.",
+        "I added \"Milk\".",
+        "You finished \"Draft chapter 3\". I moved \"Tax return\" to Friday.",
+    )
+    private val userSubjectWrite = "You're all set — you've moved \"Dentist\" to Friday."
+
+    @Test fun `recap neutralises the user's own past actions only on a review turn`() {
+        for (c in recapOnly) {
+            assertFalse("recap: $c", looksLikeActionClaim(c, recap = true))
+            assertTrue("no recap: $c", looksLikeActionClaim(c))
+        }
+    }
+
+    @Test fun `real claims trip with or without recap`() {
+        for (c in alwaysClaims) {
+            assertTrue("recap: $c", looksLikeActionClaim(c, recap = true))
+            assertTrue("no recap: $c", looksLikeActionClaim(c))
+        }
+    }
+
+    @Test fun `a write phrased at the user still trips without recap`() {
+        assertTrue(looksLikeActionClaim(userSubjectWrite))
+        // With recap it is waved through — the reason recap is scoped to review turns.
+        assertFalse(looksLikeActionClaim(userSubjectWrite, recap = true))
+        assertEquals(16, recapOnly.size + alwaysClaims.size + 1)
+    }
+
+    @Test fun `the neutraliser rewrites coordinated verbs to a fixpoint`() {
+        assertEquals(
+            "you did \"A\", did \"B\" and did \"C\".",
+            tech.csalliance.unstuck.core.logic.AssistantGuard.neutraliseUserRecap("You finished \"A\", skipped \"B\" and moved \"C\"."),
+        )
+    }
+
     // ---- looksLikeActionClaim
 
     @Test fun `catches the observed qwen fabrications`() {

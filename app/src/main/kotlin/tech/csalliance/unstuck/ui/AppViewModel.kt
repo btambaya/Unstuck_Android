@@ -103,6 +103,7 @@ import tech.csalliance.unstuck.core.logic.HarnessToolRunner
 import tech.csalliance.unstuck.ui.assistant.ToolArgs
 import tech.csalliance.unstuck.ui.assistant.TurnScratch
 import tech.csalliance.unstuck.ui.assistant.buildAssistantContext
+import tech.csalliance.unstuck.ui.assistant.buildTextRequestContext
 import tech.csalliance.unstuck.ui.assistant.buildVoiceInstructions
 import tech.csalliance.unstuck.ui.assistant.buildVoiceOpening
 import tech.csalliance.unstuck.ui.assistant.runAssistantTool
@@ -488,6 +489,9 @@ class AppViewModel(
     private var insightsOpenAt: Pair<tech.csalliance.unstuck.core.logic.InsightsSpan, Int>? = null
     fun openInsightsAt(span: tech.csalliance.unstuck.core.logic.InsightsSpan, offset: Int) { insightsOpenAt = span to offset }
     fun consumeInsightsOpenAt(): Pair<tech.csalliance.unstuck.core.logic.InsightsSpan, Int>? = insightsOpenAt.also { insightsOpenAt = null }
+
+    /** The last cal_blocks pull hit the server's row cap (get_period_review's note). */
+    internal fun calBlocksMayBeTruncated(): Boolean = graph.coordinator?.calBlocksMayBeTruncated() == true
     fun isoNow(): String = ISO.format(Instant.now())
 
     private fun launchWrite(block: suspend () -> Unit) { viewModelScope.launch { block() } }
@@ -4107,7 +4111,9 @@ class AppViewModel(
             // — the one place the codebase's own "decode off the main thread" rule
             // was missed (review section 4). Off Main now.
             val wire = messages.map { it.toChat() }
-            val context = withContext(Dispatchers.Default) { buildAssistantContext(api) }
+            // The TEXT request reports the gated tools this build can run
+            // (toolCaps, week-review-spec D9); the voice + tour contexts never do.
+            val context = withContext(Dispatchers.Default) { buildTextRequestContext(api) }
             when (val r = a.ask(wire, context)) {
                 is AssistantResult.Ok -> HarnessReply(
                     text = r.reply.content,

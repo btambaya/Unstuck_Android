@@ -31,7 +31,7 @@ class ToolRegistryParityTest {
     }
 
     @Test fun `every registry name has an executor case`() {
-        assertEquals(71, ToolRegistry.NAMES.size)
+        assertEquals(72, ToolRegistry.NAMES.size)
         assertEquals("no duplicate names", ToolRegistry.NAMES.size, ToolRegistry.NAMES.toSet().size)
         for (name in ToolRegistry.NAMES) {
             val r = runOnFake(name)

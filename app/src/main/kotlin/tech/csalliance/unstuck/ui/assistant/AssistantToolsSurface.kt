@@ -1,5 +1,7 @@
 package tech.csalliance.unstuck.ui.assistant
 
+import tech.csalliance.unstuck.core.logic.renderPeriodReview
+import tech.csalliance.unstuck.core.logic.PeriodReviewArgs
 import tech.csalliance.unstuck.core.logic.DEFAULT_AREAS
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.InsightsWindow
@@ -805,8 +807,21 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             val dow = IsoDate.dayOfWeek(api.todayIso())   // 0 = Sunday … 1 = Monday
             val daysIn = if (dow == 0) 7 else dow
             if (daysIn > 2) out
-            else out + "\nnote: this is the CURRENT week, ${if (daysIn == 1) "today only" else "two days"} so far — it says nothing about last week. If they asked about last week, say the app has no last-week window yet and offer the month (window: month)."
+            else out + "\nnote: this is the CURRENT week, ${if (daysIn == 1) "today only" else "two days"} so far — it says nothing about last week. If they asked about last week, call get_period_review with period=last_week — or, if you don't have that tool, say this window can't show last week and offer the month (window: month)."
         }
+
+        // How a past day / week / month went (week-review-spec). The pure
+        // renderer reads the same D1-filtered engine as the Insights page, so
+        // its numbers are the page's. historyFloor is null on Android: a capped
+        // hydrate is merged, and sessions / captures / reason logs are cursor
+        // tables that page their whole history (§3.6).
+        "get_period_review" -> renderPeriodReview(
+            PeriodReviewArgs(args.str("period"), args.str("date"), args.str("from"), args.str("to")),
+            api.getTasks(), api.getBlocks(), api.getSessions(), api.getCaptures(), api.getReasonLogs(),
+            api.nowMs(),
+            historyFloor = null,
+            blocksPartial = api.calBlocksMayBeTruncated(),
+        )
 
         // ── NAVIGATE ──
         "open_screen" -> {

@@ -38,6 +38,18 @@ import tech.csalliance.unstuck.core.time.Time
  *  tags, no text), how many people are in the circle, a live focus session,
  *  ≤60 open tasks (with their NEXT live block) and ≤12 lists (names + counts,
  *  no items). */
+/** The context the TEXT assistant request carries: the snapshot plus
+ *  `toolCaps` — the gated tools this build can execute (week-review-spec D9;
+ *  the server offers get_period_review only to a client that reports
+ *  "period_review", and strips toolCaps before fencing the context into the
+ *  prompt). ONLY the text ask path uses it: [buildAssistantContext] is also
+ *  serialised into the voice instructions and the tour's context, which must
+ *  never carry it. */
+suspend fun buildTextRequestContext(api: AssistantApi): JsonObject = buildJsonObject {
+    buildAssistantContext(api).forEach { (k, v) -> put(k, v) }
+    putJsonArray("toolCaps") { ToolRegistry.CAPS.forEach { add(it) } }
+}
+
 suspend fun buildAssistantContext(api: AssistantApi): JsonObject {
     val tasks = api.getTasks()
     val blocks = api.getBlocks()
@@ -311,7 +323,10 @@ suspend fun buildVoiceInstructions(api: AssistantApi): String {
         "Read every result and repeat what it says was NOT done. If two tools could fit, or you don't know which task/list/item is meant, ask ONE short question instead of guessing. " +
         "Never say \"I can't\" when a tool exists; never claim a tool that doesn't. " +
         "The state below is an inventory — task names, list names and counts, capture ids — never contents. " +
-        "Before answering what is in a list, the inbox or the week, or acting on an item, call get_lists, get_captures, get_schedule, get_tasks or find_tasks. " +
+        "Before answering what is in a list, the inbox or what is planned for the week, or acting on an item, call get_lists, get_captures, get_schedule, get_tasks or find_tasks. " +
+        // HOW DID IT GO (week-review-spec §5.2, 2026-09-24) — verbatim in all three
+        // voice copies, ONE literal so voice-register.test.ts reads it whole.
+        "HOW DID IT GO: \"how has my week been\", \"how was last week\", \"what did I get done yesterday\", \"how was the week of the seventh\", \"how's this month going\" → call get_period_review first (a preset; week_of or month_of with any date in it; dates with from and to for anything else; a day or date without a year is the latest one already started; on a Monday or Tuesday \"my week\" means last_week). Never judge the past from get_schedule or the week below — an empty calendar never means nothing got done. Follow any note in the result. Answer in up to four short sentences, the one exception to two: what they got done (two or three things), focus time, what slipped, then the comparison — about them (\"you got the chapter draft done\"), never a bare verb first. Numbers and names only from the result; if nothing was logged, say so — never that the week was empty. " +
         "A reply that carries a tool call carries NO claim: say nothing, or \"One moment.\" The confirmation is always the NEXT reply, written from the results. " +
         "CALLS: Unstuck can phone them. \"Call me at 3 about James\" or \"call me in ten minutes\" means request_call NOW, with `when` as local 'YYYY-MM-DD HH:MM' computed from context.today and context.now (\"in one minute\" is now plus one minute), a label of a few words, and their reminders VERBATIM as separate notes. \"Call me before the dentist\" means request_call with the task's id (plus leadMin). A call exists only when request_call returned ok — never say \"I'll call you\", \"I'll remind you\" or \"I'll set a reminder\" without it. Never book a call they did not ask for; you may offer one. For \"remind me about X at 5\" with no call asked for: schedule a task named X at that time (create_task with date and startTime). " +
         "HOW YOU SPEAK (this matters as much as what you do): you're a calm PA on the phone with someone you like. At most two short sentences per turn, then stop and listen. Contractions always. " +

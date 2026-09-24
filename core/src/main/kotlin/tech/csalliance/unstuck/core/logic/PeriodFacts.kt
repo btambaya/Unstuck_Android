@@ -53,8 +53,8 @@ fun insightsRange(span: InsightsSpan, offset: Int, today: String, earliest: Stri
  *  Null when there is none. The page's ‹ stepper stops there. */
 fun earliestActivityDay(data: PeriodData, zone: ZoneId): String? {
     var best: String? = null
-    for (t in data.tasks) periodDayOf(t.createdAt, zone)?.let { if (best == null || it < best!!) best = it }
-    for (s in data.sessions) periodDayOf(s.completedAt, zone)?.let { if (best == null || it < best!!) best = it }
+    for (t in data.tasks) data.stamp(t.createdAt, zone)?.day?.let { if (best == null || it < best!!) best = it }
+    for (s in data.sessions) data.stamp(s.completedAt, zone)?.day?.let { if (best == null || it < best!!) best = it }
     return best
 }
 
@@ -154,7 +154,7 @@ fun insightsFacts(data: PeriodData, r: PeriodRange, nowMs: Long, zone: ZoneId): 
     val cut = if (r.clipped) nowZ.hour * 60 + nowZ.minute else null
     val cur = collectWindow(data, PeriodWindow(r.from, r.end, cut), zone)
     val prev = if (r.p == "all") null else collectWindow(data, PeriodWindow(r.prevFrom, r.prevTo, cut), zone)
-    val perDay = perDayCounts(cur, zone)
+    val perDay = perDayCounts(cur, data, zone)
     val days = ArrayList<DayFacts>()
     var d = periodParseYmd(r.from)!!
     val last = periodParseYmd(r.to)!!
@@ -165,7 +165,7 @@ fun insightsFacts(data: PeriodData, r: PeriodRange, nowMs: Long, zone: ZoneId): 
         d = d.plusDays(1)
     }
     val showedUp = perDay.values.count { it.done > 0 || it.sessions > 0 }
-    val prevShowedUp = prev?.let { p -> perDayCounts(p, zone).values.count { it.done > 0 || it.sessions > 0 } }
+    val prevShowedUp = prev?.let { p -> perDayCounts(p, data, zone).values.count { it.done > 0 || it.sessions > 0 } }
     return InsightsFacts(
         range = r,
         cur = cur,
@@ -176,7 +176,7 @@ fun insightsFacts(data: PeriodData, r: PeriodRange, nowMs: Long, zone: ZoneId): 
         plan = if (r.p == "all") null else planFacts(data, r, nowMs, zone),
         stillOpenToday = stillOpenToday(data, r),
         series = seriesRhythm(data, r),
-        wins = unstuckWins(cur, zone),
+        wins = unstuckWins(cur, data, zone),
         doneByArea = doneByAreaCounts(cur, data.byId),
         doneNoArea = doneWithoutArea(cur, data.byId),
     )
@@ -209,10 +209,10 @@ fun seriesRhythm(data: PeriodData, r: PeriodRange): List<SeriesRhythm> {
 
 /** "Got unstuck": plain tasks done in the window that had waited ≥ 7 days
  *  (completedAt − createdAt) or been moved ≥ 2×. Longest wait first. */
-fun unstuckWins(cur: WindowFacts, zone: ZoneId): List<UnstuckWin> =
+fun unstuckWins(cur: WindowFacts, data: PeriodData, zone: ZoneId): List<UnstuckWin> =
     cur.plainDone.mapNotNull { t ->
-        val done = periodStampMs(t.completedAt, zone) ?: return@mapNotNull null
-        val created = periodStampMs(t.createdAt, zone)
+        val done = data.stamp(t.completedAt, zone)?.ms ?: return@mapNotNull null
+        val created = data.stamp(t.createdAt, zone)?.ms
         val waited = if (created != null && done > created) ((done - created) / DAY_MS).toInt() else 0
         val moves = t.moveCount ?: 0
         if (waited >= WIN_MIN_WAIT_DAYS || moves >= WIN_MIN_MOVES) UnstuckWin(t, waited, moves) else null

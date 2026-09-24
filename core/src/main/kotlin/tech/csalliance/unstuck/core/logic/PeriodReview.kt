@@ -247,6 +247,40 @@ class PeriodData(
 ) {
     val sessions: List<Session> = countableSessions(sessions)
     val byId: Map<String, TaskItem> = tasks.associateBy { it.id }
+
+    // Every stamp parsed once per zone: the page reads the same rows for the
+    // period, the one before, eight trend weeks and the pill, and the strict
+    // grammar's regex dominated the cost (soak: 29 ms → a few ms for the trend).
+    private val memo = java.util.concurrent.ConcurrentHashMap<String, Any>()
+    @Volatile private var memoZone: ZoneId? = null
+
+    /** [stamp] under the §3.1 grammar in [zone] — instant, local day and
+     *  minute-of-day — or null when absent / unparseable. Memoised. */
+    fun stamp(stamp: String?, zone: ZoneId): StampInfo? {
+        if (stamp == null) return null
+        if (memoZone != zone) { memo.clear(); memoZone = zone }
+        memo[stamp]?.let { return it as? StampInfo }
+        val info = parseStampInfo(stamp, zone)
+        memo[stamp] = info ?: NO_STAMP
+        return info
+    }
+
+    /** The window predicate over a memoised stamp (see [inPeriodWindow]). */
+    fun inWindow(stamp: String?, win: PeriodWindow, zone: ZoneId): Boolean {
+        val i = stamp(stamp, zone) ?: return false
+        if (i.day < win.from || i.day > win.to) return false
+        return win.cut == null || i.day != win.to || i.minute <= win.cut
+    }
+
+    private companion object { val NO_STAMP = Any() }
+}
+
+/** A parsed stamp in one zone. */
+class StampInfo(val ms: Long, val day: String, val minute: Int)
+
+fun parseStampInfo(stamp: String?, zone: ZoneId): StampInfo? = periodStampMs(stamp, zone)?.let { ms ->
+    val z = Instant.ofEpochMilli(ms).atZone(zone)
+    StampInfo(ms, fmtYmd(z.toLocalDate()), z.hour * 60 + z.minute)
 }
 
 /** `{from, to}` inclusive local dates; [cut] = minute-of-day on `to`, or null. */
@@ -277,11 +311,11 @@ fun inPeriodWindow(stamp: String?, win: PeriodWindow, zone: ZoneId): Boolean {
 }
 
 fun collectWindow(data: PeriodData, win: PeriodWindow, zone: ZoneId): WindowFacts {
-    fun inWin(stamp: String?) = inPeriodWindow(stamp, win, zone)
+    fun inWin(stamp: String?) = data.inWindow(stamp, win, zone)
     val plainDone = data.tasks.filter { !isTemplateTask(it) && it.done && inWin(it.completedAt) }
     val occDone = data.blocks.filter { b ->
         isTaskBlock(b) && isTemplateTask(data.byId[b.taskId]) && b.done && !b.skipped &&
-            (if (periodStampMs(b.completedAt, zone) != null) inWin(b.completedAt) else b.date >= win.from && b.date <= win.to)
+            (if (data.stamp(b.completedAt, zone) != null) inWin(b.completedAt) else b.date >= win.from && b.date <= win.to)
     }
     return WindowFacts(
         plainDone = plainDone,
@@ -295,7 +329,7 @@ fun collectWindow(data: PeriodData, win: PeriodWindow, zone: ZoneId): WindowFact
 
 /** The local day an occurrence's check-off counts on: its completedAt's day,
  *  else its block date. */
-fun occurrenceDay(b: CalBlock, zone: ZoneId): String = periodDayOf(b.completedAt, zone) ?: b.date
+fun occurrenceDay(b: CalBlock, data: PeriodData, zone: ZoneId): String = data.stamp(b.completedAt, zone)?.day ?: b.date
 
 // ── plan vs outcome (§3.4, judged days only) ────────────────────────────────
 
@@ -352,18 +386,18 @@ fun planFacts(data: PeriodData, r: PeriodRange, nowMs: Long, zone: ZoneId): Plan
     val slipped = ArrayList<SlippedTask>()
     for ((id, date) in plannedPlain) {
         val t = data.byId[id]!!
-        if (t.done && (periodStampMs(t.completedAt, zone) == null || periodDayOf(t.completedAt, zone)!! <= r.end)) plainDoneN++
+        val doneDay = data.stamp(t.completedAt, zone)?.day
+        if (t.done && (doneDay == null || doneDay <= r.end)) plainDoneN++
         else slipped += SlippedTask(t, date)
     }
     slipped.sortWith(compareBy<SlippedTask> { it.date }.thenBy { periodCleanName(it.task.name) }.thenBy { it.task.id })
     val deadlines = data.tasks.filter { t ->
-        val due = periodStampMs(t.dueAt, zone)
-        if (isTemplateTask(t) || due == null || due >= nowMs) return@filter false
-        val d = periodDayOf(t.dueAt, zone)!!
-        if (d < r.from || d > r.end) return@filter false
-        val doneAt = if (t.done) periodStampMs(t.completedAt, zone) else null
-        !(doneAt != null && doneAt <= due)
-    }.sortedWith(compareBy<TaskItem> { periodStampMs(it.dueAt, zone)!! }.thenBy { it.id })
+        val dueInfo = data.stamp(t.dueAt, zone)
+        if (isTemplateTask(t) || dueInfo == null || dueInfo.ms >= nowMs) return@filter false
+        if (dueInfo.day < r.from || dueInfo.day > r.end) return@filter false
+        val doneAt = if (t.done) data.stamp(t.completedAt, zone)?.ms else null
+        !(doneAt != null && doneAt <= dueInfo.ms)
+    }.sortedWith(compareBy<TaskItem> { data.stamp(it.dueAt, zone)!!.ms }.thenBy { it.id })
     val missedSorted = missed.values.sortedWith(compareByDescending<SeriesCount> { it.n }.thenBy { it.name }.thenBy { it.id })
     return PlanFacts(plannedPlain, plainDoneN, slipped, occPlanned, occDoneN, missedSorted, skipped, deadlines)
 }
@@ -417,7 +451,7 @@ fun renderPeriodReview(
     val doneTotal = cur.doneCount
     val plain = cur.plainDone.sortedWith(
         compareByDescending<TaskItem> { it.estimateMin }
-            .thenBy { periodStampMs(it.completedAt, zone)!! }
+            .thenBy { data.stamp(it.completedAt, zone)!!.ms }
             .thenBy { it.id },
     )
     val series = LinkedHashMap<String, SeriesCount>()
@@ -443,14 +477,14 @@ fun renderPeriodReview(
     if (n == 0) lines += "Focus: no focus sessions logged."
     else {
         val longest = cur.sessions.sortedWith(
-            compareByDescending<Session> { secOf(it) }.thenBy { periodStampMs(it.completedAt, zone)!! }.thenBy { it.id },
+            compareByDescending<Session> { secOf(it) }.thenBy { data.stamp(it.completedAt, zone)!!.ms }.thenBy { it.id },
         ).first()
         if (n == 1) lines += "Focus: 1 session, ${periodDur(periodMinutes(cur.focusSec))} on ${q(longest.taskName)}."
         else {
             var line = "Focus: $n sessions, ${periodDur(periodMinutes(cur.focusSec))} in all, average ${periodDur(periodMinutes(cur.focusSec / n))}, longest ${periodDur(periodMinutes(secOf(longest)))} on ${q(longest.taskName)}"
             if (n >= 3) {
                 // Group by task id (else cleaned name); the name shown is the NEWEST session's.
-                val newestFirst = cur.sessions.sortedWith(compareByDescending<Session> { periodStampMs(it.completedAt, zone)!! }.thenBy { it.id })
+                val newestFirst = cur.sessions.sortedWith(compareByDescending<Session> { data.stamp(it.completedAt, zone)!!.ms }.thenBy { it.id })
                 val groups = LinkedHashMap<String, Triple<String, String, Int>>()   // key → (key, name, sec)
                 for (s in newestFirst) {
                     val key = if (!s.taskId.isNullOrEmpty()) "id:${s.taskId}" else "name:${periodCleanName(s.taskName)}"
@@ -484,7 +518,7 @@ fun renderPeriodReview(
         if (plan.skipped > 0) bits += "${plural(plan.skipped, "repeating day")} skipped on purpose"
         if (plan.deadlines.isNotEmpty()) {
             val more = if (plan.deadlines.size > MAX_DEADLINES) " +${plan.deadlines.size - MAX_DEADLINES} more" else ""
-            bits += "${plural(plan.deadlines.size, "deadline")} missed — ${plan.deadlines.take(MAX_DEADLINES).joinToString(", ") { "${q(it.name)} (${periodFmtDay(periodDayOf(it.dueAt, zone)!!, y)})" }}$more"
+            bits += "${plural(plan.deadlines.size, "deadline")} missed — ${plan.deadlines.take(MAX_DEADLINES).joinToString(", ") { "${q(it.name)} (${periodFmtDay(data.stamp(it.dueAt, zone)!!.day, y)})" }}$more"
         }
         planRecorded = plan.planned > 0 || bits.isNotEmpty()
         lines += when {
@@ -511,7 +545,7 @@ fun renderPeriodReview(
         also += "pauses: ${g.entries.sortedWith(compareByDescending<Map.Entry<String, Int>> { it.value }.thenBy { it.key }).take(MAX_PAUSES).joinToString(", ") { "${it.key} ×${it.value}" }}"
     }
     if (r.days >= 2) {
-        val perDay = perDayCounts(cur, zone)
+        val perDay = perDayCounts(cur, data, zone)
         val best = perDay.entries.sortedWith(
             compareByDescending<Map.Entry<String, DayCount>> { it.value.done }.thenByDescending { it.value.sec }.thenBy { it.key },
         ).firstOrNull()
@@ -577,12 +611,12 @@ fun capPeriodReview(headIn: List<String>, tail: List<String>, areaLine: String?,
  *  [occurrenceDay]) and focus seconds / sessions by the session's END day. */
 data class DayCount(val done: Int = 0, val sec: Int = 0, val sessions: Int = 0)
 
-fun perDayCounts(w: WindowFacts, zone: ZoneId): Map<String, DayCount> {
+fun perDayCounts(w: WindowFacts, data: PeriodData, zone: ZoneId): Map<String, DayCount> {
     val perDay = LinkedHashMap<String, DayCount>()
     fun at(d: String) = perDay[d] ?: DayCount()
-    for (t in w.plainDone) { val d = periodDayOf(t.completedAt, zone)!!; perDay[d] = at(d).let { it.copy(done = it.done + 1) } }
-    for (b in w.occDone) { val d = occurrenceDay(b, zone); perDay[d] = at(d).let { it.copy(done = it.done + 1) } }
-    for (s in w.sessions) { val d = periodDayOf(s.completedAt, zone)!!; perDay[d] = at(d).let { it.copy(sec = it.sec + secOf(s), sessions = it.sessions + 1) } }
+    for (t in w.plainDone) { val d = data.stamp(t.completedAt, zone)!!.day; perDay[d] = at(d).let { it.copy(done = it.done + 1) } }
+    for (b in w.occDone) { val d = occurrenceDay(b, data, zone); perDay[d] = at(d).let { it.copy(done = it.done + 1) } }
+    for (s in w.sessions) { val d = data.stamp(s.completedAt, zone)!!.day; perDay[d] = at(d).let { it.copy(sec = it.sec + secOf(s), sessions = it.sessions + 1) } }
     return perDay
 }
 

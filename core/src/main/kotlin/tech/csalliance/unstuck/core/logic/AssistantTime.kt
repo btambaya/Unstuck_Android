@@ -220,7 +220,8 @@ private fun nearestSeriesDaysText(days: List<Int>, date: String, today: String):
  * checks own that). The same rule as web (weekday-guard.ts) and iOS
  * (SeriesWeekday.swift); each platform words it its own way.
  */
-fun rejectOffSeriesDay(taskName: String, recurrence: Recurrence?, date: String, today: String): String? {
+fun rejectOffSeriesDay(taskName: String, recurrence: Recurrence?, date: String, today: String, placesSeries: Boolean = false): String? {
+    if (recurrence is Recurrence.EveryNWeeks) return rejectOffNWeeksDay(taskName, recurrence, date, today, placesSeries)
     val weekly = recurrence as? Recurrence.Weekly ?: return null
     if (!ISO_DATE_RE.matches(date) || IsoDate.parse(date) == null) return null
     val days = cleanWeekdays(weekly.daysOfWeek)
@@ -232,6 +233,65 @@ fun rejectOffSeriesDay(taskName: String, recurrence: Recurrence?, date: String, 
         "${nearestSeriesDaysText(days, date, today)} " +
         "Call schedule_task again with the day the user meant; only if they asked for $asked itself (a one-off move off its usual day), call it again with $date unchanged. " +
         "To change the days it repeats on, call set_task_recurrence instead."
+}
+
+/** "Thu 8 Oct" — the short day an every-N-weeks refusal and the
+ *  set_task_recurrence ok line name (US English, like [doneWhenLabel]). */
+fun shortDayLabel(iso: String): String = IsoDate.parse(iso)?.format(DONE_WHEN_FORMAT) ?: iso
+
+/** Is [date] off an every-N-weeks series only by its WEEK (its weekday is one
+ *  of the series' days)? The schedule_task ok line then says "in an off week"
+ *  rather than "on a Friday". */
+fun isOffWeekOnly(recurrence: Recurrence?, date: String): Boolean {
+    if (recurrence !is Recurrence.EveryNWeeks || IsoDate.parse(date) == null) return false
+    return IsoDate.dayOfWeek(date) in everyNWeeksDays(recurrence) && !ruleHasDate(recurrence.copy(until = null), date)
+}
+
+/**
+ * The every-N-weeks arm of [rejectOffSeriesDay] (every-n-weeks spec §7.3, the
+ * A1 guard extended): a day that is not one of the series' weekdays, or one of
+ * them in an OFF week, is refused once, naming the nearest dates the rule has —
+ * found up to 7·N days away (a ±7-day search named no day at all for every 4
+ * weeks). A first placement ([placesSeries]: nothing live after today)
+ * re-anchors the series on the day given, so every week is valid then; only its
+ * weekday is checked, and the nearest days are the plain weekdays.
+ */
+private fun rejectOffNWeeksDay(taskName: String, r: Recurrence.EveryNWeeks, date: String, today: String, placesSeries: Boolean): String? {
+    if (!ISO_DATE_RE.matches(date) || IsoDate.parse(date) == null) return null
+    if (!isValidEveryNWeeks(r)) return null
+    val days = everyNWeeksDays(r)
+    if (days.isEmpty()) return null
+    val dow = IsoDate.dayOfWeek(date)
+    val offDay = dow !in days
+    val rule: Recurrence = if (placesSeries) Recurrence.Weekly(days) else r.copy(until = null)
+    if (!offDay && (placesSeries || ruleHasDate(rule, date))) return null
+    val nearest = ArrayList<String>()
+    val span = 7 * (if (placesSeries) 1 else minOf(r.interval, 520))
+    for (back in 1..span) {
+        val d = IsoDate.addDays(date, -back)
+        if (d < today) break
+        if (ruleHasDate(rule, d)) { nearest += d; break }
+    }
+    nextRuleDate(rule, IsoDate.addDays(date, 1))?.let { nearest += it }
+    val label = if (days.size == 1) WEEKDAY_NAMES_CAP[days[0]] else "day"
+    val listed = nearest.joinToString(" and ") { "${shortDayLabel(it)} ($it)" }
+    val nearestText = when (nearest.size) {
+        0 -> ""
+        1 -> "The nearest $label it repeats on is $listed. "
+        else -> "The nearest ${label}s it repeats on are $listed. "
+    }
+    val every = "repeats every ${r.interval} weeks on ${weekdayList(days)}"
+    return if (offDay) {
+        val asked = WEEKDAY_NAMES_CAP[dow]
+        "error: \"$taskName\" $every, but $date is a $asked — nothing was scheduled. " + nearestText +
+            "Call schedule_task again with the day the user meant; only if they asked for $asked itself (a one-off move off its usual day), call it again with $date unchanged. " +
+            "To change the days or weeks it repeats on, call set_task_recurrence instead."
+    } else {
+        val asked = shortDayLabel(date)
+        "error: \"$taskName\" $every, and $asked is an off week — nothing was scheduled. " + nearestText +
+            "Call schedule_task again with the day the user meant; only if they asked for $asked itself (a one-off in an off week), call it again with $date unchanged. " +
+            "To change the days or weeks it repeats on, call set_task_recurrence instead."
+    }
 }
 
 /**

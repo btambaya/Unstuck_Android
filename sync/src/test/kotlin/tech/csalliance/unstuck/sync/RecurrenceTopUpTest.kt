@@ -195,6 +195,19 @@ class RecurrenceTopUpTest {
         assertTrue(RecurrenceHorizonTopUp.serverAgrees(series.copy(recurrence = Recurrence.Weekly(listOf(1, 3))), series.copy(recurrence = Recurrence.Weekly(listOf(3, 1)))))
     }
 
+    /** Every N weeks (spec §8.1): the server agrees when the interval, the days
+     *  (as a set), week one's Monday and until match — without this arm the
+     *  `else -> false` skipped every N-week series for good. */
+    @Test fun anEveryNWeeksSeriesTheServerAgreesWithIsToppedUp() {
+        val a = series.copy(recurrence = Recurrence.EveryNWeeks(2, listOf(4, 1), "2026-09-21"))
+        assertTrue(RecurrenceHorizonTopUp.serverAgrees(a, a.copy(recurrence = Recurrence.EveryNWeeks(2, listOf(1, 4), "2026-09-24"))))
+        assertFalse("another N", RecurrenceHorizonTopUp.serverAgrees(a, a.copy(recurrence = Recurrence.EveryNWeeks(3, listOf(1, 4), "2026-09-21"))))
+        assertFalse("other weeks", RecurrenceHorizonTopUp.serverAgrees(a, a.copy(recurrence = Recurrence.EveryNWeeks(2, listOf(1, 4), "2026-09-28"))))
+        assertFalse("another until", RecurrenceHorizonTopUp.serverAgrees(a, a.copy(recurrence = Recurrence.EveryNWeeks(2, listOf(1, 4), "2026-09-21", "2026-12-31"))))
+        assertFalse("weekly now", RecurrenceHorizonTopUp.serverAgrees(a, a.copy(recurrence = Recurrence.Weekly(listOf(1, 4)))))
+        assertFalse("a lagging weekly copy against the server's rule", RecurrenceHorizonTopUp.serverAgrees(a.copy(recurrence = Recurrence.Weekly(listOf(4))), a))
+    }
+
     /** A failed server check mints nothing and does not use the day up. */
     @Test fun aFailedSeriesCheckWaitsForTheNextPull() = runTest {
         seedServerSeries()

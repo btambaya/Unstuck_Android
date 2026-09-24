@@ -21,8 +21,10 @@ class PeriodReviewWiringTest {
 
     @Test fun `the text request reports toolCaps, the shared context does not`() = runTest {
         val text = buildTextRequestContext(api())
-        assertEquals(listOf("period_review"), text["toolCaps"]!!.jsonArray.map { it.jsonPrimitive.content })
-        assertEquals(ToolRegistry.CAPS, listOf("period_review"))
+        // + recurrence_interval (every-n-weeks spec §7.1): this build executes
+        // set_task_recurrence's intervalWeeks, so the server may offer it.
+        assertEquals(listOf("period_review", "recurrence_interval"), text["toolCaps"]!!.jsonArray.map { it.jsonPrimitive.content })
+        assertEquals(ToolRegistry.CAPS, listOf("period_review", "recurrence_interval"))
         // Everything else is the same snapshot.
         val shared = buildAssistantContext(api())
         assertNull(shared["toolCaps"])

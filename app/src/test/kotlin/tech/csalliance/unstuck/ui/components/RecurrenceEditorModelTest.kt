@@ -1,0 +1,87 @@
+package tech.csalliance.unstuck.ui.components
+
+import androidx.compose.runtime.saveable.SaverScope
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
+import org.junit.Test
+import tech.csalliance.unstuck.core.logic.StartsChip
+import tech.csalliance.unstuck.core.model.Recurrence
+import tech.csalliance.unstuck.ui.tasks.RecurrenceSaver
+
+/**
+ * The repeat picker's every-N-weeks half (every-n-weeks spec §5/§6, Ahmad
+ * 2026-09-24): chips Every week · 2 weeks · 3 weeks · 4 weeks (a 5–8 rhythm the
+ * assistant set shows as a fifth), the "Starts" chips, and the week one each
+ * pick writes — the create sheet's and the task sheet's.
+ */
+class RecurrenceEditorModelTest {
+    private val m = RecurrenceEditorModel
+    private val v1 = Recurrence.EveryNWeeks(2, listOf(4), "2026-09-21")
+
+    @Test fun `interval chips are 1 to 4, plus the assistant's 5 to 8`() {
+        assertEquals(listOf(1, 2, 3, 4), m.intervalChoices(1))
+        assertEquals(listOf(1, 2, 3, 4), m.intervalChoices(3))
+        assertEquals(listOf(1, 2, 3, 4, 6), m.intervalChoices(6))
+        assertEquals(listOf("Every week", "2 weeks", "3 weeks", "4 weeks", "Every 6 weeks"),
+            m.intervalChoices(6).map(m::intervalLabel))
+        assertEquals(2, m.intervalOf(v1))
+        assertEquals(1, m.intervalOf(Recurrence.Weekly(listOf(4))))
+        assertEquals(listOf(4), m.daysOf(Recurrence.EveryNWeeks(2, listOf(4, 9, -1), "2026-09-21")))
+    }
+
+    @Test fun `every week is plain weekly`() {
+        assertEquals(Recurrence.Weekly(listOf(4), "2026-12-31"), m.rule(v1, listOf(4), 1, "2026-12-31", "2026-09-24", "2026-09-24"))
+    }
+
+    /** Create: week one is the first series day on or after the picked day. */
+    @Test fun `create defaults to the first Starts chip`() {
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-21"), m.rule(null, listOf(4), 2, null, "2026-09-24", "2026-09-24"))
+        // A Friday pick for a Thursday rule: the next Thursday's week, not N weeks out.
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28"), m.rule(null, listOf(4), 2, null, "2026-09-24", "2026-09-25"))
+        val chips = m.starts(null, Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28"), "2026-09-24", "2026-09-25")
+        assertEquals(listOf(StartsChip("2026-10-01", "2026-09-28") to true, StartsChip("2026-10-08", "2026-10-05") to false), chips)
+    }
+
+    /** Edit keeping N: the stored weeks (days, time or until changed). */
+    @Test fun `an edit that keeps N keeps the stored weeks, and pre-selects them`() {
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(5), "2026-09-21"), m.rule(v1, listOf(5), 2, null, "2026-09-30", "2026-10-08"))
+        val chips = m.starts(v1, v1, "2026-09-30", "2026-10-08")
+        assertEquals(listOf("2026-10-08", "2026-10-15"), chips.map { it.first.date })
+        assertEquals(listOf(true, false), chips.map { it.second })
+    }
+
+    /** Edit changing N (E3) and weekly → every 2 weeks: the current rule's next
+     *  date's week stays week one. */
+    @Test fun `an edit changing N keeps the next occurrence`() {
+        assertEquals(Recurrence.EveryNWeeks(3, listOf(4), "2026-10-05"), m.rule(v1, listOf(4), 3, null, "2026-09-30", "2026-09-30"))
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28"), m.rule(Recurrence.Weekly(listOf(4)), listOf(4), 2, null, "2026-09-30", "2026-09-30"))
+    }
+
+    /** A Starts pick writes that week's Monday. */
+    @Test fun `a Starts pick writes its week`() {
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-10-05"), m.rule(v1, listOf(4), 2, null, "2026-09-30", "2026-09-30", anchor = "2026-10-05"))
+    }
+
+    /** The create sheet schedules the first chip on the picked day (a one-off on
+     *  an off weekday, as for weekly), a later chip on its own day — the weeks
+     *  the Schedule step's re-anchor lands on are the chip's either way. */
+    @Test fun `create starts on the picked day, or on a later chip's day`() {
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28") to "2026-09-25",
+            m.createStart(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28"), "2026-09-25"))
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-10-05") to "2026-10-08",
+            m.createStart(Recurrence.EveryNWeeks(2, listOf(4), "2026-10-05"), "2026-09-25"))
+        // A stale anchor with the same weeks is written as the chip's Monday.
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28") to "2026-09-25",
+            m.createStart(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-14"), "2026-09-25"))
+        assertEquals(Recurrence.Weekly(listOf(4)) to "2026-09-25", m.createStart(Recurrence.Weekly(listOf(4)), "2026-09-25"))
+    }
+
+    /** The create sheet's draft survives a rotation with its rhythm and weeks. */
+    @Test fun `the draft saver round-trips every N weeks`() {
+        val scope = object : SaverScope { override fun canBeSaved(value: Any) = true }
+        val r = Recurrence.EveryNWeeks(3, listOf(1, 4), "2026-09-21", "2026-12-31")
+        val saved = with(RecurrenceSaver) { scope.save(r) }!!
+        assertEquals(r, RecurrenceSaver.restore(saved))
+        assertTrue(RecurrenceSaver.restore(with(RecurrenceSaver) { scope.save(Recurrence.Weekly(listOf(2))) }!!) is Recurrence.Weekly)
+    }
+}

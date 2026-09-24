@@ -88,22 +88,30 @@ import tech.csalliance.unstuck.ui.AppViewModel
 // Savers so the draft survives a config change (rotation / dark-mode flip / locale /
 // split-screen): Activity recreation must not silently discard a half-typed task.
 
-/** [kind, until, daysOfWeek("|"-joined)] strings; empty list = does not repeat. */
-private val RecurrenceSaver = listSaver<Recurrence?, String>(
+/** [kind, until, daysOfWeek("|"-joined), interval, anchor] strings; empty list =
+ *  does not repeat (interval + anchor for every N weeks only). */
+internal val RecurrenceSaver = listSaver<Recurrence?, String>(
     save = { r ->
         when (r) {
             null -> emptyList()
             is Recurrence.Daily -> listOf("daily", r.until.orEmpty())
             is Recurrence.Monthly -> listOf("monthly", r.until.orEmpty())
             is Recurrence.Weekly -> listOf("weekly", r.until.orEmpty(), r.daysOfWeek.joinToString("|"))
+            is Recurrence.EveryNWeeks -> listOf("everyNWeeks", r.until.orEmpty(), r.daysOfWeek.joinToString("|"), r.interval.toString(), r.anchor)
         }
     },
     restore = { saved ->
         val until = saved.getOrNull(1)?.ifBlank { null }
+        val days = saved.getOrNull(2)?.split("|")?.mapNotNull { it.toIntOrNull() }.orEmpty()
         when (saved.firstOrNull()) {
             "daily" -> Recurrence.Daily(until)
             "monthly" -> Recurrence.Monthly(until)
-            "weekly" -> Recurrence.Weekly(saved.getOrNull(2)?.split("|")?.mapNotNull { it.toIntOrNull() }.orEmpty(), until)
+            "weekly" -> Recurrence.Weekly(days, until)
+            "everyNWeeks" -> {
+                val n = saved.getOrNull(3)?.toIntOrNull()
+                val anchor = saved.getOrNull(4)
+                if (n != null && n >= 2 && anchor != null) Recurrence.EveryNWeeks(n, days, anchor, until) else Recurrence.Weekly(days, until)
+            }
             else -> null
         }
     },
@@ -234,14 +242,19 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     // silently dropped, the live T2 bug). Failures are logged, not swallowed.
     fun submit() {
         if (!canSubmit) return
+        // Every N weeks: week one is the "Starts" chip shown as picked, and a later
+        // chip's day is where the series is scheduled from (spec §5).
+        val (rule, firstDate) = if (effectiveDate != null) {
+            tech.csalliance.unstuck.ui.components.RecurrenceEditorModel.createStart(recurrence, effectiveDate)
+        } else recurrence to null
         val t = vm.addTask(
             name = name, estimateMin = estimate, lifeArea = area, tags = tags.toList().ifEmpty { null },
-            firstPhysicalAction = null, recurrence = recurrence,
+            firstPhysicalAction = null, recurrence = rule,
             later = whenSel == "Later",
             shares = shareLevels.toMap(),
         )
-        if (whenSel != "Later" && effectiveDate != null && pickedTime != null) {
-            vm.scheduleTask(t, effectiveDate, pickedTime!!)
+        if (whenSel != "Later" && firstDate != null && pickedTime != null) {
+            vm.scheduleTask(t, firstDate, pickedTime!!)
         }
         onDismiss()
     }
@@ -423,7 +436,9 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                     SectionLabel("Tags")
                     tech.csalliance.unstuck.ui.components.TagPicker(vm, tags.toList()) { tags.clear(); tags.addAll(it) }
 
-                    tech.csalliance.unstuck.ui.components.RecurrenceEditor(recurrence) { recurrence = it }
+                    tech.csalliance.unstuck.ui.components.RecurrenceEditor(
+                        recurrence, todayIso = todayIso, startIso = effectiveDate ?: todayIso,
+                    ) { recurrence = it }
                 }
             }
 

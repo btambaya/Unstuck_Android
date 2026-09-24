@@ -97,6 +97,30 @@ class DbRowCodecTest {
         assertEquals("2026-05-21T11:00:00.000Z", back.completedAt)
     }
 
+    /** Every N weeks (every-n-weeks spec §2): the whole-row write sends the
+     *  canonical jsonb (camelCase keys, kind first, until only when set), and the
+     *  server shape reads back as the same rule. */
+    @Test fun everyNWeeksRoundTripsThroughServerShape() {
+        val r = Recurrence.EveryNWeeks(2, listOf(4), "2026-09-21")
+        val o = DbRowCodec.encodeTask(task().copy(recurrence = r))
+        assertEquals("""{"kind":"everyNWeeks","interval":2,"daysOfWeek":[4],"anchor":"2026-09-21"}""", o["recurrence"].toString())
+        assertEquals(r, DbRowCodec.decodeTask(o).recurrence)
+        val withUntil = r.copy(until = "2026-12-31")
+        assertEquals(withUntil, DbRowCodec.decodeTask(DbRowCodec.encodeTask(task().copy(recurrence = withUntil))).recurrence)
+    }
+
+    /** A malformed rule from the server keeps the task (the unknown sentinel),
+     *  and this build would write exactly the sentinel migration 081 keeps the
+     *  stored rule under. */
+    @Test fun aMalformedEveryNWeeksRowKeepsTheTask() {
+        val row = JsonObject(DbRowCodec.encodeTask(task()) + ("recurrence" to kotlinx.serialization.json.Json.parseToJsonElement(
+            """{"kind":"everyNWeeks","interval":"2","daysOfWeek":[4],"anchor":"2026-09-21"}""")))
+        val t = DbRowCodec.decodeTask(row)
+        assertEquals("Ship", t.name)
+        assertTrue(tech.csalliance.unstuck.core.model.RecurrenceSerializer.isUnknown(t.recurrence))
+        assertEquals("""{"kind":"daily","until":"0001-01-01"}""", DbRowCodec.encodeTask(t)["recurrence"].toString())
+    }
+
     @Test fun decodeIgnoresExtraServerColumns() {
         // The server returns user_id + created_at etc. — ignoreUnknownKeys keeps decode happy.
         val withExtra = JsonObject(

@@ -551,6 +551,40 @@ class CatchUpConvergenceTest {
         assertTrue("and it re-seeds them", puller.hasCursors(uid))
     }
 
+    // ── 7b. an upgrade re-reads a rule the old build could not (every-n-weeks §3.3) ─
+
+    /**
+     * vc107 decoded an `everyNWeeks` row to the unknown sentinel and stored THAT
+     * in Room, with cursors past the row. The upgraded build needs no
+     * codec-version re-read: the first pull of every process is a full,
+     * server-canonical hydrate (`FreshnessOwner.hydratedFor` starts null, since
+     * A11 / 023d753), so the row decodes to the new case on the first launch. A
+     * catch-up alone would never have fetched it again (nothing newer than the
+     * mark) — the second half shows why the full hydrate is what matters.
+     */
+    @Test fun anUpgradedBuildRereadsAStoredSentinel_onItsFirstPull() = runTest {
+        val rule = tech.csalliance.unstuck.core.model.Recurrence.EveryNWeeks(2, listOf(4), "2026-09-21")
+        val stamp = "2027-01-15T08:00:00.000Z"
+        val onServer = task("a", stamp, "Office Focus").copy(recurrence = rule)
+        remote.put(Tables.TASKS, DbRowCodec.encodeTask(onServer))
+        // vc107's local copy: the sentinel, and the marks of an earlier session.
+        val sentinel = onServer.copy(recurrence = tech.csalliance.unstuck.core.model.Recurrence.Daily(tech.csalliance.unstuck.core.model.RecurrenceSerializer.UNKNOWN_UNTIL))
+        store.upsert(Tables.TASKS, sentinel, TaskItem.serializer(), sentinel.id, sentinel.updatedAt)
+        puller.seedCursors(uid, mapOf(Tables.TASKS to "2027-01-15T09:00:00Z"))
+        assertTrue(puller.hasCursors(uid))
+
+        // A catch-up alone leaves the stale copy: nothing is newer than the mark.
+        puller.catchUp(uid)
+        assertTrue(tech.csalliance.unstuck.core.model.RecurrenceSerializer.isUnknown(localTasks().single().recurrence))
+
+        // The upgraded build's process: a fresh owner, its first request.
+        val scope = CoroutineScope(StandardTestDispatcher(testScheduler))
+        val o = owner(scope)
+        o.freshness.requestAndWait(FreshnessTrigger.COLD_START)
+        advanceUntilIdle()
+        assertEquals(rule, localTasks().single().recurrence)
+    }
+
     // ── 8. shared-list membership through the catch-up (audit 2026-09-22 C8) ─
     //
     // The owner's phone decides "shared" from the local members[]; with none it

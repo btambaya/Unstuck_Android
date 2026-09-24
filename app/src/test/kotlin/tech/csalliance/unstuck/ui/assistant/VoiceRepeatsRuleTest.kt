@@ -9,22 +9,28 @@ import tech.csalliance.unstuck.core.logic.AssistantGuard
 /**
  * REPEATS (Zubair's iOS morning call, 2026-09-24): asked for "every two weeks
  * on Thursdays", the model set weekly first and only then said it couldn't do
- * fortnightly. The spoken prompt says an unsupported repeat before setting
- * anything — verbatim web `REPEATS_RULE` (lib/assistant/tools.ts, pinned there
- * by voice-register.test.ts), in the same place: with the rules of conduct,
- * after CALLS and before HOW YOU SPEAK. The registry's set_task_recurrence
- * description carries the same rule for text and voice.
+ * fortnightly. This build executes set_task_recurrence's intervalWeeks (every-n-
+ * weeks spec §7.1), so the spoken rule names every 2–8 weeks — verbatim the
+ * shared vectors' prompts.voiceRepeatsRule (web REPEATS_RULE and iOS carry the
+ * same text), in the same place: with the rules of conduct, after CALLS and
+ * before HOW YOU SPEAK. An unsupported repeat is still said first, as a question.
  */
 class VoiceRepeatsRuleTest {
     private fun api() = AssistantToolsTest().FakeApi()
 
-    private val rule =
-        "REPEATS: a task can repeat daily, weekly on chosen days, or monthly, optionally until a last date — nothing else. " +
-            "If they ask for a repeat those can't express (every two weeks, every other month, the third Tuesday), say so FIRST and offer the closest options " +
-            "as a question (\"Every other week isn't an option — weekly on Thursdays, or just this one?\"), never as \"I'll set it weekly…\"; " +
-            "never set a different pattern before they agree to it. "
+    /** prompts.voiceRepeatsRule, read from core's generated vectors (no second copy). */
+    private val rule: String = run {
+        val rel = "core/src/test/kotlin/tech/csalliance/unstuck/core/RecurrenceVectors.generated.kt"
+        val src = listOf(java.io.File("../$rel"), java.io.File(rel)).first { it.exists() }.readText()
+        val open = "const val JSON: String = \"\"\""
+        val body = src.substring(src.indexOf(open) + open.length, src.lastIndexOf("\"\"\"")).replace("\${\"$\"}", "$")
+        kotlinx.serialization.json.Json.parseToJsonElement(body).let {
+            (it as kotlinx.serialization.json.JsonObject)["prompts"]!!.let { p -> (p as kotlinx.serialization.json.JsonObject)["voiceRepeatsRule"]!! }
+        }.let { (it as kotlinx.serialization.json.JsonPrimitive).content }
+    }
 
-    @Test fun `the voice instructions carry the web REPEATS rule verbatim, with the rules of conduct`() = runTest {
+    @Test fun `the voice instructions carry the shared REPEATS rule verbatim, with the rules of conduct`() = runTest {
+        assertTrue(rule, rule.startsWith("REPEATS: a task can repeat daily, weekly or every 2–8 weeks on chosen days"))
         val v = buildVoiceInstructions(api())
         assertTrue(v.contains(rule))
         val at = v.indexOf(rule)
@@ -40,14 +46,18 @@ class VoiceRepeatsRuleTest {
         val example = Regex("\\(\"([^\"]+)\"\\)").find(rule)!!.groupValues[1]
         assertTrue(example, example.endsWith("?"))
         assertFalse(AssistantGuard.looksLikeActionClaim(example))
-        assertFalse(AssistantGuard.looksLikeActionClaim("I can't do every two weeks — want it weekly on Thursdays instead, or just today?"))
-        assertTrue(AssistantGuard.looksLikeActionClaim("Fortnightly isn't an option. I'll set it weekly on Thursdays if that works for you?"))
+        assertFalse(AssistantGuard.looksLikeActionClaim("I can't do every other month — want it monthly instead, or just this one?"))
+        assertTrue(AssistantGuard.looksLikeActionClaim("Every other month isn't an option. I'll set it monthly if that works for you?"))
     }
 
+    /** The capable description (this build reports recurrence_interval): every
+     *  2–8 weeks named within voice compaction's 90-character first sentence, and
+     *  the say-so-first rule for everything else. */
     @Test fun `the registry's set_task_recurrence description says the same, for text and voice`() {
         val desc = ToolRegistry.JSON
-        assertTrue(desc.contains("Those are the ONLY repeats there are"))
-        assertTrue(desc.contains("SAY SO FIRST and offer the closest ones"))
+        assertTrue(desc.contains("Repeat a task daily, weekly or every 2–8 weeks on given days, or monthly; kind=none stops it."))
+        assertTrue(desc.contains("SAY SO FIRST and offer the closest as a question"))
+        assertTrue(desc.contains("\"description\":\"Every N weeks, 1–8 (2 = every other week / fortnightly)."))
         // create_task with a date and time is already on the calendar (the
         // redundant schedule_task of the same call).
         assertTrue(desc.contains("never follow it with schedule_task for the same day and time"))

@@ -767,8 +767,15 @@ class AppViewModel(
         // The cleared row then REPLACES `task` below, so the move-count bump's
         // whole-row upsert can't write later=true straight back.
         val cleared = clearLaterOnSchedule(original, isoNow())
-        cleared?.let { write?.upsertTask(it) }
-        val task = cleared ?: original
+        // Scheduling a series on a day means "the series starts here" (every-n-weeks
+        // spec §5, Ahmad 2026-09-24): an every-N-weeks rule takes the chosen day's
+        // week as week one. Only an off-week choice changes anything; the row is
+        // written (with the un-park, in one write) BEFORE the plan and any top-up
+        // read the rule, and every whole-row write below builds on it.
+        val reanchored = tech.csalliance.unstuck.core.logic.reanchorForSchedule((cleared ?: original).recurrence, date)
+        val rowWrite = reanchored?.let { (cleared ?: original).copy(recurrence = it, updatedAt = isoNow()) } ?: cleared
+        rowWrite?.let { write?.upsertTask(it) }
+        val task = rowWrite ?: original
         val recurrence = task.recurrence
         val existing = blocks.value.filter { it.taskId == task.id && tech.csalliance.unstuck.core.logic.isTaskBlock(it) }
         if (recurrence != null) {

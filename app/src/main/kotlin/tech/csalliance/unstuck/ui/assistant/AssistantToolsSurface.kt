@@ -88,7 +88,14 @@ private fun taskLine(t: TaskItem, tasks: List<TaskItem>, blocks: List<CalBlock>,
     t.lifeArea?.takeIf { it.isNotEmpty() }?.let { sb.append(" · $it") }
     t.tags?.takeIf { it.isNotEmpty() }?.let { sb.append(" · #${it.joinToString(" #")}") }
     if (b != null) sb.append(" · ${b.date} ${b.startTime}")
-    if (occ != null || t.recurrence != null) sb.append(" · repeats")
+    if (occ != null || t.recurrence != null) {
+        // Every N weeks says its rhythm, so a later turn can answer "how often?"
+        // (every-n-weeks spec §7.3; an omitted intervalWeeks keeps it anyway).
+        val rule = t.recurrence ?: occ?.taskId?.let { id -> tasks.firstOrNull { it.id == id }?.recurrence }
+        val n = (rule as? tech.csalliance.unstuck.core.model.Recurrence.EveryNWeeks)
+            ?.takeIf { tech.csalliance.unstuck.core.logic.isValidEveryNWeeks(it) && it.interval >= 2 }?.interval
+        sb.append(if (n != null) " · repeats every $n weeks" else " · repeats")
+    }
     if (t.later == true) sb.append(" · Later")
     if ((t.moveCount ?: 0) >= 3) sb.append(" · slipped ${t.moveCount}×")
     // When it was created — "the ones I created last week" (Ahmad, 2026-09-20:

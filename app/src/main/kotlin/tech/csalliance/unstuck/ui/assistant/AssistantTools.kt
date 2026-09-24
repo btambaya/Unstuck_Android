@@ -17,6 +17,13 @@ import tech.csalliance.unstuck.core.logic.NOTHING_TO_CHANGE
 import tech.csalliance.unstuck.core.logic.ProfileFactsLogic
 import tech.csalliance.unstuck.core.logic.WEEKDAY_NAMES_CAP
 import tech.csalliance.unstuck.core.logic.hmToMin
+import tech.csalliance.unstuck.core.logic.isOffWeekOnly
+import tech.csalliance.unstuck.core.logic.isValidEveryNWeeks
+import tech.csalliance.unstuck.core.logic.liveRuleDates
+import tech.csalliance.unstuck.core.logic.nWeeksAnchor
+import tech.csalliance.unstuck.core.logic.reanchorForSchedule
+import tech.csalliance.unstuck.core.logic.seriesAnchor
+import tech.csalliance.unstuck.core.logic.shortDayLabel
 import tech.csalliance.unstuck.core.logic.jsDayOfWeek
 import tech.csalliance.unstuck.core.logic.rejectPastDate
 import tech.csalliance.unstuck.core.logic.rejectPastTime
@@ -304,6 +311,19 @@ private suspend fun scheduleTask(api: AssistantApi, task: TaskItem, date: String
     // A series with nothing live after today (a first placement, or one that
     // lapsed) is being placed, so the time given sets the series' time.
     val placesSeries = live.none { it.date > today }
+    // …and, every N weeks, its weeks: placing a series means "it starts here"
+    // (spec §5), so week one becomes the placed day's. Written BEFORE the fill
+    // below reads the rule; nothing is written when the weeks are the same.
+    var task = task
+    if (task.recurrence != null && placesSeries) {
+        reanchorForSchedule(task.recurrence, date)?.let { re ->
+            val fresh = api.getTasks().firstOrNull { it.id == task.id } ?: task
+            val moved = fresh.copy(recurrence = re, updatedAt = api.nowIso())
+            api.upsertTask(moved)
+            scratch.newTasks[moved.id] = moved
+            task = moved
+        }
+    }
     // The target day of a series: an occurrence already there is retimed (and
     // un-skipped), a done one leaves the day alone; only an empty day moves the
     // next occurrence onto it (parity with iOS build 81, audit 2026-09-22 C7).
@@ -446,6 +466,24 @@ suspend fun runAssistantTool(name: String, args: ToolArgs, api: AssistantApi, sc
 fun unknownToolResult(name: String): String =
     "error: unknown tool \"$name\". The tools are: ${ToolRegistry.NAMES.joinToString(", ")}"
 
+/** set_task_recurrence's intervalWeeks ceiling (every-n-weeks spec §2: the
+ *  56-day horizon always holds the next occurrence up to every 8 weeks). */
+const val MAX_INTERVAL_WEEKS = 8
+
+/** A JSON number with a whole value (2 or 2.0), else null: never the string
+ *  "2", never true, never 2.5 rounded to 3 the way [ToolArgs.int] would. */
+internal fun wholeNumberArg(e: kotlinx.serialization.json.JsonElement?): Long? {
+    val p = e as? JsonPrimitive ?: return null
+    if (p.isString || p is JsonNull) return null
+    if (p.booleanOrNull != null) return null
+    val d = p.doubleOrNull ?: return null
+    if (!d.isFinite() || d != Math.floor(d) || kotlin.math.abs(d) > 1.0E9) return null
+    return d.toLong()
+}
+
+/** "every week" / "every 2 weeks" — the rhythm an ok line names. */
+private fun rhythmName(n: Int): String = if (n == 1) "every week" else "every $n weeks"
+
 /** Tags as the task stores them: trimmed, blanks dropped, case-insensitively
  *  unique, null when nothing is left (the row's own convention). */
 private fun cleanTags(raw: List<String>?): List<String>? =
@@ -529,11 +567,19 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             // Saturday Park run on a Sunday (TestFlight build 51). A day that
             // already holds one of its occurrences (a one-off moved there) is
             // fine, and the same call again is a deliberate one-off move.
+            // Every N weeks (spec §7.3): a series day in an OFF week is refused the
+            // same way — except for a FIRST placement (nothing live after today),
+            // which re-anchors the series on the day given (scheduleTask), so every
+            // week is valid there; only its weekday is checked.
             var offDay: String? = null
-            if (api.getBlocks().none { it.taskId == t.id && isTaskBlock(it) && it.date == date }) {
-                rejectOffSeriesDay(t.name, t.recurrence, date, api.todayIso())?.let { refusal ->
+            val blocksNow = api.getBlocks()
+            if (blocksNow.none { it.taskId == t.id && isTaskBlock(it) && it.date == date }) {
+                val todayNow = api.todayIso()
+                val placesSeries = t.recurrence != null &&
+                    blocksNow.none { it.taskId == t.id && !it.done && !it.skipped && it.date > todayNow }
+                rejectOffSeriesDay(t.name, t.recurrence, date, todayNow, placesSeries)?.let { refusal ->
                     if (scratch.offDayRefused.add("schedule|${t.id}|$date")) return refusal
-                    offDay = WEEKDAY_NAMES_CAP[jsDayOfWeek(date)]
+                    offDay = if (isOffWeekOnly(t.recurrence, date)) "" else WEEKDAY_NAMES_CAP[jsDayOfWeek(date)]
                 }
             }
             // No time given AND the task has never had one: don't guess — ask,
@@ -546,7 +592,7 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             val landed = scheduleTask(api, t, date, startTime, scratch)
                 ?: return "error: \"${t.name}\" is already done on $date — nothing changed"
             "ok: scheduled \"${t.name}\" $date $landed${if (startTime == null) " (kept its existing time — say so)" else ""}" +
-                (offDay?.let { " — a one-off on a $it, off the days it repeats on" } ?: "")
+                (offDay?.let { if (it.isEmpty()) " — a one-off in an off week, off the weeks it repeats on" else " — a one-off on a $it, off the days it repeats on" } ?: "")
         }
 
         "update_task" -> {
@@ -616,6 +662,18 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             }
             val until = args.str("until")
             val days = args.intList("daysOfWeek")?.distinct()?.sorted()
+            // intervalWeeks (every-n-weeks spec §7.2). kind none ignores it, like a
+            // stray daysOfWeek: Zubair's own cancel carried daysOfWeek [4]
+            // (2026-09-24), and refusing a cancel over a leftover param is wrong.
+            // Anything else checks it as given — never through the rounding int().
+            var intervalWeeks: Int? = null
+            if (kind != "none" && args.has("intervalWeeks") && !args.isNull("intervalWeeks")) {
+                val n = wholeNumberArg(args.raw["intervalWeeks"])
+                    ?: return "error: intervalWeeks must be a whole number of weeks (2 = every other week) — nothing changed"
+                if (n < 1 || n > MAX_INTERVAL_WEEKS) return "error: every N weeks goes up to every 8 weeks — nothing changed; tell the user this rhythm isn't available"
+                if (kind != "weekly" && n >= 2) return "error: every N weeks only goes with kind weekly and its days — nothing changed"
+                intervalWeeks = n.toInt()
+            }
             if (kind == "weekly") {
                 // Weekly with no days generated NOTHING and still said ok (rules §1).
                 if (days.isNullOrEmpty()) return "error: weekly needs daysOfWeek (0=Sunday … 6=Saturday) — ask which days"
@@ -632,7 +690,9 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             // variant — create_task on Sunday 2026-09-20, then weekly on Saturday,
             // started the series from the Sunday and never placed the coming
             // Saturday. Refused ONCE before anything is written (web + iOS do the
-            // same); the same call again means the series really starts there.
+            // same); the same call again means the series really starts there. It
+            // runs on the requested days BEFORE they become an every-N-weeks rule:
+            // the placed day's week becomes week one, so only its weekday can be wrong.
             if (kind == "weekly" && days != null) {
                 val today = api.todayIso()
                 val placed = scratch.placedBlocks[t.id]?.let { id ->
@@ -644,20 +704,6 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                     }
                 }
             }
-            val rec: Recurrence? = when (kind) {
-                "daily" -> Recurrence.Daily(until)
-                "weekly" -> Recurrence.Weekly(days ?: emptyList(), until)
-                "monthly" -> Recurrence.Monthly(until)
-                else -> null
-            }
-            // The editor's rule (AppViewModel.setRecurrence): "stop repeating" carries
-            // a ticked today onto the task, and a repeat turned on never leaves a
-            // DONE template — an ended series (parity with iOS build 81, audit
-            // 2026-09-22 C3).
-            val upd = taskAfterSettingRecurrence(t, rec, api.getBlocks(), api.todayIso(), now()).copy(updatedAt = now())
-            api.upsertTask(upd)
-            scratch.newTasks[t.id] = upd
-            // Regenerate future blocks off the existing anchor, if scheduled.
             val blocks = api.getBlocks()
             val today = api.todayIso()
             // An occurrence schedule_task placed earlier in this turn sets the
@@ -667,13 +713,51 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             val placed = scratch.placedBlocks[t.id]?.let { id ->
                 blocks.firstOrNull { it.id == id && !it.done && !it.skipped && it.startTime.isNotEmpty() && it.date >= today }
             }
+            // The rhythm (spec §7.2): an omitted intervalWeeks KEEPS the task's —
+            // "move it to Fridays" never silently doubles a fortnightly series, and
+            // the model need not know N; 1 is plain weekly.
+            val current = t.recurrence
+            val currentN = (current as? Recurrence.EveryNWeeks)?.takeIf { isValidEveryNWeeks(it) }?.interval
+                ?: if (current is Recurrence.Weekly) 1 else null
+            val newN = if (kind == "weekly") intervalWeeks ?: currentN ?: 1 else null
+            // Week one (spec §5): the placed day's week when this call makes the task
+            // every N weeks or changes N; else the stored weeks when N is kept; else
+            // the week of the current rule's next date (weekly, another N), or of the
+            // edit's own start (daily, monthly, no repeat).
+            val startsNWeeks = newN != null && newN >= 2 && currentN != newN
+            val rec: Recurrence? = when (kind) {
+                "daily" -> Recurrence.Daily(until)
+                "weekly" -> if (newN == null || newN < 2) Recurrence.Weekly(days ?: emptyList(), until) else {
+                    val d = days ?: emptyList()
+                    val anchor = if (placed != null && startsNWeeks) seriesAnchor(d, placed.date)
+                        else nWeeksAnchor(current, d, newN, today, recurrenceEditStart(t.id, null, blocks, today)?.date ?: today)
+                    Recurrence.EveryNWeeks(newN, d, anchor, until)
+                }
+                "monthly" -> Recurrence.Monthly(until)
+                else -> null
+            }
+            // The editor's rule (AppViewModel.setRecurrence): "stop repeating" carries
+            // a ticked today onto the task, and a repeat turned on never leaves a
+            // DONE template — an ended series (parity with iOS build 81, audit
+            // 2026-09-22 C3).
+            val upd = taskAfterSettingRecurrence(t, rec, blocks, today, now()).copy(updatedAt = now())
+            api.upsertTask(upd)
+            scratch.newTasks[t.id] = upd
             // Otherwise the earliest LIVE timed block — never the oldest block of any
             // kind, which rebuilt the series at a history time and, on a series
             // started 56+ days ago, deleted its whole future — at the series' own
             // time and day, never a one-off moved occurrence's (parity with iOS
-            // builds 79 and 81, audit 2026-09-22 B79.1 C1).
-            val start = placed?.let { RecurrenceStart(it.date, it.startTime, RECURRENCE_HORIZON_DAYS) }
-                ?: recurrenceEditStart(t.id, rec, blocks, today)
+            // builds 79 and 81, audit 2026-09-22 B79.1 C1). Every N weeks runs from
+            // TODAY over 56 days (spec §5, vector E1) at the placed time when one was
+            // placed; a placement that starts the rhythm runs from the placed day.
+            val start = when {
+                rec is Recurrence.EveryNWeeks && placed != null && startsNWeeks ->
+                    RecurrenceStart(placed.date, placed.startTime, RECURRENCE_HORIZON_DAYS)
+                rec is Recurrence.EveryNWeeks -> recurrenceEditStart(t.id, rec, blocks, today)
+                    ?.let { if (placed != null) it.copy(startTime = placed.startTime) else it }
+                else -> placed?.let { RecurrenceStart(it.date, it.startTime, RECURRENCE_HORIZON_DAYS) }
+                    ?: recurrenceEditStart(t.id, rec, blocks, today)
+            }
             if (start != null) {
                 // This month's occurrence moved later off a series day that has
                 // passed stays (see RecurrenceStart.keepId) — it goes INTO the plan
@@ -706,13 +790,28 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             if (rec == null) {
                 "ok: \"${t.name}\" no longer repeats${if (anchored) " (future occurrences removed)" else ""}$doneNote"
             } else {
-                val how = when (kind) {
-                    "weekly" -> "weekly on " + (days ?: emptyList()).joinToString(", ") { WEEKDAY_NAMES_CAP[it].take(3) }
+                val dayNames = (days ?: emptyList()).joinToString(", ") { WEEKDAY_NAMES_CAP[it].take(3) }
+                // The ok line always names the rhythm it SAVED (spec §7.2), so a model
+                // that meant every week can see "every 2 weeks" and re-call with 1.
+                val how = when {
+                    rec is Recurrence.EveryNWeeks -> "every ${rec.interval} weeks on $dayNames"
+                    kind == "weekly" -> "weekly on $dayNames"
                     else -> kind
                 }
+                // …and says so when this call CHANGED it.
+                val rhythmNote = if (newN != null && currentN != null && newN != currentN) " — ${rhythmName(newN)} now; it was ${rhythmName(currentN)}" else ""
+                // The next two dates the saved rule has AND that hold a live
+                // occurrence, from the store after the writes; today's counts while
+                // it is open — Zubair's 10:30 was still ahead at 07:02.
+                val next = if (rec is Recurrence.EveryNWeeks) {
+                    val dates = liveRuleDates(rec, t.id, api.getBlocks(), api.todayIso())
+                    if (dates.isEmpty()) "" else " — next " + dates.mapIndexed { i, d ->
+                        (if (i > 0) "then " else "") + shortDayLabel(d) + (if (d == api.todayIso()) " (today)" else "")
+                    }.joinToString(", ")
+                } else ""
                 // The time the series now runs at, so the reply can't claim a
                 // re-time that didn't happen (audit 2026-09-22, C1).
-                "ok: \"${t.name}\" now repeats $how${start?.let { " at ${it.startTime}" } ?: ""}${if (until != null) " until $until" else ""}$doneNote" +
+                "ok: \"${t.name}\" now repeats $how${start?.let { " at ${it.startTime}" } ?: ""}${if (until != null) " until $until" else ""}$rhythmNote$next$doneNote" +
                     if (anchored) "" else " — it has no calendar slot yet; schedule_task it to place the first one"
             }
         }

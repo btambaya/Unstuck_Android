@@ -9,10 +9,15 @@ import kotlinx.serialization.encoding.Decoder
 import kotlinx.serialization.encoding.Encoder
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonDecoder
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonEncoder
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.int
 import kotlinx.serialization.json.jsonArray
 import kotlinx.serialization.json.jsonObject
@@ -31,14 +36,34 @@ data class Objective(val text: String, val done: Boolean? = null, val minutes: I
 data class Comment(val text: String, val at: String? = null)
 
 /** Recurring schedule. `null` (the optional) = does not repeat. Encodes the
- *  tagged-union JSON the web uses: {kind, daysOfWeek?, until?}. daysOfWeek
- *  is 0=Sun…6=Sat. `until` (YYYY-MM-DD) inclusive. */
+ *  tagged-union JSON the web uses: {kind, daysOfWeek?, interval?, anchor?,
+ *  until?}. daysOfWeek is 0=Sun…6=Sat. `until` (YYYY-MM-DD) inclusive. */
 @Serializable(with = RecurrenceSerializer::class)
 sealed class Recurrence {
     abstract val until: String?
     data class Daily(override val until: String? = null) : Recurrence()
     data class Weekly(val daysOfWeek: List<Int>, override val until: String? = null) : Recurrence()
     data class Monthly(override val until: String? = null) : Recurrence()
+
+    /**
+     * Every [interval] weeks on [daysOfWeek] (every-n-weeks spec, Ahmad
+     * 2026-09-24, from Zubair's "every two weeks on Thursdays"). Week one is the
+     * ISO (Monday) week holding [anchor]; every [interval]-th week after it (and
+     * before it) counts, measured in whole weeks between Mondays in epoch days —
+     * never the ISO week number (2026 has 53 weeks).
+     *
+     * Writers store [interval] 2…8 (1 is written as plain [Weekly]), [anchor] as
+     * a Monday and distinct, sorted days in 0…6. Readers accept any integral
+     * interval ≥ 1 and ignore days outside 0…6 (never folded). The codec only
+     * builds this case from a VALID rule (§2); anything else under the kind
+     * decodes to the unknown sentinel, like any unreadable rule.
+     */
+    data class EveryNWeeks(
+        val interval: Int,
+        val daysOfWeek: List<Int>,
+        val anchor: String,
+        override val until: String? = null,
+    ) : Recurrence()
 }
 
 object RecurrenceSerializer : KSerializer<Recurrence> {
@@ -63,10 +88,61 @@ object RecurrenceSerializer : KSerializer<Recurrence> {
                     put("kind", "weekly")
                     put("daysOfWeek", JsonArray(value.daysOfWeek.map { JsonPrimitive(it) }))
                 }
+                // Canonical key order (spec §2): kind, interval, daysOfWeek, anchor,
+                // then until only when set — byte-identical to web and iOS.
+                is Recurrence.EveryNWeeks -> {
+                    put("kind", EVERY_N_WEEKS)
+                    put("interval", value.interval)
+                    put("daysOfWeek", JsonArray(value.daysOfWeek.map { JsonPrimitive(it) }))
+                    put("anchor", value.anchor)
+                }
             }
             value.until?.let { put("until", it) }
         }
         json.encodeJsonElement(obj)
+    }
+
+    /** The every-N-weeks kind's wire name. */
+    const val EVERY_N_WEEKS = "everyNWeeks"
+
+    private val YMD = Regex("^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+
+    /** A real 'YYYY-MM-DD' civil date that round-trips (2026-02-31 never rolls
+     *  over to 3 Mar, "soon" is never 1970-01-01) — the spec §2 anchor rule. */
+    fun strictYmd(s: String?): java.time.LocalDate? {
+        if (s == null || !YMD.matches(s)) return null
+        val d = runCatching { java.time.LocalDate.parse(s) }.getOrNull() ?: return null
+        return if (String.format(java.util.Locale.ROOT, "%04d-%02d-%02d", d.year, d.monthValue, d.dayOfMonth) == s) d else null
+    }
+
+    /** A JSON number with an integral value, as a Long — never a string ("2"), a
+     *  boolean or null. `2.0` counts as 2 (jsonb keeps 2.0 as written). Kotlin's
+     *  `jsonPrimitive.int` reads the string "2" as 2 and throws on `true`, so the
+     *  kind is checked first (spec §2, the Android trap). */
+    private fun integral(e: JsonElement?): Long? {
+        val p = e as? JsonPrimitive ?: return null
+        if (p.isString || p is JsonNull) return null
+        p.longOrNull?.let { return it }
+        val d = p.doubleOrNull ?: return null
+        if (!d.isFinite() || d != Math.floor(d) || kotlin.math.abs(d) > 9.0E15) return null
+        return d.toLong()
+    }
+
+    /** The every-N-weeks case for a VALID rule (spec §2), else null. */
+    internal fun decodeEveryNWeeks(obj: JsonObject, until: String?): Recurrence.EveryNWeeks? {
+        val interval = integral(obj["interval"]) ?: return null
+        if (interval < 1 || interval > Int.MAX_VALUE) return null
+        val anchor = (obj["anchor"] as? JsonPrimitive)?.takeIf { it.isString }?.content ?: return null
+        if (strictYmd(anchor) == null) return null
+        val raw = obj["daysOfWeek"] as? JsonArray ?: return null
+        val days = ArrayList<Int>(raw.size)
+        for (e in raw) {
+            val v = integral(e) ?: return null
+            // An integral day outside 0…6 is kept (and ignored); one too big for an
+            // Int is out of range all the same.
+            days += if (v in Int.MIN_VALUE..Int.MAX_VALUE) v.toInt() else -1
+        }
+        return Recurrence.EveryNWeeks(interval.toInt(), days, anchor, until)
     }
 
     override fun deserialize(decoder: Decoder): Recurrence {
@@ -78,6 +154,10 @@ object RecurrenceSerializer : KSerializer<Recurrence> {
             "monthly" -> Recurrence.Monthly(until)
             "weekly" -> Recurrence.Weekly(
                 obj["daysOfWeek"]?.jsonArray?.map { it.jsonPrimitive.int } ?: emptyList(), until)
+            // Strict (spec §2): a malformed rule is the unknown sentinel below — inert
+            // here, and migration 081 keeps the stored rule if this build writes the
+            // sentinel back.
+            EVERY_N_WEEKS -> decodeEveryNWeeks(obj, until) ?: Recurrence.Daily(until = UNKNOWN_UNTIL)
             // Forward-compat: an UNKNOWN kind (a newer web/iOS release added a
             // recurrence type this build can't model). A bare throw aborts the WHOLE
             // TaskItem decode, so the task would VANISH from the list. Degrade to a no-op

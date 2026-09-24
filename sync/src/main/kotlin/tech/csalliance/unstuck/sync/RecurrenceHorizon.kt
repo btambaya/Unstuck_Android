@@ -2,6 +2,8 @@ package tech.csalliance.unstuck.sync
 
 import java.util.concurrent.atomic.AtomicBoolean
 import kotlinx.coroutines.CancellationException
+import tech.csalliance.unstuck.core.logic.everyNWeeksDays
+import tech.csalliance.unstuck.core.logic.mondayIso
 import tech.csalliance.unstuck.core.logic.normalizeWeekdays
 import tech.csalliance.unstuck.core.logic.recurrenceTopUp
 import tech.csalliance.unstuck.core.model.CalBlock
@@ -234,6 +236,14 @@ class RecurrenceHorizonTopUp(
                 a is Recurrence.Monthly && b is Recurrence.Monthly -> a.until == b.until
                 a is Recurrence.Weekly && b is Recurrence.Weekly ->
                     a.until == b.until && normalizeWeekdays(a.daysOfWeek).toSet() == normalizeWeekdays(b.daysOfWeek).toSet()
+                // Every N weeks (every-n-weeks spec §8.1): the same interval, days as a
+                // set, the same week one (anchors compared by their Monday) and until.
+                // Without this arm `else -> false` skipped every N-week series for good,
+                // as "changed on the server".
+                a is Recurrence.EveryNWeeks && b is Recurrence.EveryNWeeks ->
+                    a.interval == b.interval && a.until == b.until &&
+                        everyNWeeksDays(a).toSet() == everyNWeeksDays(b).toSet() &&
+                        mondayIso(a.anchor) == mondayIso(b.anchor)
                 else -> false
             }
         }

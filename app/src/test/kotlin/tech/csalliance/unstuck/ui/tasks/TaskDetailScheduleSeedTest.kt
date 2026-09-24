@@ -96,4 +96,20 @@ class TaskDetailScheduleSeedTest {
     @Test fun `a one-off keeps opening on today and now`() {
         assertNull(seriesScheduleSeed(template(recurrence = null), listOf(occ("b", day(2), "10:00")), today))
     }
+    /** Every N weeks (every-n-weeks spec §6): Schedule re-anchors the series on
+     *  the day picked, so the seed must be a date the RULE has — never an
+     *  occurrence moved into an off week, or OK without changes would shift the
+     *  whole series a week. */
+    @Test fun `an every-2-weeks series seeds a date its rule has, never a block moved into an off week`() {
+        val v1 = template(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-21"))
+        val moved = occ(tech.csalliance.unstuck.core.logic.occurrenceId("tpl", "2026-10-08"), "2026-10-15", "10:30")
+        val blocks = listOf(occ("done", "2026-09-24", "10:30", done = true), moved, occ("x", "2026-10-22", "10:30"))
+        val seed = seriesScheduleSeed(v1, blocks, "2026-09-30")!!
+        assertEquals(ScheduleSeed("2026-10-22", "10:30"), seed)
+        assertNull("OK without changes keeps the weeks", tech.csalliance.unstuck.core.logic.reanchorForSchedule(v1.recurrence, seed.date))
+        // No live block on the rule: its next date.
+        assertEquals("2026-10-08", seriesScheduleSeed(v1, listOf(moved), "2026-09-30")!!.date)
+        // The off-week block itself would have re-anchored the series.
+        assertTrue(tech.csalliance.unstuck.core.logic.reanchorForSchedule(v1.recurrence, "2026-10-15") != null)
+    }
 }

@@ -379,10 +379,12 @@ class Hydrator(private val gateway: SyncRemote, private val store: LocalStore) {
      * §4's `updated_at` bump on every collection_members change is the owner's ONLY
      * pull-side signal that a list became shared (a join by link, an invite claimed
      * at sign-up, a share made on another device) or lost a member. Without this
-     * re-read the owner's phone kept `members == []` across foregrounds AND
-     * relaunches (the cursors persist, so a cold launch never full-hydrates),
-     * `isShared` stayed false, and its item edits went out as whole-row upserts that
-     * deleted what the members added.
+     * re-read the owner's phone kept `members == []` across foregrounds (and, before
+     * the Android audit's A11 — `023d753` — across relaunches too: the cursors
+     * persist, and a cold launch did not full-hydrate then; since A11 the first pull
+     * of every process does, `FreshnessOwner.hydratedFor`), `isShared` stayed false,
+     * and its item edits went out as whole-row upserts that deleted what the members
+     * added.
      *
      * It only PATCHES members/myRole onto the local rows, read and written in one
      * transaction: the pull right before it already applied every newer

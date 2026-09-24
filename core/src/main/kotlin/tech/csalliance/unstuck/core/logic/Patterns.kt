@@ -1,6 +1,7 @@
 package tech.csalliance.unstuck.core.logic
 
 import tech.csalliance.unstuck.core.model.CalBlock
+import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.TaskItem
 import java.time.LocalDate
 
@@ -89,6 +90,10 @@ fun derivePatterns(tasks: List<TaskItem>, blocks: List<CalBlock>, todayIso: Stri
         val tid = b.taskId
         if (tid.isNullOrEmpty()) continue
         val task = taskById[tid] ?: continue
+        // An every-N-weeks series is not weekly by definition: counted, a
+        // fortnightly Sunday made a 3-week pattern and its OFF week raised "still
+        // on for Sunday?" (every-n-weeks spec §8.2).
+        if (task.recurrence is Recurrence.EveryNWeeks) continue
         // A block whose `date` isn't a real 'YYYY-MM-DD' is not evidence of a
         // habit — skip it. (The web's lenient Date makes such a row a silent
         // NaN bucket; java.time throws, and a throw here would take down the

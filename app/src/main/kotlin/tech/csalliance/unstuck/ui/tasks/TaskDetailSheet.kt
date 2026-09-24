@@ -47,7 +47,9 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.formatTime
+import tech.csalliance.unstuck.core.logic.liveRuleDates
 import tech.csalliance.unstuck.core.logic.materializeOccurrences
+import tech.csalliance.unstuck.core.logic.nextRuleDate
 import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
 import tech.csalliance.unstuck.core.logic.recurrenceAnchor
 import tech.csalliance.unstuck.core.logic.recurrenceEditStart
@@ -158,7 +160,11 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     // abandons the repeat (parity with iOS build 81, audit 2026-09-22 C7).
     fun pickStartRepeating(pending: Recurrence) {
         val today = Time.startOfDayMillis(System.currentTimeMillis())
-        val first = materializeOccurrences(pending, today, "00:00", 35).firstOrNull()?.date
+        // Every N weeks: the rule's own next date — from N = 6 the next on week
+        // can be 41 days away, past a 35-day scan, whose fallback (today) is an
+        // off day (every-n-weeks spec §6).
+        val first = (if (pending is Recurrence.EveryNWeeks) nextRuleDate(pending, Clock.dateIso(today)) else null)
+            ?: materializeOccurrences(pending, today, "00:00", 35).firstOrNull()?.date
         val seed = first?.let { runCatching { java.time.LocalDate.parse(it) }.getOrNull() } ?: java.time.LocalDate.now()
         pickDateTime(seed, java.time.LocalTime.now()) { dateIso, timeIso -> vm.startRepeating(editTarget, pending, dateIso, timeIso) }
     }
@@ -341,7 +347,11 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                 Text(recurrenceLabel(task.recurrence).ifEmpty { "Does not repeat" }, style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(bottom = 6.dp))
                 // The heading above + the summary line are this sheet's — the
                 // editor must not print its own "Repeat" on top of them.
-                RecurrenceEditor(task.recurrence, showHeading = false) { r ->
+                val todayIso = Clock.todayIso()
+                RecurrenceEditor(
+                    task.recurrence, showHeading = false, stored = task.recurrence, todayIso = todayIso,
+                    startIso = recurrenceEditStart(task.id, null, blocks, todayIso)?.date ?: todayIso,
+                ) { r ->
                     if (!vm.setRecurrence(editTarget, r) && r != null) pendingRepeat = r
                 }
             }
@@ -573,9 +583,17 @@ internal data class ScheduleSeed(val date: String, val startTime: String?)
  * before; the time is null when the series has no timed block.
  */
 internal fun seriesScheduleSeed(task: TaskItem, blocks: List<CalBlock>, todayIso: String): ScheduleSeed? {
-    if (task.recurrence == null) return null
+    val rule = task.recurrence ?: return null
     val anchor = recurrenceAnchor(task.id, blocks, todayIso)
-    val time = recurrenceEditStart(task.id, task.recurrence, blocks, todayIso)?.startTime ?: anchor?.startTime
+    val time = recurrenceEditStart(task.id, rule, blocks, todayIso)?.startTime ?: anchor?.startTime
+    // Every N weeks (spec §6): a date the RULE has — the first live occurrence on
+    // or after today that it matches, else its next date. Schedule re-anchors the
+    // series on the day picked, so an occurrence moved into an off week as the
+    // seed would shift the whole series on "OK" without changes.
+    if (rule is Recurrence.EveryNWeeks) {
+        val onRule = liveRuleDates(rule, task.id, blocks, todayIso, limit = 1).firstOrNull()
+        return ScheduleSeed(onRule ?: nextRuleDate(rule, todayIso) ?: maxOf(anchor?.date ?: todayIso, todayIso), time)
+    }
     return ScheduleSeed(maxOf(anchor?.date ?: todayIso, todayIso), time)
 }
 

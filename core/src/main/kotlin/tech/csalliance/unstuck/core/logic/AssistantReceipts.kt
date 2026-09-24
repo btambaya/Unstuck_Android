@@ -226,6 +226,9 @@ const val NOTHING_TO_CHANGE = " — nothing to change"
  *  (include this turn's scratch rows — the store lags the optimistic write);
  *  [tone] (from [toneFromFacts]) phrases the quiet-win line. Returns null for
  *  read-only tools and unrecognized results — no receipt beats a wrong receipt. */
+/** set_task_recurrence's ok line for an every-N-weeks rule: "now repeats every 2 weeks on …". */
+private val EVERY_N_WEEKS_RESULT = Regex("\\bnow repeats every (\\d+) weeks\\b")
+
 fun deriveReceipt(name: String, args: ReceiptArgs, result: String, tasks: List<TaskItem>, tone: Tone = Tone.GENTLE): Receipt? {
     if (!result.startsWith("ok")) return null
     if (result.endsWith(NOTHING_TO_CHANGE)) return null
@@ -254,7 +257,15 @@ fun deriveReceipt(name: String, args: ReceiptArgs, result: String, tasks: List<T
             val suffix = if (nm != null) " — “$nm”" else ""
             // kind "none" is the stop: it read "Repeats none" on the card (web parity, 2026-09-24).
             val kind = args.kind?.takeIf { it != "none" }
-            val label = if (kind != null) "Repeats $kind$suffix" else "Repeat removed$suffix"
+            // The rhythm comes from the RESULT, never the args: an omitted
+            // intervalWeeks keeps a fortnightly series fortnightly (every-n-weeks
+            // spec §7.3), so "weekly" in the args can still save every 2 weeks.
+            val everyN = EVERY_N_WEEKS_RESULT.find(result)?.groupValues?.get(1)
+            val label = when {
+                kind != null && everyN != null -> "Repeats every $everyN weeks$suffix"
+                kind != null -> "Repeats $kind$suffix"
+                else -> "Repeat removed$suffix"
+            }
             Receipt(ReceiptIcon.CALENDAR, label)
         }
         "complete_task" -> {

@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 112
-        versionName = "0.5.28"
+        versionCode = 113
+        versionName = "0.5.29"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.28 — The + now sits in the tab bar with the other tabs. Times everywhere follow your phone's 12/24-hour setting — no more mix of \"14:30\" and \"2:30 PM\"."
+    releaseNotes = "v0.5.29 — Settings is now seven rows (Account, Notifications & calls, Assistant & privacy, People, Appearance, Send feedback, Replay the tour). Focus options moved onto the Focus screen (⋯). Areas & tags are edited from Tasks. The assistant now asks before it shares anything with our AI provider."
 }
 
 dependencies {

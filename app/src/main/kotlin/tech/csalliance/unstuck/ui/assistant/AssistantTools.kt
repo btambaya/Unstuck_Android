@@ -13,6 +13,7 @@ import kotlinx.serialization.json.jsonObject
 import kotlinx.serialization.json.jsonPrimitive
 import tech.csalliance.unstuck.core.logic.CallSettingsLogic
 import tech.csalliance.unstuck.core.logic.IsoDate
+import tech.csalliance.unstuck.core.logic.NOTHING_TO_CHANGE
 import tech.csalliance.unstuck.core.logic.ProfileFactsLogic
 import tech.csalliance.unstuck.core.logic.WEEKDAY_NAMES_CAP
 import tech.csalliance.unstuck.core.logic.hmToMin
@@ -180,6 +181,30 @@ fun nextLiveBlock(blocks: List<CalBlock>, today: String, taskId: String): CalBlo
         .firstOrNull()
 
 suspend fun nextLiveBlock(api: AssistantApi, taskId: String): CalBlock? = nextLiveBlock(api.getBlocks(), api.todayIso(), taskId)
+
+private val SLOT_HM = Regex("^(\\d{1,2}):(\\d{2})(?::\\d{2})?$")
+
+/** 'H:MM' / 'HH:MM[:SS]' → 'HH:MM'; anything else (e.g. "10:30pm") → null:
+ *  never read as a time it might not be (web `hhmm`). */
+internal fun slotHm(s: String): String? {
+    val m = SLOT_HM.find(s.trim()) ?: return null
+    return m.groupValues[1].padStart(2, '0') + ":" + m.groupValues[2]
+}
+
+/** The task's open (not done, not skipped) calendar slot at exactly this day
+ *  and time, if it has one — the slot a schedule_task there would not change
+ *  (web `liveBlockAt`, 2026-09-24). Never for a task parked in Later:
+ *  scheduling un-parks it (scheduleTask → clearLaterOnSchedule), so "put it
+ *  back on Thursday at 10:30" over the slot it kept in Later is a real change,
+ *  not "already there" — the no-op left it parked, off Today, over an ok. */
+internal fun liveBlockAt(blocks: List<CalBlock>, task: TaskItem, date: String, startTime: String): CalBlock? {
+    val at = slotHm(startTime) ?: return null
+    if (task.later == true) return null
+    return blocks.firstOrNull {
+        it.taskId == task.id && isTaskBlock(it) && !it.done && !it.skipped && it.date == date &&
+            it.startTime.isNotEmpty() && slotHm(it.startTime) == at
+    }
+}
 
 /** Complete a task the way the UI's toggleDone does: completedAt stamped
  *  (applyCompletion) and the shared-list `done` sent. Only the done + completedAt
@@ -487,6 +512,18 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             val date = args.str("date") ?: return "error: date required"
             val startTime = args.str("startTime")
             rejectPastDate(api, date)?.let { return it }
+            // Already in that exact slot: nothing to move. create_task with a
+            // date and time, then schedule_task for the same day and time, is the
+            // model re-placing what create_task already placed (Zubair's call,
+            // 2026-09-24) — an ok that says nothing changed, with no second
+            // receipt, never a second block. It still anchors a
+            // set_task_recurrence after it, the way a placement would (web parity).
+            if (startTime != null) {
+                liveBlockAt(api.getBlocks(), t, date, startTime)?.let { same ->
+                    scratch.placedBlocks[t.id] = same.id
+                    return "ok: \"${t.name}\" is already on $date at ${slotHm(startTime)}$NOTHING_TO_CHANGE"
+                }
+            }
             // A weekly series onto a day it doesn't repeat on is refused ONCE,
             // naming the right days — the model's date maths put James's
             // Saturday Park run on a Sunday (TestFlight build 51). A day that
@@ -584,7 +621,12 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 if (days.isNullOrEmpty()) return "error: weekly needs daysOfWeek (0=Sunday … 6=Saturday) — ask which days"
                 if (days.any { it !in 0..6 }) return "error: daysOfWeek must be 0=Sunday … 6=Saturday"
             }
-            if (kind == "none" && t.recurrence == null) return "error: \"${t.name}\" doesn't repeat — nothing changed"
+            // Stopping a repeat that isn't there: what the user asked for is already
+            // true, so it is a success that changed nothing. As an error the model
+            // told Zubair "It didn't change anything… doesn't actually have
+            // recurrence" right after he'd asked it to stop (iOS call, 2026-09-24).
+            // No receipt: NOTHING_TO_CHANGE (web parity).
+            if (kind == "none" && t.recurrence == null) return "ok: \"${t.name}\" already doesn't repeat$NOTHING_TO_CHANGE"
             // The slot placed for it earlier THIS turn (create_task / schedule_task
             // with a date) on a day the new weekly days leave out: the Park run
             // variant — create_task on Sunday 2026-09-20, then weekly on Saturday,

@@ -1698,4 +1698,246 @@ class BargeInControllerTest {
         c.h(tr("how was my week", "h", final = true), 2.4)
         assertEquals("the caption of the turn already answered", 1, c.answeredTurns)
     }
+
+    // ── 30: TOOLS (Zubair's iOS morning call, 2026-09-24 07:02:44–53, session
+    // 1cbfac75): a turn still pending at the done of the reply that carried
+    // set_task_recurrence was asked for at that done — 70 ms BEFORE the tool's
+    // ok went out — so the reply was generated without the result ("I tried
+    // to cancel the repeat, but it didn't go through"), and the continuation
+    // after the output then collided with it ("Conversation already has an
+    // active response"). Nothing is asked while a tool runs; the ONE reply
+    // after its output answers both. ──
+
+    private fun toolStarted(id: String = "c1") = BargeInEvent.ToolCallStarted(id)
+    private fun toolFinished(id: String = "c1") = BargeInEvent.ToolCallFinished(id)
+    private fun asks(cmds: List<BargeInCommand>) = cmds.count { it == create || it == BargeInCommand.CommitAndRespond }
+
+    @Test fun `30a a turn pending at the done of a reply carrying a tool call is asked only after the output`() {
+        val c = controller(speaker)
+        var creates = 0
+        fun run(e: BargeInEvent, sec: Double) = c.h(e, sec).also { creates += asks(it) }
+        run(started("u1"), 0.0)
+        run(stopped, 1.0)
+        run(tr("No, just cancel the recurring.", "u1", final = true), 1.2)
+        assertEquals(ask, run(tick, 1.7))
+        // A segment begins after the create went out, nothing on air: the turn
+        // is held past the create, so it is still pending when r1 is created.
+        run(started("n"), 1.75)
+        run(BargeInEvent.ResponseCreated("r1"), 1.8)
+        assertTrue(c.pendingCreate)
+        run(stopped, 2.4)
+        run(tr("", "n", final = true), 2.6)
+        run(BargeInEvent.AudioDelta("r1"), 3.0)                  // "We'll stop it repeating. One moment."
+        assertEquals("the call is registered, nothing else", cmds(timer(BargeInController.TOOL_WAIT_MAX_MS + 1)), run(toolStarted(), 4.1))
+        val atDone = run(done("r1"), 4.105)
+        assertEquals("no ask at the done — the output is not out yet", 0, asks(atDone))
+        assertEquals(cmds(timer(500), speakingUi), atDone)
+        assertEquals("the hold's tick: still waiting for the tool", emptyList<BargeInCommand>(), run(tick, 4.605))
+        assertEquals(cmds(timer(BargeInController.CONTINUE_DELAY_MS)), run(toolFinished(), 4.7))
+        assertEquals("the continuation — ONE create, after the output", ask, run(tick, 4.82))
+        assertTrue("pending until created", c.pendingCreate)
+        run(BargeInEvent.ResponseCreated("r2"), 4.9)
+        assertFalse("the turn rode on it", c.pendingCreate)
+        assertNull(c.continuationSince)
+        run(BargeInEvent.PlaybackDrained, 5.0)
+        run(tick, 8.0)
+        run(done("r2"), 9.0)
+        run(tick, 12.0)
+        assertEquals("the turn's create and the continuation — never a third", 2, creates)
+    }
+
+    @Test fun `30b the continuation is asked 120 ms after the last output, or at the done if the output came first`() {
+        val c = controller(speaker)
+        c.h(BargeInEvent.ResponseCreated("r1"), 0.0)
+        c.h(toolStarted(), 0.1)
+        // A fast tool: its output is out before the reply that carried it is
+        // done. That reply was not cancelled: its done asks (the 10 s cap only
+        // covers a done that never comes).
+        assertEquals(cmds(timer(BargeInController.CONTINUE_DELAY_MS), timer(BargeInController.TOOL_WAIT_MAX_MS + 1)), c.h(toolFinished(), 0.2))
+        assertTrue(c.toolsPending)
+        assertEquals("r1 is still generating", emptyList<BargeInCommand>(), c.h(tick, 0.32))
+        assertEquals("at its done, at once", ask, c.h(done("r1"), 0.4))
+        assertFalse(c.toolsPending)
+        c.h(BargeInEvent.ResponseCreated("r2"), 0.5)
+        // The usual order: the done first, the output after it.
+        c.h(toolStarted(), 1.0)
+        assertEquals("thinking while the tool runs", cmds(thinking), c.h(done("r2"), 1.01))
+        assertEquals(cmds(timer(BargeInController.CONTINUE_DELAY_MS)), c.h(toolFinished(), 1.2))
+        assertEquals("coalescing window", emptyList<BargeInCommand>(), c.h(tick, 1.25))
+        assertEquals(ask, c.h(tick, 1.32))
+        assertEquals("once", emptyList<BargeInCommand>(), c.h(tick, 1.4).filter { it == create })
+    }
+
+    @Test fun `30c parallel calls of one reply get one continuation, after the last output`() {
+        val c = controller(speaker)
+        c.h(BargeInEvent.ResponseCreated("r1"), 0.0)
+        c.h(toolStarted("a"), 0.1)
+        c.h(toolStarted("b"), 0.11)
+        assertEquals(2, c.toolsInFlight)
+        c.h(done("r1"), 0.12)
+        assertEquals("one of two: nothing yet", emptyList<BargeInCommand>(), c.h(toolFinished("a"), 0.3))
+        assertEquals(emptyList<BargeInCommand>(), c.h(tick, 0.5))
+        assertEquals(cmds(timer(BargeInController.CONTINUE_DELAY_MS)), c.h(toolFinished("b"), 0.9))
+        assertEquals(ask, c.h(tick, 1.02))
+    }
+
+    @Test fun `30d a turn taken while a tool runs waits for its output and rides on the continuation`() {
+        val c = speaking(speaker)
+        said(c, "One moment.")
+        c.h(toolStarted(), 1.0)
+        c.h(done("r1"), 1.01)
+        assertEquals("drained, the tool still working", cmds(thinking), c.h(BargeInEvent.PlaybackDrained, 1.5))
+        c.h(started("q"), 3.5)
+        c.h(stopped, 4.5)
+        assertEquals(cmds(turn("and move it to Friday"), timer(500), thinking), c.h(tr("and move it to Friday", "q", final = true), 4.7))
+        assertEquals("hold up, tool not done", emptyList<BargeInCommand>(), c.h(tick, 5.2))
+        c.h(toolFinished(), 6.0)
+        assertEquals("one ask reads the output and answers the turn", ask, c.h(tick, 6.12))
+        c.h(BargeInEvent.ResponseCreated("r2"), 6.2)
+        assertFalse(c.pendingCreate)
+        assertFalse(c.toolsPending)
+    }
+
+    @Test fun `30e a tool that never answers is waited out, and its late output still gets read`() {
+        val c = controller(speaker)
+        c.h(BargeInEvent.ResponseCreated("r1"), 0.0)
+        c.h(toolStarted(), 0.1)
+        c.h(done("r1"), 0.2)
+        c.h(started("u"), 1.0)
+        c.h(stopped, 2.0)
+        c.h(tr("hello?", "u", final = true), 2.2)
+        assertEquals(emptyList<BargeInCommand>(), c.h(tick, 2.7))
+        assertEquals(emptyList<BargeInCommand>(), c.h(tick, 10.0))
+        assertEquals("the wait's own tick gives up on it", ask, c.h(tick, 10.101))
+        assertEquals(0, c.toolsInFlight)
+        c.h(BargeInEvent.ResponseCreated("r2"), 10.2)
+        assertEquals("late: r2 is generating (not cancelled — its done asks)", cmds(timer(BargeInController.CONTINUE_DELAY_MS), timer(BargeInController.TOOL_WAIT_MAX_MS + 1)), c.h(toolFinished(), 12.0))
+        assertEquals(0, c.toolsInFlight)
+        assertEquals(emptyList<BargeInCommand>(), c.h(tick, 12.12))
+        assertEquals("read at r2's done", ask, c.h(done("r2"), 13.0))
+    }
+
+    @Test fun `30f a hold-to-talk release while a tool runs commits and asks with the continuation`() {
+        val c = controller(speaker, holdToTalk = true)
+        c.h(BargeInEvent.ResponseCreated("r1"), 0.0)
+        c.h(toolStarted(), 0.1)
+        c.h(done("r1"), 0.2)
+        c.h(BargeInEvent.PttDown, 0.5)
+        val up = c.h(BargeInEvent.PttUp, 1.5)
+        assertFalse("no commit + create before the output", up.contains(BargeInCommand.CommitAndRespond))
+        assertTrue(up.contains(BargeInCommand.ForceGate(false)))
+        assertEquals(1, c.answeredTurns)
+        c.h(toolFinished(), 1.8)
+        assertEquals(cmds(BargeInCommand.CommitAndRespond, timer(BargeInController.CREATE_GRACE_MS + 1), thinking), c.h(tick, 1.92))
+        // With nothing running, a release commits and asks at once, as ever.
+        c.h(BargeInEvent.ResponseCreated("r2"), 2.0)
+        c.h(done("r2"), 3.0)
+        c.h(BargeInEvent.PttDown, 4.0)
+        assertTrue(c.h(BargeInEvent.PttUp, 5.0).contains(BargeInCommand.CommitAndRespond))
+    }
+
+    @Test fun `30g an active-response complaint while a tool runs asks nothing before its output`() {
+        val c = controller(speaker)
+        c.h(BargeInEvent.ResponseCreated("r1"), 0.0)
+        c.h(toolStarted(), 0.1)
+        val out = c.h(BargeInEvent.Error("Conversation already has an active response"), 0.2)
+        assertEquals(0, asks(out))
+        assertFalse(c.responseActive)
+        c.h(toolFinished(), 0.5)
+        assertEquals(ask, c.h(tick, 0.62))
+    }
+
+    // ── 30h–30j: review of the tool fix (2026-09-24). ──
+
+    /** Hold-to-talk: they press over "One moment." (the press cancels it; the
+     *  tool keeps running) and its output lands while the orb is still held.
+     *  The continuation used to be asked right then — its reply played over
+     *  the hold, and the release's commit + create collided with it ("already
+     *  has an active response"), so their turn went unanswered. Nothing is
+     *  asked over a hold; the release asks once, with the outputs in. */
+    @Test fun `30h a tool's output that lands while the orb is held is read with the release, never over the hold`() {
+        val c = controller(speaker, holdToTalk = true)
+        c.h(BargeInEvent.ResponseCreated("r1"), 0.0)
+        c.h(BargeInEvent.AudioDelta("r1"), 0.05)
+        c.h(toolStarted(), 0.1)
+        c.h(BargeInEvent.PttDown, 0.2)
+        assertEquals(BargeInPhase.HOLD, c.phase)
+        assertEquals("no Thinking while they hold the orb", cmds(listening), c.h(done("r1", "cancelled"), 0.25))
+        assertEquals(cmds(timer(BargeInController.CONTINUE_DELAY_MS)), c.h(toolFinished(), 0.4))
+        assertEquals("nothing asked over the hold", emptyList<BargeInCommand>(), c.h(tick, 0.52))
+        assertTrue(c.toolsPending)
+        val up = c.h(BargeInEvent.PttUp, 1.5)
+        assertEquals("the release commits and asks ONCE, the outputs already in",
+            cmds(BargeInCommand.ForceGate(false), BargeInCommand.CommitAndRespond, timer(BargeInController.CREATE_GRACE_MS + 1), thinking), up)
+        assertEquals(1, c.answeredTurns)
+        assertFalse(c.toolsPending)
+        c.h(BargeInEvent.ResponseCreated("r2"), 1.6)
+        assertEquals(0, asks(c.h(tick, 4.61)))
+        // Released before the output: the output's tick asks (30f), not the hold.
+        c.h(done("r2"), 5.0)
+        c.h(toolStarted("c2"), 5.1)
+        c.h(BargeInEvent.PttDown, 5.2)
+        c.h(BargeInEvent.PttUp, 6.0)
+        c.h(toolFinished("c2"), 6.2)
+        assertEquals(cmds(BargeInCommand.CommitAndRespond, timer(BargeInController.CREATE_GRACE_MS + 1), thinking), c.h(tick, 6.32))
+    }
+
+    /** A fast tool whose output is out while the reply that carried it is
+     *  still generating: the 2.5 s fallback used to ask INTO that reply — the
+     *  server refuses a create while one is active, the benign resync dropped
+     *  the continuation with it, and the result was never read. A reply we did
+     *  not cancel always sends its done, and the done asks; 10 s covers a done
+     *  that never comes. One we cancelled keeps the 2.5 s fallback. */
+    @Test fun `30i a continuation is never asked into the reply still generating — its done asks`() {
+        val c = controller(speaker)
+        c.h(BargeInEvent.ResponseCreated("r1"), 0.0)
+        c.h(toolStarted(), 0.1)
+        assertEquals(cmds(timer(BargeInController.CONTINUE_DELAY_MS), timer(BargeInController.TOOL_WAIT_MAX_MS + 1)), c.h(toolFinished(), 0.15))
+        assertEquals(emptyList<BargeInCommand>(), c.h(tick, 0.27))
+        assertEquals("2.5 s on, r1 still generating: not asked over it", emptyList<BargeInCommand>(), c.h(tick, 2.651))
+        assertTrue(c.responseActive)
+        assertEquals(ask, c.h(done("r1"), 3.2))
+
+        // A done that never comes: asked anyway once 10 s have passed.
+        val d = controller(speaker)
+        d.h(BargeInEvent.ResponseCreated("r1"), 0.0)
+        d.h(toolStarted(), 0.1)
+        d.h(toolFinished(), 0.15)
+        assertEquals(emptyList<BargeInCommand>(), d.h(tick, 10.0))
+        assertEquals(ask, d.h(tick, 10.151))
+
+        // One we cancelled (the Interrupt button here): its done may never
+        // come — the 2.5 s fallback, as for a turn.
+        val e = speaking(speaker)
+        e.h(toolStarted(), 0.1)
+        e.h(BargeInEvent.InterruptPressed, 0.12)
+        assertEquals("r1", e.cancelledResponseId)
+        assertEquals(cmds(timer(BargeInController.CONTINUE_DELAY_MS), timer(BargeInController.PENDING_CREATE_FALLBACK_MS + 1)), e.h(toolFinished(), 0.2))
+        assertEquals(emptyList<BargeInCommand>(), e.h(tick, 0.32))
+        assertEquals(ask, e.h(tick, 2.701))
+    }
+
+    /** Calls are tracked by id: the late output of a call the 10 s wait gave
+     *  up on used to decrement a COUNT, releasing the continuation while a
+     *  newer call was still running — a reply generated without that result
+     *  (the morning call's "didn't go through", again). */
+    @Test fun `30j a late output never stands in for a call that is still running`() {
+        val c = controller(speaker)
+        c.h(BargeInEvent.ResponseCreated("r1"), 0.0)
+        c.h(toolStarted("slow"), 0.1)
+        c.h(done("r1"), 0.12)
+        c.h(started("u"), 1.0)
+        c.h(stopped, 2.0)
+        c.h(tr("hello?", "u", final = true), 2.2)
+        assertEquals("the wait gives up on the slow one", ask, c.h(tick, 10.101))
+        c.h(BargeInEvent.ResponseCreated("r2"), 10.2)
+        c.h(toolStarted("fast"), 10.5)
+        c.h(done("r2"), 10.51)
+        assertEquals("the slow one's late output: the fast one still runs", emptyList<BargeInCommand>(), c.h(toolFinished("slow"), 11.0))
+        assertEquals(1, c.toolsInFlight)
+        assertEquals(emptyList<BargeInCommand>(), c.h(tick, 11.12))
+        assertEquals(cmds(timer(BargeInController.CONTINUE_DELAY_MS)), c.h(toolFinished("fast"), 11.5))
+        assertEquals("one continuation reads both", ask, c.h(tick, 11.62))
+        assertEquals(0, asks(c.h(tick, 11.8)))
+    }
 }

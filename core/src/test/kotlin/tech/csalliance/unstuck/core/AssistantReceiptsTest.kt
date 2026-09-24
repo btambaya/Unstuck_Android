@@ -8,6 +8,7 @@ import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tech.csalliance.unstuck.core.logic.NOTHING_TO_CHANGE
 import tech.csalliance.unstuck.core.logic.Receipt
 import tech.csalliance.unstuck.core.logic.ReceiptArgs
 import tech.csalliance.unstuck.core.logic.ReceiptIcon
@@ -109,6 +110,19 @@ class AssistantReceiptsTest {
         val t = task(id = "t7", name = "Taxes")
         assertEquals("Repeats weekly — “Taxes”", deriveReceipt("set_task_recurrence", ReceiptArgs(taskId = "t7", kind = "weekly"), "ok", listOf(t))!!.label)
         assertEquals("Repeat removed — “Taxes”", deriveReceipt("set_task_recurrence", ReceiptArgs(taskId = "t7"), "ok", listOf(t))!!.label)
+        // kind "none" is the stop — the card read "Repeats none" (web parity, 2026-09-24).
+        assertEquals("Repeat removed — “Taxes”", deriveReceipt("set_task_recurrence", ReceiptArgs(taskId = "t7", kind = "none"), "ok: \"Taxes\" no longer repeats", listOf(t))!!.label)
+    }
+
+    /** Zubair's call, 2026-09-24: a wish that was already true is an `ok:` that
+     *  wrote nothing — a receipt would claim a change (web receipts.ts). */
+    @Test fun `an ok that changed nothing shows no receipt`() {
+        val t = task(id = "t7", name = "Office Focus")
+        assertNull(deriveReceipt("set_task_recurrence", ReceiptArgs(taskId = "t7", kind = "none"), "ok: \"Office Focus\" already doesn't repeat$NOTHING_TO_CHANGE", listOf(t)))
+        assertNull(deriveReceipt("schedule_task", ReceiptArgs(taskId = "t7", date = "2026-09-24", startTime = "10:30"), "ok: \"Office Focus\" is already on 2026-09-24 at 10:30$NOTHING_TO_CHANGE", listOf(t)))
+        assertEquals(" — nothing to change", NOTHING_TO_CHANGE)
+        assertEquals("a real schedule keeps its card", "Scheduled “Office Focus” · 2026-09-24 10:30",
+            deriveReceipt("schedule_task", ReceiptArgs(taskId = "t7", date = "2026-09-24", startTime = "10:30"), "ok: scheduled \"Office Focus\" 2026-09-24 10:30", listOf(t))!!.label)
     }
 
     @Test fun `the remaining base write tools each get their own glyph`() {

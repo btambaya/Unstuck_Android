@@ -57,6 +57,19 @@ import kotlin.math.sqrt
 //      300 ms pre-roll, DIGITAL SILENCE while closed (the server's
 //      silence_duration_ms timer must observe silence to end a turn), and no
 //      floor adaptation while the model is playing (residual echo).
+//   5. TOOLS: the client reports each tool call it starts and each
+//      function_call_output it has sent. While one is running nothing is
+//      asked for; when the last output is out, ONE reply is asked for (120 ms
+//      later, or at the done of the reply that carried the calls) and it
+//      answers any turn the user took meanwhile too. The turn used to be
+//      asked at that done, before the output: Zubair's morning call
+//      (2026-09-24 07:02:50, iOS) heard "I tried to cancel the repeat, but it
+//      didn't go through" over an ok, and the continuation then collided
+//      with it ("already has an active response"). Calls are tracked by id,
+//      so a late output (after the 10 s wait gave up on it) never stands in
+//      for a call still running; a reply we did not cancel is never asked
+//      over (its done asks); and nothing is asked while hold-to-talk is held
+//      (the release asks, with the continuation riding on it).
 //
 // The loudspeaker is FULL-DUPLEX again (it was half-duplex — mic muted for
 // the whole reply — from 2026-09-17): the platform echo canceller keeps the
@@ -208,6 +221,20 @@ sealed class BargeInEvent {
      *  [code] is the server's `error.code`, carried so the client can word a
      *  rate limit without matching the provider's text (iOS build 78). */
     data class Error(val message: String?, val code: String? = null) : BargeInEvent()
+    /** The client started running one of the reply's tool calls (deduped by
+     *  call id). Until its `function_call_output` is in the conversation no
+     *  reply may be asked for: one generated without the result reads the call
+     *  as failed (Zubair's morning call, 2026-09-24 07:02:50 — a pending turn
+     *  was asked at the done of the reply carrying set_task_recurrence, 70 ms
+     *  before the ok went out: "I tried to cancel the repeat, but it didn't go
+     *  through"). Arrives before that reply's done (same socket, same order). */
+    data class ToolCallStarted(val callId: String) : BargeInEvent()
+    /** That call's `function_call_output` has been SENT. With none left
+     *  running, ONE reply is asked for — the continuation that reads the
+     *  results, and answers any turn the user took meanwhile. By id: a late
+     *  output of a call the wait gave up on is read, but never counts against
+     *  a call that is still running. */
+    data class ToolCallFinished(val callId: String) : BargeInEvent()
 }
 
 sealed class BargeInCommand {
@@ -248,8 +275,11 @@ sealed class BargeInCommand {
      *  take it out so the model never sees it as the user's turn. */
     data class DeleteItem(val id: String) : BargeInCommand()
     /** `response.create` — a user turn is complete (its transcript has real
-     *  words) and nothing is generating. The server never creates replies by
-     *  itself (create_response:false). */
+     *  words), or the tool outputs of the last reply are all in, and nothing
+     *  is generating. The server never creates replies by itself
+     *  (create_response:false). The continuation after tool outputs is asked
+     *  for here too (it used to be the client's own timer), so a turn's ask
+     *  and a continuation never race each other or a tool's output. */
     object CreateResponse : BargeInCommand()
     /** The user's completed words, for the caption — REAL turns only. Every
      *  completed transcript used to be shown as the user's line, so the
@@ -298,6 +328,13 @@ class BargeInController(
         /** Rate-limited replies re-asked for one turn before the user is told
          *  the assistant is busy (parity with iOS build 76). */
         const val RATE_LIMIT_MAX_RETRIES = 3
+        /** The continuation is asked this long after the LAST tool output
+         *  (web/iOS: 120 ms), so parallel calls of one reply get one reply —
+         *  or at once at the done of the reply that carried them. */
+        const val CONTINUE_DELAY_MS = 120L
+        /** A tool that never answers must not hold the user's turn forever
+         *  (nothing times a tool out): past this, asks stop waiting for it. */
+        const val TOOL_WAIT_MAX_MS = 10_000L
         /** Echo reference cap per reply. */
         const val SPOKEN_CAP = 400
         const val SEGMENT_HISTORY = 8
@@ -421,6 +458,25 @@ class BargeInController(
      *  reply. A new turn keeps it: asked before the reset, it only fails again. */
     var retryNotBefore: Long? = null; private set
 
+    /** Tool calls (by call id) running whose `function_call_output` has not gone out. */
+    private val toolCalls = LinkedHashSet<String>()
+    val toolsInFlight: Int get() = toolCalls.size
+    /** When the first of [toolsInFlight] started (for [TOOL_WAIT_MAX_MS]). */
+    private var toolsSince: Long? = null
+    /** The last tool output went out at this time and no reply has been asked
+     *  for since: the continuation that reads the results is owed. */
+    var continuationSince: Long? = null; private set
+    /** A hold-to-talk release while a tool ran: its commit + ask wait for the
+     *  continuation (the release appends nothing, so nothing is lost). */
+    private var pttCommitOwed = false
+    /** A tool call is running or its results are still to be read: the next
+     *  reply is the continuation, and nothing else may ask before it. The
+     *  client holds the integrity corrective for it on this. */
+    val toolsPending: Boolean get() = toolCalls.isNotEmpty() || continuationSince != null
+    /** The reply generating now is one we cancelled: its done may never come
+     *  (the fallback's case). A reply we did not cancel always sends its done. */
+    private val activeCancelled: Boolean get() = activeResponseId != null && activeResponseId == cancelledResponseId
+
     /** Echo reference: the words of the reply on air and of the one before
      *  it (a reply's tail echoes after the next response was created). Not a
      *  long history — everyday words pile up and a real question starts to
@@ -494,7 +550,7 @@ class BargeInController(
         get() = when {
             phase == BargeInPhase.HOLD -> BargeInUi.LISTENING
             playbackQueued -> BargeInUi.SPEAKING
-            responseActive -> BargeInUi.THINKING
+            responseActive || toolsPending -> BargeInUi.THINKING
             else -> BargeInUi.LISTENING
         }
 
@@ -546,7 +602,26 @@ class BargeInController(
                     // (the server never queues one): re-ask below if a turn is pending —
                     // also when the server ignored our cancel and the reply completed.
                     createSentAt = null
-                    if (pendingCreate) {
+                    if (toolsPending) {
+                        // This reply carried tool calls. The next reply is the one
+                        // that reads their results, asked for once every output is
+                        // out — at once if they already are. A turn the user took
+                        // meanwhile rides on it (their words are in the
+                        // conversation); asking for it NOW would beat the outputs
+                        // (Zubair's morning call, 2026-09-24 07:02:50).
+                        if (phase == BargeInPhase.SPEAKING && !playbackQueued) phase = BargeInPhase.IDLE
+                        val ask = tryAsk(t, afterDone = true)
+                        out += ask
+                        if (ask.none { it == BargeInCommand.CreateResponse || it == BargeInCommand.CommitAndRespond }) {
+                            if (pendingCreate) out += BargeInCommand.StartTimer(TURN_HOLD_MS)
+                            // Holding the orb: they are talking — never "Thinking" over them.
+                            ui(when {
+                                phase == BargeInPhase.HOLD -> BargeInUi.LISTENING
+                                playbackQueued -> BargeInUi.SPEAKING
+                                else -> BargeInUi.THINKING
+                            }, out)
+                        }
+                    } else if (pendingCreate) {
                         // The reply we cancelled is finished server-side: the user's
                         // turn can be asked for once its hold is up and they are quiet.
                         val ask = tryAsk(t)
@@ -583,7 +658,9 @@ class BargeInController(
                 playingResponseId = null
                 if (!responseActive) {
                     if (phase == BargeInPhase.SPEAKING) phase = BargeInPhase.IDLE
-                    ui(BargeInUi.LISTENING, out)
+                    // "One moment." has played; the tool it announced is still
+                    // working, or its results are about to be read.
+                    ui(if (toolsPending && phase != BargeInPhase.HOLD) BargeInUi.THINKING else BargeInUi.LISTENING, out)
                 }
             }
             BargeInEvent.GateOpen -> {
@@ -670,9 +747,38 @@ class BargeInController(
                     phase = BargeInPhase.IDLE
                     pttPressed = false
                     out += BargeInCommand.ForceGate(false)
-                    out += BargeInCommand.CommitAndRespond
+                    // A tool still running (or its results unread): the commit
+                    // and its ask go out as the continuation — a create now would
+                    // beat the outputs. Outputs that came in while the orb was
+                    // held (nothing is asked over a hold) are read right here.
+                    val ask = if (toolsPending) { pttCommitOwed = true; tryAsk(t) } else listOf(BargeInCommand.CommitAndRespond)
+                    out += ask
                     answeredTurns += 1
-                    ui(BargeInUi.THINKING, out)
+                    if (ask.none { it is BargeInCommand.Ui }) ui(BargeInUi.THINKING, out)
+                }
+            }
+            is BargeInEvent.ToolCallStarted -> {
+                if (toolCalls.isEmpty()) {
+                    toolsSince = t
+                    // The tick that stops waiting for a tool that never answers.
+                    out += BargeInCommand.StartTimer(TOOL_WAIT_MAX_MS + 1)
+                }
+                toolCalls += event.callId
+            }
+            is BargeInEvent.ToolCallFinished -> {
+                // A late output (the wait gave up on it) is still read, but it
+                // never stands in for another call that is still running.
+                toolCalls -= event.callId
+                continuationSince = t
+                if (toolCalls.isEmpty()) {
+                    toolsSince = null
+                    // Coalesced: the tick asks CONTINUE_DELAY_MS after the LAST
+                    // output — or the done of the reply still generating does. A
+                    // create into that reply is refused, and the continuation
+                    // went with it: only one we cancelled (whose done may never
+                    // come) gets the 2.5 s fallback; one we did not, 10 s.
+                    out += BargeInCommand.StartTimer(CONTINUE_DELAY_MS)
+                    if (responseActive) out += BargeInCommand.StartTimer((if (activeCancelled) PENDING_CREATE_FALLBACK_MS else TOOL_WAIT_MAX_MS) + 1)
                 }
             }
         }
@@ -825,11 +931,12 @@ class BargeInController(
             }
             phase == BargeInPhase.SPEAKING && !playbackQueued -> phase = BargeInPhase.IDLE
         }
-        if (pendingCreate) {
+        if (pendingCreate || toolsPending) {
             // Our cancel found nothing to cancel — the reply had already
-            // finished. Its done is not coming; ask once the hold is up.
+            // finished. Its done is not coming; ask once the hold is up (and,
+            // with a tool's results owed, once its outputs are out).
             val ask = tryAsk(t)
-            if (ask.isEmpty()) out += BargeInCommand.StartTimer(TURN_HOLD_MS) else out += ask
+            if (ask.isEmpty()) out += BargeInCommand.StartTimer(if (pendingCreate) TURN_HOLD_MS else CONTINUE_DELAY_MS) else out += ask
         } else {
             ui(uiStateNow, out)
         }
@@ -851,19 +958,45 @@ class BargeInController(
         return if (itemId == null || segments[last].itemId == null) last else null
     }
 
-    /** The held turn, asked for when it is ready: the hold has elapsed since
-     *  the user was last heard, the server VAD is silent, and no reply is
-     *  generating — or the cancelled reply's done never came (the fallback). */
-    private fun tryAsk(t: Long): List<BargeInCommand> {
-        val since = pendingTurnSince ?: return emptyList()
+    /** The held turn — and/or the continuation owed after tool outputs —
+     *  asked for when it is ready: no tool output still to come, the hold has
+     *  elapsed since the user was last heard, the server VAD is silent, the
+     *  outputs settled [CONTINUE_DELAY_MS] (or the reply that carried the
+     *  calls is done: [afterDone]), and no reply is generating — or the
+     *  cancelled reply's done never came (the fallback). ONE create answers
+     *  both: the user's words and the outputs are all in the conversation. */
+    private fun tryAsk(t: Long, afterDone: Boolean = false): List<BargeInCommand> {
+        val turn = pendingTurnSince
+        val cont = continuationSince
+        if (turn == null && cont == null && !pttCommitOwed) return emptyList()
+        // A tool is still running: a reply asked for now is generated without
+        // its result (Zubair's morning call, 2026-09-24). Its output's
+        // ToolCallFinished asks; one that never answers is waited out.
+        if (toolCalls.isNotEmpty()) {
+            val since = toolsSince
+            if (since != null && t - since < TOOL_WAIT_MAX_MS) return emptyList()
+            toolCalls.clear()
+            toolsSince = null
+        }
+        // Holding the orb: nothing is asked over them. The release commits
+        // their words and asks, and the continuation rides on it — asked here,
+        // its reply played over the hold and the release's create collided
+        // with it (their turn went unanswered).
+        if (phase == BargeInPhase.HOLD && turn == null) return emptyList()
         val notBefore = retryNotBefore
         if (notBefore != null && t < notBefore) return listOf(BargeInCommand.StartTimer(notBefore - t))
-        val elapsed = t - since
         if (responseActive) {
-            if (elapsed < PENDING_CREATE_FALLBACK_MS) return emptyList()
+            // The fallback, from the turn (as ever) or, with none, the outputs.
+            // The continuation alone never goes into a reply we did not cancel
+            // before 10 s: its done comes and asks (afterDone); a create into
+            // it would only be refused, and the continuation lost with it.
+            val since = turn ?: cont ?: return emptyList()
+            val wait = if (turn == null && !activeCancelled) TOOL_WAIT_MAX_MS else PENDING_CREATE_FALLBACK_MS
+            if (t - since < wait) return emptyList()
             responseActive = false
         } else {
-            if (elapsed < TURN_HOLD_MS || serverSpeaking) return emptyList()
+            if (turn != null && (t - turn < TURN_HOLD_MS || serverSpeaking)) return emptyList()
+            if (cont != null && !afterDone && t - cont < CONTINUE_DELAY_MS) return emptyList()
         }
         val sent = createSentAt
         if (sent != null && t - sent < CREATE_GRACE_MS) {
@@ -873,11 +1006,16 @@ class BargeInController(
             return listOf(BargeInCommand.StartTimer(CREATE_GRACE_MS - (t - sent) + 1))
         }
         createSentAt = t
+        // Whatever this create answers, it goes out after every output sent
+        // so far: the continuation is no longer owed.
+        continuationSince = null
+        val ask = if (pttCommitOwed) BargeInCommand.CommitAndRespond else BargeInCommand.CreateResponse
+        pttCommitOwed = false
         // The grace's own tick. Asked from idle, no done or error may ever
         // come, and a swallowed create then waited for the user to speak
         // again (review of the 2026-09-23 parity port). Once created, the
         // tick finds nothing pending.
-        return listOf(BargeInCommand.CreateResponse, BargeInCommand.StartTimer(CREATE_GRACE_MS + 1), uiTracked(BargeInUi.THINKING))
+        return listOf(ask, BargeInCommand.StartTimer(CREATE_GRACE_MS + 1), uiTracked(BargeInUi.THINKING))
     }
 
     /** The held deletes, as commands — all of them, or all but one item's. */

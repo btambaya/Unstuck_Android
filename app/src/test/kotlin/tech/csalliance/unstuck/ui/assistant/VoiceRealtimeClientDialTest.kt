@@ -445,7 +445,10 @@ class VoiceRealtimeClientDialTest {
         c.start(); f.open()
         f.listener!!.onMessage(f.last, """{"type":"response.function_call_arguments.done","name":"snooze_call","call_id":"c1","arguments":"{\"minutes\":120}"}""")
         f.listener!!.onMessage(f.last, """{"type":"response.function_call_arguments.done","name":"snooze_call","call_id":"c2","arguments":"{\"minutes\":20}"}""")
-        fun outputs() = f.last.sent.mapNotNull { raw ->
+        // A snapshot under the list's lock: the two tool outputs are appended
+        // from IO coroutines while this polls (iterating the live list threw
+        // ConcurrentModificationException now and then).
+        fun outputs() = f.last.sent.let { l -> synchronized(l) { l.toList() } }.mapNotNull { raw ->
             val item = Json.parseToJsonElement(raw).jsonObject["item"]?.jsonObject ?: return@mapNotNull null
             if (item["type"]?.jsonPrimitive?.contentOrNull != "function_call_output") null
             else item["call_id"]!!.jsonPrimitive.content to item["output"]!!.jsonPrimitive.content

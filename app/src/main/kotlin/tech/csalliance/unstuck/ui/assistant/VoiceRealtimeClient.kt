@@ -64,7 +64,10 @@ import kotlin.concurrent.thread
 //          → response.function_call_arguments.done {name, call_id, arguments}
 //          → response.output_item.done {item: function_call}  (same, other shape)
 //   client → conversation.item.create {function_call_output, call_id, output}
-//          → response.create (ONE, coalesced ~120 ms after the last tool output)
+//          → response.create (ONE, ~120 ms after the last tool output or at the
+//            done of the reply that carried the calls — asked by BargeIn.kt,
+//            which asks nothing else while a tool runs: Zubair's morning call,
+//            2026-09-24, see its header §5)
 //   client → response.cancel  (ONLY while a response is in flight; the server
 //            answers a stray one with an "…active response" error — benign)
 //   client → conversation.item.delete {item_id}  (an echo / no-word segment)
@@ -283,7 +286,7 @@ class VoiceRealtimeClient(
         // Client event id on the primer delete, so ONLY its rejection is swallowed.
         private const val PRIMER_DELETE_EVENT = "evt_primer_delete_0001"
         /** Coalescing window for the response.create after tool outputs (web/iOS: 120 ms). */
-        const val CONTINUE_DELAY_MS = 120L
+        const val CONTINUE_DELAY_MS = BargeInController.CONTINUE_DELAY_MS
         /** The opening reply went missing once on the iOS device (2026-09-20
          *  00:04: socket open, primer + response.create sent, nothing back —
          *  no response.created, no error — until the user spoke 6 s later;
@@ -418,9 +421,12 @@ class VoiceRealtimeClient(
     private val guard = VoiceIntegrityGuard()
     /** Tool calls already dispatched (both event shapes can fire for one call). */
     private val handledCalls = HashSet<String>()
-    /** One coalesced response.create ~120 ms after the LAST tool output — a
-     *  response.create per parallel call races "already has an active response". */
-    private val continueRunnable = Runnable { send(buildJsonObject { put("type", "response.create") }) }
+    /** A corrective the guard asked for at the done of a reply that also
+     *  carried a (read-only) tool call: it rides on the continuation the
+     *  controller asks for once the outputs are out — sent at that done, its
+     *  forced create beat the output exactly as the turn's did (Zubair's
+     *  morning call, 2026-09-24). Under ctlLock. */
+    private var correctiveOwed = false
 
     // Session bookkeeping, under ctlLock: any response.created seen this
     // session, whether the socket ever opened, how many opening
@@ -544,7 +550,6 @@ class VoiceRealtimeClient(
         stopped = true
         open = false
         mainHandler.removeCallbacks(tick)
-        mainHandler.removeCallbacks(continueRunnable)
         mainHandler.removeCallbacks(openingWatchdog)
         mainHandler.removeCallbacks(dialWatchdog)
         mainHandler.removeCallbacks(dialGiveUp)
@@ -669,7 +674,8 @@ class VoiceRealtimeClient(
             BargeInCommand.FlushPlayback -> { audio.flushPlayback(); guard.bargeIn() }
             BargeInCommand.SendCancel -> send(buildJsonObject { put("type", "response.cancel") })
             is BargeInCommand.DeleteItem -> send(buildJsonObject { put("type", "conversation.item.delete"); put("item_id", cmd.id) })
-            BargeInCommand.CreateResponse -> send(buildJsonObject { put("type", "response.create") })
+            // The continuation carries a corrective held for it (checkFabrication).
+            BargeInCommand.CreateResponse -> if (takeCorrective()) sendCorrective() else send(buildJsonObject { put("type", "response.create") })
             BargeInCommand.EnqueueAudio -> payload?.let { audio.enqueue(Base64.decode(it, Base64.NO_WRAP)) }
             // Only captions the controller accepts (not a cancelled reply's) count
             // towards the spoken transcript the guard scores.
@@ -686,9 +692,10 @@ class VoiceRealtimeClient(
             // the audio it covered.
             BargeInCommand.CommitAndRespond -> {
                 // (The recap already ended in dispatch: the controller counted this turn.)
+                val corrective = takeCorrective()
                 audio.afterCaptureDrain {
                     send(buildJsonObject { put("type", "input_audio_buffer.commit") })
-                    send(buildJsonObject { put("type", "response.create") })
+                    if (corrective) sendCorrective() else send(buildJsonObject { put("type", "response.create") })
                 }
             }
             is BargeInCommand.ForceGate -> audio.forceGate(cmd.open)
@@ -776,7 +783,9 @@ class VoiceRealtimeClient(
                     dispatch(BargeInEvent.SpeechStarted(ev["item_id"]?.jsonPrimitive?.contentOrNull))
                 "input_audio_buffer.speech_stopped" -> dispatch(BargeInEvent.SpeechStopped)
                 "response.created" -> {
-                    synchronized(ctlLock) { guard.responseCreated(); anyResponse = true }
+                    // A reply is under way: a corrective still held has missed its
+                    // moment and must never ride on a later, unrelated turn.
+                    synchronized(ctlLock) { guard.responseCreated(); anyResponse = true; correctiveOwed = false }
                     dispatch(BargeInEvent.ResponseCreated(responseId(ev)))
                 }
                 "response.audio.delta" ->
@@ -1036,8 +1045,21 @@ class VoiceRealtimeClient(
      *  corrects itself out loud. Capped per session; never bounces a
      *  correction's own follow-up, so it cannot loop. */
     private fun checkFabrication() {
-        val correct = synchronized(ctlLock) { guard.shouldCorrect() }
-        if (!correct) return
+        val now = synchronized(ctlLock) {
+            if (!guard.shouldCorrect()) return@synchronized false
+            // The reply also carried a tool call (a read — a write would have
+            // backed it) whose results are still to be read: a create now would
+            // beat its output. The corrective goes out with the continuation.
+            if (ctl.toolsPending) { correctiveOwed = true; false } else true
+        }
+        if (now) sendCorrective()
+    }
+
+    /** Under ctlLock (execute): the held corrective, once. */
+    private fun takeCorrective(): Boolean = correctiveOwed.also { correctiveOwed = false }
+
+    /** The hidden corrective item and the response.create that forces a tool call. */
+    private fun sendCorrective() {
         send(buildJsonObject {
             put("type", "conversation.item.create")
             putJsonObject("item") {
@@ -1070,6 +1092,9 @@ class VoiceRealtimeClient(
         val args = runCatching {
             Json.parseToJsonElement(arguments ?: "{}").jsonObject
         }.getOrDefault(JsonObject(emptyMap()))
+        // Before the reply's done (same socket thread, wire order): no reply
+        // may be asked for until this call's output is in the conversation.
+        dispatch(BargeInEvent.ToolCallStarted(callId))
         scope.launch {
             val result = runCatching { runCallAwareTool(name, args) }.getOrElse { "error: ${it.message ?: "failed"}" }
             // Feed the tool result back; the reply after it is tool-backed only
@@ -1083,7 +1108,9 @@ class VoiceRealtimeClient(
                 }
             })
             synchronized(ctlLock) { guard.toolFinished(name, result) }
-            scheduleContinue()
+            // The output is on the wire: the controller asks for the ONE reply
+            // that reads the results once none is left running.
+            dispatch(BargeInEvent.ToolCallFinished(callId))
         }
     }
 
@@ -1110,13 +1137,6 @@ class VoiceRealtimeClient(
         }
         if (name !in cm.allowedTools) return CallMode.notAvailable(name)
         return runTool(name, args)
-    }
-
-    /** One coalesced response.create ~120 ms after the last tool output. */
-    private fun scheduleContinue() {
-        if (stopped) return
-        mainHandler.removeCallbacks(continueRunnable)
-        mainHandler.postDelayed(continueRunnable, CONTINUE_DELAY_MS)
     }
 
     private fun sessionUpdate(): String = buildJsonObject {

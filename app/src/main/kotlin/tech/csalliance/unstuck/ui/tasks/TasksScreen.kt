@@ -69,6 +69,16 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import tech.csalliance.unstuck.design.component.neutralPill
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.runtime.mutableStateMapOf
+import androidx.compose.ui.draw.rotate
+import androidx.compose.ui.semantics.stateDescription
+import tech.csalliance.unstuck.core.logic.CompletedSection
+import tech.csalliance.unstuck.core.logic.groupCompleted
+import tech.csalliance.unstuck.design.component.SectionLabel
+import tech.csalliance.unstuck.ui.sharing.SharedWithYouRow
 
 // Tab order mirrors the web TaskListPane: Backlog first (the triage stack),
 // then All / Today / Upcoming / Later / Completed. Default is Today.
@@ -152,6 +162,69 @@ fun TasksScreen(
         if (view == TaskListView.BACKLOG) overdueOccurrenceLabels(list.map { it.id }, tasks, blocks, Clock.todayIso())
         else emptyMap()
     }
+    // Completed is grouped into foldable date sections (owner request 2026-09-24):
+    // my rows and finished shares together, by completedAt. The minute ticker in the
+    // key rolls "Today" into "Yesterday" at local midnight.
+    val completedGroups = remember(view, list, sharedVisible, nowState) {
+        if (view != TaskListView.COMPLETED) emptyList()
+        else groupCompleted(list.map { CompletedRow.Own(it) } + sharedVisible.map { CompletedRow.Shared(it) }, nowState) { it.completedAt }
+    }
+
+    // One of MY rows — shared by the flat list and the Completed date sections.
+    val taskRow: @Composable (TaskItem, Modifier) -> Unit = { t, rowModifier ->
+        // Long-press → "Share…" straight from the row (unified sharing
+        // v1). An occurrence row (id = a cal_block id) shares from its
+        // editor, where the template is resolved.
+        val isOccurrence = occurrenceBlockFor(t.id, tasks, blocks) != null
+        Box(rowModifier.fillMaxWidth().padding(vertical = 3.dp)) {
+        Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp))
+                .combinedClickable(onClick = { onOpen(t) }, onLongClick = { if (!isOccurrence) rowMenuFor = t.id })
+                .padding(horizontal = 12.dp, vertical = 11.dp),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text(t.name, style = UFont.sans(14, FontWeight.Medium), color = if (t.done) c.ink3 else c.ink, maxLines = 1, textDecoration = if (t.done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null)
+                Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                    AreaDotColor(areaColorFor(t.lifeArea, areas, c), size = 5)
+                    Text(t.lifeArea ?: "—", style = UFont.sans(12), color = c.ink3)
+                    if (t.recurrence != null) Text("· ↻", style = UFont.sans(12), color = c.ink3)
+                    // Tags inline on the same line as the area.
+                    t.tags?.take(3)?.forEach { tn ->
+                        Box(Modifier.neutralPill(c).clickable { activeTag = tn }.padding(horizontal = 7.dp, vertical = 2.dp)) {
+                            Text("#$tn", style = UFont.sans(10, FontWeight.Medium), color = c.ink2)
+                        }
+                    }
+                }
+            }
+            if (view == TaskListView.BACKLOG) {
+                // A missed recurring occurrence shows "Overdue · Fri" (the missed
+                // weekday) so it's obvious why it's here; everything else shows its
+                // age. The occurrence row's createdAt is the template's, so the age
+                // badge would be meaningless for it.
+                val overdue = overdueLabels[t.id]
+                if (overdue != null) {
+                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
+                        Text(overdue, style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
+                    }
+                } else {
+                    val age = tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, nowState)
+                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
+                        Text("${age.coerceAtLeast(1)}d", style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
+                    }
+                }
+            }
+            Text("${t.estimateMin}m", style = UFont.mono(11), color = c.ink3)
+        }
+        DropdownMenu(expanded = rowMenuFor == t.id, onDismissRequest = { rowMenuFor = null }) {
+            DropdownMenuItem(
+                text = { Text("Share…", style = UFont.sans(14), color = c.ink) },
+                leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null, tint = c.ink2, modifier = Modifier.size(18.dp)) },
+                onClick = { rowMenuFor = null; shareTarget = ShareTarget.Task(t.id, t.name) },
+            )
+        }
+        }
+    }
 
     Column(Modifier.fillMaxSize()) {
         // No leading hamburger — the area-filter pills below cover what it did.
@@ -206,9 +279,9 @@ fun TasksScreen(
             }
         }
         LazyColumn(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
-            // "Quiet company" above my own rows — the Completed tab is where a finished
-            // share ends up, so the group renders there too (header says so).
-            if (shareMode != null && sharedVisible.isNotEmpty()) item(key = "shared-with-you") {
+            // "Quiet company" above my own rows. On Completed, finished shares sit in
+            // the date sections below instead, among my own completed rows.
+            if (shareMode != null && shareMode != ShareViewMode.COMPLETED && sharedVisible.isNotEmpty()) item(key = "shared-with-you") {
                 SharedWithYouSection(
                     vm, sharedVisible, shareMode,
                     onToggle = { taskId, done -> vm.completeSharedTask(taskId, done) },
@@ -217,61 +290,29 @@ fun TasksScreen(
             }
             if (list.isEmpty() && sharedVisible.isEmpty()) {
                 item { Text("No ${view.label.lowercase()} tasks.", style = UFont.sans(14), color = c.ink3, modifier = Modifier.padding(vertical = 32.dp)) }
-            } else {
-                items(list, key = { it.id }) { t ->
-                    // Long-press → "Share…" straight from the row (unified sharing
-                    // v1). An occurrence row (id = a cal_block id) shares from its
-                    // editor, where the template is resolved.
-                    val isOccurrence = occurrenceBlockFor(t.id, tasks, blocks) != null
-                    Box(Modifier.fillMaxWidth().padding(vertical = 3.dp)) {
-                    Row(
-                        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(14.dp))
-                            .combinedClickable(onClick = { onOpen(t) }, onLongClick = { if (!isOccurrence) rowMenuFor = t.id })
-                            .padding(horizontal = 12.dp, vertical = 11.dp),
-                        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        Column(Modifier.weight(1f)) {
-                            Text(t.name, style = UFont.sans(14, FontWeight.Medium), color = if (t.done) c.ink3 else c.ink, maxLines = 1, textDecoration = if (t.done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null)
-                            Row(Modifier.padding(top = 3.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(5.dp)) {
-                                AreaDotColor(areaColorFor(t.lifeArea, areas, c), size = 5)
-                                Text(t.lifeArea ?: "—", style = UFont.sans(12), color = c.ink3)
-                                if (t.recurrence != null) Text("· ↻", style = UFont.sans(12), color = c.ink3)
-                                // Tags inline on the same line as the area.
-                                t.tags?.take(3)?.forEach { tn ->
-                                    Box(Modifier.neutralPill(c).clickable { activeTag = tn }.padding(horizontal = 7.dp, vertical = 2.dp)) {
-                                        Text("#$tn", style = UFont.sans(10, FontWeight.Medium), color = c.ink2)
-                                    }
-                                }
-                            }
+            } else if (view == TaskListView.COMPLETED) {
+                completedGroups.forEach { g ->
+                    val open = completedSectionOpen(g.section)
+                    item(key = "completed-section-${g.section.name}") {
+                        CompletedSectionHeader(g.section, g.items.size, open, Modifier.animateItem()) {
+                            completedFolds[g.section] = !open
                         }
-                        if (view == TaskListView.BACKLOG) {
-                            // A missed recurring occurrence shows "Overdue · Fri" (the missed
-                            // weekday) so it's obvious why it's here; everything else shows its
-                            // age. The occurrence row's createdAt is the template's, so the age
-                            // badge would be meaningless for it.
-                            val overdue = overdueLabels[t.id]
-                            if (overdue != null) {
-                                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
-                                    Text(overdue, style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
-                                }
-                            } else {
-                                val age = tech.csalliance.unstuck.ui.components.ageDays(t.createdAt, nowState)
-                                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.amberSoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
-                                    Text("${age.coerceAtLeast(1)}d", style = UFont.sans(10, FontWeight.Medium), color = c.amberInk)
-                                }
-                            }
+                    }
+                    if (open) items(g.items, key = { it.key }) { r ->
+                        when (r) {
+                            is CompletedRow.Own -> taskRow(r.task, Modifier.animateItem())
+                            is CompletedRow.Shared -> SharedWithYouRow(
+                                vm, r.share, Clock.todayIso(),
+                                onToggle = { taskId, done -> vm.completeSharedTask(taskId, done) },
+                                onOpen = onOpenShared,
+                                modifier = Modifier.animateItem().padding(vertical = 3.dp),
+                            )
                         }
-                        Text("${t.estimateMin}m", style = UFont.mono(11), color = c.ink3)
-                    }
-                    DropdownMenu(expanded = rowMenuFor == t.id, onDismissRequest = { rowMenuFor = null }) {
-                        DropdownMenuItem(
-                            text = { Text("Share…", style = UFont.sans(14), color = c.ink) },
-                            leadingIcon = { Icon(Icons.Filled.PersonAdd, contentDescription = null, tint = c.ink2, modifier = Modifier.size(18.dp)) },
-                            onClick = { rowMenuFor = null; shareTarget = ShareTarget.Task(t.id, t.name) },
-                        )
-                    }
                     }
                 }
+                item { Text("", Modifier.padding(28.dp)) }
+            } else {
+                items(list, key = { it.id }) { t -> taskRow(t, Modifier) }
                 item { Text("", Modifier.padding(28.dp)) }
             }
         }
@@ -279,6 +320,47 @@ fun TasksScreen(
 
     // The ONE Share screen, opened from a row's "Share…".
     shareTarget?.let { ShareScreen(vm, it, onDismiss = { shareTarget = null }) }
+}
+
+/** A Completed-tab row: one of mine, or a share someone finished with me. */
+private sealed interface CompletedRow {
+    val key: String
+    val completedAt: String?
+    data class Own(val task: TaskItem) : CompletedRow {
+        override val key: String get() = task.id
+        override val completedAt: String? get() = task.completedAt
+    }
+    data class Shared(val share: SharedWithMe) : CompletedRow {
+        override val key: String get() = "shared-${share.shareId}-${share.taskId}"
+        override val completedAt: String? get() = share.completedAt
+    }
+}
+
+/** Which Completed sections the user folded / unfolded — kept for the app
+ *  session (in memory), so leaving the tab and coming back keeps the layout. */
+private val completedFolds = mutableStateMapOf<CompletedSection, Boolean>()
+
+private fun completedSectionOpen(s: CompletedSection): Boolean = completedFolds[s] ?: s.defaultExpanded
+
+/** "YESTERDAY · 4 ⌄" — the section-label eyebrow (ink3, no new colour) that
+ *  folds / unfolds its section. One button for TalkBack, with its state. */
+@Composable
+private fun CompletedSectionHeader(section: CompletedSection, count: Int, open: Boolean, modifier: Modifier = Modifier, onToggle: () -> Unit) {
+    val c = UTheme.colors
+    val turn by animateFloatAsState(if (open) 0f else -90f, label = "completed-chevron")
+    Row(
+        modifier.fillMaxWidth()
+            .clickable(role = Role.Button, onClickLabel = if (open) "Collapse" else "Expand", onClick = onToggle)
+            .semantics { stateDescription = if (open) "Expanded" else "Collapsed" }
+            .testTag("completed-section-${section.name.lowercase()}")
+            .minimumInteractiveComponentSize()
+            .padding(top = 8.dp, bottom = 2.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        SectionLabel("${section.label} · $count")
+        Spacer(Modifier.weight(1f))
+        Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null, tint = c.ink3, modifier = Modifier.size(18.dp).rotate(turn))
+    }
 }
 
 /** "Edit" at the end of the area filter — an outlined pill (never a filter,

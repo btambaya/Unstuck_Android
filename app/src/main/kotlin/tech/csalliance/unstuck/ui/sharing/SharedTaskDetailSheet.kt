@@ -225,7 +225,7 @@ fun SharedTaskDetailSheet(
             // carries the task's NEXT block — lands, as on the web. Otherwise the fresh
             // detail wins; until it lands the row seeds it. Nothing to plan → no line.
             val slot: ShareSlot = shared.openedFrom ?: d ?: shared
-            plannedLabel(slot, Clock.todayIso(), tech.csalliance.unstuck.ui.components.clockMode())?.let { planned ->
+            plannedLabel(slot, Clock.todayIso(), tech.csalliance.unstuck.ui.components.clockMode(), taskDone = done)?.let { planned ->
                 Text(planned, style = UFont.sans(12, FontWeight.Medium), color = if (planned.endsWith("overdue")) c.amberInk else c.ink2)
             }
 

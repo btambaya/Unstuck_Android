@@ -80,50 +80,63 @@ fun SharedWithYouSection(
                 },
             )
         }
-        items.forEach { s ->
-            val done = s.done
-            // No tick on a repeating share: it would end the owner's series, and the
-            // server refuses it (parity with iOS build 81, audit 2026-09-22 C3).
-            val canComplete = shareCanTickDone(s)
-            Row(
-                // Row opens the read-only detail; the checkbox (below) has its own
-                // clickable that consumes the tap, so ticking never opens the sheet.
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(12.dp)).clickable { onOpen(s) }.padding(horizontal = 13.dp, vertical = 11.dp),
-                verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
-            ) {
-                if (canComplete) {
-                    Box(
-                        Modifier.size(18.dp).clip(RoundedCornerShape(6.dp)).background(if (done) c.green else Color.Transparent)
-                            .border(if (done) 0.dp else 1.5.dp, if (done) Color.Transparent else c.line2, RoundedCornerShape(6.dp))
-                            .clickable { onToggle(s.taskId, !done) },
-                        contentAlignment = Alignment.Center,
-                    ) { if (done) Icon(Icons.Filled.Check, contentDescription = "Mark done", tint = Color.White, modifier = Modifier.size(12.dp)) }
-                } else {
-                    Box(Modifier.size(18.dp))   // spacer keeps view-only rows title-aligned
-                }
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        s.title, style = UFont.sans(14, FontWeight.Medium),
-                        color = if (done) c.ink3 else c.ink,
-                        textDecoration = if (done) TextDecoration.LineThrough else null,
-                        maxLines = 1, overflow = TextOverflow.Ellipsis,
-                    )
-                    // The owner's slot leads — "Sat 04:30 · 45m · from anna" — so a shared
-                    // task reads like one of your own rows (migration 052). Unscheduled falls
-                    // back to the estimate; an overdue slot is tinted like a backlog age badge.
-                    val slot = shareSlotLabel(s, todayIso, tech.csalliance.unstuck.ui.components.clockMode())
-                    val overdue = !done && shareBucket(s, todayIso) == ShareBucket.OVERDUE
-                    val meta = listOfNotNull(slot ?: fmtDuration(s.estimateMin), "from ${shareFirstName(s.ownerName)}").joinToString(" · ")
-                    Text(meta, style = UFont.sans(12), color = if (overdue) c.amberInk else c.ink3, modifier = Modifier.padding(top = 2.dp))
-                    // Partner rows: live co-focus — "focusing now" + "Sit with them".
-                    if (s.level == ShareLevel.PARTNER && !done) {
-                        PartnerPresence(vm, s.taskId, modifier = Modifier.padding(top = 6.dp))
-                    }
-                }
-                Box(Modifier.neutralPill(c).padding(horizontal = 9.dp, vertical = 2.dp)) {
-                    Text(shareStatusLabel(s.level, done), style = UFont.sans(10, FontWeight.Bold), color = c.ink2)
-                }
+        items.forEach { s -> SharedWithYouRow(vm, s, todayIso, onToggle, onOpen) }
+    }
+}
+
+/** One "Shared with you" row — also used on its own inside the Tasks › Completed
+ *  date sections, where finished shares sit among my own completed rows. */
+@Composable
+fun SharedWithYouRow(
+    vm: AppViewModel,
+    s: SharedWithMe,
+    todayIso: String,
+    onToggle: (taskId: String, done: Boolean) -> Unit,
+    onOpen: (SharedWithMe) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val c = UTheme.colors
+    val done = s.done
+    // No tick on a repeating share: it would end the owner's series, and the
+    // server refuses it (parity with iOS build 81, audit 2026-09-22 C3).
+    val canComplete = shareCanTickDone(s)
+    Row(
+        // Row opens the read-only detail; the checkbox (below) has its own
+        // clickable that consumes the tap, so ticking never opens the sheet.
+        modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(12.dp)).clickable { onOpen(s) }.padding(horizontal = 13.dp, vertical = 11.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        if (canComplete) {
+            Box(
+                Modifier.size(18.dp).clip(RoundedCornerShape(6.dp)).background(if (done) c.green else Color.Transparent)
+                    .border(if (done) 0.dp else 1.5.dp, if (done) Color.Transparent else c.line2, RoundedCornerShape(6.dp))
+                    .clickable { onToggle(s.taskId, !done) },
+                contentAlignment = Alignment.Center,
+            ) { if (done) Icon(Icons.Filled.Check, contentDescription = "Mark done", tint = Color.White, modifier = Modifier.size(12.dp)) }
+        } else {
+            Box(Modifier.size(18.dp))   // spacer keeps view-only rows title-aligned
+        }
+        Column(Modifier.weight(1f)) {
+            Text(
+                s.title, style = UFont.sans(14, FontWeight.Medium),
+                color = if (done) c.ink3 else c.ink,
+                textDecoration = if (done) TextDecoration.LineThrough else null,
+                maxLines = 1, overflow = TextOverflow.Ellipsis,
+            )
+            // The owner's slot leads — "Sat 04:30 · 45m · from anna" — so a shared
+            // task reads like one of your own rows (migration 052). Unscheduled falls
+            // back to the estimate; an overdue slot is tinted like a backlog age badge.
+            val slot = shareSlotLabel(s, todayIso, tech.csalliance.unstuck.ui.components.clockMode())
+            val overdue = !done && shareBucket(s, todayIso) == ShareBucket.OVERDUE
+            val meta = listOfNotNull(slot ?: fmtDuration(s.estimateMin), "from ${shareFirstName(s.ownerName)}").joinToString(" · ")
+            Text(meta, style = UFont.sans(12), color = if (overdue) c.amberInk else c.ink3, modifier = Modifier.padding(top = 2.dp))
+            // Partner rows: live co-focus — "focusing now" + "Sit with them".
+            if (s.level == ShareLevel.PARTNER && !done) {
+                PartnerPresence(vm, s.taskId, modifier = Modifier.padding(top = 6.dp))
             }
+        }
+        Box(Modifier.neutralPill(c).padding(horizontal = 9.dp, vertical = 2.dp)) {
+            Text(shareStatusLabel(s.level, done), style = UFont.sans(10, FontWeight.Bold), color = c.ink2)
         }
     }
 }

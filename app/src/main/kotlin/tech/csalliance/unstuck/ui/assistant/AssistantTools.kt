@@ -312,11 +312,21 @@ private suspend fun scheduleTask(api: AssistantApi, task: TaskItem, date: String
     // A series with nothing live after today (a first placement, or one that
     // lapsed) is being placed, so the time given sets the series' time.
     val placesSeries = live.none { it.date > today }
+    // The target day of a series: an occurrence already there is retimed (and
+    // un-skipped), a done one leaves the day alone; only an empty day moves the
+    // next occurrence onto it (parity with iOS build 81, audit 2026-09-22 C7).
+    val action = if (task.recurrence == null) ChosenDateAction.Mint
+        else recurrenceChosenDateAction(blocks.filter { it.taskId == task.id }, RegenPlan(emptyList(), emptyList()), date, time)
+    val openOnDay = blocks.firstOrNull { it.taskId == task.id && isTaskBlock(it) && it.date == date && !it.done && !it.skipped }
     // …and, every N weeks, its weeks: placing a series means "it starts here"
-    // (spec §5), so week one becomes the placed day's. Written BEFORE the fill
-    // below reads the rule; nothing is written when the weeks are the same.
+    // (spec §5), so week one becomes the placed day's. The task row is written
+    // BEFORE any block — the placement's and the fill's — so no reader (the fill
+    // below, another device's top-up on the placed block's echo) runs the old
+    // weeks from it (web review fix 1, 17181ed). Nothing is written when the
+    // weeks are the same, or when that day's occurrence is already done: nothing
+    // is placed there, so nothing starts there.
     var task = task
-    if (task.recurrence != null && placesSeries) {
+    if (task.recurrence != null && placesSeries && !(action == ChosenDateAction.Covered && openOnDay == null)) {
         reanchorForSchedule(task.recurrence, date)?.let { re ->
             val fresh = api.getTasks().firstOrNull { it.id == task.id } ?: task
             val moved = fresh.copy(recurrence = re, updatedAt = api.nowIso())
@@ -325,15 +335,9 @@ private suspend fun scheduleTask(api: AssistantApi, task: TaskItem, date: String
             task = moved
         }
     }
-    // The target day of a series: an occurrence already there is retimed (and
-    // un-skipped), a done one leaves the day alone; only an empty day moves the
-    // next occurrence onto it (parity with iOS build 81, audit 2026-09-22 C7).
-    val action = if (task.recurrence == null) ChosenDateAction.Mint
-        else recurrenceChosenDateAction(blocks.filter { it.taskId == task.id }, RegenPlan(emptyList(), emptyList()), date, time)
     when (action) {
         ChosenDateAction.Covered -> {
-            val open = blocks.firstOrNull { it.taskId == task.id && isTaskBlock(it) && it.date == date && !it.done && !it.skipped }
-                ?: return null
+            val open = openOnDay ?: return null
             scratch.placedBlocks[task.id] = open.id
         }
         is ChosenDateAction.Retime -> {
@@ -738,7 +742,10 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 "weekly" -> if (newN == null || newN < 2) Recurrence.Weekly(days ?: emptyList(), until) else {
                     val d = days ?: emptyList()
                     val anchor = if (placed != null && startsNWeeks) seriesAnchor(d, placed.date)
-                        else nWeeksAnchor(current, d, newN, today, recurrenceEditStart(t.id, null, blocks, today)?.date ?: today)
+                        // The series' block day, counted only when it is ahead (web's
+                        // rule, nWeeksBase): a task whose only blocks are past starts
+                        // week one from today, never from a past week.
+                        else nWeeksAnchor(current, d, newN, today, tech.csalliance.unstuck.core.logic.recurrenceAnchor(t.id, blocks, today)?.date ?: today)
                     Recurrence.EveryNWeeks(newN, d, anchor, until)
                 }
                 "monthly" -> Recurrence.Monthly(until)

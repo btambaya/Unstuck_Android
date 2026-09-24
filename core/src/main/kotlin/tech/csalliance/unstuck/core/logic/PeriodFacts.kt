@@ -269,14 +269,20 @@ fun insightsTrend(data: PeriodData, span: InsightsSpan, offset: Int, nowMs: Long
     return out
 }
 
-/** This week's counted focus seconds (Monday-anchored, so far) — the Today
- *  pill's number, identical to the Insights page's This week "Focused" (D3). */
-fun thisWeekFocusSec(data: PeriodData, nowMs: Long, zone: ZoneId): Int {
+/** This week's window facts (Monday-anchored, so far, cut at this minute) —
+ *  exactly what the Insights page reads for This week ([insightsFacts]'s
+ *  `cur`), so the Today pill's "2h 5m focused" and "3 done" are the page's
+ *  Focused and Done (D3). */
+fun thisWeekFacts(data: PeriodData, nowMs: Long, zone: ZoneId): WindowFacts {
     val today = localToday(nowMs, zone)
     val r = insightsRange(InsightsSpan.WEEK, 0, today, null)
     val nowZ = Instant.ofEpochMilli(nowMs).atZone(zone)
-    return collectWindow(data, PeriodWindow(r.from, r.end, nowZ.hour * 60 + nowZ.minute), zone).focusSec
+    return collectWindow(data, PeriodWindow(r.from, r.end, nowZ.hour * 60 + nowZ.minute), zone)
 }
+
+/** This week's counted focus seconds (Monday-anchored, so far) — the Today
+ *  pill's number, identical to the Insights page's This week "Focused" (D3). */
+fun thisWeekFocusSec(data: PeriodData, nowMs: Long, zone: ZoneId): Int = thisWeekFacts(data, nowMs, zone).focusSec
 
 /** "+2" / "same" / "−3" — a neutral change (never coloured, never judged). */
 fun neutralDelta(d: Int): String = if (d == 0) "same" else if (d > 0) "+$d" else "−${-d}"

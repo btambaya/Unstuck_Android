@@ -38,7 +38,7 @@ class RecurrenceEditorModelTest {
         assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-21"), m.rule(null, listOf(4), 2, null, "2026-09-24", "2026-09-24"))
         // A Friday pick for a Thursday rule: the next Thursday's week, not N weeks out.
         assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28"), m.rule(null, listOf(4), 2, null, "2026-09-24", "2026-09-25"))
-        val chips = m.starts(null, Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28"), "2026-09-24", "2026-09-25")
+        val chips = m.starts(null, Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28"), "2026-09-24", "2026-09-25", create = true)
         assertEquals(listOf(StartsChip("2026-10-01", "2026-09-28") to true, StartsChip("2026-10-08", "2026-10-05") to false), chips)
     }
 
@@ -48,6 +48,29 @@ class RecurrenceEditorModelTest {
         val chips = m.starts(v1, v1, "2026-09-30", "2026-10-08")
         assertEquals(listOf("2026-10-08", "2026-10-15"), chips.map { it.first.date })
         assertEquals(listOf(true, false), chips.map { it.second })
+    }
+
+    /** Web review fix 2 (17181ed): the same N with NEW days keeps the stored
+     *  anchor, so the chips count on the new days. Thu → Mon on Wed 30 Sep: the
+     *  pre-selected chip is Mon 5 Oct, the series' real first Monday — counted
+     *  on the old Thursday it read "Mon 19 Oct". */
+    @Test fun `an edit that changes only the days pre-selects the real first date`() {
+        val edited = m.rule(v1, listOf(1), 2, null, "2026-09-30", "2026-10-08") as Recurrence.EveryNWeeks
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(1), "2026-09-21"), edited)
+        val chips = m.starts(v1, edited, "2026-09-30", "2026-10-08")
+        assertEquals(listOf("2026-10-05", "2026-10-12"), chips.map { it.first.date })
+        assertEquals(listOf(true, false), chips.map { it.second })
+    }
+
+    /** Week one from no repeat on the task sheet: the series' block day only
+     *  when it is ahead (web). A past block (Mon 14 Sep, today Thu 24 Sep) gives
+     *  this week's chips and week one; the create sheet counts from its picked
+     *  day as it is. */
+    @Test fun `from no repeat a past block day counts from today, the create sheet from its day`() {
+        val r = m.rule(null, listOf(4), 2, null, "2026-09-24", "2026-09-14") as Recurrence.EveryNWeeks
+        assertEquals("2026-09-21", r.anchor)
+        assertEquals(listOf("2026-09-24", "2026-10-01"), m.starts(null, r, "2026-09-24", "2026-09-14").map { it.first.date })
+        assertEquals(listOf("2026-09-17", "2026-09-24"), m.starts(null, r, "2026-09-24", "2026-09-14", create = true).map { it.first.date })
     }
 
     /** Edit changing N (E3) and weekly → every 2 weeks: the current rule's next
@@ -90,7 +113,7 @@ class RecurrenceEditorModelTest {
         // The sheet shows and saves createRule's rule: the first chip of the new day.
         val shown = m.createRule(tappedOnThursday, null, "2026-09-25") as Recurrence.EveryNWeeks
         assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-28"), shown)
-        assertEquals(listOf(true, false), m.starts(null, shown, "2026-09-24", "2026-09-25").map { it.second })
+        assertEquals(listOf(true, false), m.starts(null, shown, "2026-09-24", "2026-09-25", create = true).map { it.second })
         assertEquals(shown to "2026-09-25", m.createStart(shown, "2026-09-25"))
     }
 

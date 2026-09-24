@@ -106,30 +106,50 @@ fun seriesAnchor(days: List<Int>, fromIso: String): String {
     return IsoDate.format(LocalDate.ofEpochDay(mondayEpochDay(from)))
 }
 
+/** The last civil day a rule date is ever computed for (9999-12-31, epoch day
+ *  2 932 896): past it a date no longer has four year digits, and the strict
+ *  YYYY-MM-DD parse would refuse what [nextRuleDate] returned (web and iOS use
+ *  the same value). */
+private const val LAST_CIVIL_EPOCH_DAY = 2_932_896L
+
+/** The most weeks a reader's cycle arithmetic looks at. Readers accept ANY
+ *  whole interval ≥ 1 (spec §2); 10 000 weeks (~190 years) already reaches
+ *  every block a series can have, so a larger N gives the same answer (web
+ *  and iOS clamp the same). */
+private const val MAX_CYCLE_WEEKS = 10_000
+
 /**
  * The first date on or after [fromIso] that [rule] (weekly or every N weeks)
  * has, from the RULE alone — never from blocks, which may have been moved by
- * hand. Null past `until`, for another kind, or when the rule has no day.
- * Scans at most 7·N days.
+ * hand. Null past `until`, past 9999-12-31, for another kind, or when the rule
+ * has no day. Computed directly (web's nextRuleDate): the rest of this week,
+ * then one on-week ahead — never a 7N-day scan, which a huge stored interval
+ * turned into a freeze (or, capped, into a wrong null).
  */
 fun nextRuleDate(rule: Recurrence?, fromIso: String): String? {
-    val from = RecurrenceSerializer.strictYmd(fromIso) ?: return null
-    val span = when (rule) {
-        is Recurrence.Weekly -> 7
-        is Recurrence.EveryNWeeks -> if (isValidEveryNWeeks(rule)) 7 * minOf(rule.interval, 520) else return null
+    val from = RecurrenceSerializer.strictYmd(fromIso)?.toEpochDay() ?: return null
+    val (days, n) = when (rule) {
+        is Recurrence.Weekly -> normalizeWeekdays(rule.daysOfWeek) to 1L
+        is Recurrence.EveryNWeeks -> if (isValidEveryNWeeks(rule)) everyNWeeksDays(rule) to rule.interval.toLong() else return null
         else -> return null
     }
-    val until = rule.until
-    for (i in 0 until span) {
-        val d = from.plusDays(i.toLong())
-        val iso = IsoDate.format(d)
-        if (until != null && iso > until) return null
-        val hit = when (rule) {
-            is Recurrence.Weekly -> d.dowJs() in normalizeWeekdays(rule.daysOfWeek)
-            is Recurrence.EveryNWeeks -> everyNWeeksHas(rule, d)
-            else -> false
+    if (days.isEmpty()) return null
+    val pos = days.map { (it + 6) % 7 }.distinct().sorted()   // Mon = 0 … Sun = 6
+    var week = from - Math.floorMod(from + 3, 7L)              // this week's Monday
+    if (rule is Recurrence.EveryNWeeks) {
+        val anchor = RecurrenceSerializer.strictYmd(rule.anchor)!!.toEpochDay()
+        val off = Math.floorMod((week - (anchor - Math.floorMod(anchor + 3, 7L))) / 7, n)
+        if (off != 0L) week += (n - off) * 7
+    }
+    repeat(2) {
+        for (p in pos) {
+            val e = week + p
+            if (e < from) continue
+            if (e > LAST_CIVIL_EPOCH_DAY) return null
+            val iso = IsoDate.format(LocalDate.ofEpochDay(e))
+            return if (rule.until != null && iso > rule.until!!) null else iso
         }
-        if (hit) return iso
+        week += 7 * n
     }
     return null
 }
@@ -150,11 +170,18 @@ fun ruleHasDate(rule: Recurrence?, iso: String): Boolean {
  *  one week, and that week's Monday (the anchor tapping it writes). */
 data class StartsChip(val date: String, val anchor: String)
 
+/** At most this many "Starts" chips: writers keep N at 2…8, and a stored rule
+ *  with a huge interval (readers accept any whole N ≥ 1) must not make the
+ *  editor build one chip per week of it (iOS review 2026-09-24: a
+ *  million-week rule froze the editor there). */
+const val MAX_STARTS_CHIPS = 8
+
 /**
  * The "Starts" chips for an every-[interval]-weeks rule on [days]: [interval]
- * consecutive weeks from the week of [seriesAnchor] (days, [baseIso]), each the
- * first series day ≥ [baseIso] in its week. Base Thu 24 Sep, Thursdays, N2 →
- * Thu 24 Sep · Thu 1 Oct; base Fri 25 Sep → Thu 1 Oct · Thu 8 Oct.
+ * consecutive weeks (at most [MAX_STARTS_CHIPS]) from the week of
+ * [seriesAnchor] (days, [baseIso]), each the first series day ≥ [baseIso] in
+ * its week. Base Thu 24 Sep, Thursdays, N2 → Thu 24 Sep · Thu 1 Oct; base Fri
+ * 25 Sep → Thu 1 Oct · Thu 8 Oct.
  */
 fun startsChips(days: List<Int>, interval: Int, baseIso: String): List<StartsChip> {
     val base = RecurrenceSerializer.strictYmd(baseIso) ?: return emptyList()
@@ -162,7 +189,7 @@ fun startsChips(days: List<Int>, interval: Int, baseIso: String): List<StartsChi
     if (valid.isEmpty() || interval < 1) return emptyList()
     val first = RecurrenceSerializer.strictYmd(seriesAnchor(days, baseIso)) ?: return emptyList()
     val out = ArrayList<StartsChip>()
-    for (k in 0 until interval) {
+    for (k in 0 until minOf(interval, MAX_STARTS_CHIPS)) {
         val monday = first.plusDays(7L * k)
         val day = (0..6).map { monday.plusDays(it.toLong()) }.firstOrNull { !it.isBefore(base) && it.dowJs() in valid } ?: continue
         out += StartsChip(IsoDate.format(day), IsoDate.format(monday))
@@ -172,20 +199,32 @@ fun startsChips(days: List<Int>, interval: Int, baseIso: String): List<StartsChi
 
 /**
  * The base the "Starts" chips and the default week one of an every-N-weeks
- * EDIT start from (spec §5/§6), given the rule the task has now ([current]):
+ * EDIT start from (spec §5/§6), given the rule the task has now ([current]) —
+ * web's `startsBase` (lib/recurrence.ts, reviewed at 17181ed), which is
+ * canonical where the spec is silent:
  *  • already every N weeks with the same N → the rule's next date, so the
- *    stored weeks are the pre-selected chip;
+ *    stored weeks are the pre-selected chip. Its next date ON [newDays] when
+ *    they are given: such an edit keeps the stored anchor, so that is the
+ *    series' real first date. Counted on the OLD days, a Thu → Mon change on
+ *    Wed 30 Sep labelled the stored weeks' chip "Mon 19 Oct" over a series
+ *    that starts Mon 5 Oct (web review fix 2);
  *  • weekly, or every N weeks with another N → the week of the CURRENT rule's
  *    next date (never before today), so the next occurrence never jumps (E3);
- *  • daily, monthly, no repeat (or the create sheet: [current] null) → [startIso]
- *    (the picked day / the edit's start, else today).
+ *  • daily, monthly, no repeat → [startIso] (the series' first block day,
+ *    recurrenceAnchor's) when it is AHEAD, else today. A task whose only
+ *    blocks are in the past counts week one from today, never from a past
+ *    week (web's rule; iOS and Android used to take the past block's week).
+ * The create sheet does not come here: its chips count from the picked day
+ * itself ([startsChips] with that day, as web's create modal does).
  */
-fun nWeeksBase(current: Recurrence?, newInterval: Int, todayIso: String, startIso: String): String = when {
-    current is Recurrence.EveryNWeeks && isValidEveryNWeeks(current) && current.interval == newInterval ->
-        nextRuleDate(current, todayIso) ?: todayIso
+fun nWeeksBase(current: Recurrence?, newInterval: Int, todayIso: String, startIso: String, newDays: List<Int>? = null): String = when {
+    current is Recurrence.EveryNWeeks && isValidEveryNWeeks(current) && current.interval == newInterval -> {
+        val days = newDays?.filter { it in 0..6 }?.distinct()?.sorted().orEmpty()
+        nextRuleDate(if (days.isEmpty()) current else current.copy(daysOfWeek = days), todayIso) ?: todayIso
+    }
     current is Recurrence.Weekly || (current is Recurrence.EveryNWeeks && isValidEveryNWeeks(current)) ->
         maxOf(todayIso, nextRuleDate(current, todayIso)?.let(::mondayIso) ?: todayIso)
-    else -> startIso
+    else -> if (startIso > todayIso) startIso else todayIso
 }
 
 /**
@@ -467,10 +506,17 @@ internal fun occurrenceReach(r: Recurrence): Int = when (r) {
     // Over the 7N-day cycle, with ISO positions (Mon=0 … Sun=6) of week one's
     // days: the gaps are the consecutive differences plus the wrap. N = 1 equals
     // the weekly value for every day set.
+    // Readers accept any whole N ≥ 1: the cycle is clamped at MAX_CYCLE_WEEKS
+    // (as web and iOS), so 7·N can't wrap (iOS trapped there, review
+    // 2026-09-24). Only malformed data gets there.
     is Recurrence.EveryNWeeks -> {
         val iso = everyNWeeksDays(r).map { (it + 6) % 7 }.sorted()
         if (iso.isEmpty() || r.interval < 1) 0
-        else ((iso.zipWithNext { a, b -> b - a } + (7 * r.interval - iso.last() + iso.first())).min() - 1) / 2
+        else {
+            val wrap = 7L * minOf(r.interval, MAX_CYCLE_WEEKS) - iso.last() + iso.first()
+            val minGap = minOf(wrap, iso.zipWithNext { a, b -> (b - a).toLong() }.minOrNull() ?: Long.MAX_VALUE)
+            ((minGap - 1) / 2).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+        }
     }
 }
 

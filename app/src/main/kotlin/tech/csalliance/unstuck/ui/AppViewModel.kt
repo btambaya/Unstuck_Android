@@ -3532,7 +3532,7 @@ class AppViewModel(
             is MomentRun.Chat -> { settleMoment(moment.id, null); openAssistantWith(run.message) }
             is MomentRun.Schedule -> launchWrite {
                 val api = assistantApi
-                val w = GatewayActions.schedule(run.taskId, run.date, run.time, api.getTasks(), api.getBlocks(), api.todayIso(), newUuid())
+                val w = GatewayActions.schedule(run.taskId, run.date, run.time, api.getTasks(), api.getBlocks(), api.todayIso(), newUuid(), api.nowIso())
                 // A vanished task → no writes and no ✓; the moment is stale, so it
                 // retires quietly instead of fabricating a block for a ghost.
                 applyGatewayWrites(api, w)
@@ -3558,11 +3558,16 @@ class AppViewModel(
     }
 
     private suspend fun applyGatewayWrites(api: AssistantApi, w: GatewayWrites) {
+        // Task rows FIRST: a series' first placement re-anchors an every-N-weeks
+        // rule, and writes reach the server in call order — the placed block
+        // arriving before its rule let another device's top-up mint the old
+        // weeks beside it (web review fix 1, 17181ed). A carry's move-count
+        // bump doesn't care about the order.
+        for (t in w.tasks) api.upsertTask(t)
         for (b in w.blocks) api.upsertBlock(b)
         // A series' first placement: its deterministic occurrence, minted
         // insert-if-absent with rule H (stage 2).
         for (b in w.inserts) api.insertBlockIfAbsent(b, retimeIfTaken = true)
-        for (t in w.tasks) api.upsertTask(t)
     }
 
     /** "Open the Assistant sheet" requests (Today's input pill, a chat moment)

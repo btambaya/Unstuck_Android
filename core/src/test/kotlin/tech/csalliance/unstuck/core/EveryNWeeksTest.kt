@@ -111,7 +111,7 @@ class EveryNWeeksTest {
 
     @Test fun materializeVectors_defaultZone() {
         assertEquals("the JVM default stays UTC", "UTC", TimeZone.getDefault().id)
-        assertEquals(18, arr("materialize").size)
+        assertEquals(20, arr("materialize").size)
         runMaterialize("UTC")
     }
 
@@ -238,6 +238,31 @@ class EveryNWeeksTest {
         }
     }
 
+    /** The Starts row of an edit (startsBase → chips → the selected one), web's
+     *  harness line for line: startDate is the task's recurrenceAnchor date (a
+     *  past one never counts); the selected chip is the stored weeks' when N is
+     *  kept, else the default week one's. */
+    @Test fun startsBaseVectors() {
+        assertEquals(7, arr("startsBase").size)
+        for (v in arr("startsBase")) {
+            val about = v.str("about")
+            val cur = rule(v.jsonObject["current"])
+            val days = v.ints("newDaysOfWeek")
+            val n = v.jsonObject["newInterval"]!!.jsonPrimitive.int
+            val today = v.str("today")!!
+            val start = v.str("startDate") ?: today
+            val base = nWeeksBase(cur, n, today, start, days)
+            assertEquals(about, v.str("expect"), base)
+            val chips = startsChips(days, n, base)
+            assertEquals(about, v.strs("expectChips"), chips.map { it.date })
+            val keeps = cur is Recurrence.EveryNWeeks && cur.interval == n
+            val def = nWeeksAnchor(cur, days, n, today, start)
+            val selected = if (keeps) chips.firstOrNull { sameSeriesWeeks(it.anchor, (cur as Recurrence.EveryNWeeks).anchor, n) }
+                else chips.firstOrNull { it.anchor == def }
+            assertEquals(about, v.str("expectSelected"), selected?.date)
+        }
+    }
+
     @Test fun scheduleAnchorVectors_reanchorOnlyWhenTheWeeksMove() {
         for (v in arr("scheduleAnchor")) {
             val r = rule(v.jsonObject["recurrence"])!! as Recurrence.EveryNWeeks
@@ -294,7 +319,7 @@ class EveryNWeeksTest {
 
     @Test fun codecUnreadable_decodesToTheSentinel_neverThrows() {
         val sentinel = codec["sentinel"]!!.jsonPrimitive.content
-        assertEquals(18, codec["unreadable"]!!.jsonArray.size)
+        assertEquals(22, codec["unreadable"]!!.jsonArray.size)
         for (c in codec["unreadable"]!!.jsonArray) {
             val r = Json.decodeFromString(Recurrence.serializer(), c.str("json")!!)
             assertTrue(c.str("about"), RecurrenceSerializer.isUnknown(r))
@@ -387,16 +412,31 @@ class EveryNWeeksTest {
         assertTrue(isOffWeekOnly(v1, "2026-10-15"))
         assertNull("on-week Thursday", rejectOffSeriesDay("Office Focus", v1, "2026-10-22", "2026-09-30"))
         assertNull("a first placement re-anchors: every week is valid", rejectOffSeriesDay("Office Focus", v1, "2026-10-15", "2026-09-30", placesSeries = true))
-        // The weekday part still applies to a first placement.
+        // The weekday part still applies to a first placement, and the dates it
+        // names are the rule's own on-week ones (web's nearestRuleDates, 17181ed).
         val fri = rejectOffSeriesDay("Office Focus", v1, "2026-10-16", "2026-09-30", placesSeries = true)!!
         assertTrue(fri, fri.contains("but 2026-10-16 is a Friday"))
-        assertTrue(fri, fri.contains("Thu 15 Oct (2026-10-15) and Thu 22 Oct (2026-10-22)"))
+        assertTrue(fri, fri.contains("Thu 8 Oct (2026-10-08) and Thu 22 Oct (2026-10-22)"))
         assertFalse(isOffWeekOnly(v1, "2026-10-16"))
         // Every 4 weeks: the nearest dates are up to 28 days away, still named.
         val n4 = Recurrence.EveryNWeeks(4, listOf(4), "2026-09-21")
         val far = rejectOffSeriesDay("Office Focus", n4, "2026-10-08", "2026-09-24")!!
         assertTrue(far, far.contains("Thu 24 Sep (2026-09-24) and Thu 22 Oct (2026-10-22)"))
         assertEquals("Thu 8 Oct", shortDayLabel("2026-10-08"))
+    }
+
+    /** Web review fix 3 (17181ed): the WEEK is judged without `until` — an
+     *  on-week Thursday past the series' end is not "an off week" (weekly never
+     *  checks until there either) — while the nearest dates still respect it. */
+    @Test fun offWeekGuard_judgesTheWeekWithoutUntil_andNamesDatesWithinIt() {
+        val ended = Recurrence.EveryNWeeks(2, listOf(4), "2026-09-21", until = "2026-10-08")
+        assertNull("an on-week Thursday past until is not an off week", rejectOffSeriesDay("Office Focus", ended, "2026-10-22", "2026-09-30"))
+        assertFalse(isOffWeekOnly(ended, "2026-10-22"))
+        // An off-week Thursday past until is still one; only 8 Oct (within until) is named.
+        val off = rejectOffSeriesDay("Office Focus", ended, "2026-10-15", "2026-09-30")!!
+        assertTrue(off, off.contains("and Thu 15 Oct is an off week"))
+        assertTrue(off, off.contains("The nearest Thursday it repeats on is Thu 8 Oct (2026-10-08). "))
+        assertFalse(off, off.contains("2026-10-22"))
     }
 
     // ── §8.2 patterns ───────────────────────────────────────────────────────
@@ -411,6 +451,56 @@ class EveryNWeeksTest {
         assertEquals(1, derivePatterns(listOf(weekly), blocks, "2026-11-08").size)
         val fortnightly = task(Recurrence.EveryNWeeks(2, listOf(0), "2026-09-28")).copy(name = "Run")
         assertEquals(emptyList<Any>(), derivePatterns(listOf(fortnightly), blocks, "2026-11-08"))
+    }
+
+    /** Web review fix 2 (17181ed): a same-N edit that changes only the days
+     *  keeps the stored anchor, so the chips count from the rule's next date ON
+     *  THE NEW DAYS. Thu → Mon on Wed 30 Sep: the series' first Monday is 5 Oct
+     *  (the stored weeks), and that chip is the pre-selected first one — counted
+     *  on the old Thursday it read "Mon 19 Oct" (a whole cycle late). */
+    @Test fun editBase_sameN_countsOnTheEditedDays() {
+        val v1 = Recurrence.EveryNWeeks(2, listOf(4), "2026-09-21")
+        assertEquals("2026-10-05", nWeeksBase(v1, 2, "2026-09-30", "2026-09-30", newDays = listOf(1)))
+        val kept = Recurrence.EveryNWeeks(2, listOf(1), nWeeksAnchor(v1, listOf(1), 2, "2026-09-30", "2026-09-30"))
+        assertEquals("2026-09-21", kept.anchor)
+        val chips = startsChips(listOf(1), 2, nWeeksBase(v1, 2, "2026-09-30", "2026-09-30", newDays = listOf(1)))
+        assertEquals(listOf("2026-10-05", "2026-10-12"), chips.map { it.date })
+        assertTrue("the stored weeks are the first chip", sameSeriesWeeks(chips.first().anchor, kept.anchor, 2))
+        assertEquals("its date is the series' real first Monday", "2026-10-05", nextRuleDate(kept, "2026-09-30"))
+        // The old base (days unchanged / not given) is the spec's nextRuleDate(stored, today).
+        assertEquals("2026-10-08", nWeeksBase(v1, 2, "2026-09-30", "2026-09-30"))
+        assertEquals("2026-10-08", nWeeksBase(v1, 2, "2026-09-30", "2026-09-30", newDays = listOf(4)))
+    }
+
+    /** Week one from no repeat / daily / monthly (web's rule, canonical where the
+     *  spec is silent): the series' block day only when it is AHEAD, else today —
+     *  a task whose only block is past never gets a past week one. */
+    @Test fun editAnchor_fromNoRepeat_aPastBlockCountsFromToday() {
+        // Only block: Mon 14 Sep (past). Today Thu 24 Sep. Thursdays every 2 weeks.
+        assertEquals("2026-09-24", nWeeksBase(null, 2, "2026-09-24", "2026-09-14"))
+        assertEquals("2026-09-21", nWeeksAnchor(null, listOf(4), 2, "2026-09-24", "2026-09-14"))
+        assertEquals("2026-09-21", nWeeksAnchor(Recurrence.Daily(), listOf(4), 2, "2026-09-24", "2026-09-10"))
+        assertEquals("2026-09-21", nWeeksAnchor(Recurrence.Monthly(), listOf(4), 2, "2026-09-24", "2026-09-17"))
+        // A block ahead still counts: Fri 2 Oct → the next Thursday's week (8 Oct).
+        assertEquals("2026-10-05", nWeeksAnchor(null, listOf(4), 2, "2026-09-24", "2026-10-02"))
+    }
+
+    /** Readers accept any whole N ≥ 1; a hand-edited or corrupt huge interval
+     *  must neither freeze the editor (one chip per week) nor give a negative
+     *  reach (7·N wrapping an Int). Writers keep 2…8. */
+    @Test fun hugeStoredIntervals_stayBounded() {
+        for (n in listOf(9, 520, 1_000_000, Int.MAX_VALUE)) {
+            val chips = startsChips(listOf(4), n, "2026-09-24")
+            assertEquals("$n", 8, chips.size)
+            val r = Recurrence.EveryNWeeks(n, listOf(4), "2026-09-21")
+            // (7·min(N, 10 000) − 1) / 2: the cycle is clamped as on web and iOS.
+            assertEquals("$n", (7 * minOf(n, 10_000) - 1) / 2, occurrenceReach(r))
+            assertEquals("2026-09-24", nextRuleDate(r, "2026-09-24"))
+            assertNull(rejectOffSeriesDay("Office Focus", r, "2026-09-24", "2026-09-24"))
+            assertTrue(rejectOffSeriesDay("Office Focus", r, "2026-10-01", "2026-09-24")!!.contains("off week"))
+        }
+        assertEquals(listOf("2026-09-24", "2026-10-01"), startsChips(listOf(4), 2, "2026-09-24").map { it.date })
+        assertEquals(27, occurrenceReach(Recurrence.EveryNWeeks(8, listOf(4), "2026-09-21")))
     }
 
     @Test fun mondayAndWeeksHelpers() {

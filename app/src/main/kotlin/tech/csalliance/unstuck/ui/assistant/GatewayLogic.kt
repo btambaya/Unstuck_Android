@@ -13,6 +13,7 @@ import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.composeBrief
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.pickMoment
+import tech.csalliance.unstuck.core.logic.reanchorForSchedule
 import tech.csalliance.unstuck.core.logic.recurrenceChosenDateWrite
 import tech.csalliance.unstuck.core.logic.toneFromFacts
 import tech.csalliance.unstuck.core.logic.usableToday
@@ -34,7 +35,9 @@ import tech.csalliance.unstuck.core.time.Time
 // ── action reducer ──────────────────────────────────────────────────────────
 
 /** What a moment action wants written. `confirmation == null` means NOTHING
- *  happened (nothing to carry, the task is gone): no ✓ line, no writes. */
+ *  happened (nothing to carry, the task is gone): no ✓ line, no writes. The
+ *  ViewModel writes [tasks] FIRST, then [blocks], then [inserts]: a series'
+ *  re-anchored row must reach the store (and the server) before its blocks. */
 data class GatewayWrites(
     val blocks: List<CalBlock> = emptyList(),
     val tasks: List<TaskItem> = emptyList(),
@@ -78,7 +81,7 @@ object GatewayActions {
      *  behaviour). */
     fun schedule(
         taskId: String, date: String, time: String?, tasks: List<TaskItem>, blocks: List<CalBlock>,
-        todayIso: String, newId: String,
+        todayIso: String, newId: String, nowIso: String = "",
     ): GatewayWrites {
         val t = tasks.firstOrNull { it.id == taskId } ?: return GatewayWrites()
         val confirmation = "Blocked — ${t.name}, $date${time?.let { " $it" } ?: ""}."
@@ -92,10 +95,20 @@ object GatewayActions {
             // deterministic occurrence, minted insert-if-absent, or a block of its
             // own when that id lives on elsewhere. A covered day writes nothing.
             val mine = blocks.filter { it.taskId == taskId && isTaskBlock(it) }
-            return when (val w = recurrenceChosenDateWrite(t, mine, RegenPlan(emptyList(), emptyList()), date, time ?: "09:00").second) {
-                is ChosenDateWrite.Insert -> GatewayWrites(confirmation = confirmation, inserts = listOf(w.block))
-                is ChosenDateWrite.Upsert -> GatewayWrites(listOf(w.block), emptyList(), confirmation)
-                ChosenDateWrite.None -> GatewayWrites(confirmation = confirmation)
+            val w = recurrenceChosenDateWrite(t, mine, RegenPlan(emptyList(), emptyList()), date, time ?: "09:00").second
+            // Placing a series means "it starts here" (every-n-weeks spec §5): an
+            // every-N-weeks rule takes the placed day's week as week one, like the
+            // assistant's schedule_task first placement and the Schedule sheet —
+            // the row goes FIRST in [GatewayWrites.tasks] (applied before any
+            // block), so nothing reads the old weeks from the placed block. Not
+            // when the day's occurrence is already done: nothing is placed there.
+            val doneDay = w == ChosenDateWrite.None && mine.none { it.date == date && !it.done && !it.skipped }
+            val row = if (doneDay) null else reanchorForSchedule(t.recurrence, date)?.let { t.copy(recurrence = it, updatedAt = nowIso.ifEmpty { t.updatedAt }) }
+            val rows = listOfNotNull(row)
+            return when (w) {
+                is ChosenDateWrite.Insert -> GatewayWrites(tasks = rows, confirmation = confirmation, inserts = listOf(w.block))
+                is ChosenDateWrite.Upsert -> GatewayWrites(listOf(w.block), rows, confirmation)
+                ChosenDateWrite.None -> GatewayWrites(tasks = rows, confirmation = confirmation)
             }
         }
         val block = CalBlock(id = newId, taskId = taskId, taskName = t.name, startTime = time ?: "09:00",

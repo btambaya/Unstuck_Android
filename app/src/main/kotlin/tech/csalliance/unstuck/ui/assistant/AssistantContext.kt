@@ -168,6 +168,10 @@ suspend fun buildAssistantContext(api: AssistantApi): JsonObject {
                     t.lifeArea?.takeIf { it.isNotEmpty() }?.let { put("lifeArea", it) }
                     if (t.later == true) put("later", true)
                     if (t.recurrence != null) put("repeats", true)
+                    // Every N weeks says how often (web's context, 17181ed; spec §7.3).
+                    (t.recurrence as? tech.csalliance.unstuck.core.model.Recurrence.EveryNWeeks)
+                        ?.takeIf { tech.csalliance.unstuck.core.logic.isValidEveryNWeeks(it) && it.interval >= 2 }
+                        ?.let { put("repeatsEveryWeeks", it.interval) }
                     blocksByTask[t.id]?.let { put("scheduledDate", it.date); put("scheduledTime", it.startTime) }
                 }
             }

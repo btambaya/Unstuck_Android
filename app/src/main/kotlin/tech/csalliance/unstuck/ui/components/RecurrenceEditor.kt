@@ -53,8 +53,9 @@ private fun withUntil(r: Recurrence?, until: String?): Recurrence? = when (r) {
  * (RecurrenceEditorModelTest).
  *
  * [stored] is the rule the task has saved (an edit), null in the create sheet;
- * [startIso] is the create sheet's picked day (else today), or an edit's own
- * start (its next timed block's day, else today).
+ * [startIso] is the create sheet's picked day (else today), or an edit's
+ * series block day (recurrenceAnchor's: its next live timed block, else its
+ * last timed one; [nWeeksBase] only counts it when it is ahead of today).
  */
 internal object RecurrenceEditorModel {
     /** Weeks between on-weeks: 1 for plain weekly (or anything else). */
@@ -117,9 +118,13 @@ internal object RecurrenceEditorModel {
         return value.copy(anchor = chips[i].anchor) to (if (i == 0) dateIso else chips[i].date)
     }
 
-    /** The "Starts" chips for [value], each with whether it is the rule's weeks. */
-    fun starts(stored: Recurrence?, value: Recurrence.EveryNWeeks, todayIso: String, startIso: String): List<Pair<StartsChip, Boolean>> =
-        startsChips(value.daysOfWeek, value.interval, nWeeksBase(stored, value.interval, todayIso, startIso))
+    /** The "Starts" chips for [value], each with whether it is the rule's weeks.
+     *  An edit counts them from [nWeeksBase] on the EDITED days (web review fix
+     *  2: a days-only change keeps the stored anchor, so the chip it
+     *  pre-selects must name the real first date); the create sheet ([create])
+     *  from the picked day itself, as [createRule] does. */
+    fun starts(stored: Recurrence?, value: Recurrence.EveryNWeeks, todayIso: String, startIso: String, create: Boolean = false): List<Pair<StartsChip, Boolean>> =
+        startsChips(value.daysOfWeek, value.interval, if (create) startIso else nWeeksBase(stored, value.interval, todayIso, startIso, value.daysOfWeek))
             .map { it to sameSeriesWeeks(it.anchor, value.anchor, value.interval) }
 }
 
@@ -142,7 +147,8 @@ fun RecurrenceEditor(
     startIso: String = todayIso,
     /** The create sheet keeps a "Starts" tap apart from the rule
      *  ([RecurrenceEditorModel.createRule]); null (the task sheet) saves it as the
-     *  rule's week one. */
+     *  rule's week one. Non-null also marks the create sheet for the chips'
+     *  base (the picked day itself). */
     onStartsPick: ((String) -> Unit)? = null,
     onChange: (Recurrence?) -> Unit,
 ) {
@@ -196,7 +202,7 @@ fun RecurrenceEditor(
             }
             // "Starts": which weeks count, made explicit (Zubair's call showed it matters).
             if (value is Recurrence.EveryNWeeks && interval >= 2) {
-                val chips = RecurrenceEditorModel.starts(stored, value, todayIso, startIso)
+                val chips = RecurrenceEditorModel.starts(stored, value, todayIso, startIso, create = onStartsPick != null)
                 if (chips.isNotEmpty()) {
                     Row(
                         Modifier.horizontalScroll(rememberScrollState()),

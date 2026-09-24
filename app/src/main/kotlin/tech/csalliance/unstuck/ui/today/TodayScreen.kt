@@ -43,7 +43,12 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -58,7 +63,7 @@ import tech.csalliance.unstuck.core.logic.insightsRange
 import tech.csalliance.unstuck.core.logic.localToday
 import tech.csalliance.unstuck.core.logic.periodDur
 import tech.csalliance.unstuck.core.logic.periodMinutes
-import tech.csalliance.unstuck.core.logic.thisWeekFocusSec
+import tech.csalliance.unstuck.core.logic.thisWeekFacts
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.areaFilterFollowing
 import tech.csalliance.unstuck.core.logic.daysSinceCreated
@@ -215,12 +220,12 @@ fun TodayScreen(
         liveId?.let { id -> tasks.firstOrNull { it.id == id } }
             ?: live?.let { l -> l.sharedTitle?.let { title -> TaskItem(id = l.taskId, name = title, estimateMin = l.sessionEstimateMin, createdAt = "", updatedAt = "") } }
     }
-    // "This week · Xh focused": THIS week (Monday-anchored, so far) from the
-    // shared periodFacts engine over the D1-filtered sessions — the same number
-    // the Insights page's This week shows (analytics D3; it was a rolling 7 days
-    // that tapped through to a Monday-anchored page). Hidden at 0; on a Monday
-    // or Tuesday with nothing yet this week it offers last week instead.
-    val pillData = remember(sessions) { PeriodData(emptyList(), emptyList(), sessions, emptyList(), emptyList()) }
+    // The week pill — the way into Insights from home, so it ALWAYS shows
+    // (Ahmad, 2026-09-24, his Today with no pill: "Where is the insight
+    // button??"). THIS week (Monday-anchored, so far) from the shared periodFacts
+    // engine over the same rows the Insights page reads — its focus and done
+    // are the page's This week Focused and Done (analytics D3). See [weekPill].
+    val pillData = remember(tasks, blocks, sessions) { PeriodData(tasks, blocks, sessions, emptyList(), emptyList()) }
     val pill = remember(pillData, now) { weekPill(pillData, now) }
 
     Column(Modifier.fillMaxWidth()) {
@@ -250,16 +255,26 @@ fun TodayScreen(
             // from the same source Settings → Account reads (reactive, so it fills
             // in once auth hydrates); "Unstuck." when unset (iOS GreetingName.line).
             GreetingLine(greetingLine(now, displayName), modifier = Modifier.padding(top = 6.dp, bottom = 6.dp))
-            if (pill != null) Row(
+            Row(
                 Modifier.padding(top = 2.dp, bottom = 4.dp).clip(RoundedCornerShape(999.dp)).background(c.bg2)
-                    .clickable { if (pill.lastWeek) vm.openInsightsAt(InsightsSpan.WEEK, -1); onInsights() }
+                    // Opens Insights on the week the pill names: last week for
+                    // "Last week · …", this week otherwise.
+                    .clickable(onClickLabel = "Open Insights", role = Role.Button) {
+                        vm.openInsightsAt(InsightsSpan.WEEK, if (pill.lastWeek) -1 else 0); onInsights()
+                    }
                     .padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Box(Modifier.size(6.dp).clip(CircleShape).background(c.coral))
-                Text(if (pill.lastWeek) "Last week · " else "This week · ", style = UFont.sans(12), color = c.ink2)
-                Text("${periodDur(pill.minutes)} focused", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
-                Text("→", style = UFont.sans(12), color = c.ink3)
+                Text(
+                    buildAnnotatedString {
+                        withStyle(SpanStyle(color = c.ink2)) { append(pill.lead) }
+                        withStyle(SpanStyle(color = c.ink, fontWeight = FontWeight.SemiBold)) { append(pill.value) }
+                        withStyle(SpanStyle(color = c.ink2)) { append(pill.tail) }
+                    },
+                    style = UFont.sans(12),
+                )
+                Text("→", style = UFont.sans(12), color = c.ink3, modifier = Modifier.clearAndSetSemantics {})
             }
             // The way into the assistant + Talk: ONE input pill directly under the
             // week pill (it replaced the gateway card — brief / moment / chips /
@@ -538,18 +553,52 @@ private fun DelegatedSection(rows: List<TaskItem>, assignedOut: Map<String, Stri
     }
 }
 
-/** What the Today pill shows: this week's focused minutes, or — on a Monday or
- *  Tuesday with none yet this week — last week's, opening Insights on last
- *  week. Null (hidden) when there is nothing to show. */
-internal data class WeekPill(val minutes: Int, val lastWeek: Boolean)
+/**
+ * What the Today week pill shows. It ALWAYS shows: it is the way into Insights
+ * from home, and hidden at zero it left a week with no focus yet no way there
+ * (Ahmad, 2026-09-24, his Today with no pill: "Where is the insight button??").
+ *  • [Kind.FOCUSED]: focus this week → "This week · 2h 5m focused →";
+ *  • [Kind.DONE]: no focus, but tasks done this week → "3 done this week →"
+ *    ("1 done this week →") — the Insights page's This week Done, from the
+ *    same periodFacts window, so the numbers match;
+ *  • [Kind.LAST_WEEK]: nothing yet this week, on a Monday or Tuesday, and last
+ *    week had focus → "Last week · 1h 35m focused →", opening Insights on last
+ *    week;
+ *  • [Kind.EMPTY]: anything else → "Your week →".
+ * The words are split where the look changes: [lead] and [tail] in ink2,
+ * [value] in ink, semibold.
+ */
+internal data class WeekPill(val kind: Kind, val minutes: Int = 0, val done: Int = 0) {
+    enum class Kind { FOCUSED, DONE, LAST_WEEK, EMPTY }
 
-internal fun weekPill(data: PeriodData, now: Long, zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): WeekPill? {
-    val thisWeek = periodMinutes(thisWeekFocusSec(data, now, zone))
-    if (thisWeek > 0) return WeekPill(thisWeek, lastWeek = false)
+    val lastWeek: Boolean get() = kind == Kind.LAST_WEEK
+
+    val lead: String get() = when (kind) {
+        Kind.FOCUSED -> "This week · "
+        Kind.LAST_WEEK -> "Last week · "
+        Kind.DONE, Kind.EMPTY -> ""
+    }
+    val value: String get() = when (kind) {
+        Kind.FOCUSED, Kind.LAST_WEEK -> "${periodDur(minutes)} focused"
+        Kind.DONE -> "$done done"
+        Kind.EMPTY -> "Your week"
+    }
+    val tail: String get() = if (kind == Kind.DONE) " this week" else ""
+
+    /** The whole pill as read: "This week · 2h 5m focused →". */
+    val text: String get() = "$lead$value$tail →"
+}
+
+internal fun weekPill(data: PeriodData, now: Long, zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): WeekPill {
+    val week = thisWeekFacts(data, now, zone)
+    val focused = periodMinutes(week.focusSec)
+    if (focused > 0) return WeekPill(WeekPill.Kind.FOCUSED, minutes = focused)
+    if (week.doneCount > 0) return WeekPill(WeekPill.Kind.DONE, done = week.doneCount)
     val dow = java.time.Instant.ofEpochMilli(now).atZone(zone).dayOfWeek.value   // 1 = Monday
-    if (dow > 2) return null
-    val today = localToday(now, zone)
-    val last = insightsRange(InsightsSpan.WEEK, -1, today, null)
-    val sec = collectWindow(data, PeriodWindow(last.from, last.end, null), zone).focusSec
-    return periodMinutes(sec).takeIf { it > 0 }?.let { WeekPill(it, lastWeek = true) }
+    if (dow <= 2) {
+        val last = insightsRange(InsightsSpan.WEEK, -1, localToday(now, zone), null)
+        val sec = collectWindow(data, PeriodWindow(last.from, last.end, null), zone).focusSec
+        periodMinutes(sec).takeIf { it > 0 }?.let { return WeekPill(WeekPill.Kind.LAST_WEEK, minutes = it) }
+    }
+    return WeekPill(WeekPill.Kind.EMPTY)
 }

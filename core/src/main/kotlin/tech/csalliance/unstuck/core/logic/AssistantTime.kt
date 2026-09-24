@@ -254,7 +254,12 @@ fun isOffWeekOnly(recurrence: Recurrence?, date: String): Boolean {
  * found up to 7·N days away (a ±7-day search named no day at all for every 4
  * weeks). A first placement ([placesSeries]: nothing live after today)
  * re-anchors the series on the day given, so every week is valid then; only its
- * weekday is checked, and the nearest days are the plain weekdays.
+ * weekday is checked.
+ *
+ * As web (weekday-guard.ts, reviewed at 17181ed): the WEEK is judged without
+ * `until` — an on-week day past the series' end is not "an off week" — while
+ * the nearest dates named are the rule's own, `until` and on-weeks included,
+ * on a first placement too.
  */
 private fun rejectOffNWeeksDay(taskName: String, r: Recurrence.EveryNWeeks, date: String, today: String, placesSeries: Boolean): String? {
     if (!ISO_DATE_RE.matches(date) || IsoDate.parse(date) == null) return null
@@ -263,16 +268,15 @@ private fun rejectOffNWeeksDay(taskName: String, r: Recurrence.EveryNWeeks, date
     if (days.isEmpty()) return null
     val dow = IsoDate.dayOfWeek(date)
     val offDay = dow !in days
-    val rule: Recurrence = if (placesSeries) Recurrence.Weekly(days) else r.copy(until = null)
-    if (!offDay && (placesSeries || ruleHasDate(rule, date))) return null
+    if (!offDay && (placesSeries || ruleHasDate(r.copy(until = null), date))) return null
     val nearest = ArrayList<String>()
-    val span = 7 * (if (placesSeries) 1 else minOf(r.interval, 520))
+    val span = 7 * minOf(r.interval, 520)
     for (back in 1..span) {
         val d = IsoDate.addDays(date, -back)
         if (d < today) break
-        if (ruleHasDate(rule, d)) { nearest += d; break }
+        if (ruleHasDate(r, d)) { nearest += d; break }
     }
-    nextRuleDate(rule, IsoDate.addDays(date, 1))?.let { nearest += it }
+    nextRuleDate(r, IsoDate.addDays(date, 1))?.let { nearest += it }
     val label = if (days.size == 1) WEEKDAY_NAMES_CAP[days[0]] else "day"
     val listed = nearest.joinToString(" and ") { "${shortDayLabel(it)} ($it)" }
     val nearestText = when (nearest.size) {

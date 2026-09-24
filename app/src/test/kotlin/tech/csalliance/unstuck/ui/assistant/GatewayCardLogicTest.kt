@@ -126,6 +126,29 @@ class GatewayCardLogicTest {
         assertEquals("2026-09-11", again.blocks.single().date)
     }
 
+    /** Every N weeks (spec §5: placing a series means "it starts here"): a
+     *  moment's first placement on an off-week day re-anchors the rule to that
+     *  day's week — the row rides in `tasks`, which the ViewModel writes before
+     *  any block. An on-week day, or a day whose occurrence is already done,
+     *  leaves the weeks alone. */
+    @Test fun schedule_aFortnightlyFirstPlacementMovesWeekOne() {
+        val nw = tech.csalliance.unstuck.core.model.Recurrence.EveryNWeeks(2, listOf(4), "2026-08-31")
+        val series = task("a", "Review").copy(recurrence = nw)
+        // Thu 10 Sep is in the week of 7 Sep — an off week of the 31 Aug weeks.
+        val w = GatewayActions.schedule("a", "2026-09-10", "10:30", listOf(series), emptyList(), today, "new", nowIso)
+        assertEquals(nw.copy(anchor = "2026-09-07"), w.tasks.single().recurrence)
+        assertEquals(nowIso, w.tasks.single().updatedAt)
+        assertEquals(tech.csalliance.unstuck.core.logic.occurrenceId("a", "2026-09-10"), w.inserts.single().id)
+        // Thu 17 Sep is an on week: nothing to write on the task.
+        val on = GatewayActions.schedule("a", "2026-09-17", "10:30", listOf(series), emptyList(), today, "new", nowIso)
+        assertTrue(on.tasks.isEmpty())
+        assertEquals(1, on.inserts.size)
+        // A day already done: nothing placed, so the weeks stay.
+        val done = block(tech.csalliance.unstuck.core.logic.occurrenceId("a", "2026-09-10"), "a", "2026-09-10", "10:30", done = true)
+        val covered = GatewayActions.schedule("a", "2026-09-10", "10:30", listOf(series), listOf(done), today, "new", nowIso)
+        assertTrue(covered.tasks.isEmpty() && covered.inserts.isEmpty() && covered.blocks.isEmpty())
+    }
+
     @Test fun schedule_vanishedTaskWritesNothing() {
         val w = GatewayActions.schedule("ghost", "2026-09-11", null, listOf(task("a")), listOf(block("b1", "ghost", tomorrow)), today, "new")
         assertNull(w.confirmation)

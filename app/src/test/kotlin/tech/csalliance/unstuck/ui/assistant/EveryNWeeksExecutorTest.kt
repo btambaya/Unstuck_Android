@@ -55,8 +55,25 @@ class EveryNWeeksExecutorTest {
     private fun rule(e: JsonElement?): Recurrence? =
         if (e == null || e is JsonNull) null else json.decodeFromJsonElement(Recurrence.serializer(), e)
 
+    /** Records the order writes reach the store: "task <anchor>" / "block <date>". */
+    private class Recording(val inner: AssistantApi) : AssistantApi by inner {
+        val log = ArrayList<String>()
+        override suspend fun upsertTask(t: TaskItem) {
+            log += "task ${(t.recurrence as? Recurrence.EveryNWeeks)?.anchor ?: ""}"
+            inner.upsertTask(t)
+        }
+        override suspend fun upsertBlock(b: CalBlock) { log += "block ${b.date}"; inner.upsertBlock(b) }
+        override suspend fun insertBlockIfAbsent(b: CalBlock, retimeIfTaken: Boolean): Boolean {
+            log += "block ${b.date}"
+            return inner.insertBlockIfAbsent(b, retimeIfTaken)
+        }
+        override suspend fun deleteBlock(id: String) { log += "block -$id"; inner.deleteBlock(id) }
+    }
+
     private class Run(val api: AssistantToolsTest.FakeApi, val scratch: TurnScratch) {
         val state get() = api.state
+        /** Every tool call goes through here, so the write order is on record. */
+        val rec = Recording(api)
     }
 
     private fun setup(c: JsonElement): Run {
@@ -67,6 +84,8 @@ class EveryNWeeksExecutorTest {
         api.state.tasks += TaskItem(
             id = taskId, name = t["name"]!!.jsonPrimitive.content, estimateMin = 60,
             recurrence = rule(c.jsonObject["recurrence"]),
+            // taskDone: the task row starts done (no completedAt).
+            done = (c.jsonObject["taskDone"] as? JsonPrimitive)?.booleanOrNull == true,
             createdAt = "2026-09-20T07:00:00Z", updatedAt = "2026-09-20T07:00:00Z",
         )
         c.jsonObject["blocks"]!!.jsonArray.forEachIndexed { i, b ->
@@ -85,7 +104,7 @@ class EveryNWeeksExecutorTest {
         val args = LinkedHashMap<String, JsonElement>()
         args["taskId"] = JsonPrimitive(taskId)
         call.jsonObject["args"]!!.jsonObject.forEach { (k, v) -> args[k] = v }
-        return runAssistantTool(call.str("tool")!!, ToolArgs(JsonObject(args)), api, scratch)
+        return runAssistantTool(call.str("tool")!!, ToolArgs(JsonObject(args)), rec, scratch)
     }
 
     private fun check(where: String, spec: JsonElement, got: String) {
@@ -97,12 +116,11 @@ class EveryNWeeksExecutorTest {
     private fun Run.stored(): Recurrence? = state.tasks.first { it.id == taskId }.recurrence
     private fun Run.live(): List<String> = state.blocks.filter { it.taskId == taskId && !it.done && !it.skipped }.map { it.date }
 
-    /** Runs one vector case and asserts everything it pins. */
-    private suspend fun replay(id: String): Run {
-        val c = cases[id]!!
-        val run = c.str("after")?.let { replay(it) } ?: setup(c)
-        c.jsonObject["call"]?.let { check(id, c, run.call(it)) }
-        c.jsonObject["calls"]?.jsonArray?.forEachIndexed { i, call -> check("$id.$i", call, run.call(call)) }
+    /** What a case pins about the world after its call(s). */
+    private fun checkWorld(id: String, c: JsonElement, run: Run) {
+        // expectFirstWrite "task": the first write is the task row (spec §5 write
+        // order, web review fix 1) — the re-anchored rule before any block.
+        c.str("expectFirstWrite")?.let { assertTrue("$id first write: ${run.rec.log}", run.rec.log.firstOrNull()?.startsWith(it) == true) }
         if (c.jsonObject.containsKey("expectRecurrence")) assertEquals("$id stored rule", rule(c.jsonObject["expectRecurrence"]), run.stored())
         for (d in c.strs("expectKept")) assertTrue("$id keeps $d", run.state.blocks.any { it.date == d && it.id.startsWith("plain-") })
         c.jsonObject["expectMints"]?.jsonArray?.forEach { m ->
@@ -110,11 +128,52 @@ class EveryNWeeksExecutorTest {
         }
         for (d in c.strs("expectLiveIncludes")) assertTrue("$id: $d live in ${run.live()}", d in run.live())
         for (d in c.strs("expectLiveExcludes")) assertFalse("$id: $d not live in ${run.live()}", d in run.live())
-        return run
     }
 
-    @Test fun `the vectors cover X1 to X9`() {
-        assertEquals((1..9).map { "X$it" }, cases.keys.toList())
+    /** Runs one vector case and asserts everything it pins — web's harness
+     *  (every-n-weeks.test.ts): `after` runs on the world the named case left;
+     *  `calls` each start from the case's own world (an `error:` writes
+     *  nothing), unless `sequential`, where they run in order in ONE turn. */
+    private suspend fun replay(id: String): Run {
+        val c = cases[id]!!
+        c.str("after")?.let { prev ->
+            val run = replay(prev)
+            check(id, c, run.call(c.jsonObject["call"]!!))
+            checkWorld(id, c, run)
+            return run
+        }
+        c.jsonObject["call"]?.let { call ->
+            val run = setup(c)
+            check(id, c, run.call(call))
+            checkWorld(id, c, run)
+            return run
+        }
+        val calls = c.jsonObject["calls"]!!.jsonArray
+        if ((c.jsonObject["sequential"] as? JsonPrimitive)?.booleanOrNull == true) {
+            val run = setup(c)
+            calls.forEachIndexed { i, call -> check("$id.$i", call, run.call(call)) }
+            checkWorld(id, c, run)
+            return run
+        }
+        var last: Run? = null
+        calls.forEachIndexed { i, call ->
+            val run = setup(c)
+            val tasksBefore = run.state.tasks.toList()
+            val blocksBefore = run.state.blocks.toList()
+            val line = run.call(call)
+            check("$id.$i", call, line)
+            if (line.startsWith("error:")) {
+                assertEquals("$id.$i wrote nothing", tasksBefore, run.state.tasks.toList())
+                assertEquals("$id.$i wrote nothing", blocksBefore, run.state.blocks.toList())
+            }
+            checkWorld("$id.$i", c, run)
+            last = run
+        }
+        return last!!
+    }
+
+    @Test fun `the vectors cover X1 to X16`() {
+        assertEquals((1..16).map { "X$it" }, cases.keys.toList())
     }
 
     /** Zubair's turn: every 2 weeks on Thursdays from the Thursday create_task
@@ -150,6 +209,23 @@ class EveryNWeeksExecutorTest {
         val again = run.call(cases["X9"]!!.jsonObject["calls"]!!.jsonArray[1])
         assertFalse(again, again.startsWith("error"))
     }
+
+    /** Web review fix 3: the week is judged without until. */
+    @Test fun X10_theOffWeekGuardJudgesTheWeekWithoutUntil() = runTest { replay("X10") }
+
+    /** The ok line in full: how, at, until, rhythm note, next dates, done note. */
+    @Test fun X11_theOkLineOrder() = runTest { replay("X11") }
+
+    @Test fun X12_aDoneTaskMadeFortnightly_nextDatesBeforeTheDoneNote() = runTest { replay("X12") }
+
+    @Test fun X13_intervalWeeksCheckOrder_andHugeWholeNumbers() = runTest { replay("X13") }
+
+    @Test fun X14_aNonMondayStoredAnchorIsWrittenBackAsItsMonday() = runTest { replay("X14") }
+
+    /** Week one from no repeat with only a PAST block counts from today (web). */
+    @Test fun X15_aPastBlockNeverGivesAPastWeekOne() = runTest { replay("X15") }
+
+    @Test fun X16_noSlot_noNextDates() = runTest { replay("X16") }
 
     // ── beyond the vectors ──────────────────────────────────────────────────
 
@@ -257,6 +333,67 @@ class EveryNWeeksExecutorTest {
         assertTrue(d.length <= VoiceToolCompaction.TOOL_DESCRIPTION_CAP + 1)
         val p = c["parameters"]!!.jsonObject["properties"]!!.jsonObject["intervalWeeks"]!!.jsonObject
         assertEquals("Every N weeks, 1–8 (2 = every other week / fortnightly).", p["description"]!!.jsonPrimitive.content)
+    }
+
+    // ── web review parity (17181ed) ────────────────────────────────────────
+
+    /** Web review fix 1: a first placement that re-anchors writes the task row
+     *  BEFORE any block — the placed one, the fill's, the moved one — so no
+     *  reader (the fill, another device's top-up on the placed block's echo)
+     *  runs the old weeks from it. With an open block left behind today, that
+     *  block is the one moved, and the move-count bump carries the new rule. */
+    @Test fun `X8 writes the re-anchored task row before any block`() = runTest {
+        for (withLive in listOf(false, true)) {
+            val run = setup(cases["X8"]!!)
+            if (withLive) run.state.blocks += CalBlock(occurrenceId(taskId, "2026-09-30"), taskId, "Office Focus", "10:30", 60, "2026-09-30", kind = CalBlockKind.TASK)
+            val rec = run.rec
+            val ok = run.call(cases["X8"]!!.jsonObject["call"]!!)
+            assertTrue(ok, ok.startsWith("ok:"))
+            assertEquals("withLive=$withLive: ${rec.log}", "task 2026-10-12", rec.log.first())
+            assertTrue("withLive=$withLive: ${rec.log}", rec.log.filter { it.startsWith("task") }.all { it == "task 2026-10-12" })
+            assertTrue(rec.log.any { it == "block 2026-10-15" })
+            assertEquals(rule(cases["X8"]!!.jsonObject["expectRecurrence"]), run.stored())
+            if (withLive) assertEquals(1, run.state.tasks.first { it.id == taskId }.moveCount)
+        }
+    }
+
+    /** …and a first placement onto a day whose occurrence is already DONE places
+     *  nothing, so nothing starts there: the weeks stay. */
+    @Test fun `a first placement onto a done day leaves the weeks alone`() = runTest {
+        val run = setup(cases["X8"]!!)
+        run.state.blocks += CalBlock(occurrenceId(taskId, "2026-10-15"), taskId, "Office Focus", "10:30", 60, "2026-10-15", kind = CalBlockKind.TASK, done = true)
+        val out = runAssistantTool("schedule_task", ToolArgs(JsonObject(mapOf(
+            "taskId" to JsonPrimitive(taskId), "date" to JsonPrimitive("2026-10-15"), "startTime" to JsonPrimitive("10:30"),
+        ))), run.api, run.scratch)
+        assertTrue(out, out.startsWith("error: \"Office Focus\" is already done on 2026-10-15"))
+        assertEquals(rule(cases["X8"]!!.jsonObject["recurrence"]), run.stored())
+    }
+
+    /** Week one from no repeat when the task's only block is PAST: counted from
+     *  today (web's rule), never from the past block's week. Only block Mon
+     *  14 Sep; today Thu 24 Sep → Thursdays every 2 weeks from w/c 21 Sep. */
+    @Test fun `from no repeat with only a past block week one is this week`() = runTest {
+        val run = setup(cases["X3"]!!)
+        run.state.tasks[0] = run.state.tasks[0].copy(recurrence = null)
+        run.state.blocks.clear()
+        run.state.blocks += CalBlock("past", taskId, "Office Focus", "10:30", 60, "2026-09-14", kind = CalBlockKind.TASK, done = true)
+        val ok = run.recur("kind" to JsonPrimitive("weekly"), "daysOfWeek" to JsonArray(listOf(JsonPrimitive(4))), "intervalWeeks" to JsonPrimitive(2))
+        assertEquals(Recurrence.EveryNWeeks(2, listOf(4), "2026-09-21"), run.stored())
+        assertTrue(ok, ok.startsWith("ok: \"Office Focus\" now repeats every 2 weeks on Thu at 10:30"))
+        assertFalse("never the past block's week (w/c 14 Sep → 1 Oct on)", "2026-10-01" in run.live())
+    }
+
+    /** The context says how often (web: repeatsEveryWeeks), so a later turn can
+     *  answer "how often?"; plain weekly carries only repeats. */
+    @Test fun `the context says every N weeks`() = runTest {
+        val run = setup(cases["X3"]!!)
+        val ctx = buildAssistantContext(run.api)
+        val t = ctx["tasks"]!!.jsonArray.first { it.str("id") == taskId }.jsonObject
+        assertEquals("true", t["repeats"]!!.jsonPrimitive.content)
+        assertEquals(2, t["repeatsEveryWeeks"]!!.jsonPrimitive.content.toInt())
+        run.state.tasks[0] = run.state.tasks[0].copy(recurrence = Recurrence.Weekly(listOf(4)))
+        val weekly = buildAssistantContext(run.api)["tasks"]!!.jsonArray.first { it.str("id") == taskId }.jsonObject
+        assertFalse(weekly.containsKey("repeatsEveryWeeks"))
     }
 
     /** get_tasks names the rhythm, so "how often does it repeat?" has an answer. */

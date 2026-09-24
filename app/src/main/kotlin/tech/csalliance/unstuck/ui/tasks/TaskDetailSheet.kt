@@ -350,7 +350,9 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                 val todayIso = Clock.todayIso()
                 RecurrenceEditor(
                     task.recurrence, showHeading = false, stored = task.recurrence, todayIso = todayIso,
-                    startIso = recurrenceEditStart(task.id, null, blocks, todayIso)?.date ?: todayIso,
+                    // The series' block day (web's blockDay); nWeeksBase counts it
+                    // only when it is ahead, else today (web's week-one rule).
+                    startIso = recurrenceAnchor(task.id, blocks, todayIso)?.date ?: todayIso,
                 ) { r ->
                     if (!vm.setRecurrence(editTarget, r) && r != null) pendingRepeat = r
                 }

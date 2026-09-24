@@ -103,7 +103,7 @@ fun AuthScreen(vm: AppViewModel) {
     }
 
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 22.dp, vertical = 30.dp),
+        Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp, vertical = 30.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Orbit(size = 36)
@@ -242,7 +242,7 @@ fun SetNewPasswordScreen(vm: AppViewModel) {
         }
     }
     Column(
-        Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 22.dp, vertical = 30.dp),
+        Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp, vertical = 30.dp),
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
         Orbit(size = 36)

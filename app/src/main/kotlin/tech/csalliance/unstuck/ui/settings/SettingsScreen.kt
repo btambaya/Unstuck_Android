@@ -92,7 +92,7 @@ fun SettingsHub(vm: AppViewModel, onBack: () -> Unit, onSection: (SettingsSectio
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(title = SettingsCopy.HUB_TITLE, leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
         Column(
-            Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp),
+            Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             Column {
@@ -199,7 +199,7 @@ fun SettingsSubScreen(vm: AppViewModel, section: SettingsSection, onBack: () -> 
     val c = UTheme.colors
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(title = section.title, leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp)) {
+        Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
             SectionLabel("${SettingsCopy.HUB_TITLE} · ${section.title}", color = c.primaryDeep, modifier = Modifier.padding(top = 4.dp))
             Text(
                 section.heading, style = UFont.serifItalic(26), color = c.ink,

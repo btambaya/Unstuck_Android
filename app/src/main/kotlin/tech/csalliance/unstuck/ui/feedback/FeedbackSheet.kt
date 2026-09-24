@@ -95,7 +95,7 @@ fun FeedbackForm(vm: AppViewModel, currentScreen: String?, onDone: () -> Unit) {
         return
     }
 
-    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 22.dp).padding(bottom = 26.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    Column(Modifier.fillMaxWidth().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp).padding(bottom = 26.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         Text("Bugs, ideas, anything — straight to the team.", style = UFont.sans(13), color = c.ink2)
 
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {

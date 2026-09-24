@@ -7,6 +7,13 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.WindowInsetsSides
+import androidx.compose.foundation.layout.asPaddingValues
+import androidx.compose.foundation.layout.exclude
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.navigationBars
+import androidx.compose.foundation.layout.only
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -70,6 +77,12 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onNewCollectio
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
             modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp),
+            // Typing in the search, the keyboard covers the bottom of the grid (the
+            // bottom bar stays down under it). Room at the end for the keyboard's
+            // height, so every card can still be scrolled up above it. Nothing near
+            // the bottom takes focus here, so padding the content (not shrinking
+            // the viewport) is enough — and it is zero with the keyboard down.
+            contentPadding = WindowInsets.ime.exclude(WindowInsets.navigationBars).only(WindowInsetsSides.Bottom).asPaddingValues(),
             horizontalArrangement = Arrangement.spacedBy(10.dp),
             verticalArrangement = Arrangement.spacedBy(10.dp),
         ) {

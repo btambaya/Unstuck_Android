@@ -53,6 +53,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -95,6 +96,7 @@ import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.ui.components.keepInViewWhileTyping
 
 private val PALETTE = listOf("indigo", "coral", "green", "amber", "blue", "violet")
 
@@ -166,10 +168,23 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
         }, now.hour, now.minute, tech.csalliance.unstuck.ui.components.DeviceClock.mode(context) == tech.csalliance.unstuck.core.time.ClockMode.H24).show()
     }
 
+    // Each item you add lands right above the add field and pushes it down a row.
+    // The field is still focused, so nothing brings it back: with the keyboard up
+    // it slid under the keyboard after the first add (KeyboardInsetsTest). So once
+    // YOUR add has landed (the list grew), the add row is scrolled back into sight
+    // (keepInViewWhileTyping's `reveal`). Only after your own add: another member's
+    // item must not yank the list about.
+    var revealAddRow by remember { mutableStateOf(false) }
+    var ownAddsLanded by remember { mutableIntStateOf(0) }
+    LaunchedEffect(col.items.size) {
+        if (revealAddRow) { revealAddRow = false; ownAddsLanded++ }
+    }
+
     fun add() {
         val body = draft.trim(); if (body.isEmpty()) return
         vm.addCollectionItem(col, body)
         draft = ""
+        revealAddRow = true
         runCatching { focus.requestFocus() }   // keep adding
     }
 
@@ -255,7 +270,15 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
                 }
             }
         }
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
+        // imePadding OUTSIDE the scroll, so the keyboard shrinks the scroll's
+        // viewport. Inside it (as it was) it only lengthened the content: the
+        // viewport still ran down under the keyboard, so a field focused near the
+        // bottom — an item held to edit, the add field — counted as "in view" while
+        // the keyboard covered it, and nothing scrolled it up. A shrinking viewport
+        // is what makes the scroll keep the focused field in sight (the edit, the
+        // add field) and lets the whole list scroll above the keyboard. The bottom
+        // bar isn't involved: this screen is a full-screen route drawn over it.
+        Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
             // Recolor swatches — owner only.
             if (owner) {
                 Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
@@ -311,7 +334,7 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
             // for view-only members.
             if (canEdit) {
                 Row(
-                    Modifier.fillMaxWidth().padding(top = 18.dp).clip(RoundedCornerShape(28.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(28.dp)).padding(horizontal = 16.dp, vertical = 12.dp),
+                    Modifier.fillMaxWidth().padding(top = 18.dp).keepInViewWhileTyping(reveal = ownAddsLanded).clip(RoundedCornerShape(28.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(28.dp)).padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Icon(Icons.Filled.Add, contentDescription = null, tint = c.ink3)
@@ -538,7 +561,9 @@ private fun CollItemRow(
     // the pointer would stay still relative to it and every delta would read ~0.
     // Horizontal only, so the page's vertical scroll keeps every up/down drag.
     Box(
-        Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp))
+        // While the hold's editor is open, the whole card rides above the keyboard,
+        // not just its line of text (which left the card cut in half at the edge).
+        Modifier.keepInViewWhileTyping().fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp))
             // `enabled`, not a dropped modifier: switching it off mid-drag cancels the
             // drag through onDragStopped, so `dragging` can't stick.
             .draggable(

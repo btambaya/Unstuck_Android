@@ -82,11 +82,13 @@ import tech.csalliance.unstuck.design.component.neutralPill
 
 /* ============================================================
  * FIXED answer-bubble colors — deliberately THEME-INDEPENDENT
- * (web's dark-mode fix, iOS parity): a constant light-lavender
- * surface with constant dark ink reads correctly in BOTH themes.
- * oklch(0.93 0.04 280) / oklch(0.25 0.02 280) / oklch(0.42 0.02 280).
+ * (web's dark-mode fix, iOS parity): a constant light surface
+ * with constant dark ink reads correctly in BOTH themes.
+ * oklch(0.93 0.005 280) / oklch(0.25 0.02 280) / oklch(0.42 0.02 280).
+ * The surface was lavender (chroma 0.04) until the no-indigo
+ * rule (owner, 2026-09-24); now the neutrals' own 0.005, as on web.
  * ============================================================ */
-val TourAnswerBg: Color = oklch(0.93, 0.04, 280.0)
+val TourAnswerBg: Color = oklch(0.93, 0.005, 280.0)
 val TourAnswerInk: Color = oklch(0.25, 0.02, 280.0)
 val TourThinkingInk: Color = oklch(0.42, 0.02, 280.0)
 

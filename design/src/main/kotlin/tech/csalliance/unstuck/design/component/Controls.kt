@@ -27,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
@@ -106,19 +107,27 @@ fun MdField(
  *  the `line2` hairline grey when off. The thumb stays white either way. */
 fun toggleTrackColor(c: UnstuckColors, checked: Boolean): Color = if (checked) c.coral else c.line2
 
+/** A switch that can't be changed right now draws at this opacity (the task
+ *  detail's locked "Call me" switch already used 0.5): a disabled switch that
+ *  is ON must not read as a live full-coral one. */
+const val TOGGLE_DISABLED_ALPHA = 0.5f
+
 /** M3 switch — 44×26 pill, coral when on ([toggleTrackColor]). Mirrors M3 Switch
  *  a11y: Role.Switch + on/off state via toggleable, 48dp minimum interactive size.
- *  Every switch in the app is this one component, so they all follow. */
+ *  Every switch in the app is this one component, so they all follow.
+ *  [enabled] = false dims it ([TOGGLE_DISABLED_ALPHA]) and ignores taps. */
 @Composable
-fun MdToggle(checked: Boolean, onChange: (Boolean) -> Unit, modifier: Modifier = Modifier) {
+fun MdToggle(checked: Boolean, onChange: (Boolean) -> Unit, modifier: Modifier = Modifier, enabled: Boolean = true) {
     val c = UTheme.colors
     val thumbX by animateDpAsState(if (checked) 18.dp else 0.dp, label = "thumb")
     Box(
         modifier.minimumInteractiveComponentSize()
+            .alpha(if (enabled) 1f else TOGGLE_DISABLED_ALPHA)
             .toggleable(
                 value = checked,
                 interactionSource = remember { MutableInteractionSource() },
                 indication = null,
+                enabled = enabled,
                 role = Role.Switch,
                 onValueChange = onChange,
             )

@@ -154,8 +154,9 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     // Pick a "by" time (platform dialog), then promote keep-in-loop with that ISO time.
     fun pickByTimeThen(item: CollectionItem) {
         val now = java.time.LocalTime.now()
-        // Match the app theme so the dialog isn't light-on-light in dark mode.
-        val dialogTheme = if (c.isDark) android.R.style.Theme_Material_Dialog else android.R.style.Theme_Material_Light_Dialog
+        // Match the app theme so the dialog isn't light-on-light in dark mode —
+        // with the ink accent, not the platform's teal (res/values/themes.xml).
+        val dialogTheme = if (c.isDark) tech.csalliance.unstuck.R.style.Theme_Unstuck_PickerDark else tech.csalliance.unstuck.R.style.Theme_Unstuck_PickerLight
         android.app.TimePickerDialog(context, dialogTheme, { _, h, m ->
             // A "by" time earlier than now means tomorrow — otherwise the task is
             // born already-overdue and fires a late nudge on the next cron tick.

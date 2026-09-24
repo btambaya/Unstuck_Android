@@ -456,6 +456,13 @@ private fun RollupStat(label: String, value: String, bg: androidx.compose.ui.gra
 internal fun monthHeat(c: tech.csalliance.unstuck.design.theme.UnstuckColors, t: Float): androidx.compose.ui.graphics.Color =
     lerp(c.bg2, c.ink3, 0.2f + 0.6f * t.coerceIn(0f, 1f))
 
+/** The day number (and its planned dots) on a heat cell: whichever of bg / ink
+ *  stands off [fill] more. ink, not ink2: with ink2 the crossover mid-greys
+ *  bottomed out at ~3.1:1 (light) / 3.2:1 (dark); with ink they hold ≥4.7:1 /
+ *  ≥4.0:1 across the whole ramp. */
+internal fun monthDayInk(c: tech.csalliance.unstuck.design.theme.UnstuckColors, fill: androidx.compose.ui.graphics.Color): androidx.compose.ui.graphics.Color =
+    if (contrastRatio(c.bg, fill) > contrastRatio(c.ink, fill)) c.bg else c.ink
+
 /** WCAG contrast ratio between two opaque colours. */
 internal fun contrastRatio(a: androidx.compose.ui.graphics.Color, b: androidx.compose.ui.graphics.Color): Float {
     val la = a.luminance() + 0.05f
@@ -530,8 +537,8 @@ private fun MonthView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared
                                     // The heat ramp is neutral (bg2 → ink3): it was indigo, and
                                     // indigo is no longer an accent (owner decision 2026-09-24).
                                     // ink3 sits where the indigo did in lightness, so the ramp reads
-                                    // the same; the day number takes whichever of bg / ink2 is the
-                                    // stronger contrast on its cell.
+                                    // the same; on a heat cell the day number takes whichever of
+                                    // bg / ink is the stronger contrast (monthDayInk).
                                     val fill = if (isToday) c.coral else if (v == 0) c.bg2 else monthHeat(c, t)
                                     val ownHere = iso in ownPlannedDays
                                     val sharedHere = iso in sharedPlannedDays
@@ -547,12 +554,18 @@ private fun MonthView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared
                                             },
                                         contentAlignment = Alignment.Center,
                                     ) {
-                                        val onDark = isToday || contrastRatio(c.bg, fill) > contrastRatio(c.ink2, fill)
+                                        // Today: bg on coral (as before). An empty day: ink2 on bg2 (as
+                                        // before). A heat cell: bg or ink, by contrast.
+                                        val dayInk = when {
+                                            isToday -> c.bg
+                                            v == 0 -> c.ink2
+                                            else -> monthDayInk(c, fill)
+                                        }
                                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                                            Text("${d.dayOfMonth}", style = UFont.sans(11, FontWeight.SemiBold), color = if (onDark) c.bg else c.ink2, textAlign = TextAlign.Center)
+                                            Text("${d.dayOfMonth}", style = UFont.sans(11, FontWeight.SemiBold), color = dayInk, textAlign = TextAlign.Center)
                                             // ● own blocks planned · ○ shared blocks (the owner's slot).
                                             if (ownHere || sharedHere) {
-                                                val dot = if (onDark) c.bg else c.ink2
+                                                val dot = dayInk
                                                 Row(Modifier.padding(top = 1.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                                                     if (ownHere) Box(Modifier.size(4.dp).clip(CircleShape).background(dot))
                                                     if (sharedHere) Box(Modifier.size(4.dp).clip(CircleShape).border(1.dp, dot, CircleShape))

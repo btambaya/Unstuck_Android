@@ -39,6 +39,36 @@ class NoIndigoAccentGuardTest {
         )
     }
 
+    // A hand-written indigo/violet literal — oklch(L, C, H) with a real chroma
+    // (≥ 0.03) at an indigo/violet hue (255…310) — outside the palette file. The
+    // tour answer bubble was one (lavender, 0.04 @ 280) until it went neutral.
+    private val indigoLiteral = Regex("""oklch\(\s*[0-9.]+\s*,\s*([0-9.]+)\s*,\s*([0-9.]+)""")
+
+    /** The one deliberate exception: the Focus takeover's full-screen deep-indigo
+     *  radial background (FocusScreen + the tour's Focus demo) — a background
+     *  mood, shared with web's ambient treatment, not an accent. */
+    private val focusBackdrop = "listOf(oklch(0.30, 0.10, 280.0), oklch(0.16, 0.02, 280.0))"
+
+    @Test fun `no hand-written indigo colour outside the palette`() {
+        val root = projectRoot()
+        val offenders = mutableListOf<String>()
+        for (module in listOf("design", "app")) {
+            File(root, "$module/src/main").walkTopDown()
+                .filter { it.isFile && it.extension == "kt" && it.name != "Theme.kt" && it.name != "Oklch.kt" }
+                .forEach { f ->
+                    f.readLines().forEachIndexed { i, line ->
+                        if (focusBackdrop in line) return@forEachIndexed
+                        for (m in indigoLiteral.findAll(line)) {
+                            val chroma = m.groupValues[1].toDoubleOrNull() ?: continue
+                            val hue = m.groupValues[2].toDoubleOrNull() ?: continue
+                            if (chroma >= 0.03 && hue in 255.0..310.0) offenders += "${f.relativeTo(root)}:${i + 1}  ${m.value}"
+                        }
+                    }
+                }
+        }
+        assertTrue("indigo is not an accent — use the palette's neutrals / ink:\n" + offenders.joinToString("\n"), offenders.isEmpty())
+    }
+
     @Test fun `the Material colour scheme does not map primary to indigo`() {
         val theme = File(projectRoot(), "design/src/main/kotlin/tech/csalliance/unstuck/design/theme/Theme.kt").readText()
         assertTrue("UnstuckTheme must build its scheme with unstuckColorScheme()", "unstuckColorScheme(colors)" in theme)

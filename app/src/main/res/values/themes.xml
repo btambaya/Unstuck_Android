@@ -1,10 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- Base activity theme; the Compose UnstuckTheme owns the real styling.
-         Edge-to-edge with transparent system bars. -->
+         Edge-to-edge with transparent system bars.
+         colorAccent is what the PLATFORM date / time pickers (android.app.
+         DatePickerDialog / TimePickerDialog: Schedule, the repeat end date, the
+         call hours) paint their header, selected day and clock hand with. It
+         defaulted to Material's teal; selection is the black-and-white ink / bg
+         pair everywhere (owner, 2026-09-24), so it is the light palette's ink
+         (UnstuckColors.light.ink — PickerAccentTest keeps them equal). -->
     <style name="Theme.Unstuck" parent="android:Theme.Material.Light.NoActionBar">
         <item name="android:windowBackground">@android:color/white</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
         <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:colorAccent">#1A1C26</item>
+    </style>
+
+    <!-- Platform picker dialogs that follow the app's light / dark choice (the
+         collection "by" time): the Material dialog themes with the same ink
+         accent instead of teal — light ink on the light dialog, the dark
+         palette's ink (UnstuckColors.dark.ink) on the dark one. -->
+    <style name="Theme.Unstuck.PickerLight" parent="android:Theme.Material.Light.Dialog">
+        <item name="android:colorAccent">#1A1C26</item>
+    </style>
+    <style name="Theme.Unstuck.PickerDark" parent="android:Theme.Material.Dialog">
+        <item name="android:colorAccent">#F0F2F5</item>
     </style>
 </resources>

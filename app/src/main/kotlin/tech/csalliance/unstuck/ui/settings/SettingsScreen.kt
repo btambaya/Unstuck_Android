@@ -541,7 +541,10 @@ internal fun ToggleRow(
             Text(label, style = UFont.sans(14, FontWeight.Medium), color = if (enabled) c.ink else c.ink3)
             if (sub != null) Text(sub, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 3.dp))
         }
-        MdToggle(value, { if (enabled) onChange(it) }, Modifier.clearAndSetSemantics {})
+        // Disabled (e.g. Voice replies while the spoken coach is off, AI data
+        // sharing during the tour): the switch dims too, so an ON one doesn't
+        // read as a live full-coral switch next to a greyed label.
+        MdToggle(value, { if (enabled) onChange(it) }, Modifier.clearAndSetSemantics {}, enabled = enabled)
     }
     if (!last) CardDivider()
 }

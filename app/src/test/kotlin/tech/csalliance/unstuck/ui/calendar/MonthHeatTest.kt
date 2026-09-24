@@ -6,8 +6,8 @@ import org.junit.Test
 import tech.csalliance.unstuck.design.theme.UnstuckColors
 
 // The month view's heat ramp went neutral (bg2 → ink3) when indigo stopped
-// being an accent (owner decision 2026-09-24). The day number picks bg or ink2
-// by contrast on its cell, rather than flipping at the ramp's midpoint — the
+// being an accent (owner decision 2026-09-24). The day number picks bg or ink
+// by contrast on its cell (monthDayInk), rather than flipping at the ramp's midpoint — the
 // midpoint flip left a mid-grey day at ~2:1.
 class MonthHeatTest {
 
@@ -29,8 +29,11 @@ class MonthHeatTest {
         for (c in palettes) {
             for (i in 0..100) {
                 val fill = monthHeat(c, i / 100f)
-                val best = maxOf(contrastRatio(c.bg, fill), contrastRatio(c.ink2, fill))
-                assertTrue("${if (c.isDark) "dark" else "light"} t=${i / 100f}: $best", best >= 3f)
+                val ink = monthDayInk(c, fill)
+                assertTrue(ink == c.bg || ink == c.ink)
+                val ratio = contrastRatio(ink, fill)
+                // ≥4.7:1 light / ≥4.0:1 dark (ink2 as the dark option bottomed out ~3.1:1).
+                assertTrue("${if (c.isDark) "dark" else "light"} t=${i / 100f}: $ratio", ratio >= 3.9f)
             }
         }
     }

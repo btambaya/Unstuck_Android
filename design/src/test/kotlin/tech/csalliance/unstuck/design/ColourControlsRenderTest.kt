@@ -99,11 +99,11 @@ class ColourControlsRenderTest {
     }
 
     @Composable
-    private fun ToggleRow(label: String, on: Boolean) {
+    private fun ToggleRow(label: String, on: Boolean, enabled: Boolean = true) {
         val c = UTheme.colors
         Row(Modifier.fillMaxWidth().padding(vertical = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text(label, style = UFont.sans(14, FontWeight.Medium), color = c.ink, modifier = Modifier.weight(1f))
-            MdToggle(on, {})
+            Text(label, style = UFont.sans(14, FontWeight.Medium), color = if (enabled) c.ink else c.ink3, modifier = Modifier.weight(1f))
+            MdToggle(on, {}, enabled = enabled)
         }
     }
 
@@ -112,6 +112,8 @@ class ColourControlsRenderTest {
         SectionLabel("Switches")
         ToggleRow("Morning brief (on)", on = true)
         ToggleRow("Evening preview (off)", on = false)
+        ToggleRow("Voice replies (on, disabled)", on = true, enabled = false)
+        ToggleRow("AI data sharing (off, disabled)", on = false, enabled = false)
         Spacer(Modifier.padding(6.dp))
         SectionLabel("Selection")
         Row(Modifier.padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {

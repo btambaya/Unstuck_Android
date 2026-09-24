@@ -5,6 +5,17 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.view.View
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.Text
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.performClick
@@ -38,7 +49,15 @@ import tech.csalliance.unstuck.data.db.UnstuckDatabase
 import tech.csalliance.unstuck.design.theme.UnstuckTheme
 import tech.csalliance.unstuck.sync.WriteThrough
 import tech.csalliance.unstuck.ui.auth.AuthScreen
+import tech.csalliance.unstuck.design.theme.UTheme
+import tech.csalliance.unstuck.ui.assistant.VoiceModeScreen
 import tech.csalliance.unstuck.ui.focus.CaptureSheet
+import tech.csalliance.unstuck.ui.focus.FocusOptionsSheet
+import tech.csalliance.unstuck.ui.sharing.ShareScreen
+import tech.csalliance.unstuck.ui.sharing.ShareTarget
+import tech.csalliance.unstuck.ui.tour.TourAnswerBg
+import tech.csalliance.unstuck.ui.tour.TourAnswerInk
+import tech.csalliance.unstuck.ui.tour.TourModeRow
 import tech.csalliance.unstuck.ui.onboarding.OnboardingScreen
 import java.io.File
 import java.time.LocalDate
@@ -209,6 +228,83 @@ class ColourRenderTest {
     @Test fun captureSheetLight() = captureSheet(false, "focus-capture-sheet-light.png")
     @Test fun captureSheetDark() = captureSheet(true, "focus-capture-sheet-dark.png")
 
+    // ── review round: the screens the first pass didn't capture ──
+    // Collection detail — "Shared with N" (was indigo) + the collection's own colour.
+    private fun collectionDetail(dark: Boolean, name: String) {
+        compose.setContent { UnstuckTheme(dark = dark) { tech.csalliance.unstuck.ui.collections.CollectionDetailScreen(vm, "k1", onBack = {}) } }
+        compose.waitUntil(10_000) { compose.onAllNodesWithText("Shared with 1").fetchSemanticsNodes().isNotEmpty() }
+        shot(name)
+    }
+    @Test fun collectionDetailLight() = collectionDetail(false, "collection-detail-light.png")
+    @Test fun collectionDetailDark() = collectionDetail(true, "collection-detail-dark.png")
+    @Test fun appearanceLight() { shell(false); link("unstuck://settings?section=Appearance"); shot("appearance-light.png") }
+    @Test fun appearanceDark() { shell(true); link("unstuck://settings?section=Appearance"); shot("appearance-dark.png") }
+    @Test fun peopleLight() { shell(false); link("unstuck://settings?section=People"); shot("people-light.png") }
+    @Test fun peopleDark() { shell(true); link("unstuck://settings?section=People"); shot("people-dark.png") }
+
+    /** Focus options with the spoken coach OFF and Voice replies ON: Voice
+     *  replies is a DISABLED switch that is on — it must not read as live. */
+    private fun focusOptions(dark: Boolean, name: String) {
+        vm.updateSettings { it.copy(focusCopilotSpeak = false, focusCopilotVoice = true, focusSoftExit = true) }
+        compose.setContent { UnstuckTheme(dark = dark) { FocusOptionsSheet(vm, onDismiss = {}) } }
+        shot(name)
+    }
+    @Config(qualifiers = TALL_C) @Test fun focusOptionsLight() = focusOptions(false, "focus-options-light.png")
+    @Config(qualifiers = TALL_C) @Test fun focusOptionsDark() = focusOptions(true, "focus-options-dark.png")
+
+    /** Talk: the orb (idle / listening was indigo, speaking coral). */
+    private fun voiceOrb(dark: Boolean, name: String) {
+        compose.setContent { UnstuckTheme(dark = dark) { VoiceModeScreen(vm, onClose = {}) } }
+        shot(name)
+    }
+    @Test fun voiceOrbLight() = voiceOrb(false, "voice-orb-light.png")
+    @Test fun voiceOrbDark() = voiceOrb(true, "voice-orb-dark.png")
+
+    /** Tour: a recommended mode row (indigo ring + SUGGESTED pill) and the
+     *  fixed answer bubble (was lavender). */
+    private fun tourBits(dark: Boolean, name: String) {
+        compose.setContent {
+            UnstuckTheme(dark = dark) {
+                val c = UTheme.colors
+                Column(Modifier.fillMaxSize().background(c.bg).padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    TourModeRow("Show me around", "Two minutes, hands on", meta = "2 min", recommended = true) {}
+                    TourModeRow("Just talk me through it", "Listen while you look", recommended = false) {}
+                    Box(Modifier.clip(RoundedCornerShape(12.dp)).background(TourAnswerBg).padding(horizontal = 12.dp, vertical = 10.dp)) {
+                        Text("Captures stay attached to the task you were on.", color = TourAnswerInk)
+                    }
+                }
+            }
+        }
+        shot(name)
+    }
+    @Test fun tourLight() = tourBits(false, "tour-rows-light.png")
+    @Test fun tourDark() = tourBits(true, "tour-rows-dark.png")
+
+    @Test fun shareScreenLight() { compose.setContent { UnstuckTheme(dark = false) { ShareScreen(vm, ShareTarget.Task("t1", "Draft the quarterly update"), onDismiss = {}) } }; shot("share-light.png") }
+    @Test fun shareScreenDark() { compose.setContent { UnstuckTheme(dark = true) { ShareScreen(vm, ShareTarget.Task("t1", "Draft the quarterly update"), onDismiss = {}) } }; shot("share-dark.png") }
+
+    /** The PLATFORM pickers: Schedule's date + time, the repeat end date and the
+     *  call hours use the activity theme; a collection's "by" time picks a light
+     *  / dark dialog theme. Their accent was Material's teal. */
+    private fun platformPickers(name: String, dialogTheme: Int?) {
+        compose.setContent { UnstuckTheme(dark = dialogTheme != null) { Box(Modifier.fillMaxSize()) } }
+        val time = compose.runOnIdle {
+            val a = compose.activity
+            (if (dialogTheme == null) android.app.TimePickerDialog(a, null, 9, 30, false)
+            else android.app.TimePickerDialog(a, dialogTheme, null, 9, 30, false)).also { it.show() }
+        }
+        shot("$name-time.png")
+        compose.runOnIdle { time.dismiss() }
+        compose.runOnIdle {
+            val a = compose.activity
+            (if (dialogTheme == null) android.app.DatePickerDialog(a, null, 2026, 8, 24)
+            else android.app.DatePickerDialog(a, dialogTheme, null, 2026, 8, 24)).show()
+        }
+        shot("$name-date.png")
+    }
+    @Config(qualifiers = TALL_C) @Test fun platformPickersActivityTheme() = platformPickers("platform-pickers-activity", null)
+    @Config(qualifiers = TALL_C) @Test fun platformPickersDarkDialog() = platformPickers("platform-pickers-dark-dialog", PICKER_DARK)
+
     private fun tap(text: String) {
         runCatching { compose.onAllNodesWithText(text)[0].performClick() }
         compose.waitForIdle()
@@ -216,6 +312,8 @@ class ColourRenderTest {
 
     private companion object {
         const val NOW = "2026-09-24T09:00:00.000Z"
+        /** The collection "by" time's dark dialog theme (ink accent, not teal). */
+        val PICKER_DARK: Int = tech.csalliance.unstuck.R.style.Theme_Unstuck_PickerDark
     }
 }
 

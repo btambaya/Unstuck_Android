@@ -823,6 +823,49 @@ class AppViewModelTest {
         assertEquals("tpl", store.reasonLogs().first { it.isNotEmpty() }.single().taskId)
     }
 
+    // Pause lengths (analytics P0-3 / D5, 2026-09-24): the reason picked for a
+    // pause gets its duration_sec when the session resumes — no client wrote it.
+    @Test fun pauseReason_getsThePauseLengthOnResume() = runTest(dispatcher) {
+        val t = task("t1", name = "Write report")
+        seedTask(t)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        vm.startFocus(t); advanceUntilIdle()
+        awaitLiveSession { it?.sessionStart != null }
+        nowMs += 60_000
+        vm.pauseFocus(); advanceUntilIdle()
+        awaitLiveSession { it?.paused == true }
+        vm.saveReasonLog("t1", "Drink"); advanceUntilIdle()
+        val pending = awaitLiveSession { it?.pendingReasonId != null }!!.pendingReasonId
+        nowMs += 185_000
+        vm.resumeFocus(); advanceUntilIdle()
+        awaitLiveSession { it?.paused == false }
+        val log = store.reasonLogs().first { l -> l.any { it.durationSec != null } }.single()
+        assertEquals(pending, log.id)
+        assertEquals(185, log.durationSec)
+        assertEquals(null, store.getLiveSession()!!.pendingReasonId)
+    }
+
+    @Test fun pauseReason_getsThePauseLengthWhenFinishedWhilePaused() = runTest(dispatcher) {
+        val t = task("t1", name = "Write report")
+        seedTask(t)
+        val vm = vm()
+        subscribeReads(vm, vm.tasks, vm.blocks)
+        vm.startFocus(t); advanceUntilIdle()
+        awaitLiveSession { it?.sessionStart != null }
+        nowMs += 120_000
+        vm.pauseFocus(); advanceUntilIdle()
+        awaitLiveSession { it?.paused == true }
+        vm.saveReasonLog("t1", "Stuck — need a moment"); advanceUntilIdle()
+        awaitLiveSession { it?.pendingReasonId != null }
+        nowMs += 30_000
+        vm.finishFocus(t, markDone = false); advanceUntilIdle()
+        // The session itself records its own plan as estimate_min (P1-13).
+        assertEquals(25, awaitSessions { it.isNotEmpty() }.single().estimateMin)
+        awaitLiveSession { it == null }
+        assertEquals(30, store.reasonLogs().first().single().durationSec)
+    }
+
     @Test fun cancelFocus_releasesTheCapturesQueuedBehindItsSession() = runTest(dispatcher) {
         // cancel_focus writes no Session row, so a capture waiting on one never flushed.
         seedTask(task("t1", name = "Write"))

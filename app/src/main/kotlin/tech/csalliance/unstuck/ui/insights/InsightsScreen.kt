@@ -59,7 +59,6 @@ import tech.csalliance.unstuck.core.logic.comebackBins
 import tech.csalliance.unstuck.core.logic.earliestActivityDay
 import tech.csalliance.unstuck.core.logic.hourDayHeatmap
 import tech.csalliance.unstuck.core.logic.hourLabel
-import tech.csalliance.unstuck.core.logic.inPeriodWindow
 import tech.csalliance.unstuck.core.logic.insightsComparisonLabel
 import tech.csalliance.unstuck.core.logic.insightsFacts
 import tech.csalliance.unstuck.core.logic.insightsPeriodLabel
@@ -126,9 +125,9 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
     val sessions = facts.cur.sessions
     val captures = facts.cur.captures
     val reasons = facts.cur.pauses
-    val rawSessions = remember(allSessions, range, now) {
+    val rawSessions = remember(data, allSessions, range, now) {
         val win = windowOf(range, now, zone)
-        allSessions.filter { inPeriodWindow(it.completedAt, win, zone) }
+        allSessions.filter { data.inWindow(it.completedAt, win, zone) }
     }
     val hasFocus = sessions.isNotEmpty()
     val areaNames = remember(lifeAreas) { lifeAreas.sortedBy { it.sortOrder }.map { it.name }.ifEmpty { DEFAULT_AREAS } }

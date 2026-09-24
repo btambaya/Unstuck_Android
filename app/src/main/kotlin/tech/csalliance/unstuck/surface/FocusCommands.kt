@@ -48,10 +48,10 @@ object FocusCommands {
             val now = System.currentTimeMillis()
             val r = stampControl(it, FocusTimer.resume(it, now))
             store.setLiveSession(r)
-            recordPauseLength(store, app.graph.coordinator?.write, it, now)
             // Re-arm the ongoing notification's chronometer at the POST-resume start so
             // it doesn't count the pause gap (was left at the stale pre-pause start).
             FocusTimerService.update(app, paused = false, startMs = r.sessionStart)
+            recordPauseLength(store, app.graph.coordinator?.write, it, now)
         }
     }
 

@@ -2211,10 +2211,12 @@ class AppViewModel(
         write?.upsertReasonLog(ReasonLog(id = id, taskId = ownTaskIdFor(taskId), reason = reason, action = action, at = isoNow(), durationSec = durationSec))
         // A reason picked for the CURRENT pause: remember it on the live session so
         // the resume (or a finish while paused) writes the pause's length back onto
-        // it (analytics P0-3 / D5). Device-local; not a shared control.
+        // it (analytics P0-3 / D5). Device-local; not a shared control. After the
+        // row is stored, so a resume always finds the row it updates; the read and
+        // write are back to back and only touch a still-paused session.
         if (action == ReasonAction.PAUSE && durationSec == null) {
             val cur = store.getLiveSession()
-            if (cur != null && cur.paused) store.setLiveSession(cur.copy(pendingReasonId = id))
+            if (cur != null && cur.paused && cur.pausedAt != null) store.setLiveSession(cur.copy(pendingReasonId = id))
         }
     }
 

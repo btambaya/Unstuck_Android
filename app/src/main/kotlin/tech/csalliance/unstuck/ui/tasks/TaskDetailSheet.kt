@@ -83,6 +83,7 @@ import androidx.compose.material3.DropdownMenuItem
 import tech.csalliance.unstuck.ui.components.RecurrenceEditor
 import tech.csalliance.unstuck.ui.components.TagPicker
 import tech.csalliance.unstuck.ui.components.areaColorFor
+import tech.csalliance.unstuck.ui.components.keepInViewWhileTyping
 import tech.csalliance.unstuck.ui.tour.TourAnchorIds
 import tech.csalliance.unstuck.ui.tour.tourAnchor
 import androidx.compose.foundation.layout.heightIn
@@ -496,8 +497,9 @@ private fun AddCaptureRow(onAdd: (CaptureTag, String) -> Unit) {
     )
     Column(Modifier.fillMaxWidth().padding(top = 6.dp).clip(RoundedCornerShape(14.dp)).background(c.bg2).padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         // Field + Add on one row — Add sits before the tags so it's always visible
-        // and you can add without scrolling past the chips.
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        // and you can add without scrolling past the chips. That row (field + Add)
+        // rides above the keyboard while typing, not just the field's line of text.
+        Row(Modifier.fillMaxWidth().keepInViewWhileTyping(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             BasicTextField(
                 value = body, onValueChange = { body = it }, textStyle = UFont.sans(14).copy(color = c.ink), singleLine = true, cursorBrush = SolidColor(c.ink),
                 modifier = Modifier.weight(1f),

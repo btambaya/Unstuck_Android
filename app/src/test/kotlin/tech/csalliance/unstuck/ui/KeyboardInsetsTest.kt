@@ -6,16 +6,20 @@ import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isSelectable
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.longClick
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.onRoot
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performImeAction
 import androidx.compose.ui.test.performScrollTo
+import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTextInput
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.unit.Dp
@@ -60,7 +64,10 @@ import tech.csalliance.unstuck.sync.WriteThrough
  *
  *  - a field being typed into sits ABOVE the keyboard (the edited list item,
  *    the collection's add field — also after adding a few — and the task
- *    detail's capture field at the bottom of its scroll);
+ *    detail's capture field at the bottom of its scroll) — and so does the card
+ *    or pill drawn around it, not just its line of text (keepInViewWhileTyping);
+ *  - that holds in a long list and in landscape, and when the keyboard goes the
+ *    list gets its full height back;
  *  - the bottom bar does NOT ride up on top of the keyboard.
  *
  * Offline, MainScaffoldFabTest's harness. SDK 33 for its own Compose sandbox
@@ -86,6 +93,7 @@ class KeyboardInsetsTest {
     @get:Rule val rules: RuleChain = RuleChain.outerRule(hostActivity).around(compose)
 
     private lateinit var db: UnstuckDatabase
+    private lateinit var store: LocalStore
     private lateinit var vm: AppViewModel
     private lateinit var composeView: View
     private val drain = ViewModelDrain()
@@ -96,12 +104,20 @@ class KeyboardInsetsTest {
         CollectionItem(id = "i$n", body = "Sync item $n", at = "2026-09-24T09:%02d:00.000Z".format(java.util.Locale.ROOT, n))
     }
     private val list = ItemCollection(id = "c1", name = "Zubair/Ahmad sync up", color = "indigo", items = items, sortOrder = 0, ownerId = UID)
+    /** A list far taller than the screen. */
+    private val longItems = (1..40).map { n ->
+        CollectionItem(id = "L$n", body = "Long item $n", at = "2026-09-24T10:%02d:00.000Z".format(java.util.Locale.ROOT, n))
+    }
+    private val longList = ItemCollection(id = "c2", name = "Long list", color = "green", items = longItems, sortOrder = 1, ownerId = UID)
 
     @Before fun setup() {
         val ctx = ApplicationProvider.getApplicationContext<android.app.Application>()
         db = Room.inMemoryDatabaseBuilder(ctx, UnstuckDatabase::class.java).allowMainThreadQueries().build()
-        val store = LocalStore(db)
-        runBlocking { store.upsert(Tables.COLLECTIONS, list, ItemCollection.serializer(), list.id) }
+        store = LocalStore(db)
+        runBlocking {
+            store.upsert(Tables.COLLECTIONS, list, ItemCollection.serializer(), list.id)
+            store.upsert(Tables.COLLECTIONS, longList, ItemCollection.serializer(), longList.id)
+        }
         val graph = AppGraph(ctx, configured = false, storeOverride = store, uidOverride = { UID })
         graph.onboarded = true
         runCatching { androidx.work.WorkManager.initialize(ctx, androidx.work.Configuration.Builder().build()) }
@@ -117,9 +133,13 @@ class KeyboardInsetsTest {
 
     // ── the keyboard ─────────────────────────────────────────────────────────
 
+    /** The keyboard height last reported (0 = hidden). */
+    private var keyboardNow: Dp = 0.dp
+
     /** Report an IME of [height] (0 = hidden) to the Compose view, as the
      *  platform does for an edge-to-edge window. */
     private fun keyboard(height: Dp) {
+        keyboardNow = height
         compose.runOnIdle {
             val px = (height.value * composeView.resources.displayMetrics.density).toInt()
             val insets = WindowInsetsCompat.Builder()
@@ -133,19 +153,41 @@ class KeyboardInsetsTest {
 
     private fun rootBottom(): Dp = compose.onRoot().getUnclippedBoundsInRoot().bottom
     /** Where the keyboard's top edge is, in root coordinates. */
-    private fun keyboardTop(): Dp = rootBottom() - KEYBOARD
+    private fun keyboardTop(): Dp = rootBottom() - keyboardNow
 
-    private fun openTheList() {
-        vm.openDeepLink("unstuck://collections/${list.id}")
+    private fun openTheList(col: ItemCollection = list) {
+        vm.openDeepLink("unstuck://collections/${col.id}")
         compose.waitUntil(WAIT_MS) { compose.onAllNodes(hasText(INLINE_ADD)).fetchSemanticsNodes().isNotEmpty() }
         compose.waitForIdle()
     }
 
-    private fun assertAboveTheKeyboard(what: String, node: androidx.compose.ui.test.SemanticsNodeInteraction) {
+    /** [below]: how far the field's card / pill reaches below its line of text —
+     *  that must clear the keyboard too, not be cut in half by its edge. */
+    private fun assertAboveTheKeyboard(what: String, node: androidx.compose.ui.test.SemanticsNodeInteraction, below: Dp = 0.dp) {
         val b = node.getUnclippedBoundsInRoot()
         val top = keyboardTop()
-        assertTrue("$what must sit above the keyboard: its bottom is ${b.bottom}, the keyboard's top is $top", b.bottom <= top + 0.5.dp)
+        assertTrue("$what must sit above the keyboard: its bottom (+$below of its container) is ${b.bottom + below}, the keyboard's top is $top", b.bottom + below <= top + 0.5.dp)
         assertTrue("$what must still be on screen: its top is ${b.top}", b.top >= 0.dp)
+    }
+
+    /** The bottom edge of the scroll [node] is seen through. */
+    private fun viewportBottom(node: androidx.compose.ui.test.SemanticsNodeInteraction): Dp {
+        var n: androidx.compose.ui.semantics.SemanticsNode? = node.fetchSemanticsNode().parent
+        while (n != null && !n.config.contains(androidx.compose.ui.semantics.SemanticsActions.ScrollBy)) n = n.parent
+        val px = n?.boundsInRoot?.bottom ?: error("$node is not in a scroll")
+        return (px / composeView.resources.displayMetrics.density).dp
+    }
+
+    /** Hold the lowest on-screen item a keyboard of [kb] would cover; returns its editor. */
+    private fun holdTheLowestCoveredItem(of: List<CollectionItem>, kb: Dp): androidx.compose.ui.test.SemanticsNodeInteraction {
+        val bottom = rootBottom()
+        val target = of.reversed().firstOrNull { item ->
+            compose.onAllNodes(hasContentDescription(item.body)).fetchSemanticsNodes().isNotEmpty() &&
+                compose.onNodeWithContentDescription(item.body).getUnclippedBoundsInRoot().let { b -> b.top > bottom - kb && b.bottom < bottom }
+        } ?: error("precondition: no item sits where the keyboard comes up")
+        compose.onNodeWithContentDescription(target.body).performTouchInput { longClick() }
+        compose.waitForIdle()
+        return compose.onNode(hasSetTextAction() and hasText(target.body)).also { it.assertExists() }
     }
 
     // ── a collection ─────────────────────────────────────────────────────────
@@ -155,21 +197,9 @@ class KeyboardInsetsTest {
     @Test fun anItemHeldForEditingNearTheBottomEndsUpAboveTheKeyboard() {
         openTheList()
         keyboard(0.dp)
-        // The lowest item that is on screen now and that a keyboard would cover.
-        val kbTop = keyboardTop()
-        val bottom = rootBottom()
-        val target = items.reversed().firstOrNull { item ->
-            val b = compose.onNodeWithContentDescription(item.body).getUnclippedBoundsInRoot()
-            b.top > kbTop && b.bottom < bottom
-        } ?: error("precondition: no item sits where the keyboard comes up")
-
-        compose.onNodeWithContentDescription(target.body).performTouchInput { longClick() }
-        compose.waitForIdle()
-        val field = compose.onNode(hasSetTextAction() and hasText(target.body))
-        field.assertExists()
-
+        val field = holdTheLowestCoveredItem(items, KEYBOARD)
         keyboard(KEYBOARD)
-        assertAboveTheKeyboard("the item being edited", field)
+        assertAboveTheKeyboard("the item being edited", field, below = CARD_BELOW)
     }
 
     /** Opening a list puts the cursor in its add field (at the BOTTOM of the
@@ -177,7 +207,7 @@ class KeyboardInsetsTest {
     @Test fun theAddFieldIsNotLeftUnderTheKeyboard() {
         openTheList()
         keyboard(KEYBOARD)
-        assertAboveTheKeyboard("the add field", compose.onNode(hasSetTextAction() and hasText(INLINE_ADD)))
+        assertAboveTheKeyboard("the add field", compose.onNode(hasSetTextAction() and hasText(INLINE_ADD)), below = PILL_BELOW)
     }
 
     /** "…or adding a new one at the bottom": each new item lands right above the
@@ -195,7 +225,7 @@ class KeyboardInsetsTest {
                 vm.collections.value.firstOrNull { it.id == list.id }?.items?.any { it.body == body } == true
             }
             compose.waitForIdle()
-            assertAboveTheKeyboard("the add field after adding \"$body\"", compose.onNode(hasSetTextAction() and hasText(INLINE_ADD)))
+            assertAboveTheKeyboard("the add field after adding \"$body\"", compose.onNode(hasSetTextAction() and hasText(INLINE_ADD)), below = PILL_BELOW)
             compose.onNodeWithContentDescription(body).assertExists()
         }
     }
@@ -209,6 +239,35 @@ class KeyboardInsetsTest {
         first.performScrollTo()
         compose.waitForIdle()
         assertAboveTheKeyboard("the first item", first)
+    }
+
+    /** A list far taller than the screen: the add pill it opens on and a card
+     *  held to edit near the bottom both clear the keyboard; and when the keyboard
+     *  goes, the list gets its full height back with the edited card still shown. */
+    @Test fun aLongListKeepsTheFieldAboveTheKeyboardAndGetsItsHeightBack() {
+        openTheList(longList)
+        keyboard(KEYBOARD)
+        assertAboveTheKeyboard("the long list's add field", compose.onNode(hasSetTextAction() and hasText(INLINE_ADD)), below = PILL_BELOW)
+
+        keyboard(0.dp)
+        val field = holdTheLowestCoveredItem(longItems, KEYBOARD)
+        keyboard(KEYBOARD)
+        assertAboveTheKeyboard("the long list's item being edited", field, below = CARD_BELOW)
+
+        keyboard(0.dp)
+        assertTrue("with the keyboard gone the list runs to the bottom again: ${viewportBottom(field)} vs ${rootBottom()}", viewportBottom(field) == rootBottom())
+        assertAboveTheKeyboard("the edited item once the keyboard is gone", field, below = CARD_BELOW)
+    }
+
+    /** Turned on its side the keyboard takes most of the screen: the card being
+     *  edited still ends up in the strip above it. */
+    @Config(qualifiers = "w891dp-h411dp-xhdpi")
+    @Test fun inLandscapeTheEditedItemStillClearsTheKeyboard() {
+        openTheList()
+        keyboard(0.dp)
+        val field = holdTheLowestCoveredItem(items, LANDSCAPE_KEYBOARD)
+        keyboard(LANDSCAPE_KEYBOARD)
+        assertAboveTheKeyboard("the item being edited in landscape", field, below = CARD_BELOW)
     }
 
     // ── a task ───────────────────────────────────────────────────────────────
@@ -230,7 +289,8 @@ class KeyboardInsetsTest {
         compose.waitForIdle()
 
         keyboard(KEYBOARD)
-        assertAboveTheKeyboard("the task's capture field", capture)
+        // The row it sits in (the field + Add) clears the keyboard too.
+        assertAboveTheKeyboard("the task's capture field", capture, below = 8.dp)
     }
 
     // ── the bottom bar ───────────────────────────────────────────────────────
@@ -251,6 +311,32 @@ class KeyboardInsetsTest {
         assertTrue("the bar must sit under the keyboard, not above it: its top is ${after.top}, the keyboard's ${keyboardTop()}", after.top >= keyboardTop())
     }
 
+    /** Searching the Collections grid: the keyboard covers its lower part (the bar
+     *  stays down under it), yet every card — the last one too — can still be
+     *  scrolled up above the keyboard. */
+    @Test fun searchingCollectionsEveryCardStillScrollsAboveTheKeyboard() {
+        compose.onNode(hasText("Collections") and isSelectable()).performClick()
+        compose.waitForIdle()
+        runBlocking {
+            (3..14).forEach { n ->
+                val shelf = ItemCollection(id = "g$n", name = "Shelf $n", color = "blue", items = emptyList(), sortOrder = n, ownerId = UID)
+                store.upsert(Tables.COLLECTIONS, shelf, ItemCollection.serializer(), shelf.id)
+            }
+        }
+        compose.waitUntil(WAIT_MS) {
+            shadowOf(Looper.getMainLooper()).idle()
+            vm.collections.value.size == 14
+        }
+        compose.waitForIdle()
+        compose.onNode(hasSetTextAction() and hasText("Search collections")).performClick()
+        compose.waitForIdle()
+        keyboard(KEYBOARD)
+        // The grid's header, then 14 cards: as far down as it goes.
+        compose.onNode(hasScrollToIndexAction()).performScrollToIndex(14)
+        compose.waitForIdle()
+        assertAboveTheKeyboard("the last collection card", compose.onNodeWithText("Shelf 14"))
+    }
+
     private companion object {
         const val UID = "me"
         const val WAIT_MS = 5_000L
@@ -258,5 +344,10 @@ class KeyboardInsetsTest {
         const val CAPTURE = "Capture a thought…"
         /** A typical phone keyboard. */
         val KEYBOARD = 320.dp
+        val LANDSCAPE_KEYBOARD = 200.dp
+        /** An item's card reaches this far below its line of text (its padding). */
+        val CARD_BELOW = 10.dp
+        /** The add pill reaches this far below its line of text. */
+        val PILL_BELOW = 12.dp
     }
 }

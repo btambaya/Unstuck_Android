@@ -23,8 +23,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.relocation.BringIntoViewRequester
-import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
@@ -55,6 +53,7 @@ import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -97,10 +96,10 @@ import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.ui.components.keepInViewWhileTyping
 
 private val PALETTE = listOf("indigo", "coral", "green", "amber", "blue", "violet")
 
-@OptIn(ExperimentalFoundationApi::class)   // BringIntoViewRequester (the add row)
 @Composable
 fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () -> Unit) {
     val c = UTheme.colors
@@ -172,12 +171,13 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
     // Each item you add lands right above the add field and pushes it down a row.
     // The field is still focused, so nothing brings it back: with the keyboard up
     // it slid under the keyboard after the first add (KeyboardInsetsTest). So once
-    // YOUR add has landed (the list grew), scroll the field back into sight. Only
-    // after your own add: another member's item must not yank the list about.
-    val addRowInView = remember { BringIntoViewRequester() }
+    // YOUR add has landed (the list grew), the add row is scrolled back into sight
+    // (keepInViewWhileTyping's `reveal`). Only after your own add: another member's
+    // item must not yank the list about.
     var revealAddRow by remember { mutableStateOf(false) }
+    var ownAddsLanded by remember { mutableIntStateOf(0) }
     LaunchedEffect(col.items.size) {
-        if (revealAddRow) { revealAddRow = false; addRowInView.bringIntoView() }
+        if (revealAddRow) { revealAddRow = false; ownAddsLanded++ }
     }
 
     fun add() {
@@ -334,7 +334,7 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
             // for view-only members.
             if (canEdit) {
                 Row(
-                    Modifier.fillMaxWidth().padding(top = 18.dp).bringIntoViewRequester(addRowInView).clip(RoundedCornerShape(28.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(28.dp)).padding(horizontal = 16.dp, vertical = 12.dp),
+                    Modifier.fillMaxWidth().padding(top = 18.dp).keepInViewWhileTyping(reveal = ownAddsLanded).clip(RoundedCornerShape(28.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(28.dp)).padding(horizontal = 16.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
                     Icon(Icons.Filled.Add, contentDescription = null, tint = c.ink3)
@@ -561,7 +561,9 @@ private fun CollItemRow(
     // the pointer would stay still relative to it and every delta would read ~0.
     // Horizontal only, so the page's vertical scroll keeps every up/down drag.
     Box(
-        Modifier.fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp))
+        // While the hold's editor is open, the whole card rides above the keyboard,
+        // not just its line of text (which left the card cut in half at the edge).
+        Modifier.keepInViewWhileTyping().fillMaxWidth().padding(vertical = 3.dp).clip(RoundedCornerShape(12.dp))
             // `enabled`, not a dropped modifier: switching it off mid-drag cancels the
             // drag through onDragStopped, so `dragging` can't stick.
             .draggable(

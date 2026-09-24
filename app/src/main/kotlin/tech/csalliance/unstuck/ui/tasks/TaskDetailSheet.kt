@@ -46,7 +46,6 @@ import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.clampEstimateMin
-import tech.csalliance.unstuck.core.logic.formatTime
 import tech.csalliance.unstuck.core.logic.liveRuleDates
 import tech.csalliance.unstuck.core.logic.materializeOccurrences
 import tech.csalliance.unstuck.core.logic.nextRuleDate
@@ -58,6 +57,8 @@ import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.CaptureTag
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.time.ClockFormat
+import tech.csalliance.unstuck.core.time.ClockMode
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.design.component.AppBar
@@ -110,6 +111,8 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     val sessions by vm.sessions.collectAsStateWithLifecycle()
     val captures by vm.captures.collectAsStateWithLifecycle()
     var scheduled by remember(task.id) { mutableStateOf<String?>(null) }
+    // The phone's 12/24-hour setting: the schedule line and the time picker follow it.
+    val clock = tech.csalliance.unstuck.ui.components.clockMode()
 
     // A recurring OCCURRENCE's id is its cal_block id. Complete/skip route to
     // the block (vm.toggleDone / vm.skipOccurrence already detect it); field
@@ -135,8 +138,8 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                 val dateIso = java.time.LocalDate.of(y, m + 1, day).toString()
                 val timeIso = WireTime.hm(h, min)
                 onPicked(dateIso, timeIso)
-                scheduled = "${dateIso.takeLast(5)} ${formatTime(timeIso)}"
-            }, t0.hour, t0.minute, false).show()
+                scheduled = "${dateIso.takeLast(5)} ${ClockFormat.time(timeIso, clock)}"
+            }, t0.hour, t0.minute, clock == ClockMode.H24).show()
         }, d0.year, d0.monthValue - 1, d0.dayOfMonth)
         dlg.datePicker.minDate = System.currentTimeMillis() - 60_000   // no past days
         dlg.show()
@@ -190,7 +193,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     val myBlocks = blocks.filter { it.taskId == task.id }.sortedWith(compareBy({ it.date }, { it.startTime }))
     val scheduleLabel = when {
         task.later == true -> "Later"
-        myBlocks.isNotEmpty() -> "${myBlocks.first().date.takeLast(5)} ${formatTime(myBlocks.first().startTime)}"
+        myBlocks.isNotEmpty() -> "${myBlocks.first().date.takeLast(5)} ${ClockFormat.time(myBlocks.first().startTime, clock)}"
         else -> "Unscheduled"
     }
 
@@ -623,7 +626,9 @@ object CallMeLogic {
     const val CHANGED_UNDERNEATH = "That call changed underneath you — reloaded."
 
     fun chip(minutes: Int): String = "${minutes}m before"
-    fun ringsLine(callAtMs: Long): String = "Rings ${CallToolLogic.fmt(callAtMs)}"
+    /** "Rings 2026-09-24 14:05" / "Rings 2026-09-24 2:05 PM" — the phone's [clock]. */
+    fun ringsLine(callAtMs: Long, clock: ClockMode, zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): String =
+        "Rings ${CallToolLogic.ymd(callAtMs, zone)} ${ClockFormat.time(callAtMs, clock, zone)}"
 
     /** A call needs a scheduled start and a task that isn't parked in Later. */
     fun canBook(blockStartMs: Long?, later: Boolean?): Boolean = blockStartMs != null && later != true
@@ -647,15 +652,15 @@ object CallMeLogic {
      *  ring (its Calls switch or hours) — or null. The booking used to succeed
      *  and the call was declined quietly at ring time (parity with iOS build
      *  81, audit 2026-09-22 C12). */
-    fun hoursHint(callAtMs: Long?, s: tech.csalliance.unstuck.core.logic.CallSettings): String? {
+    fun hoursHint(callAtMs: Long?, s: tech.csalliance.unstuck.core.logic.CallSettings, clock: ClockMode): String? {
         val at = callAtMs ?: return null
         if (tech.csalliance.unstuck.core.logic.CallSettingsLogic.deviceGuard(at, s) == null) return null
         if (!s.enabled) return "Calls are off on this phone, so it would decline this call. Switch them on in Settings › Calls."
         val hm = CallToolLogic.hhmm(at)
         val hours = tech.csalliance.unstuck.core.logic.CallSettingsLogic.hoursLabel(
-            s.hoursStart, s.hoursEnd, tech.csalliance.unstuck.core.logic.CallSettingsLogic.minutesOfDay(hm) ?: -1,
+            s.hoursStart, s.hoursEnd, tech.csalliance.unstuck.core.logic.CallSettingsLogic.minutesOfDay(hm) ?: -1, clock,
         )
-        return "$hm is outside this phone's call hours ($hours), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Calls."
+        return "${ClockFormat.time(hm, clock)} is outside this phone's call hours ($hours), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Calls."
     }
 
     /** Booking, or changing the ring time (lead / slot), meets the hint; a
@@ -681,12 +686,13 @@ object CallMeLogic {
 
     /** The tool's contract string → the copy the section shows (iOS: the error
      *  minus "error: ", first letter capitalised; the two iOS-local strings map
-     *  to their sentences). */
-    fun userMessage(result: String): String = when {
+     *  to their sentences). Its 'HH:MM' times — the model's 24-hour contract —
+     *  are shown the phone's way ([clock]). */
+    fun userMessage(result: String, clock: ClockMode): String = when {
         isOk(result) -> ""
         result == CallToolLogic.NETWORK -> BOOK_FAILED
         result == CallToolLogic.CHANGED_UNDERNEATH -> CHANGED_UNDERNEATH
-        else -> result.removePrefix("error: ").replaceFirstChar { it.uppercase() }
+        else -> ClockFormat.localizeTimes(result.removePrefix("error: "), clock).replaceFirstChar { it.uppercase() }
     }
 
     /** The row a successful request_call describes when the read-back fails
@@ -703,6 +709,7 @@ object CallMeLogic {
 @Composable
 internal fun CallMeSection(vm: AppViewModel, task: TaskItem, taskBlocks: List<CalBlock>) {
     val c = UTheme.colors
+    val clock = tech.csalliance.unstuck.ui.components.clockMode()
     val scope = rememberCoroutineScope()
     val callSettings by vm.callSettings.collectAsStateWithLifecycle()
     var loaded by remember(task.id) { mutableStateOf(false) }
@@ -745,7 +752,7 @@ internal fun CallMeSection(vm: AppViewModel, task: TaskItem, taskBlocks: List<Ca
         }
     }
     // This phone's switch + hours, live (C12).
-    val hoursHint = CallMeLogic.hoursHint(callAt, callSettings)
+    val hoursHint = CallMeLogic.hoursHint(callAt, callSettings, clock)
     val changesTime = CallMeLogic.changesTime(row, lead, nextBlock?.id)
 
     fun toggle(on: Boolean) {
@@ -785,7 +792,7 @@ internal fun CallMeSection(vm: AppViewModel, task: TaskItem, taskBlocks: List<Ca
                     enabled = false
                     load()
                 }
-                else -> error = CallMeLogic.userMessage(res)
+                else -> error = CallMeLogic.userMessage(res, clock)
             }
             busy = false
         }
@@ -823,7 +830,7 @@ internal fun CallMeSection(vm: AppViewModel, task: TaskItem, taskBlocks: List<Ca
                         )
                     }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        callAt?.let { Text(CallMeLogic.ringsLine(it), style = UFont.sans(12), color = c.ink2) }
+                        callAt?.let { Text(CallMeLogic.ringsLine(it, clock), style = UFont.sans(12), color = c.ink2) }
                         Box(Modifier.weight(1f))
                         UButton(
                             if (row == null) CallMeLogic.BOOK else CallMeLogic.UPDATE, kind = ButtonKind.DARK, fill = false,

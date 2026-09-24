@@ -68,12 +68,13 @@ import tech.csalliance.unstuck.core.logic.clampEstimateMin
 import tech.csalliance.unstuck.core.logic.circleInviteErrorMessage
 import tech.csalliance.unstuck.core.logic.findConflicts
 import tech.csalliance.unstuck.core.logic.findFreeSlotsForDate
-import tech.csalliance.unstuck.core.logic.formatTime
 import tech.csalliance.unstuck.core.logic.newTaskNeedsTime
 import tech.csalliance.unstuck.core.model.CircleStatus
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.time.Clock
+import tech.csalliance.unstuck.core.time.ClockFormat
+import tech.csalliance.unstuck.core.time.ClockMode
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.design.component.ButtonKind
@@ -220,8 +221,10 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
         "Tomorrow" -> tmrwIso
         else -> pickedDate
     }
-    val slots = remember(effectiveDate, estimate, blocks) {
-        if (effectiveDate == null) emptyList() else findFreeSlotsForDate(blocks, estimate, effectiveDate, now, limit = 4)
+    // The phone's 12/24-hour setting — the time chips and the picker follow it.
+    val clock = tech.csalliance.unstuck.ui.components.clockMode()
+    val slots = remember(effectiveDate, estimate, blocks, clock) {
+        if (effectiveDate == null) emptyList() else findFreeSlotsForDate(blocks, estimate, effectiveDate, now, limit = 4, clock = clock)
     }
     // Auto-pick the first free slot when the date/estimate changes — unless the
     // user (or a calendar-slot prefill) chose a specific time.
@@ -318,8 +321,8 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                         val pt = pickedTime
                         SelectableChip("Custom…", selected = false) { showTimePicker = true }
                         // The chosen time (a prefilled/custom one not in the suggestions) — tap to change.
-                        if (pt != null && slots.none { it.startTime == pt }) SelectableChip(formatTime(pt), selected = true) { showTimePicker = true }
-                        slots.forEach { s -> SelectableChip(formatTime(s.startTime), selected = pickedTime == s.startTime) { pickedTime = s.startTime; autoTime = false } }
+                        if (pt != null && slots.none { it.startTime == pt }) SelectableChip(ClockFormat.time(pt, clock), selected = true) { showTimePicker = true }
+                        slots.forEach { s -> SelectableChip(ClockFormat.time(s.startTime, clock), selected = pickedTime == s.startTime) { pickedTime = s.startTime; autoTime = false } }
                     }
                     if (slots.isEmpty() && pickedTime == null) {
                         // "…added without one" is only true for a one-off today (C7).
@@ -495,7 +498,7 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
         val tpState = rememberTimePickerState(
             initialHour = pickedTime?.substringBefore(":")?.toIntOrNull() ?: 9,
             initialMinute = pickedTime?.substringAfter(":")?.toIntOrNull() ?: 0,
-            is24Hour = false,
+            is24Hour = clock == ClockMode.H24,
         )
         androidx.compose.material3.AlertDialog(
             onDismissRequest = { showTimePicker = false },

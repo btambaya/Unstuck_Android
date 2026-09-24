@@ -82,7 +82,9 @@ fun rememberAssistantContext(vm: AppViewModel, nowMs: Long): AssistantPanelConte
     val live by vm.liveSession.collectAsStateWithLifecycle()
     val displayName by vm.currentNameState.collectAsStateWithLifecycle()
 
-    return remember(tasks, blocks, collections, live, displayName, nowMs) {
+    // The phone's 12/24-hour setting: a chip's message becomes the user's turn.
+    val clock = tech.csalliance.unstuck.ui.components.clockMode()
+    return remember(tasks, blocks, collections, live, displayName, nowMs, clock) {
         val liveTaskId = live?.taskId
         val next = pickStartNext(tasks, blocks, liveTaskId)
         val pausedName = live?.takeIf { it.paused }?.let { l -> tasks.firstOrNull { it.id == l.taskId }?.name }
@@ -99,7 +101,7 @@ fun rememberAssistantContext(vm: AppViewModel, nowMs: Long): AssistantPanelConte
             nextName = next?.name,
             usableLabel = usableLabel,
             pausedName = pausedName,
-            groups = buildSuggestions(tasks, blocks, collections, todayIso),
+            groups = buildSuggestions(tasks, blocks, collections, todayIso, clock),
             checkinLine = buildCheckin(firstName, openTodayCount, usableLabel, hour),
         )
     }

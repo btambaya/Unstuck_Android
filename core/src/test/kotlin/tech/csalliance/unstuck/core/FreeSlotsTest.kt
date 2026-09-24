@@ -7,7 +7,8 @@ import tech.csalliance.unstuck.core.logic.blockTimeRange
 import tech.csalliance.unstuck.core.logic.findConflicts
 import tech.csalliance.unstuck.core.logic.findFreeSlots
 import tech.csalliance.unstuck.core.logic.findFreeSlotsForDate
-import tech.csalliance.unstuck.core.logic.formatTime
+import tech.csalliance.unstuck.core.time.ClockMode
+import java.util.Locale
 
 // Ported 1:1 from FreeSlotsTests.swift / lib/free-slots.test.ts. NOW is a
 // local datetime; tests run under TZ=UTC.
@@ -83,15 +84,27 @@ class FreeSlotsTest {
         assertEquals(emptyList<Any>(), findConflicts("2026-05-21", "09:00", 30, blocks))
     }
 
-    @Test fun formatTime12Hour() {
-        assertEquals("9:00 AM", formatTime("09:00"))
-        assertEquals("2:30 PM", formatTime("14:30"))
-        assertEquals("12:15 AM", formatTime("00:15"))
-        assertEquals("12:00 PM", formatTime("12:00"))
+    @Test fun blockTimeRangeFollowsTheClockMode() {
+        val b = mkBlock(startTime = "09:00", durationMinutes = 60, date = "2026-05-21")
+        assertEquals("09:00–10:00", blockTimeRange(b, ClockMode.H24))
+        val prev = Locale.getDefault()
+        try {
+            Locale.setDefault(Locale.US)
+            assertEquals("9:00–10:00 AM", blockTimeRange(b, ClockMode.H12))
+            assertEquals("11:30 AM–12:30 PM", blockTimeRange(mkBlock(startTime = "11:30", durationMinutes = 60, date = "2026-05-21"), ClockMode.H12))
+        } finally {
+            Locale.setDefault(prev)
+        }
     }
 
-    @Test fun blockTimeRangeFormats() {
-        val b = mkBlock(startTime = "09:00", durationMinutes = 60, date = "2026-05-21")
-        assertEquals("9:00 AM–10:00 AM", blockTimeRange(b))
+    @Test fun slotLabelFollowsTheClockMode() {
+        assertEquals("Today · 08:00", findFreeSlots(emptyList(), 30, now, startDate = now, daysToScan = 1, limit = 1)[0].label)
+        val prev = Locale.getDefault()
+        try {
+            Locale.setDefault(Locale.US)
+            assertEquals("Today · 8:00 AM", findFreeSlots(emptyList(), 30, now, startDate = now, daysToScan = 1, limit = 1, clock = ClockMode.H12)[0].label)
+        } finally {
+            Locale.setDefault(prev)
+        }
     }
 }

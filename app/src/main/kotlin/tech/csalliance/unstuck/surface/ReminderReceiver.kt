@@ -55,8 +55,11 @@ class ReminderReceiver : BroadcastReceiver() {
 
         fun post(startNowCovers: Boolean = false) {
             if (kind == "lead") {
+                // The start time the phone's way (its 12/24-hour setting), like every
+                // other clock time the app shows.
+                val clock = tech.csalliance.unstuck.ui.components.DeviceClock.mode(context)
                 val copy = leadCopy(taskName, lead, startAt, System.currentTimeMillis(), startNowCovers) { at ->
-                    android.text.format.DateFormat.getTimeFormat(context).format(java.util.Date(at))
+                    tech.csalliance.unstuck.core.time.ClockFormat.time(at, clock)
                 } ?: return
                 val deepLink = if (taskId.isNotBlank()) "unstuck://task/$taskId" else "unstuck://today"
                 // External calendar events have a blank task id — key the notif id off the

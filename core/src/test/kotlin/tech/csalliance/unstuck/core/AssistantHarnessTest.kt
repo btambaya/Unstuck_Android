@@ -190,6 +190,17 @@ class AssistantHarnessTest {
         assertEquals("Added \"Milk\".", turn.messages.last().content)
     }
 
+    /** The closing line follows the phone's clock (Ahmad, 2026-09-24): a
+     *  24-hour phone keeps the reply's "14:30", a 12-hour one gets "2:30pm". */
+    @Test fun `the polished closing keeps the phone's clock`() {
+        fun closing(clock: tech.csalliance.unstuck.core.time.ClockMode): String? = runSync {
+            AssistantHarness(ScriptedAsk(call("create_task", """{"name":"Gym"}"""), text("Added \"Gym\" at 14:30.")), FakeRunner(), clock = clock)
+                .turn(emptyList(), "add gym at half two")
+        }.text
+        assertEquals("Added \"Gym\" at 14:30.", closing(tech.csalliance.unstuck.core.time.ClockMode.H24))
+        assertEquals("Added \"Gym\" at 2:30pm.", closing(tech.csalliance.unstuck.core.time.ClockMode.H12))
+    }
+
     // ---- honest fallbacks — never a synthesised "Done."
 
     @Test fun `an empty final reply with nothing done says nothing was changed`() {

@@ -2,6 +2,8 @@ package tech.csalliance.unstuck.core.logic
 
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.time.Clock
+import tech.csalliance.unstuck.core.time.ClockFormat
+import tech.csalliance.unstuck.core.time.ClockMode
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.core.time.WireTime
 import kotlin.math.ceil
@@ -11,6 +13,8 @@ import kotlin.math.min
 // Free-slot finder + conflict detector for scheduling. Pure functions.
 // Port of lib/free-slots.ts. Dates flow as local-midnight epoch ms (Long).
 
+/** [label] ("Today · 14:00") is the web's chip text, kept for parity — every
+ *  Android surface shows [startTime] through ClockFormat itself. */
 data class Slot(val date: String, val label: String, val startTime: String)
 
 data class Conflict(val block: CalBlock, val overlapMin: Int)
@@ -34,14 +38,6 @@ private fun pad2(n: Int): String = WireTime.pad2(n)
 
 private fun hhmmFromMin(totalMin: Int): String = "${pad2(totalMin / 60)}:${pad2(totalMin % 60)}"
 
-/** 12-hour time with AM/PM, e.g. "9:00 AM", "2:30 PM", "12:15 AM". */
-fun formatTime(hhmm: String): String {
-    val (h, m) = parseHM(hhmm)
-    val period = if (h >= 12) "PM" else "AM"
-    val h12 = ((h + 11) % 12) + 1
-    return "$h12:${pad2(m)} $period"
-}
-
 private fun dayLabelFor(d: Long, today: Long): String {
     val diffDays = Time.wholeDaysBetween(d, today)
     if (diffDays == 0) return "Today"
@@ -61,6 +57,8 @@ fun findFreeSlots(
     dayStartMin: Int = 8 * 60,
     dayEndMin: Int = 18 * 60,
     limit: Int = 9,
+    /** The phone's 12/24-hour preference, for [Slot.label] only. */
+    clock: ClockMode = ClockMode.H24,
 ): List<Slot> {
     val start = startDate ?: now
     val out = mutableListOf<Slot>()
@@ -92,7 +90,7 @@ fun findFreeSlots(
             val gapEnd = min(block.first, dayEndMin)
             while (cursor + durationMin <= gapEnd) {
                 val hhmm = hhmmFromMin(cursor)
-                out.add(Slot(dayIso, "${dayLabelFor(day, now)} · ${formatTime(hhmm)}", hhmm))
+                out.add(Slot(dayIso, "${dayLabelFor(day, now)} · ${ClockFormat.time(hhmm, clock)}", hhmm))
                 if (out.size >= limit) return out
                 cursor += step
             }
@@ -112,6 +110,7 @@ fun findFreeSlotsForDate(
     limit: Int = 6,
     dayStartMin: Int = 8 * 60,
     dayEndMin: Int = 18 * 60,
+    clock: ClockMode = ClockMode.H24,
 ): List<Slot> {
     val parts = isoDate.split("-").mapNotNull { it.toIntOrNull() }
     if (parts.size != 3) return emptyList()
@@ -119,7 +118,7 @@ fun findFreeSlotsForDate(
     val day = Time.civil(y, m, d)
     return findFreeSlots(
         blocks, durationMin, now, startDate = day,
-        daysToScan = 1, dayStartMin = dayStartMin, dayEndMin = dayEndMin, limit = limit,
+        daysToScan = 1, dayStartMin = dayStartMin, dayEndMin = dayEndMin, limit = limit, clock = clock,
     )
 }
 
@@ -146,9 +145,7 @@ fun findConflicts(
     return out.sortedBy { parseHhmm(it.block.startTime) }
 }
 
-/** A block's time range for conflict pills, e.g. "9:00 AM–10:00 AM". */
-fun blockTimeRange(b: CalBlock): String {
-    val startMin = parseHhmm(b.startTime)
-    val endMin = startMin + b.durationMinutes
-    return "${formatTime(hhmmFromMin(startMin))}–${formatTime(hhmmFromMin(endMin))}"
-}
+/** A block's time range for conflict pills in the phone's [clock] mode:
+ *  "09:00–10:00" / "9:00–10:00 AM". */
+fun blockTimeRange(b: CalBlock, clock: ClockMode): String =
+    ClockFormat.range(parseHhmm(b.startTime), parseHhmm(b.startTime) + b.durationMinutes, clock)

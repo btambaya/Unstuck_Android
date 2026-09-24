@@ -62,6 +62,8 @@ import tech.csalliance.unstuck.core.model.Density
 import tech.csalliance.unstuck.core.model.LifeArea
 import tech.csalliance.unstuck.core.model.TagRow
 import tech.csalliance.unstuck.core.model.ThemePref
+import tech.csalliance.unstuck.core.time.ClockFormat
+import tech.csalliance.unstuck.core.time.ClockMode
 import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.design.component.AppBar
 import tech.csalliance.unstuck.design.theme.AccentPalette
@@ -281,9 +283,12 @@ internal const val CALLS_PROACTIVE_AT = "At"
  *  calls are on") was false: the dispatcher books 06:00–23:00 whatever the
  *  phone's hours, and the phone then declines (parity with iOS build 81,
  *  audit 2026-09-22 C12). */
-internal val CALLS_PROACTIVE_HINT = "All off unless you switch them on. Unstuck books them between " +
-    "${tech.csalliance.unstuck.core.logic.CallSettingsLogic.SERVER_WINDOW.start} and ${tech.csalliance.unstuck.core.logic.CallSettingsLogic.SERVER_WINDOW.endInclusive}; " +
-    "this phone still declines one outside the allowed hours above, or while Calls is off."
+internal fun callsProactiveHint(clock: ClockMode): String {
+    val w = tech.csalliance.unstuck.core.logic.CallSettingsLogic.SERVER_WINDOW
+    return "All off unless you switch them on. Unstuck books them between " +
+        "${ClockFormat.time(w.start, clock)} and ${ClockFormat.time(w.endInclusive, clock)}; " +
+        "this phone still declines one outside the allowed hours above, or while Calls is off."
+}
 /** Under the Calls switch when the microphone was refused (iOS build 78): the
  *  phone rings, but the call can't hear them. A tap asks again while Android
  *  still offers the prompt, else opens the app's system page ([callsMicHint]). */
@@ -322,19 +327,20 @@ internal sealed class TestCallState {
 
 /** Pure mapping of the request_call result → the card's state (iOS
  *  bookTestCall): an `ok:` carries the time the row landed on. */
-internal fun testCallStateFrom(result: String): TestCallState {
+internal fun testCallStateFrom(result: String, clock: ClockMode): TestCallState {
     val m = Regex("^ok: call booked \\S+ (\\d{2}:\\d{2})").find(result)
     return if (m != null) TestCallState.Booked(m.groupValues[1])
-    else TestCallState.Failed(tech.csalliance.unstuck.ui.tasks.CallMeLogic.userMessage(result).let { if (it.endsWith(".")) it else "$it." })
+    else TestCallState.Failed(tech.csalliance.unstuck.ui.tasks.CallMeLogic.userMessage(result, clock).let { if (it.endsWith(".")) it else "$it." })
 }
 
-/** iOS "Booked — ringing at HH:MM. Lock your phone and wait." */
-internal fun testCallBookedLine(at: String) = "Booked — ringing at $at. Lock your phone and wait."
+/** iOS "Booked — ringing at HH:MM. Lock your phone and wait." — [at] is the
+ *  booked 'HH:MM', shown the phone's way ([clock]). */
+internal fun testCallBookedLine(at: String, clock: ClockMode) = "Booked — ringing at ${ClockFormat.time(at, clock)}. Lock your phone and wait."
 
-/** Allowed-hours sub-line: the user's hint + the server window. */
-internal fun callsHoursHint(): String {
+/** Allowed-hours sub-line: the user's hint + the server window, the phone's [clock]. */
+internal fun callsHoursHint(clock: ClockMode): String {
     val w = tech.csalliance.unstuck.core.logic.CallSettingsLogic.SERVER_WINDOW
-    return "$CALLS_HOURS_HINT_SUFFIX Calls can only be booked between ${w.start} and ${w.endInclusive}."
+    return "$CALLS_HOURS_HINT_SUFFIX Calls can only be booked between ${ClockFormat.time(w.start, clock)} and ${ClockFormat.time(w.endInclusive, clock)}."
 }
 
 /** API 34+: has the user (or Play's calling-app classification) allowed
@@ -354,6 +360,9 @@ private fun CallsContent(vm: AppViewModel) {
     val cs by vm.callSettings.collectAsStateWithLifecycle()
     val proactive by vm.callProactivePrefs.collectAsStateWithLifecycle()
     val nudgeDismissed by vm.ringNudgeDismissed.collectAsStateWithLifecycle()
+    // Every time on this screen — the hours, the proactive times, the pickers and
+    // the warnings — follows the phone's 12/24-hour setting.
+    val clock = tech.csalliance.unstuck.ui.components.clockMode()
     var testState by remember { mutableStateOf<TestCallState>(TestCallState.Idle) }
     // Ask for the microphone while they're looking at this screen: the first
     // prompt otherwise lands mid-ring, over the lock screen (parity with iOS
@@ -375,7 +384,7 @@ private fun CallsContent(vm: AppViewModel) {
     var testAfterMic by remember { mutableStateOf(false) }
     fun bookTest() {
         testState = TestCallState.Booking
-        scope.launch { testState = testCallStateFrom(vm.bookTestCall()) }
+        scope.launch { testState = testCallStateFrom(vm.bookTestCall(), clock) }
     }
     val micLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         micRefusedHere = !granted
@@ -407,7 +416,7 @@ private fun CallsContent(vm: AppViewModel) {
         val parts = current.split(":").mapNotNull { it.toIntOrNull() }
         val h0 = parts.getOrNull(0) ?: 8
         val m0 = parts.getOrNull(1) ?: 0
-        android.app.TimePickerDialog(context, { _, h, m -> commit(WireTime.hm(h, m)) }, h0, m0, true).show()
+        android.app.TimePickerDialog(context, { _, h, m -> commit(WireTime.hm(h, m)) }, h0, m0, clock == ClockMode.H24).show()
     }
 
     // Explainer (iOS `explainer` + `deviceStatus`)
@@ -485,10 +494,10 @@ private fun CallsContent(vm: AppViewModel) {
     // Allowed hours
     SectionLabel("Allowed hours", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
     SettingsCard {
-        SettingRow("From", cs.hoursStart) { pickHour(cs.hoursStart) { hm -> vm.updateCallSettings { it.copy(hoursStart = hm) } } }
-        SettingRow("Until", cs.hoursEnd, last = true) { pickHour(cs.hoursEnd) { hm -> vm.updateCallSettings { it.copy(hoursEnd = hm) } } }
+        SettingRow("From", ClockFormat.time(cs.hoursStart, clock)) { pickHour(cs.hoursStart) { hm -> vm.updateCallSettings { it.copy(hoursStart = hm) } } }
+        SettingRow("Until", ClockFormat.time(cs.hoursEnd, clock), last = true) { pickHour(cs.hoursEnd) { hm -> vm.updateCallSettings { it.copy(hoursEnd = hm) } } }
     }
-    Text(callsHoursHint(), style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
+    Text(callsHoursHint(clock), style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
 
     // Default lead
     SectionLabel("Default lead for task calls", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
@@ -516,28 +525,28 @@ private fun CallsContent(vm: AppViewModel) {
             vm.setCallProactivePrefs(proactive.copy(morningEnabled = v)); proactiveOn(v)
         }
         if (proactive.morningEnabled) {
-            SettingRow(CALLS_PROACTIVE_AT, proactive.morningTime, last = true) {
+            SettingRow(CALLS_PROACTIVE_AT, ClockFormat.time(proactive.morningTime, clock), last = true) {
                 pickHour(proactive.morningTime) { hm -> vm.setCallProactivePrefs(vm.callProactivePrefs.value.copy(morningTime = hm)) }
             }
-            CallSettingsLogic.proactiveTimeWarning(proactive.morningTime, cs.enabled, cs.hoursStart, cs.hoursEnd)?.let { ProactiveWarning(it) }
+            CallSettingsLogic.proactiveTimeWarning(proactive.morningTime, cs.enabled, cs.hoursStart, cs.hoursEnd, clock)?.let { ProactiveWarning(it) }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
         ToggleRow(CALLS_PROACTIVE_EVENING, proactive.eveningEnabled, sub = CALLS_PROACTIVE_EVENING_SUB, last = !proactive.eveningEnabled) { v ->
             vm.setCallProactivePrefs(proactive.copy(eveningEnabled = v)); proactiveOn(v)
         }
         if (proactive.eveningEnabled) {
-            SettingRow(CALLS_PROACTIVE_AT, proactive.eveningTime, last = true) {
+            SettingRow(CALLS_PROACTIVE_AT, ClockFormat.time(proactive.eveningTime, clock), last = true) {
                 pickHour(proactive.eveningTime) { hm -> vm.setCallProactivePrefs(vm.callProactivePrefs.value.copy(eveningTime = hm)) }
             }
-            CallSettingsLogic.proactiveTimeWarning(proactive.eveningTime, cs.enabled, cs.hoursStart, cs.hoursEnd)?.let { ProactiveWarning(it) }
+            CallSettingsLogic.proactiveTimeWarning(proactive.eveningTime, cs.enabled, cs.hoursStart, cs.hoursEnd, clock)?.let { ProactiveWarning(it) }
         }
         Box(Modifier.fillMaxWidth().height(1.dp).background(c.line))
         ToggleRow(CALLS_PROACTIVE_AFTER_BLOCK, proactive.afterBlockEnabled, sub = CALLS_PROACTIVE_AFTER_BLOCK_SUB, last = true) { v ->
             vm.setCallProactivePrefs(proactive.copy(afterBlockEnabled = v)); proactiveOn(v)
         }
-        if (proactive.afterBlockEnabled) CallSettingsLogic.afterBlockWarning(cs.enabled, cs.hoursStart, cs.hoursEnd)?.let { ProactiveWarning(it) }
+        if (proactive.afterBlockEnabled) CallSettingsLogic.afterBlockWarning(cs.enabled, cs.hoursStart, cs.hoursEnd, clock)?.let { ProactiveWarning(it) }
     }
-    Text(CALLS_PROACTIVE_HINT, style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
+    Text(callsProactiveHint(clock), style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 10.dp))
 
     // Try it
     SectionLabel("Try it", color = c.primaryDeep, modifier = Modifier.padding(top = 22.dp, bottom = 8.dp))
@@ -560,7 +569,7 @@ private fun CallsContent(vm: AppViewModel) {
             } else bookTest()
         }
         when (val t = testState) {
-            is TestCallState.Booked -> Text(testCallBookedLine(t.at), style = UFont.sans(12), color = c.green)
+            is TestCallState.Booked -> Text(testCallBookedLine(t.at, clock), style = UFont.sans(12), color = c.green)
             is TestCallState.Failed -> Text(t.why, style = UFont.sans(12), color = c.red)
             else -> {}
         }

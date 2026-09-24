@@ -1,6 +1,9 @@
 package tech.csalliance.unstuck.core.logic
 
 import tech.csalliance.unstuck.core.model.ProfileFactCategory
+import tech.csalliance.unstuck.core.time.ClockFormat
+import tech.csalliance.unstuck.core.time.ClockMode
+import java.util.Locale
 
 // The get-to-know-you interview — the assistant's FIRST contact (Android port
 // of components/assistant/interview.tsx via iOS App/Features/Interview.swift).
@@ -18,8 +21,23 @@ import tech.csalliance.unstuck.core.model.ProfileFactCategory
 // persisting the step, marking done) live in the app's InterviewFlow, which
 // drives these rules against a host interface so they stay unit-testable.
 
-/** One tap-answer for a question. `fact == null` saves nothing ("It varies"). */
-data class InterviewChip(val label: String, val fact: String?)
+/** One tap-answer for a question. `fact == null` saves nothing ("It varies").
+ *  [clockHour]: the chip names a clock hour ("Before 9am") — shown the phone's
+ *  way through [displayLabel]; [label] and [fact] stay the web's verbatim copy. */
+data class InterviewChip(val label: String, val fact: String?, val clockHour: ChipClockHour? = null)
+
+/** The clock hour inside a chip's label: [prefix] + the hour ("Before" + 9). */
+data class ChipClockHour(val prefix: String, val hour: Int)
+
+/** The chip as the user sees it: an hour follows the phone's 12/24-hour setting
+ *  ([ClockFormat.compactHour]) — "Before 09:00" on a 24-hour phone, "Before 9am"
+ *  on a 12-hour one, which is the web's copy (Ahmad, 2026-09-24: one clock
+ *  app-wide). The SAVED fact keeps the web's words either way, so a fact reads
+ *  the same whichever device wrote it. */
+fun InterviewChip.displayLabel(clock: ClockMode, locale: Locale = Locale.getDefault()): String {
+    val t = clockHour ?: return label
+    return "${t.prefix} ${ClockFormat.compactHour(t.hour, clock, locale)}"
+}
 
 data class InterviewQuestion(
     val key: String,
@@ -87,8 +105,8 @@ val INTERVIEW_QUESTIONS: List<InterviewQuestion> = listOf(
         key = "nogo", category = ProfileFactCategory.CONSTRAINT,
         question = "When should I never schedule anything?",
         chips = listOf(
-            InterviewChip("Before 9am", "Never schedule anything before 9am"),
-            InterviewChip("After 9pm", "Never schedule anything after 9pm"),
+            InterviewChip("Before 9am", "Never schedule anything before 9am", ChipClockHour("Before", 9)),
+            InterviewChip("After 9pm", "Never schedule anything after 9pm", ChipClockHour("After", 21)),
             InterviewChip("Weekends", "Keep weekends free — never schedule work there"),
             InterviewChip("No hard limits", null),
         ),

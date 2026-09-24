@@ -2,6 +2,8 @@ package tech.csalliance.unstuck.core.logic
 
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.SharedBlock
+import tech.csalliance.unstuck.core.time.ClockFormat
+import tech.csalliance.unstuck.core.time.ClockMode
 import java.time.LocalDate
 import java.time.format.TextStyle
 import java.util.Locale
@@ -77,9 +79,10 @@ fun dayPeek(iso: String, own: List<CalBlock>, shared: List<SharedBlock>): DayPee
     )
 }
 
-/** "09:00 · 45m" / "09:00 · 1h" / "09:00 · 1h 30m" — a peek row's meta line. */
-fun blockSlotText(startTime: String, minutes: Int): String =
-    "$startTime · ${fmtDuration(minutes) ?: "${minutes}m"}"
+/** "09:00 · 45m" / "9:00 AM · 1h" / "14:00 · 1h 30m" — a peek row's meta
+ *  line, the start in the phone's [clock] mode. */
+fun blockSlotText(startTime: String, minutes: Int, clock: ClockMode, locale: Locale = Locale.getDefault()): String =
+    "${ClockFormat.time(startTime, clock, locale)} · ${fmtDuration(minutes) ?: "${minutes}m"}"
 
 /** "Tue, Sep 8" — the peek sheet's title. Unparseable input is returned as-is. */
 fun peekDayTitle(iso: String): String {

@@ -2,6 +2,7 @@ package tech.csalliance.unstuck.core.logic
 
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.jsonObject
+import tech.csalliance.unstuck.core.time.ClockMode
 import java.util.concurrent.CancellationException
 
 // The agentic turn loop — the harness contract from
@@ -153,13 +154,13 @@ object AssistantHarnessRules {
 
     /** Receipts the app will derive from these results (store-less: names come
      *  from the result strings; a Later/recurrence receipt just lacks its task name). */
-    fun receiptsOf(results: List<Pair<HarnessToolCall, String>>): List<Receipt> =
-        results.mapNotNull { (call, result) -> deriveReceipt(call.name, receiptArgsFromJson(call.argumentsJson), result, emptyList()) }
+    fun receiptsOf(results: List<Pair<HarnessToolCall, String>>, clock: ClockMode = ClockMode.H24): List<Receipt> =
+        results.mapNotNull { (call, result) -> deriveReceipt(call.name, receiptArgsFromJson(call.argumentsJson), result, emptyList(), clock = clock) }
 
     /** The honest closing line for a turn the model didn't close itself. Never
      *  "Done.": every line is earned by [results] or says nothing changed. */
-    fun honestFallback(kind: HarnessFallback, results: List<Pair<HarnessToolCall, String>>): String {
-        val receipts = receiptsOf(results)
+    fun honestFallback(kind: HarnessFallback, results: List<Pair<HarnessToolCall, String>>, clock: ClockMode = ClockMode.H24): String {
+        val receipts = receiptsOf(results, clock)
         val nav = navigatedTo(results)
         return when (kind) {
             HarnessFallback.LOST_THREAD -> if (nav != null) "Opened $nav." else LOST_THREAD
@@ -246,6 +247,9 @@ class AssistantHarness(
      *  task, list, area or tag its arguments point at), or null when unknown /
      *  when there is only one (cancel_focus) — see [ConfirmFirstRules]. */
     private val confirmTarget: suspend (HarnessToolCall) -> String? = { null },
+    /** The phone's 12/24-hour preference — the times in a closing line the
+     *  harness writes itself (a receipt's label, [AssistantHarnessRules.honestFallback]). */
+    private val clock: ClockMode = ClockMode.H24,
     /** Observed after every executed call (the app derives + shows receipts live). */
     private val onToolResult: (HarnessToolCall, String) -> Unit = { _, _ -> },
 ) {
@@ -309,11 +313,11 @@ class AssistantHarness(
                 // Deterministic register polish on the model's FINAL text only —
                 // AFTER the fabrication guard saw the raw claim, never on the
                 // hidden bounce, never on voice (naturalness, 2026-09-06).
-                if (closing.isNotEmpty()) closing = polishReply(closing)
+                if (closing.isNotEmpty()) closing = polishReply(closing, PolishOptions(clock = clock))
                 var fallback: HarnessFallback? = null
                 if (closing.isEmpty()) {
                     fallback = if (writeSucceeded) HarnessFallback.PARTWAY else HarnessFallback.LOST_THREAD
-                    closing = AssistantHarnessRules.honestFallback(fallback, results)
+                    closing = AssistantHarnessRules.honestFallback(fallback, results, clock)
                 }
                 working[replyIndex] = working[replyIndex].copy(content = closing)
                 return HarnessTurn(closing, working.toList(), results.toList(), fallback, corrected)
@@ -357,7 +361,7 @@ class AssistantHarness(
         }
 
         // Ran out of rounds — close out HONESTLY (the plan may be half-executed).
-        val closing = AssistantHarnessRules.honestFallback(HarnessFallback.RAN_OUT, results)
+        val closing = AssistantHarnessRules.honestFallback(HarnessFallback.RAN_OUT, results, clock)
         working += HarnessMessage("assistant", closing)
         return HarnessTurn(closing, working.toList(), results.toList(), HarnessFallback.RAN_OUT, corrected)
     }

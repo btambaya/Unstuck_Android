@@ -37,6 +37,8 @@ fun AppRoot(graph: AppGraph) {
     val dark = settings.theme == ThemePref.DARK || (settings.theme == ThemePref.SYSTEM && systemDark)
 
     UnstuckTheme(dark = dark, accent = settings.accent, fontScale = settings.fontScale) {
+        // Every clock time on screen follows the phone's 12/24-hour setting.
+        tech.csalliance.unstuck.ui.components.ProvideDeviceClock {
         when {
             !vm.configured -> SetupScreen()
             else -> {
@@ -50,6 +52,7 @@ fun AppRoot(graph: AppGraph) {
                     true -> if (recovery) tech.csalliance.unstuck.ui.auth.SetNewPasswordScreen(vm) else MainScaffold(vm)
                 }
             }
+        }
         }
     }
 }

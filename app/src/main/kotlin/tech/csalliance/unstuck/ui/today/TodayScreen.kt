@@ -257,7 +257,7 @@ fun TodayScreen(
             }
         }
         Column(Modifier.padding(horizontal = 18.dp)) {
-            SectionLabel(dateEyebrow(now), color = c.primaryDeep)
+            SectionLabel(dateEyebrow(now, tech.csalliance.unstuck.ui.components.clockMode()), color = c.primaryDeep)
             // Greet by first name on ONE line ("Good evening Maya.") — display name
             // from the same source Settings → Account reads (reactive, so it fills
             // in once auth hydrates); "Unstuck." when unset (iOS GreetingName.line).

@@ -4,6 +4,31 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
+## 2026-09-24 (branch `sharerow/android`, NOT shipped) — New task "Share with…": one behaviour on iOS, Android and web
+
+- **The row** (`ui/sharing/ShareWithRow.kt`, under the sheet's SHARE label): "Share with…", up to three overlapping
+  monograms (22dp `ink` discs with a `bg` letter, 4dp overlap, a 1.5dp ring in the card's `bg2` so no letter is cut; they
+  drop out when they and the summary don't both fit), the summary, a chevron. TalkBack: "Share with, <summary>, Button".
+- **The summary** (core `ShareWithSummary.kt`, one rule on all three, 28-character budget): 0 "Only you" · 1 "James · can
+  edit|can view|handed over" · 2 same "James, Anna · can edit" · 2 mixed "James · edit, Anna · view" · 3+ "James + 2 more",
+  plus " · can edit|can view|handed over" only when everyone has the same grade. Names are cut with "…" BEFORE the grade,
+  never the grade: names that must be cut share ONE common length (the largest that fits — not a half split), a short name
+  stays whole, a cut name keeps ≥ 1 letter + "…". Order (`shareSummaryOrder`, also the monograms): connections first, then
+  held addresses (the part before the @), each in pick order; submit keeps pick order. iOS's `shareDraftSummary` is the
+  canonical rule; `ShareWithSummaryTest.sharedCases` is the SAME 26-case table as iOS `ShareDraftTests.sharedCases` / web.
+- **Pre-create lines (same strings on all three):** pick / grade change "Maya can edit|view once you add the task." · hand
+  over "Maya gets it as their task once you add it — you keep view." · add an address "maya@example.com gets it once you
+  add the task." (the whole address) · remove "Maya won't get this task." (an address: "maya won't get this task.").
+- **Pre-create Share screen:** "Someone new" HOLDS the address ("Add"; listed "Gets it when you add the task · <grade>",
+  ✕ takes it off) and "Add task" runs `share-task add` for THIS task after the row lands (`AppViewModel.addTask(shareEmails=)`
+  → `applyCreatedShares`); a cancelled sheet sends nothing. The link is its own "Invite with a link" row (connect-only
+  `circle-invite`, copied + the share sheet). A picked person's menu: Can edit / Can view / Hand over / Remove (no
+  one-hand-over limit — none exists in the app or the server). "Manage people" is left out before the task exists (it would
+  leave the unsaved task behind). The sheet holds `NewTaskShares` (people + addresses, pick order; saved across rotation).
+- **Merged with main's slim Settings:** the sheet remembers the last estimate and has "+ New area"; the Share screen's
+  "Manage people" link lives in `ShareScreenBody(onManagePeople=)`.
+- **Screens:** `ShareRowRenderTest` (opt-in, `UNSTUCK_RENDER_DIR`).
+
 ## 2026-09-24 (branch `settings/android`, NOT shipped) — slim Settings + the AI data-sharing OK
 
 - **Settings (PLAN.md, Ahmad-approved):** hub = Account card · Notifications & calls · Assistant & privacy · People ·

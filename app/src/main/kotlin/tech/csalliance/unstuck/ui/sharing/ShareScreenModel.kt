@@ -11,15 +11,20 @@ import tech.csalliance.unstuck.core.logic.ShareItemKind
 import tech.csalliance.unstuck.core.logic.SharePendingRow
 import tech.csalliance.unstuck.core.logic.SharePersonRow
 import tech.csalliance.unstuck.core.logic.ShareResult
+import tech.csalliance.unstuck.core.logic.NewTaskShares
+import tech.csalliance.unstuck.core.logic.circleInviteErrorMessage
 import tech.csalliance.unstuck.core.logic.composeSharePeople
 import tech.csalliance.unstuck.core.logic.isEmailLike
 import tech.csalliance.unstuck.core.logic.normalizedShareEmail
+import tech.csalliance.unstuck.core.logic.sharePreCreateEmailLine
+import tech.csalliance.unstuck.core.logic.sharePreCreateLine
 import tech.csalliance.unstuck.core.logic.shareResultLine
 import tech.csalliance.unstuck.core.model.CircleMember
 import tech.csalliance.unstuck.core.model.ShareForTask
 import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.sync.CollectionMemberInfo
 import tech.csalliance.unstuck.sync.CollectionShareClient
+import tech.csalliance.unstuck.sync.InviteResult
 import tech.csalliance.unstuck.sync.ShareLinkOutcome
 import tech.csalliance.unstuck.sync.ShareOutcome
 import tech.csalliance.unstuck.sync.TaskShareOutcome
@@ -51,6 +56,19 @@ sealed class ShareTarget {
 
     data class Collection(override val itemId: String, override val name: String) : ShareTarget() {
         override val kind get() = ShareItemKind.COLLECTION
+    }
+
+    /** A task that doesn't exist yet — the New task sheet's "Share with…" row
+     *  opens the Share screen in its PRE-CREATE mode. Nothing is sent from the
+     *  screen: picks (connections by user id, typed addresses) are held by the
+     *  model and handed back to the sheet as [NewTaskShares], whose submit
+     *  applies them after the task row lands (AppViewModel.addTask →
+     *  applyCreatedShares). There is no item yet, so [itemId] is empty, Share a
+     *  link / Report / Block are hidden, and the link on offer is the
+     *  connect-only "Invite with a link". */
+    data class NewTask(override val name: String) : ShareTarget() {
+        override val itemId get() = ""
+        override val kind get() = ShareItemKind.TASK
     }
 }
 
@@ -92,6 +110,10 @@ interface ShareScreenTransport {
     /** `block_user(p_user)` (migration 075) — true only when the server blocked
      *  them. Android had no Block at all before (audit 2026-09-22 C10). */
     suspend fun block(userId: String): Boolean
+    /** `circle-invite` — the PRE-CREATE screen's "Invite with a link" (called
+     *  with null: a connect-only join link I send myself; nothing about the
+     *  task rides on it). */
+    suspend fun inviteToCircle(email: String?): InviteResult = InviteResult(error = "not_configured")
 }
 
 /** The live seam — the AppViewModel's coordinator clients. An unconfigured
@@ -114,6 +136,7 @@ class LiveShareTransport(private val vm: AppViewModel) : ShareScreenTransport {
     override suspend fun cancelCollectionInvite(collectionId: String, email: String): Boolean = vm.cancelCollectionInvite(collectionId, email)
     override suspend fun collectionLink(collectionId: String, role: String): ShareLinkOutcome = vm.collectionShareLink(collectionId, role)
     override suspend fun block(userId: String): Boolean = vm.blockUser(userId)
+    override suspend fun inviteToCircle(email: String?): InviteResult = vm.inviteToCircle(email)
 }
 
 /** Everything the screen renders. */
@@ -138,7 +161,14 @@ data class ShareScreenState(
      *  its trailing word IN PLACE and only floats to the top the next time the
      *  sheet is opened. In hand-over mode only a hand-over pins. */
     val pinnedIds: Set<String> = emptySet(),
-)
+    /** PRE-CREATE only: who the new task will be shared with — connections and
+     *  held addresses, applied by the New task sheet's submit. Always empty
+     *  otherwise. [pending] lists the held addresses. */
+    val shares: NewTaskShares = NewTaskShares(),
+) {
+    /** PRE-CREATE: the connections picked (userId → level), pick order. */
+    val picks: Map<String, ShareLevel> get() = shares.people
+}
 
 /** An action's refusal, carried through `perform`. */
 class ShareActionException(val failure: ShareFailure) : Exception(failure.message)
@@ -147,10 +177,21 @@ class ShareScreenModel(
     val target: ShareTarget,
     val mode: ShareMode = ShareMode.SHARE,
     private val transport: ShareScreenTransport,
+    /** PRE-CREATE only: what the New task sheet already holds. */
+    initialShares: NewTaskShares = NewTaskShares(),
 ) {
-    private val _state = MutableStateFlow(ShareScreenState())
+    private val _state = MutableStateFlow(
+        if (target is ShareTarget.NewTask) ShareScreenState(shares = initialShares, pending = heldEmailRows(initialShares))
+        else ShareScreenState(),
+    )
     val state: StateFlow<ShareScreenState> = _state.asStateFlow()
     private var pinned = false
+
+    /** The New task sheet's picker: everything stays on the device until "Add task". */
+    val preCreate: Boolean get() = target is ShareTarget.NewTask
+
+    /** PRE-CREATE: the last roster read, to re-compose the rows after a pick. */
+    private var roster: List<CircleMember> = emptyList()
 
     fun setAccess(access: ShareAccess) = _state.update { it.copy(access = access) }
     fun setEmail(email: String) = _state.update { it.copy(email = email) }
@@ -158,9 +199,11 @@ class ShareScreenModel(
     /** Re-read the roster + the item's grants and compose the sections. */
     suspend fun load() {
         val circle = transport.listCircle()
+        if (target is ShareTarget.NewTask) { loadPreCreate(circle); return }
         val people: List<SharePersonRow>
         val pending: List<SharePendingRow>
         when (target) {
+            is ShareTarget.NewTask -> return
             is ShareTarget.Task -> {
                 val shares = transport.taskShares(target.itemId)
                 val invites = transport.taskPendingInvites(target.itemId)
@@ -225,6 +268,7 @@ class ShareScreenModel(
 
     private suspend fun grant(row: SharePersonRow, access: ShareAccess, isNew: Boolean) {
         when (target) {
+            is ShareTarget.NewTask -> setPick(row, access.taskLevel)
             is ShareTarget.Task -> perform(row.id) {
                 // A NEW share pings the recipient; a level change is quiet.
                 transport.shareTask(target.itemId, row.userId, access.taskLevel, notify = isNew)
@@ -248,6 +292,7 @@ class ShareScreenModel(
 
     private suspend fun remove(row: SharePersonRow) {
         when (target) {
+            is ShareTarget.NewTask -> setPick(row, null)
             is ShareTarget.Task -> {
                 val shareId = row.shareId ?: return
                 perform(row.id) {
@@ -269,7 +314,7 @@ class ShareScreenModel(
      *  says the BLOCK didn't land, not that a share failed (parity with iOS build
      *  79, audit 2026-09-22 C10). */
     suspend fun block(row: SharePersonRow) {
-        if (_state.value.busyId != null) return
+        if (preCreate || _state.value.busyId != null) return
         perform(row.id) {
             if (!transport.block(row.userId)) throw ShareActionException(ShareFailure.BlockFailed(row.name))
             ShareResult.Blocked(row.name)
@@ -279,14 +324,17 @@ class ShareScreenModel(
     // ── someone new ─────────────────────────────────────────────────────────
 
     /** Share with the typed email. Local guards first (shape), then the
-     *  server's honest answer. */
+     *  server's honest answer. PRE-CREATE: the address is HELD for "Add task"
+     *  ([holdEmail]) — nothing is sent now. */
     suspend fun shareWithEmail() {
+        if (target is ShareTarget.NewTask) { holdEmail(); return }
         val s = _state.value
         if (s.busyId != null) return
         val addr = normalizedShareEmail(s.email)
         _state.update { it.copy(error = null) }
         if (!isEmailLike(addr)) { _state.update { it.copy(error = ShareFailure.InvalidEmail.message) }; return }
         when (target) {
+            is ShareTarget.NewTask -> return
             is ShareTarget.Task -> perform(EMAIL_BUSY_ID) {
                 when (val r = transport.shareTaskByEmail(target.itemId, addr, s.access.taskLevel)) {
                     is TaskShareOutcome.Shared -> ShareResult.Shared(r.displayName.ifEmpty { addr }, s.access)
@@ -309,10 +357,14 @@ class ShareScreenModel(
         if (_state.value.error == null) _state.update { it.copy(email = "") }
     }
 
-    /** Cancel a pending email invite. */
+    /** Cancel a pending email invite (PRE-CREATE: take a held address off). */
     suspend fun cancelPending(row: SharePendingRow) {
         if (_state.value.busyId != null) return
         when (target) {
+            is ShareTarget.NewTask -> _state.update { s ->
+                val next = s.shares.withEmail(row.email, null)
+                s.copy(shares = next, pending = heldEmailRows(next), error = null, result = sharePreCreateEmailLine(row.email, null))
+            }
             is ShareTarget.Task -> perform(row.id) {
                 if (!transport.cancelTaskInvite(target.itemId, row.id)) throw ShareActionException(ShareFailure.Network)
                 ShareResult.InviteCancelled(row.email)
@@ -329,11 +381,14 @@ class ShareScreenModel(
     /** Mint a one-shot join link at `access`. Returns it (the view copies it +
      *  hands it to the system share sheet) and sets the "Link copied" line. */
     suspend fun makeLink(): String? {
+        // No task yet → no link (the pre-create screen hides the section).
+        if (target is ShareTarget.NewTask) return null
         val s = _state.value
         if (s.busyId != null) return null
         _state.update { it.copy(busyId = LINK_BUSY_ID, error = null) }
         val outcome = try {
             when (target) {
+                is ShareTarget.NewTask -> return null
                 is ShareTarget.Task -> transport.taskLink(target.itemId, s.access.taskLevel)
                 is ShareTarget.Collection -> transport.collectionLink(target.itemId, s.access.collectionRole)
             }
@@ -350,6 +405,85 @@ class ShareScreenModel(
                 null
             }
         }
+    }
+
+    // ── pre-create: the New task sheet's picker ─────────────────────────────
+
+    /** PRE-CREATE load: the roster annotated with the LOCAL picks. A pick of
+     *  someone the roster no longer lists stays visible (and removable) rather
+     *  than riding along unseen on submit. Pins follow the same rule as a real
+     *  item: whoever was picked when the screen opened sits first. */
+    private fun loadPreCreate(circle: List<CircleMember>) {
+        roster = circle
+        _state.update { s ->
+            val people = preCreatePeople(circle, s.picks)
+            val pins = if (!pinned && people.isNotEmpty()) {
+                pinned = true
+                people.filter { it.isShared }.map { it.id }.toSet()
+            } else s.pinnedIds
+            s.copy(people = people, pending = heldEmailRows(s.shares), loading = false, pinnedIds = pins)
+        }
+    }
+
+    /** PRE-CREATE: pick [row] at [level] (null = un-pick). Local only — the
+     *  New task sheet's submit applies the picks once the task exists. */
+    private fun setPick(row: SharePersonRow, level: ShareLevel?) {
+        _state.update { s ->
+            val next = s.shares.withPerson(row.userId, level)
+            s.copy(shares = next, people = preCreatePeople(roster, next.people), error = null, result = sharePreCreateLine(row.name, level))
+        }
+    }
+
+    /** PRE-CREATE: hand the new task over to [row] (level `assign`) — the old
+     *  inline section's "Assign", kept on the picked person's menu. (A real
+     *  task's hand-over is its own mode, [ShareMode.HAND_OVER].) */
+    fun handOver(row: SharePersonRow) {
+        if (!preCreate || _state.value.busyId != null) return
+        setPick(row, ShareLevel.ASSIGN)
+    }
+
+    /** PRE-CREATE "Someone new": hold the typed address at the chosen grade
+     *  until "Add task", which shares THIS task with it (`share-task add` — an
+     *  existing account gets it at once, anyone else an invite that is theirs
+     *  when they sign up). Nothing is sent now, and nothing at all if the task
+     *  is cancelled. Adding the same address again changes its grade. */
+    private fun holdEmail() {
+        val s = _state.value
+        if (s.busyId != null) return
+        val addr = normalizedShareEmail(s.email)
+        if (addr.isEmpty()) return
+        if (!isEmailLike(addr)) {
+            _state.update { it.copy(error = ShareFailure.InvalidEmail.message, result = null) }
+            return
+        }
+        val level = s.access.taskLevel
+        _state.update {
+            val next = it.shares.withEmail(addr, level)
+            it.copy(shares = next, pending = heldEmailRows(next), email = "", error = null, result = sharePreCreateEmailLine(addr, level))
+        }
+    }
+
+    /** PRE-CREATE "Invite with a link": a connect-only join link (`circle-invite`
+     *  with no address). Whoever opens it becomes one of my people and shows up
+     *  here to pick; nothing about the task rides on it. Returns the link (the
+     *  view copies it + hands it to the system share sheet). */
+    suspend fun makeInviteLink(): String? {
+        if (!preCreate || _state.value.busyId != null) return null
+        _state.update { it.copy(busyId = LINK_BUSY_ID, error = null, result = null) }
+        val r = try {
+            transport.inviteToCircle(null)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            _state.update { it.copy(busyId = null) }
+            throw e
+        } catch (e: Exception) {
+            null
+        }
+        val link = r?.link?.takeIf { r.error == null && it.isNotBlank() }
+        _state.update {
+            if (link != null) it.copy(busyId = null, lastLink = link, result = INVITE_LINK_COPIED)
+            else it.copy(busyId = null, error = circleInviteErrorMessage(r?.error) ?: "Couldn't make a link — try again.")
+        }
+        return link
     }
 
     // ── plumbing ────────────────────────────────────────────────────────────
@@ -377,5 +511,18 @@ class ShareScreenModel(
     companion object {
         const val EMAIL_BUSY_ID = "email"
         const val LINK_BUSY_ID = "link"
+        const val INVITE_LINK_COPIED = "Invite link copied — whoever opens it is connected to you, then you can pick them here."
     }
 }
+
+/** The PRE-CREATE People rows: the roster annotated with the local picks
+ *  (`assign` reads as handed over), through the same composition a real task's
+ *  grants go through. */
+internal fun preCreatePeople(circle: List<CircleMember>, picks: Map<String, ShareLevel>): List<SharePersonRow> =
+    composeSharePeople(circle, picks.map { (uid, level) ->
+        ShareExistingGrant(userId = uid, access = ShareAccess.fromTaskLevel(level), handedOver = level == ShareLevel.ASSIGN)
+    })
+
+/** The PRE-CREATE held addresses, as the screen's pending rows (id "email:<address>"). */
+internal fun heldEmailRows(shares: NewTaskShares): List<SharePendingRow> =
+    shares.emails.map { (email, level) -> SharePendingRow("email:$email", email, ShareAccess.fromTaskLevel(level) ?: ShareAccess.EDIT) }

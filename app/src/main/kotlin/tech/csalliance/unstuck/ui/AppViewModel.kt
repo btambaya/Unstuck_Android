@@ -524,6 +524,11 @@ class AppViewModel(
         // so task_share (which validates ownership server-side) can't race the insert
         // and drop the share (T2). Empty for callers that don't share (e.g. onboarding).
         shares: Map<String, ShareLevel> = emptyMap(),
+        // Addresses typed into the create sheet's "Someone new" (address → level),
+        // held until now: each is `share-task add` for THIS task after the row lands
+        // — an existing account gets it at once, anyone else an invite that is
+        // theirs when they sign up.
+        shareEmails: Map<String, ShareLevel> = emptyMap(),
     ): TaskItem {
         val t = newTaskRow(
             name = name, estimateMin = estimateMin, priority = priority, lifeArea = lifeArea, tags = tags,
@@ -533,7 +538,7 @@ class AppViewModel(
         )
         launchWrite {
             write?.upsertTask(t)                                   // local write + enqueue (this coroutine)
-            if (shares.isNotEmpty()) applyCreatedShares(t.id, shares)   // then flush + share, ordered
+            if (shares.isNotEmpty() || shareEmails.isNotEmpty()) applyCreatedShares(t.id, shares, shareEmails)   // then flush + share, ordered
         }
         return t
     }
@@ -571,13 +576,13 @@ class AppViewModel(
      *  outbox so the insert commits, verify it's no longer pending, THEN share each —
      *  logging failures instead of swallowing them. Mirrors the web create-modal
      *  (awaitPendingUpsert → pendingIdsForTable guard → task_share). */
-    private suspend fun applyCreatedShares(taskId: String, picks: Map<String, ShareLevel>) {
+    private suspend fun applyCreatedShares(taskId: String, picks: Map<String, ShareLevel>, emails: Map<String, ShareLevel> = emptyMap()) {
         flushOutbox()
         // If the upsert failed (offline / 5xx), its op is still queued and the row never
         // committed server-side — firing task_share now just raises not_your_task. Bail;
         // the row lands on the next outbox replay and the user can re-share then.
         if (store.pending().any { it.recordTable == "tasks" && it.recordId == taskId && it.op == "upsert" }) {
-            println("[share] task $taskId not committed yet (queued for retry) — skipping ${picks.size} share(s)")
+            println("[share] task $taskId not committed yet (queued for retry) — skipping ${picks.size + emails.size} share(s)")
             return
         }
         picks.forEach { (userId, level) ->
@@ -585,6 +590,13 @@ class AppViewModel(
                 circleClient?.taskShare(taskId, userId, level)
                 circleClient?.notifyTaskShare(taskId, userId)
             }.onFailure { println("[share] task_share failed for $userId (${level.wire}) on $taskId: ${it.message}") }
+        }
+        // Held addresses: `share-task add` (the server shares with an existing
+        // account at once and pushes them; anyone else is emailed an invite).
+        emails.forEach { (email, level) ->
+            val r = runCatching { taskShareClient?.add(taskId, email, level) }
+                .getOrElse { tech.csalliance.unstuck.sync.TaskShareOutcome.Failed(it.message ?: "network") }
+            if (r is tech.csalliance.unstuck.sync.TaskShareOutcome.Failed) println("[share] share-task add failed (${r.reason}, ${level.wire}) on $taskId")
         }
         refreshShares()
     }

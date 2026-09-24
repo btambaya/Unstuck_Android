@@ -11,15 +11,10 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Add
-import androidx.compose.material3.Icon
 import androidx.compose.material3.DatePicker
 import androidx.compose.material3.DatePickerDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -38,7 +33,6 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -50,26 +44,19 @@ import androidx.compose.ui.Modifier
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalFocusManager
-import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.SpanStyle
-import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.core.logic.clampEstimateMin
-import tech.csalliance.unstuck.core.logic.circleInviteErrorMessage
 import tech.csalliance.unstuck.core.logic.findConflicts
 import tech.csalliance.unstuck.core.logic.findFreeSlotsForDate
 import tech.csalliance.unstuck.core.logic.newTaskNeedsTime
-import tech.csalliance.unstuck.core.model.CircleStatus
+import tech.csalliance.unstuck.core.logic.sharePicksInRosterOrder
+import tech.csalliance.unstuck.core.logic.shareWithSummary
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.ShareLevel
 import tech.csalliance.unstuck.core.time.Clock
@@ -83,8 +70,10 @@ import tech.csalliance.unstuck.design.component.SheetHandle
 import tech.csalliance.unstuck.design.component.SheetScrim
 import tech.csalliance.unstuck.design.component.UButton
 import tech.csalliance.unstuck.design.theme.UTheme
-import tech.csalliance.unstuck.sync.InviteResult
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.ui.sharing.ShareScreen
+import tech.csalliance.unstuck.ui.sharing.ShareTarget
+import tech.csalliance.unstuck.ui.sharing.ShareWithRow
 
 // Savers so the draft survives a config change (rotation / dark-mode flip / locale /
 // split-screen): Activity recreation must not silently discard a half-typed task.
@@ -123,7 +112,7 @@ private val TagsSaver = listSaver<SnapshotStateList<String>, String>(
     restore = { it.toMutableStateList() },
 )
 
-/** Pending "Share or assign" picks save as "userId|LEVEL" strings (Off = absent —
+/** Pending "Share with…" picks save as "userId|LEVEL" strings (not picked = absent —
  *  nothing is shared until "Add task", so there's no unshare to remember). */
 private val ShareLevelsSaver = listSaver<SnapshotStateMap<String, ShareLevel>, String>(
     save = { m -> m.map { (id, level) -> "$id|${level.name}" } },
@@ -151,8 +140,6 @@ private fun tomorrowIso(now: Long): String = Clock.dateIso(Time.addDaysMillis(Ti
 fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: String? = null, onDismiss: () -> Unit) {
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
     val c = UTheme.colors
-    val scope = rememberCoroutineScope()
-    val clipboard = LocalClipboardManager.current
     val areas by vm.lifeAreas.collectAsStateWithLifecycle()
     val blocks by vm.blocks.collectAsStateWithLifecycle()
     val settings by vm.settings.collectAsStateWithLifecycle()
@@ -181,39 +168,8 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
     var moreOpen by rememberSaveable { mutableStateOf(false) }
     val tags = rememberSaveable(saver = TagsSaver) { mutableStateListOf<String>() }
     val shareLevels = rememberSaveable(saver = ShareLevelsSaver) { mutableStateMapOf<String, ShareLevel>() }
-
-    // Inline circle invite (ported from ShareTaskSheet) — plain remember: an
-    // InviteResult can't round-trip a Bundle, and a half-typed invite is fine to drop.
-    var inviting by remember { mutableStateOf(false) }
-    var inviteEmail by remember { mutableStateOf("") }
-    var inviteBusy by remember { mutableStateOf(false) }
-    var inviteResult by remember { mutableStateOf<InviteResult?>(null) }
-    var inviteErr by remember { mutableStateOf<String?>(null) }
-    var copied by remember { mutableStateOf(false) }
-
-    // Only active connections with a resolved user id can receive a per-task share.
-    val active = members.filter { it.status == CircleStatus.ACTIVE && it.memberUserId != null }
-
-    fun copyLink(text: String) {
-        clipboard.setText(AnnotatedString(text)); copied = true
-        scope.launch { delay(1800); copied = false }
-    }
-
-    fun generateInvite() {
-        if (inviteBusy) return
-        inviteBusy = true; inviteErr = null
-        scope.launch {
-            val r = runCatching { vm.inviteToCircle(inviteEmail) }.getOrNull()
-            inviteBusy = false
-            if (r == null || r.error != null) {
-                // A 403 `blocked` / 429 now reaches here with its code (audit 2026-09-22 SC-3).
-                inviteErr = circleInviteErrorMessage(r?.error) ?: "Could not create invite."
-            } else {
-                inviteResult = r; inviteEmail = ""
-                r.link?.let { copyLink(it) }
-            }
-        }
-    }
+    // The Share screen in its pre-create mode, over this sheet (the "Share with…" row).
+    var showShare by rememberSaveable { mutableStateOf(false) }
 
     val effectiveDate: String? = when (whenSel) {
         "Later" -> null
@@ -374,74 +330,11 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                 }
 
                 if (moreOpen) {
-                    SectionLabel("Share or assign")
-                    active.forEach { m ->
-                        val userId = m.memberUserId!!
-                        SharePickRow(
-                            name = m.memberName ?: "Member",
-                            relationship = m.relationshipLabel,
-                            cur = shareLevels[userId],
-                        ) { level -> if (level == null) shareLevels.remove(userId) else shareLevels[userId] = level }
-                    }
-
-                    // Invite a new person inline (no separate Connections page).
-                    if (inviting) {
-                        Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.bg2).padding(14.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                            val r = inviteResult
-                            if (r != null) {
-                                when {
-                                    r.added == true -> Text("✓ Added — pick their level above.", style = tech.csalliance.unstuck.design.theme.UFont.sans(13, FontWeight.SemiBold), color = c.greenInk)
-                                    r.emailed == true -> Text("✓ Invite sent. Pick their level once they accept.", style = tech.csalliance.unstuck.design.theme.UFont.sans(13, FontWeight.SemiBold), color = c.greenInk)
-                                    r.link != null -> {
-                                        Text("Invite link ready${if (copied) " · copied!" else ""}", style = tech.csalliance.unstuck.design.theme.UFont.sans(13, FontWeight.SemiBold), color = c.ink)
-                                        Text(r.link!!, style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink2, modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).background(c.bg).padding(horizontal = 10.dp, vertical = 8.dp))
-                                        Text("Send it to them — it's the only way in.", style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink3)
-                                    }
-                                }
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    if (r.link != null) UButton("Copy link", kind = ButtonKind.DARK, fill = false) { copyLink(r.link!!) }
-                                    UButton("Done", kind = ButtonKind.GHOST, fill = false) { inviting = false; inviteResult = null }
-                                }
-                            } else {
-                                OutlinedTextField(
-                                    value = inviteEmail, onValueChange = { inviteEmail = it },
-                                    label = { Text("name@example.com (optional)") }, singleLine = true, modifier = Modifier.fillMaxWidth(),
-                                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Email, imeAction = ImeAction.Done),
-                                    keyboardActions = KeyboardActions(onDone = { generateInvite() }),
-                                )
-                                Text("We'll email them the invite. Or leave it blank for a link you send yourself.", style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink3)
-                                inviteErr?.let { Text(it, style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.red) }
-                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                                    UButton(if (inviteBusy) "…" else if (inviteEmail.isBlank()) "Generate link" else "Send invite", kind = ButtonKind.DARK, fill = false, enabled = !inviteBusy) { generateInvite() }
-                                    UButton("Cancel", kind = ButtonKind.GHOST, fill = false) { inviting = false; inviteErr = null }
-                                }
-                            }
-                        }
-                    } else {
-                        Row(
-                            Modifier.clip(RoundedCornerShape(999.dp)).clickable { inviting = true; inviteResult = null; inviteErr = null }.padding(vertical = 2.dp),
-                            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
-                        ) {
-                            Icon(Icons.Filled.Add, contentDescription = null, tint = c.primaryDeep, modifier = Modifier.padding(start = 2.dp))
-                            Text("Add someone", style = tech.csalliance.unstuck.design.theme.UFont.sans(13, FontWeight.SemiBold), color = c.primaryDeep)
-                        }
-                    }
-
-                    if (active.isEmpty() && !inviting) {
-                        Text("Share this task with someone in your circle.", style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink3)
-                    }
-                    if (active.isNotEmpty()) {
-                        // Explainer — 1:1 with the web share sheet.
-                        Text(
-                            buildAnnotatedString {
-                                fun b(word: String) = withStyle(SpanStyle(fontWeight = FontWeight.SemiBold, color = c.ink2)) { append(word) }
-                                b("View"); append(" — they see it + get pinged when you start & finish. ")
-                                b("Partner"); append(" — either of you can start/complete & focus together. ")
-                                b("Assign"); append(" — it becomes their task; you keep view.")
-                            },
-                            style = tech.csalliance.unstuck.design.theme.UFont.sans(12), color = c.ink3,
-                        )
-                    }
+                    // ONE row — who's picked, in a line — opening the Share screen
+                    // in its pre-create mode (the per-person Off/View/Partner/Assign
+                    // cards were "terrible", Ahmad 2026-09-24).
+                    SectionLabel("Share")
+                    ShareWithRow(shareWithSummary(sharePicksInRosterOrder(members, shareLevels))) { showShare = true }
 
                     SectionLabel("Tags")
                     tech.csalliance.unstuck.ui.components.TagPicker(vm, tags.toList()) { tags.clear(); tags.addAll(it) }
@@ -471,6 +364,16 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
             // needed); muted dark until then.
             UButton("Add task", kind = if (canSubmit) ButtonKind.CORAL else ButtonKind.DARK, enabled = canSubmit) { submit() }
         }
+    }
+
+    if (showShare) {
+        // Picks come back live, so the sheet holds them however the screen closes;
+        // submit() hands them to addTask exactly as before.
+        ShareScreen(
+            vm, ShareTarget.NewTask(name), picks = shareLevels.toMap(),
+            onPicks = { p -> shareLevels.clear(); shareLevels.putAll(p) },
+            onDismiss = { showShare = false },
+        )
     }
 
     if (showDatePicker) {
@@ -531,38 +434,5 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
             dismissButton = { TextButton(onClick = { showEstimate = false }) { Text("Cancel") } },
             containerColor = c.surface,
         )
-    }
-}
-
-/** One circle member + a full-width Off/View/Partner/Assign segmented control —
- *  ShareTaskSheet.MemberLevelRow's pattern, but over PENDING create-form state
- *  (nothing is shared until "Add task"), so the selected segment is the black-and-white pair (ink fill, bg text)
- *  — the same idiom as every other chip and segment in the app. */
-@Composable
-private fun SharePickRow(name: String, relationship: String?, cur: ShareLevel?, onPick: (ShareLevel?) -> Unit) {
-    val c = UTheme.colors
-    Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.bg2).padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Box(Modifier.size(28.dp).clip(CircleShape).background(c.primary), contentAlignment = Alignment.Center) {
-                Text((name.trim().firstOrNull() ?: '?').uppercase(), style = tech.csalliance.unstuck.design.theme.UFont.sans(13, FontWeight.SemiBold), color = Color.White)
-            }
-            Column(Modifier) {
-                Text(name, style = tech.csalliance.unstuck.design.theme.UFont.sans(14, FontWeight.SemiBold), color = c.ink, maxLines = 1)
-                Text(relationship ?: "connected", style = tech.csalliance.unstuck.design.theme.UFont.sans(11), color = c.ink3, maxLines = 1)
-            }
-        }
-        val opts: List<Pair<ShareLevel?, String>> = listOf(
-            null to "Off", ShareLevel.VIEW to "View", ShareLevel.PARTNER to "Partner", ShareLevel.ASSIGN to "Assign",
-        )
-        Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(999.dp)).background(c.bg).padding(3.dp), horizontalArrangement = Arrangement.spacedBy(3.dp)) {
-            opts.forEach { (value, label) ->
-                val selected = cur == value
-                Box(
-                    Modifier.weight(1f).clip(RoundedCornerShape(999.dp)).background(if (selected) c.ink else Color.Transparent)
-                        .clickable { onPick(value) }.padding(vertical = 6.dp),
-                    contentAlignment = Alignment.Center,
-                ) { Text(label, style = tech.csalliance.unstuck.design.theme.UFont.sans(11, FontWeight.SemiBold), color = if (selected) c.bg else c.ink2) }
-            }
-        }
     }
 }

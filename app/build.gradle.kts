@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 115
-        versionName = "0.5.31"
+        versionCode = 116
+        versionName = "0.5.32"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.31 — A task opened on one day of a repeating series shows that day's date. The + button is easier to tap."
+    releaseNotes = "v0.5.32 — Reminders and list notifications show times in your phone's 12/24-hour setting."
 }
 
 dependencies {

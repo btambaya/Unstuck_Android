@@ -5,7 +5,9 @@ import androidx.compose.material.icons.outlined.CalendarMonth
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.Layers
 import androidx.compose.material.icons.outlined.Schedule
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.layout.FirstBaseline
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.test.assertHasClickAction
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.getAlignmentLinePosition
@@ -14,6 +16,7 @@ import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.isSelectable
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.unit.DpRect
@@ -46,6 +49,8 @@ class BottomNavBarTest {
 
     @get:Rule val compose = createComposeRule()
 
+    private companion object { const val PLUS_SQUARE = "bar-plus-square" }
+
     private val items = listOf(
         NavSpec("today", "Today", Icons.Outlined.Schedule),
         NavSpec("tasks", "Tasks", Icons.Outlined.Inbox),
@@ -60,7 +65,12 @@ class BottomNavBarTest {
         onSelect: (String) -> Unit = {},
     ) = compose.setContent {
         UnstuckTheme(dark = false) {
-            BottomNavBar(items, activeKey, onSelect = onSelect, onFab = onFab, fabLabel = fabLabel)
+            // fabModifier is where the app hangs the guided tour's anchor; tagging it
+            // here lets the layout tests find the VISIBLE square it lands on.
+            BottomNavBar(
+                items, activeKey, onSelect = onSelect, onFab = onFab, fabLabel = fabLabel,
+                fabModifier = Modifier.testTag(PLUS_SQUARE),
+            )
         }
     }
 
@@ -120,12 +130,22 @@ class BottomNavBarTest {
     @Config(qualifiers = "w411dp-h891dp-xhdpi")
     fun plusSitsInTheRowCentredOnTheTabs() {
         bar(fabLabel = "New task")
+        // The announced, clickable node is the TAP target; the tagged node is the
+        // coral square the user sees (and the tour spotlights).
         val plus = compose.onNodeWithContentDescription("New task").getUnclippedBoundsInRoot()
+        val square = compose.onNodeWithTag(PLUS_SQUARE, useUnmergedTree = true).getUnclippedBoundsInRoot()
         val cells = items.map { cell(it.label) }
 
-        assertEquals(44f, plus.width.value, 0.5f)
-        assertEquals(44f, plus.height.value, 0.5f)
+        // Tap target: Material's 48dp minimum. Visible square: still 44dp, centred in it.
+        assertEquals(48f, plus.width.value, 0.5f)
+        assertEquals(48f, plus.height.value, 0.5f)
+        assertEquals(44f, square.width.value, 0.5f)
+        assertEquals(44f, square.height.value, 0.5f)
+        assertEquals(plus.centreX(), square.centreX(), 0.5f)
+        assertEquals(plus.centreY(), square.centreY(), 0.5f)
         cells.forEach { assertEquals("+ centred on ${it}", it.centreY(), plus.centreY(), 0.5f) }
+        // The whole 48dp target fits in the tab cells' height, so it never makes
+        // the bar taller than the tabs already do.
         assertTrue("+ not lifted above the tabs", plus.top >= cells[0].top && plus.bottom <= cells[0].bottom)
 
         // Five equal slots: four equal tabs, the gap between Tasks and Calendar

@@ -192,12 +192,8 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
             .sortedByDescending { tech.csalliance.unstuck.core.time.Time.parseMillis(it.completedAt) ?: 0L }
     }
     val taskCaptures = captures.filter { it.taskId == task.id }
-    val myBlocks = blocks.filter { it.taskId == task.id }.sortedWith(compareBy({ it.date }, { it.startTime }))
-    val scheduleLabel = when {
-        task.later == true -> "Later"
-        myBlocks.isNotEmpty() -> "${myBlocks.first().date.takeLast(5)} ${ClockFormat.time(myBlocks.first().startTime, clock)}"
-        else -> "Unscheduled"
-    }
+    val hasBlocks = blocks.any { it.taskId == task.id }
+    val scheduleLabel = scheduleCellText(task, occBlock, blocks, Clock.todayIso(), clock)
 
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
@@ -320,7 +316,7 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
                     // when a reminder can actually fire, i.e. the task is scheduled and not
                     // parked in Later (mirrors the old create-sheet condition). The override
                     // lives in prefs, so re-arm the alarms explicitly (same as Settings).
-                    if (task.later != true && (myBlocks.isNotEmpty() || isOcc)) {
+                    if (task.later != true && (hasBlocks || isOcc)) {
                         Column {
                             SectionLabel("Remind me")
                             fun pick(lead: Int?) {
@@ -584,6 +580,28 @@ internal fun StartRepeatingPrompt(onPick: () -> Unit, onCancel: () -> Unit) {
         dismissButton = { TextButton(onClick = onCancel) { Text("Cancel", color = c.ink2) } },
         containerColor = c.surface,
     )
+}
+
+/**
+ * The Schedule cell's text (unit-tested, TaskDetailScheduleLabelTest).
+ *
+ * - ONE DAY of a repeating task ([occBlock] — the row's id is that day's
+ *   cal_block id) shows THAT day. It used to look the row's blocks up by the
+ *   row id, and no block's task_id is ever a block id, so every day of a series
+ *   read "Unscheduled" (iOS showed the series' oldest block instead,
+ *   TaskEditor.scheduleText). Checked before "Later": a day is on its date.
+ * - The SERIES (the template, opened from Recurring) shows its next live
+ *   occurrence — the same [recurrenceAnchor] Schedule opens on — not its
+ *   oldest block, which is weeks-old done/skipped history.
+ * - Any other task: its earliest block, as before.
+ */
+internal fun scheduleCellText(task: TaskItem, occBlock: CalBlock?, blocks: List<CalBlock>, todayIso: String, clock: ClockMode): String {
+    fun at(b: CalBlock) = "${b.date.takeLast(5)} ${ClockFormat.time(b.startTime, clock)}"
+    if (occBlock != null) return at(occBlock)
+    if (task.later == true) return "Later"
+    val next = if (task.recurrence != null) recurrenceAnchor(task.id, blocks, todayIso) else null
+    val first = next ?: blocks.filter { it.taskId == task.id }.minWithOrNull(compareBy({ it.date }, { it.startTime }))
+    return first?.let(::at) ?: "Unscheduled"
 }
 
 /** Where Schedule opens on a repeating task (unit-tested, TaskDetailScheduleSeedTest). */

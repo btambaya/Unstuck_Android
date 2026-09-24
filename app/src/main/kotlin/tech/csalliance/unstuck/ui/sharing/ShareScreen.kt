@@ -54,6 +54,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -134,6 +135,12 @@ import tech.csalliance.unstuck.ui.AppViewModel
 // with `bg` text; unselected is `bg2` / `ink2` with a `line2` ring. Errors are
 // the palette `red`; nothing here is rust or coral.
 
+/** Test seam: the transport a [ShareScreen] talks through, in place of the
+ *  live one ([LiveShareTransport]). Null (always, in the app) = live. Lets a
+ *  test drive the REAL New task sheet → pre-create Share screen round trip
+ *  against a fake roster. */
+internal val LocalShareTransport = staticCompositionLocalOf<ShareScreenTransport?> { null }
+
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ShareScreen(
@@ -150,7 +157,8 @@ fun ShareScreen(
     val c = UTheme.colors
     val scope = rememberCoroutineScope()
     val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val model = remember(target, mode) { ShareScreenModel(target, mode, LiveShareTransport(vm), initialPicks = picks) }
+    val transport = LocalShareTransport.current
+    val model = remember(target, mode) { ShareScreenModel(target, mode, transport ?: LiveShareTransport(vm), initialPicks = picks) }
     val s by model.state.collectAsStateWithLifecycle()
 
     LaunchedEffect(model) { model.load() }

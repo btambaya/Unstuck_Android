@@ -129,6 +129,8 @@ class ShareRowRenderTest {
         listOf(SharePick("James Wilson", PARTNER), SharePick("Anna Okafor", PARTNER)),
         listOf(SharePick("James Wilson", PARTNER), SharePick("Anna Okafor", VIEW)),
         listOf(SharePick("James Wilson", PARTNER), SharePick("Anna Okafor", PARTNER), SharePick("Zubair", PARTNER), SharePick("Sam", PARTNER)),
+        // 3 picked, mixed grades: too long in full, no single grade to show.
+        listOf(SharePick("James Wilson", PARTNER), SharePick("Anna Okafor", VIEW), SharePick("Zubair Kazaure", PARTNER)),
         listOf(SharePick("Bartholomew-Alexandros Papadopoulos", PARTNER)),
     )
 
@@ -162,13 +164,16 @@ class ShareRowRenderTest {
     @Test fun screenPickedDark() = screen("share-precreate-picked-dark.png", dark = true, model = pickedModel())
     @Test fun screenFreshLight() = screen("share-precreate-fresh-light.png", dark = false, model = precreate(emptyMap()))
 
-    @Test fun pickerLight() {
+    private fun picker(file: String, dark: Boolean) {
         val m = precreate(mapOf("u2" to PARTNER, "u3" to VIEW))
         val split = sharePeopleSplit(m.state.value.people, m.state.value.pinnedIds, handOver = false)
-        shoot("share-precreate-choose-someone-light.png", dark = false) {
+        shoot(file, dark) {
             PeoplePickerBody("Share with", "Share", split.candidates, query = "", onQuery = {}, onPick = {}, onCancel = {})
         }
     }
+
+    @Test fun pickerLight() = picker("share-precreate-choose-someone-light.png", dark = false)
+    @Test fun pickerDark() = picker("share-precreate-choose-someone-dark.png", dark = true)
 
     /** A picked person's menu: Can edit ✓ / Can view / Hand over / Remove. */
     @Test fun personMenuLight() {

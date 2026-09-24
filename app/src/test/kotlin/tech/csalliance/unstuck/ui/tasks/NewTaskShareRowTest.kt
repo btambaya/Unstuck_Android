@@ -2,6 +2,7 @@ package tech.csalliance.unstuck.ui.tasks
 
 import android.content.ComponentName
 import androidx.activity.ComponentActivity
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -19,6 +20,7 @@ import androidx.compose.ui.test.performSemanticsAction
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import org.junit.After
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -36,6 +38,9 @@ import tech.csalliance.unstuck.design.theme.UnstuckTheme
 import tech.csalliance.unstuck.sync.WriteThrough
 import tech.csalliance.unstuck.ui.AppViewModel
 import tech.csalliance.unstuck.ui.ViewModelDrain
+import tech.csalliance.unstuck.ui.sharing.LocalShareTransport
+import tech.csalliance.unstuck.ui.sharing.PreCreateFakeTransport
+import tech.csalliance.unstuck.ui.sharing.preCreateMember
 
 /**
  * The New task sheet's share section is ONE "Share with…" row that opens the
@@ -127,6 +132,50 @@ class NewTaskShareRowTest {
         compose.onNodeWithText("Get link").assertExists()
         // …and nothing that needs a task that doesn't exist yet.
         compose.onNodeWithText("SHARE A LINK").assertDoesNotExist()
+    }
+
+    /** The glue the model tests can't see: a pick made on the pre-create
+     *  Share screen reaches the sheet's pending shares (what "Add task" hands
+     *  to addTask(shares=)) the moment it's made, survives closing the screen,
+     *  and comes back pinned with its grade when the row is opened again. The
+     *  fake transport fails the test on any share RPC. */
+    @Test
+    fun aPickComesBackToTheRowAndSurvivesReopening() {
+        val fake = PreCreateFakeTransport(
+            listOf(preCreateMember("c2", "u2", "James Wilson"), preCreateMember("c3", "u3", "Anna Okafor")),
+        )
+        compose.setContent {
+            CompositionLocalProvider(LocalShareTransport provides fake) {
+                UnstuckTheme(dark = false) { NewTaskSheet(vm, onDismiss = {}) }
+            }
+        }
+        compose.waitForIdle()
+        compose.onNodeWithText("More options ▾").performScrollTo().performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("Share with, Only you").performScrollTo().performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitForIdle()
+
+        // Choose someone → the searchable picker → one tap picks at Can edit.
+        compose.onNodeWithContentDescription("Choose someone, 2 people. Opens a searchable list").performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("Share with James Wilson").performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitForIdle()
+        compose.onNodeWithText("✓ James can edit once you add the task.").assertIsDisplayed()
+        compose.onNodeWithText("Done").performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitForIdle()
+
+        // Back on the sheet: the row reads the pick back. (This offline view
+        // model has no roster of its own, so the name is the "Someone" fallback;
+        // the grade is what the screen picked.)
+        compose.onNodeWithText("Done").assertDoesNotExist()
+        compose.onNodeWithContentDescription("Share with, Someone · can edit").performScrollTo().assertIsDisplayed()
+
+        // Reopened: James sits first with his grade and his menu.
+        compose.onNodeWithContentDescription("Share with, Someone · can edit").performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("James Wilson, Can edit. Change access").assertExists()
+        compose.onNodeWithContentDescription("Choose someone, 1 people. Opens a searchable list").assertExists()
+        assertTrue("nothing was sent before Add task", fake.invites.isEmpty())
     }
 
     private companion object { const val UID = "00000000-0000-0000-0000-00000000c0de" }

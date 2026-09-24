@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 107
-        versionName = "0.5.23"
+        versionCode = 108
+        versionName = "0.5.24"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.23 — The assistant checks the day before it books a repeating task (no more Saturday things landing on a Sunday), asks before it deletes, cancels or leaves anything, and Undo all only covers its latest reply. Insights: small fixes so the numbers match the web and iPhone exactly."
+    releaseNotes = "v0.5.24 — Voice: the assistant no longer says an action failed when it worked (it now waits for the result before answering), tells you up front when a repeat pattern isn't possible yet (like every two weeks) instead of setting something else, and confirms plainly when something is already done."
 }
 
 dependencies {

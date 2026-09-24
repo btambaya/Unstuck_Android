@@ -395,6 +395,13 @@ class BargeInController(
      *  breath as a `response.cancel` drops the connection (measured 2026-09-19). */
     private var pendingTurnSince: Long? = null
     val pendingCreate: Boolean get() = pendingTurnSince != null
+    /** User turns the controller took to answer: a completed transcript it
+     *  judged theirs (not echo, not a cough) with a reply to be asked for, or a
+     *  hold-to-talk release. Counts only up. The client ends a spoken review's
+     *  recap exactly here — when the app answers a real user turn, never on a
+     *  raw speech_started, which the loudspeaker's echo of the review fires too
+     *  (cross-platform rule, 2026-09-24). */
+    var answeredTurns: Int = 0; private set
     /** When our last `response.create` for the pending turn went out, until
      *  its response.created arrives. The turn stays PENDING meanwhile: a
      *  create the server swallowed (Zubair's call, 2026-09-20 18:02 — a cancel
@@ -664,6 +671,7 @@ class BargeInController(
                     pttPressed = false
                     out += BargeInCommand.ForceGate(false)
                     out += BargeInCommand.CommitAndRespond
+                    answeredTurns += 1
                     ui(BargeInUi.THINKING, out)
                 }
             }
@@ -752,6 +760,7 @@ class BargeInController(
             out += BargeInCommand.UserTurn(text)
             if (!holdToTalk && !modelBusy) {
                 pendingTurnSince = t
+                answeredTurns += 1
                 out += BargeInCommand.StartTimer(TURN_HOLD_MS)
                 ui(BargeInUi.THINKING, out)
             }
@@ -791,6 +800,7 @@ class BargeInController(
         out += BargeInCommand.UserTurn(text)
         if (holdToTalk) return   // the release already committed + asked
         segments[index] = segments[index].copy(responded = true)
+        answeredTurns += 1
         rateLimitRetries = 0
         flushPendingDeletes(except = null, out)   // before the ask: the model never sees the echo items
         if (modelBusy && !alreadyCancelled) cancel(t, out)

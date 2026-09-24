@@ -31,7 +31,7 @@ object CallNotifications {
 
     /** Android-only copy (no iOS twin): the kill-switch decline and the snooze ack. */
     object Copy {
-        const val CALLS_OFF_HINT = "(calls are switched off — Settings › Calls)"
+        const val CALLS_OFF_HINT = "(calls are switched off — Settings › Notifications & calls)"
         fun callsOffTitle(label: String) = "I called about $label"
         fun callsOffBody(notes: List<String>) = CallNotificationCopy.body(notes) + "\n" + CALLS_OFF_HINT
         fun snoozedTitle(minutes: Int) = "I'll call back in $minutes minutes"
@@ -48,7 +48,7 @@ object CallNotifications {
     /** A focus session was live / another call was up. */
     fun busy(context: Context, p: IncomingCallPayload) = post(context, CallNotificationCopy.busy(p))
 
-    /** Received outside the user's Settings › Calls window. QUIET: it lands
+    /** Received outside the user's Settings › Notifications & calls window. QUIET: it lands
      *  when the server rang — by definition outside the hours the user wants
      *  to hear from us, possibly 3 am (parity with iOS build 78). */
     fun outsideHours(context: Context, p: IncomingCallPayload) = post(context, CallNotificationCopy.outsideHours(p))
@@ -56,7 +56,7 @@ object CallNotifications {
     /** Answered, but the voice stack could not start. */
     fun voiceFailed(context: Context, p: IncomingCallPayload) = post(context, CallNotificationCopy.voiceFailed(p))
 
-    /** Declined by a kill-switch (Settings › Calls off, or the AI Assistant
+    /** Declined by a kill-switch (Settings › Notifications & calls off, or the AI Assistant
      *  switched off) — the Android decision for plan risk 10. */
     fun callsOff(context: Context, p: IncomingCallPayload) = post(
         context,

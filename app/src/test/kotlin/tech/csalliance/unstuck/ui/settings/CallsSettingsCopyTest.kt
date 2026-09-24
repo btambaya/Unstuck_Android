@@ -1,6 +1,8 @@
 package tech.csalliance.unstuck.ui.settings
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.CallSettings
 import tech.csalliance.unstuck.ui.TEST_CALL_CALLS_OFF
@@ -8,8 +10,8 @@ import tech.csalliance.unstuck.ui.TEST_CALL_LABEL
 import tech.csalliance.unstuck.ui.TEST_CALL_NOTE
 import tech.csalliance.unstuck.ui.TEST_CALL_OUTSIDE_HOURS
 
-/** Settings → "Calls from Unstuck": the "Test call now" state mapping and the
- *  copy, verbatim from iOS CallSettingsView. */
+/** Settings → Notifications & calls → Calls: the test call's state mapping,
+ *  the fix-it lines' rules and the plain copy (slim settings, 2026-09-24). */
 class CallsSettingsCopyTest {
 
     @Test fun `a booked test call reports the time the row landed on`() {
@@ -36,26 +38,15 @@ class CallsSettingsCopyTest {
         )
     }
 
-    @Test fun `the proactive calls and the ring nudge copy match iOS`() {
-        assertEquals("Calls Unstuck can make on its own", CALLS_PROACTIVE_SECTION)
-        assertEquals("Morning planning call", CALLS_PROACTIVE_MORNING)
-        assertEquals("Rings to walk through the day and plan it with you.", CALLS_PROACTIVE_MORNING_SUB)
-        assertEquals("Evening wrap-up call", CALLS_PROACTIVE_EVENING)
-        assertEquals("Rings to go over what got done and what moves to tomorrow.", CALLS_PROACTIVE_EVENING_SUB)
-        assertEquals("Check in after a block", CALLS_PROACTIVE_AFTER_BLOCK)
-        assertEquals("Rings when a block ends without its task marked done — how did it go?", CALLS_PROACTIVE_AFTER_BLOCK_SUB)
-        // The old "They ring within your allowed hours" was false (parity with iOS build 81, C12).
-        assertEquals("All off unless you switch them on. Unstuck books them between 06:00 and 23:00; this phone still declines one outside the allowed hours above, or while Calls is off.", CALLS_PROACTIVE_HINT)
-        assertEquals("Calls need microphone access — turn it on in Android Settings, or you'll ring but can't be heard.", CALLS_MIC_DENIED_HINT)
-        assertEquals("Calls need microphone access — turn it on for Unstuck in Android Settings.", CALLS_TEST_MIC_REFUSED)
-        assertEquals("At", CALLS_PROACTIVE_AT)
-        assertEquals("Calls need the full-screen permission on this phone — without it a call arrives as a notification you tap instead of a ring.", CALLS_FULL_SCREEN_NUDGE)
-        assertEquals("Not now", CALLS_FULL_SCREEN_DISMISS)
-        assertEquals("Allow full-screen calls", CALLS_FULL_SCREEN_ROW)
+    @Test fun `the test-call row says where it is`() {
+        assertEquals("We'll ring you in about a minute.", testCallLine(TestCallState.Idle))
+        assertEquals("Booking…", testCallLine(TestCallState.Booking))
+        assertEquals("Booked — ringing at 09:05. Lock your phone and wait.", testCallLine(TestCallState.Booked("09:05")))
+        assertEquals("Nope.", testCallLine(TestCallState.Failed("Nope.")))
     }
 
-    /** iOS shows the red mic line from the moment the screen opens when the mic
-     *  is denied; Android can tell only while it still offers the prompt. */
+    /** iOS shows the mic line whenever the microphone is denied, from the moment
+     *  the screen opens; Android can tell only while it still offers the prompt. */
     @Test fun `the mic line shows a refusal from before the screen opened, and a tap asks while Android still can`() {
         assertEquals(MicHint.NONE, callsMicHint(granted = true, canAskAgain = false, refusedHere = true))
         assertEquals("refused at a ring's Answer, before Settings opened", MicHint.ASK, callsMicHint(granted = false, canAskAgain = true, refusedHere = false))
@@ -64,16 +55,36 @@ class CallsSettingsCopyTest {
         assertEquals("never asked is not a refusal (the ring asks at Answer)", MicHint.NONE, callsMicHint(granted = false, canAskAgain = false, refusedHere = false))
     }
 
-    @Test fun `copy matches iOS`() {
-        assertEquals("Calls from Unstuck", CALLS_NAV_TITLE)
-        assertEquals("Ask, and Unstuck calls you", CALLS_EXPLAINER_TITLE)
-        assertEquals("A call outside these hours is declined quietly and you get the notes as a notification instead. Calls can only be booked between 06:00 and 23:00.", callsHoursHint())
-        assertEquals("\"Call me about this\" on a scheduled task rings this many minutes before it starts.", CALLS_LEAD_HINT)
-        assertEquals("Book a test call for one minute from now. Lock your phone — it rings through the real path (server → push → call screen).", CALLS_TEST_BODY)
-        assertEquals("Test call now", CALLS_TEST_BUTTON)
-        assertEquals("Booking…", CALLS_TEST_BOOKING)
+    /** Status lines only when something is wrong: DND silences the ring only
+     *  while it is on AND the Calls channel may not break through. */
+    @Test fun `the Do Not Disturb line shows only when DND would silence a call`() {
+        assertFalse("DND off", callsSilencedByDnd(interruptionFilterAll = true, channelBypassesDnd = false))
+        assertFalse("the channel breaks through", callsSilencedByDnd(interruptionFilterAll = false, channelBypassesDnd = true))
+        assertTrue(callsSilencedByDnd(interruptionFilterAll = false, channelBypassesDnd = false))
+    }
+
+    @Test fun `reminder lead labels round-trip`() {
+        assertEquals(listOf("Off", "5 min", "10 min", "15 min"), LEAD_LABELS.map { it.first })
+        assertEquals("Off", leadLabel(0))
+        assertEquals("10 min", leadLabel(10))
+        assertEquals("30 min", leadLabel(30))
+    }
+
+    @Test fun `the calls copy is plain`() {
+        assertEquals("Let Unstuck call this phone", SettingsCopy.CALLS_SWITCH)
+        assertEquals("Only call between", SettingsCopy.CALLS_HOURS)
+        assertEquals("Morning call", SettingsCopy.CALLS_MORNING)
+        assertEquals("Evening call", SettingsCopy.CALLS_EVENING)
+        assertEquals("Call me after a focus block", SettingsCopy.CALLS_AFTER_BLOCK)
+        assertEquals("Try a test call", SettingsCopy.CALLS_TEST)
+        assertEquals("Calls need the Assistant, which is off.", SettingsCopy.CALLS_NEED_ASSISTANT)
+        assertEquals("Calls need microphone access — turn it on for Unstuck in Android Settings.", CALLS_TEST_MIC_REFUSED)
         assertEquals("Test call", TEST_CALL_LABEL)
         assertEquals("This is what a call from Unstuck sounds like", TEST_CALL_NOTE)
         assertEquals("unstuck_calls", CALLS_CHANNEL_ID)
+        // No plumbing words on the screen any more.
+        for (line in listOf(SettingsCopy.CALLS_INTRO, SettingsCopy.CALLS_SWITCH_OFF_SUB, SettingsCopy.CALLS_HOURS_SUB, SettingsCopy.CALLS_TEST_SUB)) {
+            assertFalse(line, line.contains("server") || line.contains("push") || line.contains("token"))
+        }
     }
 }

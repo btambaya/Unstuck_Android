@@ -29,14 +29,14 @@ import tech.csalliance.unstuck.ui.auth.AuthScreen
 fun AppRoot(graph: AppGraph) {
     val vm: AppViewModel = viewModel(factory = viewModelFactory { initializer { AppViewModel(graph) } })
 
-    // Theme is reactive off the persisted settings: theme pref + accent +
-    // density/larger-type font scale. Everything renders inside this wrapper
-    // so a Settings change re-themes the whole app immediately.
+    // Theme is reactive off the persisted settings: theme pref + the in-app
+    // text size. Everything renders inside this wrapper so a Settings change
+    // re-themes the whole app immediately.
     val settings by vm.settings.collectAsStateWithLifecycle()
     val systemDark = isSystemInDarkTheme()
     val dark = settings.theme == ThemePref.DARK || (settings.theme == ThemePref.SYSTEM && systemDark)
 
-    UnstuckTheme(dark = dark, accent = settings.accent, fontScale = settings.fontScale) {
+    UnstuckTheme(dark = dark, fontScale = settings.fontScale) {
         when {
             !vm.configured -> SetupScreen()
             else -> {

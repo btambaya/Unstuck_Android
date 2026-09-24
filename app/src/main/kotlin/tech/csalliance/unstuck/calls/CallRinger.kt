@@ -231,7 +231,7 @@ object CallRinger {
     }
 
     /** Set when the LAST ring had to degrade to a heads-up because the
-     *  full-screen intent permission was missing — the Settings › Calls row
+     *  full-screen intent permission was missing — the Settings › Notifications & calls row
      *  reads this to show the "allow full-screen calls" prompt. */
     fun fullScreenIntentDenied(context: Context): Boolean = prefs(context).getBoolean(K_FSI_DENIED, false)
 

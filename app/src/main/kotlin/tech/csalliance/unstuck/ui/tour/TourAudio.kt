@@ -35,15 +35,21 @@ const val TOUR_AUDIO_VOICE = "Cherry"
  *  (both maps below resolve to 0) until the clips are re-recorded — then
  *  bundle the new m4a, map it, and drop the id here (TourLogicTest pins the
  *  pairing).
- *  EMPTY since 2026-09-18: the "today" clips (tour_today / tour_today_more)
- *  were re-recorded from the hero-less home's copy — DashScope
- *  qwen3-tts-flash, voice "Cherry", the same bytes iOS bundles. */
-val TOUR_STEPS_AWAITING_NARRATION: Set<String> = emptySet()
+ *  2026-09-24 (slim settings): "personalization" — tour_personalization.m4a
+ *  names accent and density, which are gone; the step now opens Appearance.
+ *  Re-record from the step's narration (DashScope qwen3-tts-flash, "Cherry"). */
+val TOUR_STEPS_AWAITING_NARRATION: Set<String> = setOf("personalization")
+
+/** Steps whose NARRATION clip still matches but whose Tell-me-more clip no
+ *  longer does: only the more clip is parked (0 below); the narration plays.
+ *  2026-09-24: "finish" — tour_finish_more.m4a says "Settings → Account";
+ *  the tour is now "Settings → Replay the tour". */
+val TOUR_MORE_AWAITING_NARRATION: Set<String> = setOf("finish")
 
 /** Step id → bundled raw resource (0 = none → Listen hidden for that step).
  *  Explicit map so a typo'd id fails visibly in review, not at runtime. */
 @RawRes
-fun tourAudioRes(stepId: String): Int = when (stepId) {
+fun tourAudioRes(stepId: String): Int = if (stepId in TOUR_STEPS_AWAITING_NARRATION) 0 else when (stepId) {
     "welcome" -> R.raw.tour_welcome
     "today" -> R.raw.tour_today
     "first-action" -> R.raw.tour_first_action
@@ -72,7 +78,7 @@ fun tourNarrationShouldRewind(moreActive: Boolean, narrationFinished: Boolean): 
 /** Step id → bundled Tell-me-more clip (0 = none — exactly the steps whose
  *  `more` is null; the section still expands, just silently). */
 @RawRes
-fun tourMoreAudioRes(stepId: String): Int = when (stepId) {
+fun tourMoreAudioRes(stepId: String): Int = if (stepId in TOUR_STEPS_AWAITING_NARRATION || stepId in TOUR_MORE_AWAITING_NARRATION) 0 else when (stepId) {
     "welcome" -> R.raw.tour_welcome_more
     "today" -> R.raw.tour_today_more
     "first-action" -> R.raw.tour_first_action_more

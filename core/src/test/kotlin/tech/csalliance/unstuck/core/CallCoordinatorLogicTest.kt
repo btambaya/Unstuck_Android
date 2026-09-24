@@ -146,7 +146,7 @@ class CallCoordinatorLogicTest {
         val n = CallNotificationCopy.of(r.notify!!, payload())
         assertEquals("I called about speak to James", n.title)
         assertTrue(n.body.contains("outside your call hours"))
-        assertEquals("Ask about the invoice\nConfirm Friday\n(outside your call hours — Settings › Calls)", n.body)
+        assertEquals("Ask about the invoice\nConfirm Friday\n(outside your call hours — Settings › Notifications & calls)", n.body)
     }
 
     @Test fun `the kill-switches decline with the same notice`() {

@@ -43,6 +43,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
@@ -60,6 +61,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
@@ -288,6 +290,19 @@ fun ShareScreen(vm: AppViewModel, target: ShareTarget, mode: ShareMode = ShareMo
                     )
                 }
             }
+
+            // Everyone you share with, in one place: Settings → People.
+            Text(
+                MANAGE_PEOPLE, style = UFont.sans(13, FontWeight.Medium), color = c.ink2,
+                modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                    .clickable(role = Role.Button, onClickLabel = MANAGE_PEOPLE_A11Y) {
+                        onDismiss()
+                        vm.openDeepLink(MANAGE_PEOPLE_LINK)
+                    }
+                    .minimumInteractiveComponentSize()
+                    .padding(horizontal = 4.dp)
+                    .testTag("share-manage-people"),
+            )
         }
     }
 
@@ -547,3 +562,8 @@ private fun PeoplePickerSheet(
         }
     }
 }
+
+/** The share sheet's way to the roster (slim settings, 2026-09-24). */
+internal const val MANAGE_PEOPLE = "Manage people"
+internal const val MANAGE_PEOPLE_A11Y = "Manage the people you share with, in Settings"
+internal const val MANAGE_PEOPLE_LINK = "unstuck://settings?section=People"

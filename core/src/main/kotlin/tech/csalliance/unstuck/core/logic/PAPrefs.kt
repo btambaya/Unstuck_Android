@@ -68,14 +68,16 @@ data class RitualPrefs(
     }
 }
 
-/** Settings / interview picker copy (web RITUAL_LABELS). */
+/** The interview picker's copy (web RITUAL_LABELS). The names are the web
+ *  assistant panel's "Routines" (slim settings, 2026-09-24), so the morning
+ *  one no longer shares a name with the morning summary or the morning call. */
 data class RitualLabel(val key: RitualKey, val label: String, val sub: String)
 
 val RITUAL_LABELS: List<RitualLabel> = listOf(
-    RitualLabel(RitualKey.MORNING, "Morning briefing", "Your day, one decision, at your first open"),
-    RitualLabel(RitualKey.EVENING, "Evening sweep", "Carry what didn’t happen — no guilt attached"),
-    RitualLabel(RitualKey.FRIDAY, "Friday review", "Your week in three minutes, one question"),
-    RitualLabel(RitualKey.SUNDAY, "Sunday runway", "A look at next week before it lands on you"),
+    RitualLabel(RitualKey.MORNING, "Morning plan", "Your day, one decision, at your first open"),
+    RitualLabel(RitualKey.EVENING, "Evening wind-down", "Carry what didn’t happen — no guilt attached"),
+    RitualLabel(RitualKey.FRIDAY, "Friday look-back", "Your week in three minutes, one question"),
+    RitualLabel(RitualKey.SUNDAY, "Sunday plan-ahead", "A look at next week before it lands on you"),
 )
 
 object PAPrefsLogic {

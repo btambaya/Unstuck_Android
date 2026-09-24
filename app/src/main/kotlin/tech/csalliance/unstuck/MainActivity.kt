@@ -45,7 +45,7 @@ class MainActivity : ComponentActivity() {
             notifPermission.launch(Manifest.permission.POST_NOTIFICATIONS)
         }
         // Exact alarms are asked for from Today once the user is in the app
-        // (ui/ExactAlarmPrompt) and in Settings › Focus, not here: onCreate ran before
+        // (ui/ExactAlarmPrompt) and in Settings › Notifications & calls, not here: onCreate ran before
         // the async session restore knew the user was onboarded, so the ask was
         // skipped, then fired on some later rotation (Android audit 2026-09-23, A15).
         // Register the FCM token once a session exists (so it lands on first
@@ -77,7 +77,7 @@ class MainActivity : ComponentActivity() {
 
         setContent {
             // AppRoot owns UnstuckTheme so it reacts to the persisted
-            // theme / accent / density settings.
+            // theme / text-size settings.
             AppRoot(graph)
         }
     }

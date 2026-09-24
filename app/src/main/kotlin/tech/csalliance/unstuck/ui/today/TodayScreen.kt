@@ -131,7 +131,7 @@ fun TodayScreen(
     // session's screen).
     var voiceOpen by rememberSaveable { mutableStateOf(false) }
     if (voiceOpen) VoiceModeScreen(vm) { voiceOpen = false }
-    // Privacy §21 kill-switch (Settings → Interface → AI Assistant): with AI off
+    // Privacy §21 kill-switch (Settings → Assistant & privacy → AI Assistant): with AI off
     // the input pill draws nothing at all (web / iOS parity).
     val settings by vm.settings.collectAsStateWithLifecycle()
     val assistantOn = BuildConfig.ASSISTANT_ENABLED && settings.assistantEnabled

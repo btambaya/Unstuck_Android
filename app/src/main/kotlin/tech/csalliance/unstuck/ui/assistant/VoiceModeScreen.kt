@@ -18,6 +18,7 @@ import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.selection.toggleable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -132,7 +133,11 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
     fun attach() {
         attached = true
         main.removeCallbacks(reattachDeadline)
-        if (!sessionActive) { state = VoiceState.CONNECTING; caption = ""; note = null; suggestHoldToTalk = false }
+        if (!sessionActive) {
+            state = VoiceState.CONNECTING; caption = ""; note = null; suggestHoldToTalk = false
+            // The switch shows the saved choice before the session dials.
+            holdToTalk = settingsStore.voiceHoldToTalk()
+        }
     }
 
     /** Screen leaving the composition. [changingConfigurations] = the Activity is
@@ -144,10 +149,15 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
         main.postDelayed(reattachDeadline, REATTACH_GRACE_MS)
     }
 
-    fun switchToHoldToTalk() {
-        settingsStore.setVoiceHoldToTalk(true)
-        client?.setHoldToTalk(true)
-        holdToTalk = true
+    fun switchToHoldToTalk() = setHoldToTalkPref(true)
+
+    /** The Talk screen's "Noisy room? Hold to talk" switch — the device key
+     *  Settings used to hold (voice.holdToTalk; slim settings moved it here,
+     *  2026-09-24). A live session switches at once, without reconnecting. */
+    fun setHoldToTalkPref(on: Boolean) {
+        settingsStore.setVoiceHoldToTalk(on)
+        client?.setHoldToTalk(on)
+        holdToTalk = on
         suggestHoldToTalk = false
     }
 
@@ -355,7 +365,7 @@ private tailrec fun Context.findActivity(): Activity? = when (this) {
  *  - open mic (default): the server VAD + RMS gate handle turns; tapping the orb
  *    or the Interrupt pill hard-cancels a reply — offered ONLY while the model is
  *    responding or its speech is still playing (client.canInterrupt);
- *  - hold to talk (Settings › Interface, or the one-tap "Noisy room?" chip the
+ *  - hold to talk (the "Noisy room? Hold to talk" switch, or the one-tap "Noisy room?" chip the
  *    client raises after 3 false barge-ins in 2 min): press and hold the orb to
  *    speak, release to send. The label shows the mode.
  *
@@ -508,6 +518,20 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                 }
             }
 
+            // "Noisy room? Hold to talk" — the one place this choice lives now.
+            // The whole pill is the switch for TalkBack; the inner toggle is decorative.
+            androidx.compose.foundation.layout.Row(
+                Modifier.align(Alignment.BottomCenter).padding(bottom = 116.dp)
+                    .clip(RoundedCornerShape(999.dp)).background(c.bg2)
+                    .toggleable(value = holdToTalk, role = Role.Switch) { holder.setHoldToTalkPref(it) }
+                    .padding(start = 16.dp, end = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text(TALK_HOLD_TO_TALK, style = UFont.sans(13, FontWeight.Medium), color = c.ink2)
+                tech.csalliance.unstuck.design.component.MdToggle(holdToTalk, { holder.setHoldToTalkPref(it) }, Modifier.clearAndSetSemantics {})
+            }
+
             // End button
             Box(
                 Modifier.align(Alignment.BottomCenter).padding(bottom = 48.dp)
@@ -534,3 +558,6 @@ private fun PulsingOrb(active: Boolean, color: Color, gesture: Modifier = Modifi
         // The glyph is decorative — keep TalkBack on the orb's label, not "●".
     ) { Text("●", Modifier.clearAndSetSemantics {}, style = UFont.sans(36), color = Color.White.copy(alpha = 0.9f)) }
 }
+
+/** The Talk screen's hold-to-talk switch label (iOS / web: the same words). */
+internal const val TALK_HOLD_TO_TALK = "Noisy room? Hold to talk"

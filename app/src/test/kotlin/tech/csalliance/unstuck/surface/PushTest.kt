@@ -162,10 +162,10 @@ class PushTest {
     @Test fun `the kill-switches decline with the calls-off notice`() {
         assertTrue(handle(env = ringEnv.copy(assistantEnabled = false)))
         var n = shadowOf(nm).getNotification(NotifIds.callResult(callId))
-        assertTrue(n.extras.getCharSequence(Notification.EXTRA_BIG_TEXT).toString().endsWith("(calls are switched off — Settings › Calls)"))
+        assertTrue(n.extras.getCharSequence(Notification.EXTRA_BIG_TEXT).toString().endsWith("(calls are switched off — Settings › Notifications & calls)"))
         assertTrue(handle(contract + mapOf("callId" to "c2"), env = ringEnv.copy(callsEnabled = false)))
         n = shadowOf(nm).getNotification(NotifIds.callResult("c2"))
-        assertTrue(n.extras.getCharSequence(Notification.EXTRA_BIG_TEXT).toString().endsWith("(calls are switched off — Settings › Calls)"))
+        assertTrue(n.extras.getCharSequence(Notification.EXTRA_BIG_TEXT).toString().endsWith("(calls are switched off — Settings › Notifications & calls)"))
         assertEquals("the user switched calls off — a quiet note, never a buzz", NotificationChannels.CALL_NOTES, n.channelId)
         assertEquals(listOf(CallOutcome.DECLINED, CallOutcome.DECLINED), queued().map { it.outcome })
     }

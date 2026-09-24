@@ -72,7 +72,7 @@ import tech.csalliance.unstuck.ui.settings.SettingsSection
 //  • One-time auto-welcome on Today for accounts that finish onboarding AFTER
 //    this shipped (TourState.eligible — armed in AppViewModel.completeOnboarding).
 //    Existing accounts are never ambushed.
-//  • TourEvents.requestRestart() — Settings → Account → "Product tour".
+//  • TourEvents.requestRestart() — Settings → "Replay the tour".
 //
 // FOCUS STEPS (round 2): FocusScreen mints a real session in a LaunchedEffect
 // on entry, so the focus + capture steps NEVER navigate there — the tour
@@ -97,13 +97,22 @@ class TourNav(
     val firstTaskId: () -> String?,
 )
 
-/** Map the web section names onto Android's settings screens. The notification
- *  presence control (Calm/Balanced/Coach) lives in Settings → Focus. */
+/** Map the web section names onto Android's settings screens: the
+ *  notifications step opens Notifications & calls (where the Calm / Balanced /
+ *  Coach control is), the personalization step Appearance ("Interface" is its
+ *  old name). Both are pushed sub-screens, so the scoped lockdown holds. */
 internal fun tourSettingsSection(section: String?): SettingsSection = when (section) {
-    "Notifications" -> SettingsSection.FOCUS
-    "Interface" -> SettingsSection.INTERFACE
+    "Notifications" -> SettingsSection.NOTIFICATIONS
+    "Appearance", "Interface" -> SettingsSection.APPEARANCE
     else -> SettingsSection.ACCOUNT
 }
+
+/** Android's "Remove animations" (Settings → Accessibility): the animator
+ *  duration scale is 0. Read defensively — a missing value means motion on. */
+internal fun systemReducesMotion(context: android.content.Context): Boolean =
+    runCatching {
+        android.provider.Settings.Global.getFloat(context.contentResolver, android.provider.Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f
+    }.getOrDefault(false)
 
 /** Per-step navigation (web routeFor + onShow-nudges, Android view mapping).
  *  Pure dispatch over [TourNav] so the focus deviation is unit-testable. */
@@ -170,7 +179,12 @@ fun TourHost(
     val context = LocalContext.current
     val store = remember { TourStateStore(context) }
     val boot = remember { store.load() }
-    val settings by vm.settings.collectAsStateWithLifecycle()
+    // The ring's pulse follows the SYSTEM "Remove animations" setting (the
+    // in-app Reduce motion switch was retired with the slim settings,
+    // 2026-09-24). Re-read on resume, so a change made in Android Settings
+    // lands the next time the app comes back.
+    var reduceMotion by remember { mutableStateOf(systemReducesMotion(context)) }
+    androidx.lifecycle.compose.LifecycleEventEffect(androidx.lifecycle.Lifecycle.Event.ON_RESUME) { reduceMotion = systemReducesMotion(context) }
 
     var phase by remember { mutableStateOf(entryToPhase(initialPhase(boot))) }
     var mode by remember { mutableStateOf(boot.mode ?: TourMode.ESSENTIAL) }
@@ -291,7 +305,7 @@ fun TourHost(
         advance()
     }
 
-    // Settings → Account → "Product tour": routed through resumeDecision —
+    // Settings → "Replay the tour": routed through resumeDecision —
     // a paused/unfinished run offers the RESUME card at its saved step (an
     // unconditional wipe here would eat an in-progress run); a finished tour
     // or a fresh account resets the run flags and shows the welcome.
@@ -510,7 +524,7 @@ fun TourHost(
                 // on the assistant/reentry steps (display-only elsewhere).
                 TourSpotlight(
                     targetRect,
-                    reduceMotion = settings.reduceMotion,
+                    reduceMotion = reduceMotion,
                     consumeInput = lockdown.consumeInput,
                     cutoutInteractive = lockdown.cutoutInteractive,
                 )
@@ -635,7 +649,7 @@ fun TourHost(
  * Resume chip — a small floating pill (orbit mark + ✕), docked
  * bottom-corner across screens while a paused run has progress.
  * Tap = resume at the saved step; ✕ = gone for good (the
- * Settings → Account → Product tour path remains).
+ * Settings → Replay the tour path remains).
  * ============================================================ */
 @Composable
 private fun TourResumeChip(onResume: () -> Unit, onDismissForever: () -> Unit) {

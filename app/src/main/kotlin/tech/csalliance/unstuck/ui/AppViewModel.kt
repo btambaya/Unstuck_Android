@@ -270,7 +270,7 @@ class AppViewModel(
     private val _callProactive = MutableStateFlow(CallProactivePrefs.DEFAULTS)
     val callProactivePrefs: StateFlow<CallProactivePrefs> = _callProactive.asStateFlow()
 
-    /** The one-time Settings › Calls "allow full-screen calls" nudge was dismissed. */
+    /** The one-time Settings › Notifications & calls "allow full-screen calls" nudge was dismissed. */
     private val _ringNudgeDismissed = MutableStateFlow(false)
     val ringNudgeDismissed: StateFlow<Boolean> = _ringNudgeDismissed.asStateFlow()
     private val _receiptUndosInFlight = MutableStateFlow<Set<String>>(emptySet())
@@ -3123,6 +3123,13 @@ class AppViewModel(
         if (changed.isNotEmpty()) {
             settingsStore.savePendingNotifPrefWrites(settingsStore.loadPendingNotifPrefWrites() + changed)
             viewModelScope.launch { auth?.currentUserId?.let { uid -> runCatching { drainNotifPrefWrites(uid) } } }
+            // Re-arm the on-device alarms off the new level / lead — here, not in
+            // each caller: the assistant's set_notification_level and
+            // set_reminder_lead used to change the setting and leave the alarms
+            // armed for the old one until the next sync (slim-settings plan, C3).
+            (graph.appContext as? tech.csalliance.unstuck.UnstuckApp)?.let { app ->
+                runCatching { tech.csalliance.unstuck.surface.ReminderScheduler.reschedule(app) }
+            }
         }
     }
 
@@ -4256,7 +4263,7 @@ class AppViewModel(
     val voiceProxyUrl: String get() = tech.csalliance.unstuck.BuildConfig.VOICE_PROXY_URL
     val voiceModel: String get() = "qwen3.5-omni-flash-realtime"
     /** Realtime voice is available only when a proxy is configured AND the user
-     *  hasn't switched AI off (Settings → Interface → AI Assistant). The
+     *  hasn't switched AI off (Settings → Assistant & privacy → AI Assistant). The
      *  kill-switch has to reach EVERY assistant surface, voice included — the
      *  published privacy policy promises exactly that. */
     fun voiceConfigured(): Boolean = voiceProxyUrl.isNotBlank() && settings.value.assistantEnabled
@@ -4397,7 +4404,7 @@ class AppViewModel(
     /** Calls need a signed-in Supabase client (the tools say so otherwise). */
     fun callsAvailable(): Boolean = currentUid() != null && assistantApi.callStore() != null
 
-    /** A USER change from Settings → Calls: cache for this account (+ the in-memory
+    /** A USER change from Settings → Notifications & calls: cache for this account (+ the in-memory
      *  value Push.kt's decide() reads). Signed out → in-memory only. */
     fun updateCallSettings(transform: (CallSettings) -> CallSettings) {
         val next = transform(_callSettings.value)
@@ -4406,7 +4413,7 @@ class AppViewModel(
         runCatching { CallSettingsStore.save(graph.appContext, uid, next) }
     }
 
-    /** A USER change from Settings › Calls to the proactive calls: cache it for
+    /** A USER change from Settings › Notifications & calls to the proactive calls: cache it for
      *  this account, mark it pending, and push it to `notification_preferences`
      *  now (best-effort — a failure leaves it pending for the next pull, which
      *  re-pushes rather than pulling the server's older value over it). */
@@ -4420,7 +4427,7 @@ class AppViewModel(
         viewModelScope.launch { runCatching { pushCallProactivePrefs(uid) } }
     }
 
-    /** Settings › Calls opened: pull the account's proactive prefs (a toggle
+    /** Settings › Notifications & calls opened: pull the account's proactive prefs (a toggle
      *  made on the web / iPhone reaches this phone). */
     fun refreshCallProactivePrefs() {
         val uid = currentUid() ?: return
@@ -4675,7 +4682,7 @@ class AppViewModel(
         runCatching { tech.csalliance.unstuck.surface.PausedCheckinScheduler.cancel(ctx) }
     }
 
-    /** Settings › Interface › "Clear Assistant history": the server-side delete
+    /** Settings › Assistant & privacy › "Delete conversation history": the server-side delete
      *  of this user's stored conversations (`delete_my_assistant_turns`,
      *  migration 074) — the control the privacy policy promises. The rows
      *  deleted, or a failure (signed out, offline). Local chat threads are
@@ -4883,7 +4890,7 @@ data class Nudge(
  *  use the same words). */
 const val VOICE_SESSION_RECEIPTS = "While we talked:"
 
-// ── "Test call now" (Settings → Calls) — copy from iOS CallSettingsView ──
+// ── "Test call now" (Settings → Notifications & calls) — copy from iOS CallSettingsView ──
 /** The label of the row "Test call now" books (a live one is cancelled before a retry). */
 const val TEST_CALL_LABEL = TestCallLogic.LABEL
 const val TEST_CALL_NOTE = TestCallLogic.NOTE

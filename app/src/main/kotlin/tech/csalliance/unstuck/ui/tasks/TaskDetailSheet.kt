@@ -650,12 +650,12 @@ object CallMeLogic {
     fun hoursHint(callAtMs: Long?, s: tech.csalliance.unstuck.core.logic.CallSettings): String? {
         val at = callAtMs ?: return null
         if (tech.csalliance.unstuck.core.logic.CallSettingsLogic.deviceGuard(at, s) == null) return null
-        if (!s.enabled) return "Calls are off on this phone, so it would decline this call. Switch them on in Settings › Calls."
+        if (!s.enabled) return "Calls are off on this phone, so it would decline this call. Switch them on in Settings › Notifications & calls."
         val hm = CallToolLogic.hhmm(at)
         val hours = tech.csalliance.unstuck.core.logic.CallSettingsLogic.hoursLabel(
             s.hoursStart, s.hoursEnd, tech.csalliance.unstuck.core.logic.CallSettingsLogic.minutesOfDay(hm) ?: -1,
         )
-        return "$hm is outside this phone's call hours ($hours), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Calls."
+        return "$hm is outside this phone's call hours ($hours), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Notifications & calls."
     }
 
     /** Booking, or changing the ring time (lead / slot), meets the hint; a
@@ -777,8 +777,13 @@ internal fun CallMeSection(vm: AppViewModel, task: TaskItem, taskBlocks: List<Ca
             val existing = row
             val res = if (existing != null) vm.updateTaskCall(existing.id, leadNow, notesNow) else vm.bookTaskCall(task.id, leadNow, notesNow)
             when {
-                CallMeLogic.isOk(res) -> row = vm.callForTask(task.id)
-                    ?: CallMeLogic.rowFromResult(res, existing?.userId, task.id, block.id, leadNow, notesNow, at) ?: existing
+                CallMeLogic.isOk(res) -> {
+                    row = vm.callForTask(task.id)
+                        ?: CallMeLogic.rowFromResult(res, existing?.userId, task.id, block.id, leadNow, notesNow, at) ?: existing
+                    // The next "Call me about this" starts at this lead (slim settings:
+                    // the call-lead row left Settings; request_call reads the same key).
+                    if (leadNow != vm.callSettings.value.defaultLeadMin) vm.updateCallSettings { it.copy(defaultLeadMin = leadNow) }
+                }
                 // Zero rows: the call rang / was cancelled underneath us.
                 res == CallToolLogic.CHANGED_UNDERNEATH || CallMeLogic.isAlreadyGone(res) -> {
                     error = CallMeLogic.CHANGED_UNDERNEATH

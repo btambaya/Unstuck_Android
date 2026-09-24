@@ -24,8 +24,8 @@ import java.time.ZoneId
  *                    as a notification);
  *  - assistantEnabled the build flag AND the AI Assistant setting — off means
  *                    the call is declined with a notification (plan risk 10);
- *  - callsEnabled    the per-account "Calls from Unstuck" toggle (Settings › Calls);
- *  - withinHours     the user's Settings › Calls window (CallSettingsLogic:
+ *  - callsEnabled    the per-account "Calls from Unstuck" toggle (Settings › Notifications & calls);
+ *  - withinHours     the user's Settings › Notifications & calls window (CallSettingsLogic:
  *                    start inclusive, end exclusive, overnight when end < start);
  *  - focusLive       a focus session is running (the live-session store);
  *  - anchorExists    for a task-anchored call: false only for what this phone

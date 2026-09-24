@@ -128,7 +128,7 @@ data class CallNotificationSpec(
 
 object CallNotificationCopy {
     const val NO_NOTES = "No notes on this one."
-    const val HOURS_HINT = "(outside your call hours — Settings › Calls)"
+    const val HOURS_HINT = "(outside your call hours — Settings › Notifications & calls)"
     const val VOICE_FAILED_TITLE = "Couldn't start the call — here's what it was about"
 
     /** Unanswered after 30 s: "I called about <label>" with the notes as

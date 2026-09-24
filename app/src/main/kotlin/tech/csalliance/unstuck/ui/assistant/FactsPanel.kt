@@ -72,23 +72,24 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.util.Locale
 
-// "What Unstuck knows" — every fact the assistant has learned, visible and
-// deletable (port of iOS App/Features/FactsPanel.swift and the web's
-// components/settings/facts-panel.tsx). Memory transparency is part of the
-// same consent surface as the AI toggle (docs/ai-gateway-brainstorm.md):
-// nothing is stored silently, and forgetting is immediate, everywhere
-// (soft-delete tombstones sync through profile_facts).
+// Settings → Assistant & privacy → "What Unstuck remembers" — every fact the
+// assistant has learned, visible and deletable (port of iOS
+// App/Features/FactsPanel.swift and the web's components/settings/facts-panel.tsx).
+// Memory transparency is part of the same consent surface as the AI toggle
+// (docs/ai-gateway-brainstorm.md): nothing is stored silently, and forgetting
+// is immediate, everywhere (soft-delete tombstones sync through profile_facts).
 //
-// Settings → "What Unstuck knows". Lists each ACTIVE fact with its category
-// chip + date (the date it refers to when set, else when it was last
-// updated), edit-in-place, forget one, "Forget everything" (confirmed), an
-// add row, and the four ritual toggles (which recurring moments run).
+// Lists each ACTIVE fact with its plain category ("About me", "Routine", …) +
+// date (the date it refers to when set, else when it was last updated),
+// edit-in-place, × to forget with Undo, "Forget everything" (confirmed) and an
+// add row. The screen stays when the AI is off — only the add row hides. The
+// recurring moments left this screen (slim settings, 2026-09-24): nothing on
+// the phones shows them; the web assistant panel runs them as Routines.
 
-/** Every user-facing string of the panel, verbatim from iOS / the web. */
+/** Every user-facing string of the panel. */
 object FactsPanelCopy {
-    const val EYEBROW = "Settings · Memory"
-    const val TITLE = "What Unstuck knows about you."
-    const val NAV_TITLE = "What Unstuck knows"
+    const val NAV_TITLE = "What Unstuck remembers"
+    /** Verbatim iOS / web. */
     const val DISCLOSURE =
         "The assistant’s memory — built from your answers and conversations. These facts are shared with our AI provider (which doesn’t train on them) so it can personalise your help. Delete anything; it forgets immediately, everywhere."
     const val EMPTY = "Nothing yet — it learns as you talk to it."
@@ -100,17 +101,18 @@ object FactsPanelCopy {
     const val FORGET_ALL_TITLE = "Forget everything?"
     const val FORGET_ALL_MESSAGE = "Forget everything the assistant has learned about you? This can’t be undone."
     const val CANCEL = "Cancel"
-    const val MOMENTS = "Moments it runs for you"
-    const val TONE_NOTE = "Your tone is derived from these facts — tell it “keep me honest” or “gently” and it adapts. No separate dial."
     const val EDIT_PLACEHOLDER = "The fact"
     const val SAVE = "Save"
+    const val UNDO = "Undo"
     /** A rejected/failed edit is SAID, never swallowed — the old text is still
      *  on screen because the row was never removed. Same words as the
      *  interview's failed save (InterviewCopy.SAVE_FAILED). */
     const val EDIT_FAILED = "Couldn’t save that — try again"
-    fun editTitle(f: ProfileFact) = "Edit · ${f.category.raw}"
+    const val FORGET_FAILED = "Couldn’t forget that — try again"
+    fun editTitle(f: ProfileFact) = "Edit · ${f.category.plainLabel}"
     fun editA11y(f: ProfileFact) = "Edit fact: ${f.fact}"
     fun forgetA11y(f: ProfileFact) = "Forget \"${f.fact}\""
+    fun forgot(f: ProfileFact) = "Forgot “${f.fact}”."
 }
 
 /** "for 12 Sept" (the date the fact is about) or "12 Sept" (last updated) —
@@ -138,34 +140,22 @@ object FactDate {
     }
 }
 
-/** The full Settings sub-screen (own app bar), for a host that routes it as
- *  its own destination. [FactsPanelContent] is the body alone, for a host that
- *  places it inside `SettingsSubScreen`'s scaffold. */
+/** The panel body, inside Settings' sub-screen scaffold. [canAdd] = false
+ *  (the AI is off) hides only the add row: what it remembers stays visible,
+ *  editable and forgettable. */
 @Composable
-fun FactsPanelScreen(host: FactsHost, onBack: () -> Unit) {
-    val c = UTheme.colors
-    Column(Modifier.fillMaxSize().background(c.bg)) {
-        AppBar(title = FactsPanelCopy.NAV_TITLE, leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp)) {
-            SectionLabel(FactsPanelCopy.EYEBROW, color = c.primaryDeep, modifier = Modifier.padding(top = 4.dp))
-            Text(FactsPanelCopy.TITLE, style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
-            FactsPanelContent(host)
-            Box(Modifier.padding(24.dp)) {}
-        }
-    }
-}
-
-@Composable
-fun FactsPanelContent(host: FactsHost, modifier: Modifier = Modifier) {
+fun FactsPanelContent(host: FactsHost, modifier: Modifier = Modifier, canAdd: Boolean = true) {
     val c = UTheme.colors
     val scope = rememberCoroutineScope()
     val facts by host.profileFacts.collectAsStateWithLifecycle()
-    val rituals by host.rituals.collectAsStateWithLifecycle()
     var editing by remember { mutableStateOf<ProfileFact?>(null) }
     var confirmForgetAll by remember { mutableStateOf(false) }
     /** Set when the last edit didn't land — the row is untouched, so this is
      *  the only sign the user gets. Cleared by the next edit attempt. */
     var editError by remember { mutableStateOf<String?>(null) }
+    /** The fact the last × forgot, for its Undo (a fresh save of the same
+     *  words, category and date). Cleared by the next forget or after Undo. */
+    var lastForgotten by remember { mutableStateOf<ProfileFact?>(null) }
 
     Column(modifier.fillMaxWidth()) {
         Text(FactsPanelCopy.DISCLOSURE, style = UFont.sans(12).copy(lineHeight = 17.sp), color = c.ink3, modifier = Modifier.padding(bottom = 12.dp))
@@ -182,12 +172,41 @@ fun FactsPanelContent(host: FactsHost, modifier: Modifier = Modifier) {
                     FactRow(
                         f = f,
                         onEdit = { editing = f },
-                        onForget = { scope.launch { host.forgetProfileFact(f.id) } },
+                        onForget = {
+                            editError = null
+                            scope.launch {
+                                if (host.forgetProfileFact(f.id)) lastForgotten = f
+                                else editError = FactsPanelCopy.FORGET_FAILED
+                            }
+                        },
                     )
                 }
             }
-            Divider()
-            AddRow { category, text -> scope.launch { host.saveProfileFact(category, text, ProfileFactSource.SETTINGS, null) } }
+            if (canAdd) {
+                Divider()
+                AddRow { category, text -> scope.launch { host.saveProfileFact(category, text, ProfileFactSource.SETTINGS, null) } }
+            }
+        }
+
+        lastForgotten?.let { f ->
+            Row(
+                Modifier.fillMaxWidth().padding(top = 8.dp).clip(RoundedCornerShape(12.dp)).background(c.bg2)
+                    .padding(start = 14.dp, end = 4.dp)
+                    .semantics(mergeDescendants = false) { liveRegion = LiveRegionMode.Polite },
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(FactsPanelCopy.forgot(f), style = UFont.sans(12), color = c.ink2, maxLines = 2, modifier = Modifier.weight(1f).padding(vertical = 10.dp))
+                Text(
+                    FactsPanelCopy.UNDO, style = UFont.sans(12, FontWeight.SemiBold), color = c.ink,
+                    modifier = Modifier.clip(RoundedCornerShape(8.dp))
+                        .clickable(role = Role.Button, onClickLabel = "Undo forgetting ${f.fact}") {
+                            lastForgotten = null
+                            scope.launch { host.saveProfileFact(f.category, f.fact, f.source, f.whenIso) }
+                        }
+                        .minimumInteractiveComponentSize()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                )
+            }
         }
 
         editError?.let { err ->
@@ -208,16 +227,6 @@ fun FactsPanelContent(host: FactsHost, modifier: Modifier = Modifier) {
                     .padding(horizontal = 4.dp, vertical = 12.dp),
             )
         }
-
-        Text(FactsPanelCopy.MOMENTS, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink, modifier = Modifier.padding(top = 18.dp, bottom = 8.dp))
-        Card {
-            RITUAL_LABELS.forEachIndexed { i, r ->
-                RitualToggleRow(label = r.label, sub = r.sub, value = rituals[r.key], last = i == RITUAL_LABELS.lastIndex) { on ->
-                    host.setRitual(r.key, on)
-                }
-            }
-        }
-        Text(FactsPanelCopy.TONE_NOTE, style = UFont.sans(12).copy(lineHeight = 17.sp), color = c.ink2, modifier = Modifier.padding(top = 10.dp))
     }
 
     if (confirmForgetAll) {
@@ -226,7 +235,7 @@ fun FactsPanelContent(host: FactsHost, modifier: Modifier = Modifier) {
             title = { Text(FactsPanelCopy.FORGET_ALL_TITLE, style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
             text = { Text(FactsPanelCopy.FORGET_ALL_MESSAGE, style = UFont.sans(13), color = c.ink2) },
             confirmButton = {
-                TextButton(onClick = { confirmForgetAll = false; scope.launch { host.forgetAllProfileFacts() } }) {
+                TextButton(onClick = { confirmForgetAll = false; lastForgotten = null; scope.launch { host.forgetAllProfileFacts() } }) {
                     Text(FactsPanelCopy.FORGET_ALL, color = c.red)
                 }
             },
@@ -277,7 +286,7 @@ private fun FactRow(f: ProfileFact, onEdit: () -> Unit, onForget: () -> Unit) {
     val c = UTheme.colors
     Row(Modifier.fillMaxWidth().padding(start = 16.dp, end = 4.dp, top = 10.dp, bottom = 10.dp), verticalAlignment = Alignment.Top) {
         Text(
-            f.category.raw.uppercase(), style = UFont.mono(9, FontWeight.SemiBold).copy(letterSpacing = 0.6.sp), color = c.coral,
+            f.category.plainLabel.uppercase(), style = UFont.mono(9, FontWeight.SemiBold).copy(letterSpacing = 0.6.sp), color = c.coral,
             modifier = Modifier.padding(top = 2.dp).clip(RoundedCornerShape(6.dp)).background(c.bg2).padding(horizontal = 6.dp, vertical = 2.dp),
         )
         Column(
@@ -318,13 +327,13 @@ private fun AddRow(onAdd: (ProfileFactCategory, String) -> Unit) {
                     .padding(horizontal = 9.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                Text(category.raw, style = UFont.sans(12), color = c.ink2)
+                Text(category.plainLabel, style = UFont.sans(12), color = c.ink2)
                 Icon(Icons.Filled.KeyboardArrowDown, contentDescription = null, tint = c.ink2, modifier = Modifier.size(14.dp))
             }
             DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
                 ProfileFactCategory.entries.forEach { cat ->
                     DropdownMenuItem(
-                        text = { Text(cat.raw.replaceFirstChar { it.uppercase() }, style = UFont.sans(14), color = c.ink) },
+                        text = { Text(cat.plainLabel, style = UFont.sans(14), color = c.ink) },
                         onClick = { category = cat; menu = false },
                     )
                 }
@@ -351,28 +360,6 @@ private fun AddRow(onAdd: (ProfileFactCategory, String) -> Unit) {
                 .padding(horizontal = 12.dp, vertical = 8.dp),
         )
     }
-}
-
-/** Label + sub + switch — one ritual (Settings variant of the interview chips). */
-@Composable
-private fun RitualToggleRow(label: String, sub: String, value: Boolean, last: Boolean, onChange: (Boolean) -> Unit) {
-    val c = UTheme.colors
-    // The whole row is the switch for TalkBack ("<label>, switch, on") — the
-    // inner pill is decorative so it doesn't surface as a second nameless toggle.
-    Row(
-        Modifier.fillMaxWidth()
-            .toggleable(value = value, role = Role.Switch, onValueChange = onChange)
-            .semantics { contentDescription = "$label. $sub" }
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-            Text(label, style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
-            Text(sub, style = UFont.sans(12), color = c.ink3)
-        }
-        MdToggle(value, onChange, Modifier.clearAndSetSemantics {})
-    }
-    if (!last) Divider()
 }
 
 /** Edit one fact's text (category + date stay). Save re-stores it. */

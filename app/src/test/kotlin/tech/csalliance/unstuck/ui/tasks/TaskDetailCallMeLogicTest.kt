@@ -89,15 +89,15 @@ class TaskDetailCallMeLogicTest {
         assertNull(CallMeLogic.hoursHint(localMs("20:00"), narrow))
         assertNull(CallMeLogic.hoursHint(null, narrow))
         assertEquals(
-            "21:00 is outside this phone's call hours (08:00–21:00; the latest it rings is 20:59), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Calls.",
+            "21:00 is outside this phone's call hours (08:00–21:00; the latest it rings is 20:59), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Notifications & calls.",
             CallMeLogic.hoursHint(localMs("21:00"), narrow),
         )
         assertEquals(
-            "07:45 is outside this phone's call hours (08:00–21:00), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Calls.",
+            "07:45 is outside this phone's call hours (08:00–21:00), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Notifications & calls.",
             CallMeLogic.hoursHint(localMs("07:45"), narrow),
         )
         assertEquals(
-            "Calls are off on this phone, so it would decline this call. Switch them on in Settings › Calls.",
+            "Calls are off on this phone, so it would decline this call. Switch them on in Settings › Notifications & calls.",
             CallMeLogic.hoursHint(localMs("12:00"), tech.csalliance.unstuck.core.logic.CallSettings(enabled = false)),
         )
     }

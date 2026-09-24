@@ -74,6 +74,9 @@ private fun CaptureTag.wire(): String = name.lowercase().replace('_', '-')
 
 private fun onOff(b: Boolean) = if (b) "on" else "off"
 
+/** The stored ambient value → the speaker button's state ("pink" was the same loop). */
+internal fun ambientIsOn(stored: String): Boolean = stored == "brown" || stored == "pink"
+
 /** One task as the read tools list it: name, id, estimate, area, next slot,
  *  repeat / Later / slip / done markers. Recurring rows are OCCURRENCES whose
  *  id is the block id — the model must get the TASK id (templateId).
@@ -691,15 +694,20 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             val s = api.getSettings()
             val usable = if (s.usableWeekdayMin == null && s.usableWeekendMin == null) "not readable in this app (set_usable_minutes still sets them)"
             else "weekdays ${s.usableWeekdayMin ?: "?"}m, weekend days ${s.usableWeekendMin ?: "?"}m"
+            // Only what still has a control (slim settings, 2026-09-24): no accent,
+            // density, high contrast or in-app reduce motion — naming them would
+            // send the user looking for switches that are gone.
             "ok: settings:\n" +
-                "- notifications: ${s.notificationLevel}\n" +
+                "- notifications: ${s.notificationLevel} (Settings → Notifications & calls)\n" +
                 "- reminders: ${if (s.reminderLeadMin == 0) "off" else "${s.reminderLeadMin} minutes before"} (the default for every task)\n" +
                 "- usable minutes: $usable\n" +
-                "- focus defaults: ${s.focusDefaultMin}m sessions, overrun ${if (s.focusOverrunMin == 0) "off" else "${s.focusOverrunMin}m"}, " +
-                "soft exit ${onOff(s.focusSoftExit)}, pause reasons ${onOff(s.focusPauseReasons)}\n" +
-                "- theme: ${s.theme}\n" +
-                "- ambient sound: ${s.ambient}\n" +
-                "- rituals: ${listOf("morning", "evening", "friday", "sunday").joinToString(", ") { "$it ${onOff(s.rituals[it] ?: false)}" }}"
+                "- focus options (⋯ Options on the Focus screen): new tasks start at ${s.focusDefaultMin}m, " +
+                "check in ${if (s.focusOverrunMin == 0) "never" else "${s.focusOverrunMin}m after the timer runs out"}, " +
+                "ask before leaving ${onOff(s.focusSoftExit)}, ask why pausing ${onOff(s.focusPauseReasons)}\n" +
+                "- theme: ${s.theme} (Settings → Appearance)\n" +
+                "- text size: ${s.textSize} (Settings → Appearance)\n" +
+                "- background noise: ${onOff(ambientIsOn(s.ambient))} (the speaker button on the Focus screen)\n" +
+                "- routines: ${listOf("morning", "evening", "friday", "sunday").joinToString(", ") { "$it ${onOff(s.rituals[it] ?: false)}" }}"
         }
 
         "set_usable_minutes" -> {
@@ -743,13 +751,19 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             "ok: theme set to $t"
         }
 
+        // Background noise is on/off now (the Focus screen's speaker button): brown
+        // or pink = on — pink was the same loop, and an older model or client may
+        // still send it, so it is taken, never rejected — off = off.
         "set_ambient_sound" -> {
             val sounds = RegistryTools.enumOf("set_ambient_sound", "sound")
-            val snd = (args.str("sound") ?: "").lowercase()
-            if (snd !in sounds) return "error: sound must be ${sounds.joinToString(", ")}"
-            if (api.getSettings().ambient == snd) return "error: ambient sound is already $snd — nothing changed"
-            if (!api.setAmbientSound(snd)) return "error: could not save the ambient sound"
-            "ok: ambient sound ${if (snd == "off") "off" else "set to $snd noise"}"
+            val on = when ((args.str("sound") ?: "").lowercase()) {
+                "off" -> false
+                "brown", "pink", "on" -> true
+                else -> return "error: sound must be ${sounds.joinToString(", ")}"
+            }
+            if (ambientIsOn(api.getSettings().ambient) == on) return "error: background noise is already ${onOff(on)} — nothing changed"
+            if (!api.setAmbientSound(if (on) "brown" else "off")) return "error: could not save background noise"
+            "ok: background noise ${onOff(on)}"
         }
 
         "set_focus_defaults" -> {

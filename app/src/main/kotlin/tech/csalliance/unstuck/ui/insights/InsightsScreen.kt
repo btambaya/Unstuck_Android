@@ -23,6 +23,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -203,8 +204,9 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                         Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text("Gentle friction", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
                             Text(if (slips.size == 1) "1 task has been waiting a while or keeps moving." else "${slips.size} tasks have been waiting a while or keep moving.", style = UFont.sans(12), color = c.ink2)
-                            slips.take(3).forEach { s -> Text("· ${s.name}", style = UFont.sans(12), color = c.ink3, maxLines = 1) }
-                            if (slips.size > 3) Text("The rest are in Deep dive.", style = UFont.sans(11), color = c.ink3)
+                            var frictionOpen by rememberSaveable { mutableStateOf(false) }
+                            slips.take(clipTo(frictionOpen, 3)).forEach { s -> Text("· ${s.name}", style = UFont.sans(12), color = c.ink3, maxLines = 1) }
+                            MoreToggle(slips.size - 3, frictionOpen, { frictionOpen = !frictionOpen })
                         }
                     }
                 }
@@ -304,7 +306,8 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                 if (slips.isNotEmpty()) {
                     item {
                         SectionLabel("The slip detector · ${slips.size}", Modifier.padding(top = 18.dp, bottom = 6.dp))
-                        slips.take(SLIP_SHOWN).forEach { s ->
+                        var slipsOpen by rememberSaveable { mutableStateOf(false) }
+                        slips.take(clipTo(slipsOpen, SLIP_SHOWN)).forEach { s ->
                             Card(Modifier.fillMaxWidth().padding(vertical = 3.dp), radius = 12) {
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
                                     Text(s.name, style = UFont.sans(13, FontWeight.Medium), color = c.ink, modifier = Modifier.weight(1f))
@@ -312,7 +315,7 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                                 }
                             }
                         }
-                        if (slips.size > SLIP_SHOWN) Text("+${slips.size - SLIP_SHOWN} more", style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 4.dp))
+                        MoreToggle(slips.size - SLIP_SHOWN, slipsOpen, { slipsOpen = !slipsOpen }, Modifier.padding(top = 4.dp))
                     }
                 }
             }

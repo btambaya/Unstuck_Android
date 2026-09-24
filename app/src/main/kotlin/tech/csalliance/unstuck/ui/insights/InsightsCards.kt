@@ -1,6 +1,12 @@
 package tech.csalliance.unstuck.ui.insights
 
 import androidx.compose.foundation.background
+import androidx.compose.ui.semantics.Role
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -175,17 +181,38 @@ internal fun DailyRhythmCard(days: List<DayFacts>, span: InsightsSpan, todayYear
     }
 }
 
+/** "+N more ›" under a clipped list — tap shows the rest, "Show less" folds it
+ *  back (web + iOS parity). Nothing when the list isn't cut. */
+@Composable
+internal fun MoreToggle(hidden: Int, open: Boolean, onToggle: () -> Unit, modifier: Modifier = Modifier) {
+    if (hidden <= 0) return
+    val c = UTheme.colors
+    Text(
+        if (open) "Show less" else "+$hidden more ›",
+        style = UFont.sans(11, FontWeight.SemiBold),
+        color = c.ink2,
+        modifier = modifier
+            .clip(RoundedCornerShape(6.dp))
+            .clickable(role = Role.Button, onClickLabel = if (open) "Show less" else "Show all") { onToggle() }
+            .padding(horizontal = 2.dp, vertical = 4.dp),
+    )
+}
+
+/** How many rows a clipped list shows: all of them once opened. */
+internal fun clipTo(open: Boolean, max: Int): Int = if (open) Int.MAX_VALUE else max
+
 /** "Got unstuck": things finished after waiting a week or more, or after being
  *  moved twice. Hidden when empty — there is never a "no wins" state. */
 @Composable
 internal fun GotUnstuckCard(wins: List<UnstuckWin>) {
     val c = UTheme.colors
+    var open by rememberSaveable { mutableStateOf(false) }
     if (wins.isEmpty()) return
     Card(Modifier.fillMaxWidth().padding(top = 12.dp), radius = 18) {
         Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
             Text("Got unstuck", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
             Text("Finished after waiting a while — the hard ones.", style = UFont.sans(11), color = c.ink3)
-            wins.take(3).forEach { w ->
+            wins.take(clipTo(open, 3)).forEach { w ->
                 Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(periodCleanName(w.task.name), style = UFont.sans(13, FontWeight.Medium), color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                     val chip = listOfNotNull(
@@ -197,7 +224,7 @@ internal fun GotUnstuckCard(wins: List<UnstuckWin>) {
                     }
                 }
             }
-            if (wins.size > 3) Text("+${wins.size - 3} more", style = UFont.sans(11), color = c.ink3)
+            MoreToggle(wins.size - 3, open, { open = !open })
         }
     }
 }
@@ -209,6 +236,7 @@ internal fun GotUnstuckCard(wins: List<UnstuckWin>) {
 @Composable
 internal fun PlanCard(plan: PlanFacts?, todayYear: Int, zone: ZoneId) {
     val c = UTheme.colors
+    var openAll by rememberSaveable { mutableStateOf(false) }
     if (plan == null) return
     val later = plan.slipped.count { it.task.done }
     val openPlain = plan.slipped.filter { !it.task.done }
@@ -238,18 +266,19 @@ internal fun PlanCard(plan: PlanFacts?, todayYear: Int, zone: ZoneId) {
             }
             if (openPlain.isNotEmpty() || plan.missed.isNotEmpty()) {
                 SectionLabel("Still open from earlier", Modifier.padding(top = 2.dp))
-                openPlain.take(3).forEach { s ->
+                openPlain.take(clipTo(openAll, 3)).forEach { s ->
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(periodCleanName(s.task.name), style = UFont.sans(13), color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                         Text("planned ${periodFmtDay(s.date, todayYear)}", style = UFont.sans(11), color = c.ink3)
                     }
                 }
-                plan.missed.take(3).forEach { m ->
+                plan.missed.take(clipTo(openAll, 3)).forEach { m ->
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(m.name, style = UFont.sans(13), color = c.ink, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
                         Text("${m.n} day${if (m.n == 1) "" else "s"} open", style = UFont.sans(11), color = c.ink3)
                     }
                 }
+                MoreToggle((openPlain.size - 3).coerceAtLeast(0) + (plan.missed.size - 3).coerceAtLeast(0), openAll, { openAll = !openAll })
             }
             if (plan.deadlines.isNotEmpty()) {
                 // A deadline that passed unmet: still open, or finished after it
@@ -291,11 +320,12 @@ private fun Legend(color: Color?, text: String) {
 @Composable
 internal fun RepeatingRhythmCard(series: List<SeriesRhythm>, lifeAreas: List<LifeArea>) {
     val c = UTheme.colors
+    var open by rememberSaveable { mutableStateOf(false) }
     if (series.isEmpty()) return
     Card(Modifier.fillMaxWidth().padding(top = 12.dp), radius = 18) {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("Repeating tasks", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
-            series.take(5).forEach { s ->
+            series.take(clipTo(open, 5)).forEach { s ->
                 val a11y = "${s.name}: kept ${s.kept} of ${s.soFar} so far"
                 Column(Modifier.semantics(mergeDescendants = true) { contentDescription = a11y }, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -308,7 +338,7 @@ internal fun RepeatingRhythmCard(series: List<SeriesRhythm>, lifeAreas: List<Lif
                     }
                 }
             }
-            if (series.size > 5) Text("+${series.size - 5} more", style = UFont.sans(11), color = c.ink3)
+            MoreToggle(series.size - 5, open, { open = !open })
         }
     }
 }

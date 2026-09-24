@@ -15,6 +15,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.wrapContentSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
@@ -233,8 +234,14 @@ fun TodayScreen(
         //    Today/Backlog filters. Only the list below scrolls. ──────────────────
         // top = 8.dp to match the shared AppBar's vertical padding (the other
         // three tabs) so the header icon row sits on the same line across pages.
-        Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 12.dp, top = 8.dp, bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-            Orbit(size = 24)
+        // The logo's ring fills the same 32-dp box as the avatar (Orbit draws its
+        // ring at ~72 % of its size, so 44 → a 32-dp ring, left to overflow the
+        // box's transparent margin), and both sit on the page's 18-dp margins —
+        // logo and avatar mirror each other (iOS build 96 parity).
+        Row(Modifier.fillMaxWidth().padding(start = 18.dp, end = 18.dp, top = 8.dp, bottom = 4.dp), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+            Box(Modifier.size(32.dp), contentAlignment = Alignment.Center) {
+                Orbit(modifier = Modifier.wrapContentSize(unbounded = true), size = 44)
+            }
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                 Box(Modifier.size(40.dp).clip(CircleShape).clickable(onClick = onInbox), contentAlignment = Alignment.Center) {
                     Icon(Icons.Outlined.MoveToInbox, contentDescription = "Captures", tint = c.ink2, modifier = Modifier.size(20.dp))

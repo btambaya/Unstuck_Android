@@ -107,6 +107,7 @@ import tech.csalliance.unstuck.ui.assistant.buildTextRequestContext
 import tech.csalliance.unstuck.ui.assistant.buildVoiceInstructions
 import tech.csalliance.unstuck.ui.assistant.buildVoiceOpening
 import tech.csalliance.unstuck.ui.assistant.runAssistantTool
+import tech.csalliance.unstuck.ui.assistant.confirmTargetName
 import tech.csalliance.unstuck.ui.assistant.talkVoiceToolsJson
 import tech.csalliance.unstuck.ui.assistant.callVoiceToolsJson
 import tech.csalliance.unstuck.ui.assistant.CallToolLogic
@@ -4140,7 +4141,12 @@ class AppViewModel(
             }
         }
         val outcome = try {
-            AssistantHarness(ask, runner).turn(base, text)
+            // Confirm-first reads the name of what a destructive call points at,
+            // so "delete Gym" can't delete another task (James, build 51).
+            val confirmTarget: suspend (HarnessToolCall) -> String? = { call ->
+                withContext(Dispatchers.Default) { confirmTargetName(call.name, ToolArgs.parse(call.argumentsJson), api, scratch) }
+            }
+            AssistantHarness(ask, runner, confirmTarget).turn(base, text)
         } catch (e: HarnessAskFailed) {
             val code = (e.cause as? AssistantAskException)?.code ?: "network"
             // A failed FIRST round keeps the user's turn (the panel shows the

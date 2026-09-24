@@ -17,6 +17,8 @@ import java.util.concurrent.CancellationException
 //    (placed AFTER the tool results so every tool message stays adjacent to
 //    its tool_calls parent — the orphaned-tool shape the upstream 400s on);
 //  • truncated tool-call JSON → tell the model to split the call;
+//  • CONFIRM-FIRST: a destructive call the user didn't ask for is refused
+//    before it runs (AssistantConfirmFirst.kt);
 //  • honest fallbacks only; NEVER a synthesised "Done." (Android defect F2).
 //
 // Pure with respect to the store: the loop talks to a [HarnessAsk] and a
@@ -240,6 +242,10 @@ object AssistantHarnessRules {
 class AssistantHarness(
     private val ask: HarnessAsk,
     private val runner: HarnessToolRunner,
+    /** The display name of the thing a confirm-first call would destroy (the
+     *  task, list, area or tag its arguments point at), or null when unknown /
+     *  when there is only one (cancel_focus) — see [ConfirmFirstRules]. */
+    private val confirmTarget: suspend (HarnessToolCall) -> String? = { null },
     /** Observed after every executed call (the app derives + shows receipts live). */
     private val onToolResult: (HarnessToolCall, String) -> Unit = { _, _ -> },
 ) {
@@ -249,6 +255,13 @@ class AssistantHarness(
      *  round-trip fails; CancellationException propagates untouched. */
     suspend fun turn(history: List<HarnessMessage>, userText: String): HarnessTurn {
         val working = ArrayList<HarnessMessage>(history)
+        // The assistant's last reply the user SAW before this message — what a
+        // "yes" answers (confirm-first). Tool rounds and the hidden bounce don't count.
+        val hidden = AssistantHarnessRules.hiddenIndices(history)
+        val previousReply = history.indices.reversed().firstOrNull { i ->
+            val m = history[i]
+            i !in hidden && m.role == "assistant" && m.toolCalls.isEmpty() && !m.content.isNullOrBlank()
+        }?.let { history[it].content }
         working += HarnessMessage("user", userText)
         val results = ArrayList<Pair<HarnessToolCall, String>>()
         // Fabrication guard state — at most one corrective bounce per turn.
@@ -308,7 +321,14 @@ class AssistantHarness(
 
             // Execute each tool call, append its result for the next round.
             for (call in reply.toolCalls) {
-                var result = try {
+                // CONFIRM-FIRST in code: a destructive tool the user's message
+                // didn't ask for (nor said yes to) never runs — the model reads
+                // why and asks instead (James's stray deletes, build 51).
+                val refused = if (call.name in ConfirmFirstRules.TOOLS) {
+                    val target = try { confirmTarget(call) } catch (e: CancellationException) { throw e } catch (e: Throwable) { null }
+                    ConfirmFirstRules.refusal(call.name, target, userText, previousReply)
+                } else null
+                var result = refused ?: try {
                     runner.run(call)
                 } catch (e: CancellationException) {
                     throw e

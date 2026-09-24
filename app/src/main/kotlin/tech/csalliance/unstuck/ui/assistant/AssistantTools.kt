@@ -388,6 +388,17 @@ private suspend fun renderSchedule(api: AssistantApi, range: String): String {
     return "ok:\n" + lines.joinToString("\n")
 }
 
+/** The display name of what a confirm-first call would destroy — the text
+ *  harness checks the user's message names it ([tech.csalliance.unstuck.core.logic.ConfirmFirstRules]).
+ *  Null when it can't be resolved (the executor then says "not found") or for
+ *  cancel_focus, which has only the running session to point at. */
+suspend fun confirmTargetName(name: String, args: ToolArgs, api: AssistantApi, scratch: TurnScratch): String? = when (name) {
+    "delete_task" -> findTask(args.str("taskId"), api, scratch)?.name
+    "delete_list", "leave_list" -> findList(args.str("listId"), api, scratch)?.name
+    "delete_area", "delete_tag" -> args.str("name")
+    else -> null
+}
+
 // ── the executor ──
 
 /** Execute one tool call. Returns a short result string the model reads on the

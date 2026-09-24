@@ -87,6 +87,8 @@ class ToolRegistryParityTest {
         assertEquals(ToolRegistry.READ_ONLY, AssistantHarnessRules.READ_ONLY_TOOLS)
         assertEquals(ToolRegistry.NAVIGATION, AssistantHarnessRules.NAVIGATION_TOOLS)
         assertEquals(ToolRegistry.STAGED, AssistantHarnessRules.STAGED_TOOLS)
+        // Confirm-first is enforced in code from :core's pinned copy.
+        assertEquals(ToolRegistry.CONFIRM_FIRST, tech.csalliance.unstuck.core.logic.ConfirmFirstRules.TOOLS)
         assertEquals(setOf("share_task", "share_list"), ToolRegistry.STAGED)
         for (n in ToolRegistry.READ_ONLY + ToolRegistry.NAVIGATION + ToolRegistry.STAGED + ToolRegistry.CONFIRM_FIRST) {
             assertTrue("$n is a registry tool", n in ToolRegistry.NAMES)

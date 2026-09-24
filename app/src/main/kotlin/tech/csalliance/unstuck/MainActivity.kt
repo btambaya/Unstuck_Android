@@ -58,6 +58,7 @@ class MainActivity : ComponentActivity() {
                     when (status) {
                         is SessionStatus.Authenticated -> registerFcmToken(application as UnstuckApp)
                         is SessionStatus.NotAuthenticated -> if (status.isSignOut) {
+                            tech.csalliance.unstuck.surface.RegisteredClock.sent = null
                             // Don't leak the previous user's notification history / reminder
                             // settings to a different account on this device.
                             tech.csalliance.unstuck.surface.NotificationLog.clear(this@MainActivity)
@@ -80,6 +81,17 @@ class MainActivity : ComponentActivity() {
             // theme / text-size settings.
             AppRoot(graph)
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // The phone's 12/24-hour setting changed while the app was away (only
+        // system Settings can flip it): re-register so server-written push /
+        // card times follow it. A local read + compare; a request only on change.
+        val mode = tech.csalliance.unstuck.ui.components.DeviceClock.mode(this)
+        if (tech.csalliance.unstuck.surface.RegisteredClock.stale(mode) &&
+            graph.provider?.client?.auth?.currentSessionOrNull() != null
+        ) registerFcmToken(application as UnstuckApp)
     }
 
     override fun onNewIntent(intent: Intent) {

@@ -17,7 +17,10 @@ import tech.csalliance.unstuck.core.logic.CallDecision
 import tech.csalliance.unstuck.core.logic.CallEnv
 import tech.csalliance.unstuck.core.logic.CallOutcome
 import tech.csalliance.unstuck.core.logic.IncomingCallPayload
+import tech.csalliance.unstuck.core.time.ClockMode
+import tech.csalliance.unstuck.sync.PushClient
 import tech.csalliance.unstuck.sync.liveUserId
+import tech.csalliance.unstuck.ui.components.DeviceClock
 
 // FCM receive + token registration. Dormant until google-services.json is
 // added + the google-services plugin applied (a manual prerequisite, the
@@ -35,11 +38,35 @@ fun registerFcmToken(app: UnstuckApp) {
     runCatching {
         FirebaseMessaging.getInstance().token.addOnSuccessListener { token ->
             app.graph.scope.launch {
-                runCatching { push.register(deviceId = deviceId(app), fcmToken = token) }
+                runCatching { push.registerDevice(app, token) }
                     .onSuccess { PendingPushToken.clearIf(app, token) }
             }
         }
     }
+}
+
+/** THE register call: this device's [token] plus the phone's 12/24-hour setting
+ *  (DeviceClock), so the times the server writes into reminder / brief / call
+ *  pushes and in-app cards read like the rest of the phone ("15:00", not
+ *  "3:00 PM", on a 24-hour phone). Remembers the setting the server now has. */
+internal suspend fun PushClient.registerDevice(context: Context, token: String) {
+    val clock = DeviceClock.mode(context)
+    register(deviceId = deviceId(context), fcmToken = token, clock = clock)
+    RegisteredClock.sent = clock
+}
+
+/**
+ * The 12/24-hour setting the server last took from this process. The only way
+ * to flip it is from system Settings, so MainActivity re-registers on the way
+ * back to the front when it no longer matches — a local read + compare, no
+ * request unless it changed. Null = nothing registered yet in this process (a
+ * cold start registers on its own once the session is up) or signed out.
+ */
+internal object RegisteredClock {
+    @Volatile var sent: ClockMode? = null
+
+    /** True when a registration went out with a different mode than [current]. */
+    fun stale(current: ClockMode): Boolean = sent.let { it != null && it != current }
 }
 
 /**
@@ -205,7 +232,7 @@ class UnstuckMessagingService : FirebaseMessagingService() {
         PendingPushToken.set(app, token)
         app.graph.scope.launch {
             PendingPushToken.register(app, token, liveUser = { coordinator.session.ensure().liveUserId }) {
-                coordinator.push.register(deviceId = deviceId(app), fcmToken = it)
+                coordinator.push.registerDevice(app, it)
             }
         }
     }

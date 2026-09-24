@@ -40,7 +40,7 @@ class SyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(c
         app.graph.coordinator?.let { c ->
             PendingPushToken.get(applicationContext)?.let { token ->
                 PendingPushToken.register(applicationContext, token, liveUser = { c.session.ensure().liveUserId }) {
-                    c.push.register(deviceId = deviceId(applicationContext), fcmToken = it)
+                    c.push.registerDevice(applicationContext, it)
                 }
             }
         }

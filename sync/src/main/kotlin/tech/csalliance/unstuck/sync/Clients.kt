@@ -21,6 +21,7 @@ import kotlinx.serialization.json.put
 import tech.csalliance.unstuck.core.logic.PAPrefsLogic
 import tech.csalliance.unstuck.core.logic.RitualPrefs
 import tech.csalliance.unstuck.core.logic.CallProactivePrefs
+import tech.csalliance.unstuck.core.time.ClockMode
 import java.util.TimeZone
 
 // PushClient (FCM register) + NotificationsClient (recap / paused-checkin) +
@@ -31,7 +32,7 @@ import java.util.TimeZone
 
 class PushClient(private val client: SupabaseClient) {
     @Serializable
-    private data class RegisterBody(
+    internal data class RegisterBody(
         val deviceId: String,
         val fcmToken: String?,
         // NO default: kotlinx omits default-valued fields from JSON (encodeDefaults
@@ -41,16 +42,32 @@ class PushClient(private val client: SupabaseClient) {
         // FCM to it. Always serialize it by keeping it required + set explicitly below.
         val platform: String,
         val timezone: String,
+        // The phone's 12/24-hour setting ("12h" / "24h", migration 083): the server
+        // writes the clock times in reminder / brief / call pushes + in-app cards in
+        // it. Required for the same reason as `platform` — never dropped.
+        val clock: String,
     )
 
     /** Register the device's FCM token with the register-push-token function
-     *  (platform = "android" → the backend stores fcm_token + branches sends). */
-    suspend fun register(deviceId: String, fcmToken: String?, timezone: String = TimeZone.getDefault().id) {
+     *  (platform = "android" → the backend stores fcm_token + branches sends),
+     *  with the phone's [clock] mode so server-written times match the screen. */
+    suspend fun register(deviceId: String, fcmToken: String?, clock: ClockMode, timezone: String = TimeZone.getDefault().id) {
         client.functions.invoke("register-push-token") {
             method = HttpMethod.Post
             contentType(ContentType.Application.Json)
-            setBody(RegisterBody(deviceId = deviceId, fcmToken = fcmToken, platform = "android", timezone = timezone))
+            setBody(body(deviceId, fcmToken, clock, timezone))
         }
+    }
+
+    internal companion object {
+        /** The wire value of a clock mode: "24h" / "12h". */
+        fun clockWire(mode: ClockMode): String = when (mode) {
+            ClockMode.H24 -> "24h"
+            ClockMode.H12 -> "12h"
+        }
+
+        fun body(deviceId: String, fcmToken: String?, clock: ClockMode, timezone: String): RegisterBody =
+            RegisterBody(deviceId = deviceId, fcmToken = fcmToken, platform = "android", timezone = timezone, clock = clockWire(clock))
     }
 
     /** Delete this device's token row on sign-out so the previous user's

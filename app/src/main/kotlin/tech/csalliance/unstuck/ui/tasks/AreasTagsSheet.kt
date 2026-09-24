@@ -101,7 +101,7 @@ fun AreasTagsSheet(vm: AppViewModel, onDismiss: () -> Unit) {
         dragHandle = { Box(Modifier.fillMaxWidth().padding(top = 14.dp), contentAlignment = Alignment.Center) { SheetHandle() } },
     ) {
         Column(
-            Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 22.dp).padding(bottom = 28.dp)
+            Modifier.fillMaxWidth().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp).padding(bottom = 28.dp)
                 .testTag("areas-tags-sheet"),
             verticalArrangement = Arrangement.spacedBy(18.dp),
         ) {

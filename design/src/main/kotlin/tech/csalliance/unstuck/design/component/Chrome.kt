@@ -1,7 +1,10 @@
 package tech.csalliance.unstuck.design.component
 
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,6 +28,7 @@ import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -180,15 +184,27 @@ private fun RowScope.NavCell(item: NavSpec, activeKey: String, onSelect: (String
  * The bar's in-row +: a 44×44 coral rounded square (13dp corners) with a white
  * 22dp glyph and no shadow — it is part of the bar, not floating over it.
  * [label] is what it creates (TalkBack).
+ *
+ * The TAP target is a 48×48 box around the square (Material's minimum; the
+ * square alone was 44). The square keeps its look: [modifier] (the tour
+ * anchor) still measures the visible square, and the press ripple is drawn on
+ * the square, not the invisible 2dp margin. The tab cells are at least 48dp
+ * tall (BottomNavBarTest), so the bar's height and the +'s centring don't move.
  */
 @Composable
 private fun BarPlusButton(onClick: () -> Unit, modifier: Modifier, label: String) {
     val c = UTheme.colors
+    val press = remember { MutableInteractionSource() }
     Box(
-        modifier.size(44.dp).clip(RoundedCornerShape(13.dp)).background(c.coral)
-            .clickable(onClick = onClick, role = Role.Button),
+        Modifier.size(48.dp).clickable(interactionSource = press, indication = null, role = Role.Button, onClick = onClick),
         contentAlignment = Alignment.Center,
-    ) { Icon(Icons.Filled.Add, contentDescription = label, tint = Color.White, modifier = Modifier.size(22.dp)) }
+    ) {
+        Box(
+            modifier.size(44.dp).clip(RoundedCornerShape(13.dp)).background(c.coral)
+                .indication(press, LocalIndication.current),
+            contentAlignment = Alignment.Center,
+        ) { Icon(Icons.Filled.Add, contentDescription = label, tint = Color.White, modifier = Modifier.size(22.dp)) }
+    }
 }
 
 /**

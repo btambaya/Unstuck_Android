@@ -19,7 +19,9 @@ import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.logic.slipping
 import tech.csalliance.unstuck.core.logic.topInsights
-import tech.csalliance.unstuck.core.logic.weekdayAreaHours
+import tech.csalliance.unstuck.core.logic.AreaSeries
+import tech.csalliance.unstuck.core.logic.areaTotals
+import tech.csalliance.unstuck.core.logic.weekdayAreaBars
 import tech.csalliance.unstuck.core.model.CaptureTag
 import tech.csalliance.unstuck.core.model.ReasonAction
 import tech.csalliance.unstuck.core.model.ReasonLog
@@ -42,7 +44,7 @@ class AnalyticsTest {
             sess("s1", "t1", 3600, "2026-05-19T10:00:00.000Z"), // Tue
             sess("s2", "t2", 1800, "2026-05-20T14:00:00.000Z"), // Wed
         )
-        val out = weekdayAreaHours(sessions, tasks)
+        val out = weekdayAreaBars(sessions, tasks).days
         assertEquals(1.0, out[1].data[0], eps)
         assertEquals(0.5, out[2].data[1], eps)
     }
@@ -181,22 +183,25 @@ class AnalyticsTest {
         assertEquals(listOf("12am", "6am", "12pm", "6pm", "11pm"), listOf(0, 6, 12, 18, 23).map { hourLabel(it) })
     }
 
-    // P0-5 — the "No area" series keeps no-task and no-area focus on the chart.
-    @Test fun weekdayAreaHoursNoAreaSeries() {
-        val tasks = listOf(mkTask(id = "t1", lifeArea = "Work"), mkTask(id = "t2"), mkTask(id = "t3", lifeArea = "Gone"))
+    // P0-5 — the "No area" series keeps no-task and no-area focus on the chart;
+    // an area off the user's list keeps its own name (web's rule, 2026-09-24).
+    @Test fun weekdayAreaBarsNoAreaAndOffListSeries() {
+        val tasks = listOf(mkTask(id = "t1", lifeArea = "Work"), mkTask(id = "t2"), mkTask(id = "t3", lifeArea = "Gone"), mkTask(id = "t4", lifeArea = "  "))
         val sessions = listOf(
             sess("s1", "t1", 3600, "2026-05-19T10:00:00.000Z"),   // Tue, Work
             sess("s2", "t2", 1800, "2026-05-19T11:00:00.000Z"),   // Tue, no area
             sess("s3", null, 1800, "2026-05-19T12:00:00.000Z"),   // Tue, no task
-            sess("s4", "t3", 1800, "2026-05-19T13:00:00.000Z"),   // Tue, a removed area
+            sess("s4", "t3", 1800, "2026-05-19T13:00:00.000Z"),   // Tue, an area off the list
+            sess("s5", "t4", 1800, "2026-05-19T14:00:00.000Z"),   // Tue, a blank area
+            sess("s6", "gone", 1800, "2026-05-19T15:00:00.000Z"), // Tue, a deleted task
         )
-        val out = weekdayAreaHours(sessions, tasks, listOf("Work"), withNoArea = true)
-        assertEquals(2, out[1].data.size)
-        assertEquals(1.0, out[1].data[0], eps)
-        assertEquals(1.5, out[1].data[1], eps)
+        val bars = weekdayAreaBars(sessions, tasks, listOf("Work", "Home"))
+        assertEquals(listOf(AreaSeries("Work", "Work"), AreaSeries("Home", "Home"), AreaSeries("Gone", "Gone"), AreaSeries("No area", null)), bars.series)
+        assertEquals(listOf(1.0, 0.0, 0.5, 2.0), bars.days[1].data)
+        assertEquals(listOf(1.0, 0.0, 0.5, 2.0), areaTotals(bars))
         assertEquals("No area", NO_AREA_LABEL)
-        // Without the series those minutes drop out (old behaviour, kept for callers that want it).
-        assertEquals(1, weekdayAreaHours(sessions, tasks, listOf("Work")).first().data.size)
+        // No session without an area → no "No area" series.
+        assertEquals(listOf("Work", "Home"), weekdayAreaBars(sessions.take(1), tasks, listOf("Work", "Home")).series.map { it.name })
     }
 
     // P0-7 — sub-minute sessions never count anywhere.
@@ -204,7 +209,7 @@ class AnalyticsTest {
         val tasks = listOf(mkTask(id = "t1", estimateMin = 25, lifeArea = "Work"))
         val sessions = (0 until 5).map { sess("s$it", "t1", 20, "2026-05-18T10:0$it:00.000Z") }
         assertTrue(calibrationDots(sessions, tasks).isEmpty())
-        assertEquals(0.0, weekdayAreaHours(sessions, tasks, listOf("Work")).sumOf { it.data.sum() }, eps)
+        assertEquals(0.0, weekdayAreaBars(sessions, tasks, listOf("Work")).days.sumOf { it.data.sum() }, eps)
         assertTrue(topInsights(sessions, tasks, emptyList(), emptyList()).none { it.title.contains("strongest") })
     }
 

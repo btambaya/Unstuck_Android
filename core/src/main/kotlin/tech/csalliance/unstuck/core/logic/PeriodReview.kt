@@ -124,7 +124,7 @@ private fun q(s: String?): String = "\"${periodCleanName(s)}\""
 private fun plural(n: Int, one: String): String = "$n ${if (n == 1) one else one + "s"}"
 
 /** Integer seconds → rounded minutes (§4.1 `minutes`). */
-fun periodMinutes(sec: Int): Int = (sec + 30) / 60
+fun periodMinutes(sec: Int): Int = (maxOf(0, sec) + 30) / 60
 
 /** `45m` / `2h` / `1h 5m` (§4.1 `dur`). */
 fun periodDur(m: Int): String = if (m < 60) "${m}m" else if (m % 60 == 0) "${m / 60}h" else "${m / 60}h ${m % 60}m"

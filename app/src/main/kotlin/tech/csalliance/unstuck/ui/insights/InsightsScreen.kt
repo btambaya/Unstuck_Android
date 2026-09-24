@@ -47,7 +47,7 @@ import tech.csalliance.unstuck.core.logic.CalibrationDot
 import tech.csalliance.unstuck.core.logic.DEFAULT_AREAS
 import tech.csalliance.unstuck.core.logic.INTERRUPTIONS_MIN_LINKED
 import tech.csalliance.unstuck.core.logic.InsightsSpan
-import tech.csalliance.unstuck.core.logic.NO_AREA_LABEL
+import tech.csalliance.unstuck.core.logic.AreaSeries
 import tech.csalliance.unstuck.core.logic.PeriodData
 import tech.csalliance.unstuck.core.logic.PeriodRange
 import tech.csalliance.unstuck.core.logic.PeriodWindow
@@ -72,7 +72,7 @@ import tech.csalliance.unstuck.core.logic.periodMinutes
 import tech.csalliance.unstuck.core.logic.periodParseYmd
 import tech.csalliance.unstuck.core.logic.slipping
 import tech.csalliance.unstuck.core.logic.topInsights
-import tech.csalliance.unstuck.core.logic.weekdayAreaHours
+import tech.csalliance.unstuck.core.logic.weekdayAreaBars
 import tech.csalliance.unstuck.design.component.AppBar
 import tech.csalliance.unstuck.design.component.Card
 import tech.csalliance.unstuck.design.component.Leading
@@ -189,8 +189,10 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                 if (span != InsightsSpan.ALL) item { RepeatingRhythmCard(facts.series, lifeAreas) }
                 if (hasFocus) {
                     item {
-                        val weekdayBars = remember(sessions, tasks, areaNames) { weekdayAreaHours(sessions, tasks, areaNames, withNoArea = true).map { it.d to it.data } }
-                        StackedBars("When focus happens", weekdayBars, areaNames + NO_AREA_LABEL, lifeAreas)
+                        // The user's areas, then any other area a task carries (its own
+                        // name), then "No area" — the web's series, and get_insights'.
+                        val areaBars = remember(sessions, tasks, areaNames) { weekdayAreaBars(sessions, tasks, areaNames) }
+                        StackedBars("When focus happens", areaBars.days.map { it.d to it.data }, areaBars.series, lifeAreas)
                     }
                 }
                 if (slips.isNotEmpty()) item {
@@ -404,11 +406,13 @@ private fun EmptyPeriodNote(periodName: String, current: Boolean, month: Boolean
 
 @OptIn(ExperimentalLayoutApi::class)
 @Composable
-private fun StackedBars(title: String, bars: List<Pair<String, List<Double>>>, areas: List<String>, lifeAreas: List<tech.csalliance.unstuck.core.model.LifeArea>) {
+private fun StackedBars(title: String, bars: List<Pair<String, List<Double>>>, series: List<AreaSeries>, lifeAreas: List<tech.csalliance.unstuck.core.model.LifeArea>) {
     val c = UTheme.colors
     val max = bars.maxOfOrNull { it.second.sum() }?.coerceAtLeast(0.001) ?: 0.001
-    // "No area" (the last series) is ink4 — never an area's colour.
-    fun colorOf(i: Int): Color = if (areas.getOrNull(i) == NO_AREA_LABEL) c.ink4 else tech.csalliance.unstuck.ui.components.areaColorFor(areas.getOrElse(i) { "" }, lifeAreas, c)
+    val areas = series.map { it.name }
+    // "No area" is ink4 — never an area's colour; an area off the user's list
+    // has no colour of its own either (areaColorFor falls back to ink4).
+    fun colorOf(i: Int): Color = series.getOrNull(i)?.area?.let { tech.csalliance.unstuck.ui.components.areaColorFor(it, lifeAreas, c) } ?: c.ink4
     val totals = areas.indices.map { i -> bars.sumOf { it.second.getOrElse(i) { 0.0 } } }
     // Spoken summary so screen-reader users get the per-day totals the bars encode.
     val a11y = "$title. " + bars.joinToString("; ") { (day, data) ->

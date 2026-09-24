@@ -49,12 +49,20 @@ fun insightsRange(span: InsightsSpan, offset: Int, today: String, earliest: Stri
     }
 }
 
-/** The first local day with any activity: a task created or a session ended.
- *  Null when there is none. The page's ‹ stepper stops there. */
+/** The first local day with any activity — web's rule (lib/period-facts.ts
+ *  `firstActivityDay`, the cross-platform pick of 2026-09-24): the earliest of
+ *  a task created, a task done (its completedAt), and a COUNTED session's end
+ *  (an accidental sub-minute start is no activity). Null when there is none.
+ *  "All time" starts here and the page's ‹ stepper stops here. */
 fun earliestActivityDay(data: PeriodData, zone: ZoneId): String? {
     var best: String? = null
-    for (t in data.tasks) data.stamp(t.createdAt, zone)?.day?.let { if (best == null || it < best!!) best = it }
-    for (s in data.sessions) data.stamp(s.completedAt, zone)?.day?.let { if (best == null || it < best!!) best = it }
+    fun see(day: String?) { if (day != null && (best == null || day < best!!)) best = day }
+    for (t in data.tasks) {
+        see(data.stamp(t.createdAt, zone)?.day)
+        if (t.done) see(data.stamp(t.completedAt, zone)?.day)
+    }
+    // PeriodData holds the counted sessions only (the D1 filter runs there).
+    for (s in data.sessions) see(data.stamp(s.completedAt, zone)?.day)
     return best
 }
 
@@ -187,8 +195,10 @@ fun insightsFacts(data: PeriodData, r: PeriodRange, nowMs: Long, zone: ZoneId): 
 
 /** Each repeating task with ≥1 occurrence dated in [from, to]: one dot per
  *  occurrence by its block date (done / skipped on purpose / open / still to
- *  come — today is never "open"). Sorted by kept desc, then name, then id. No
- *  streaks: it's a count of days, never a chain. */
+ *  come — today is never "open"). Sorted by kept desc, then days due so far
+ *  desc, then name, then id — web's order (lib/period-facts.ts `seriesRhythm`,
+ *  the cross-platform pick of 2026-09-24). No streaks: it's a count of days,
+ *  never a chain. */
 fun seriesRhythm(data: PeriodData, r: PeriodRange): List<SeriesRhythm> {
     val judgeTo = if (r.clipped) IsoDate.addDays(r.end, -1) else r.end
     val byTask = LinkedHashMap<String, MutableList<SeriesDot>>()
@@ -207,7 +217,7 @@ fun seriesRhythm(data: PeriodData, r: PeriodRange): List<SeriesRhythm> {
     return byTask.map { (id, dots) ->
         val t = data.byId[id]!!
         SeriesRhythm(id, periodCleanName(t.name), t.lifeArea, dots)
-    }.sortedWith(compareByDescending<SeriesRhythm> { it.kept }.thenBy { it.name }.thenBy { it.taskId })
+    }.sortedWith(compareByDescending<SeriesRhythm> { it.kept }.thenByDescending { it.soFar }.thenBy { it.name }.thenBy { it.taskId })
 }
 
 /** "Got unstuck": plain tasks done in the window that had waited ≥ 7 days

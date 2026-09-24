@@ -40,33 +40,60 @@ data class StackedBar(val d: String, val data: MutableList<Double>)
 private val DAY_LABELS = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 val DEFAULT_AREAS = listOf("Work", "Personal", "Home", "Health", "Volunteering")
 
-/** The "No area" series label (sessions with no task, a deleted task, no area,
- *  or an area that no longer exists). */
+/** The "No area" series label (sessions with no task, a deleted task, or a
+ *  task with no area). */
 const val NO_AREA_LABEL = "No area"
 
-/** Hours per Monday-anchored weekday × area. With [withNoArea] the bars carry
- *  one extra, LAST value: the hours that belong to no listed area (no task, a
- *  deleted task, no area, a removed area) — so the chart shows every counted
- *  minute (cross-check P0-5: 22% of prod focus used to vanish here). */
-fun weekdayAreaHours(
-    sessions: List<Session>,
-    tasks: List<TaskItem>,
-    areas: List<String> = DEFAULT_AREAS,
-    withNoArea: Boolean = false,
-): List<StackedBar> {
-    val taskArea = HashMap<String, String>()
-    for (t in tasks) t.lifeArea?.let { taskArea[t.id] = it }
-    val width = areas.size + if (withNoArea) 1 else 0
-    val out = DAY_LABELS.map { StackedBar(it, MutableList(width) { 0.0 }) }
+/** One series of the "When focus happens" chart: a named area, or the
+ *  "No area" bucket ([area] == null). */
+data class AreaSeries(val name: String, val area: String?)
+
+/** The chart: its series, and Mon..Sun hours per series (same order). */
+data class AreaBars(val series: List<AreaSeries>, val days: List<StackedBar>)
+
+/** A session's area as the chart files it: its task's area, or null (no task,
+ *  a deleted task, a blank area). */
+private fun sessionArea(s: Session, byId: Map<String, TaskItem>): String? =
+    s.taskId?.let { byId[it] }?.lifeArea?.takeIf { it.isNotBlank() }
+
+/** The chart's series — web's rule (lib/period-facts.ts `areaSeries`, the
+ *  cross-platform pick of 2026-09-24): the user's areas in their order, then
+ *  any OTHER area a counted session's task carries, by name (an area renamed
+ *  or removed from the list, a custom one from another device), then
+ *  "No area" when a counted session has none. An area off the list is shown
+ *  under its own name, never folded into "No area". */
+fun areaSeries(sessions: List<Session>, tasks: List<TaskItem>, areas: List<String> = DEFAULT_AREAS): List<AreaSeries> {
+    val byId = tasks.associateBy { it.id }
+    val known = areas.toSet()
+    val extra = java.util.TreeSet<String>()
+    var noArea = false
     for (s in countableSessions(sessions)) {
-        val area = s.taskId?.let { taskArea[it] }
-        val ai = area?.let { areas.indexOf(it) } ?: -1
-        val slot = if (ai >= 0) ai else if (withNoArea) areas.size else continue
-        val d = parseDate(s.completedAt) ?: continue
-        out[dayOfWeekIdx(d)].data[slot] += s.actualSec / HOUR
+        val a = sessionArea(s, byId)
+        if (a == null) noArea = true else if (a !in known) extra += a
     }
-    return out
+    return areas.map { AreaSeries(it, it) } + extra.map { AreaSeries(it, it) } +
+        (if (noArea) listOf(AreaSeries(NO_AREA_LABEL, null)) else emptyList())
 }
+
+/** Hours per Monday-anchored weekday × [areaSeries] — every counted minute
+ *  lands in a series (cross-check P0-5: 22% of prod focus used to vanish). */
+fun weekdayAreaBars(sessions: List<Session>, tasks: List<TaskItem>, areas: List<String> = DEFAULT_AREAS): AreaBars {
+    val counted = countableSessions(sessions)
+    val series = areaSeries(counted, tasks, areas)
+    val byId = tasks.associateBy { it.id }
+    val days = DAY_LABELS.map { StackedBar(it, MutableList(series.size) { 0.0 }) }
+    for (s in counted) {
+        val d = parseDate(s.completedAt) ?: continue
+        val a = sessionArea(s, byId)
+        val i = series.indexOfFirst { it.area == a }
+        if (i < 0) continue
+        days[dayOfWeekIdx(d)].data[i] += s.actualSec / HOUR
+    }
+    return AreaBars(series, days)
+}
+
+/** Total hours per series, in [AreaBars.series] order. */
+fun areaTotals(bars: AreaBars): List<Double> = bars.series.indices.map { i -> bars.days.sumOf { it.data[i] } }
 
 // H2 — estimate-vs-actual scatter
 

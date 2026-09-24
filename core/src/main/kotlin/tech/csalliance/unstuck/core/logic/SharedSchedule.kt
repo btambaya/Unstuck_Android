@@ -177,8 +177,10 @@ fun shareSlotLabel(item: ShareSlot, todayIso: String, clock: ClockMode, locale: 
 
 /** The detail-sheet line: "Planned Sat, Sep 5 · 04:30 · 45m" (+ " · overdue" when
  *  the slot has passed and the task is still open), the time in the phone's
- *  [clock] mode. Null when nothing is planned. */
-fun plannedLabel(item: ShareSlot, todayIso: String, clock: ClockMode, locale: Locale = Locale.getDefault()): String? {
+ *  [clock] mode. Null when nothing is planned. [taskDone] is the TASK's state —
+ *  it differs from [item]'s when [item] is a tapped calendar block (whose `done`
+ *  is the block's): a completed task never reads "overdue" (2026-09-24). */
+fun plannedLabel(item: ShareSlot, todayIso: String, clock: ClockMode, locale: Locale = Locale.getDefault(), taskDone: Boolean = item.done): String? {
     val d = item.nextDate ?: return null
     val whenLabel = if (d == todayIso) "today" else "${weekdayShort(d)}, ${monthDay(d)}"
     val parts = mutableListOf("Planned $whenLabel")
@@ -186,7 +188,7 @@ fun plannedLabel(item: ShareSlot, todayIso: String, clock: ClockMode, locale: Lo
     fmtDuration(item.nextDurationMinutes)?.let { parts += it }
     // A past block the owner already ticked done (task still open) reads "finished",
     // not "overdue" — nothing is due (web wording).
-    if (!item.done && d < todayIso) parts += if (item.nextDone == true) "finished" else "overdue"
+    if (!item.done && !taskDone && d < todayIso) parts += if (item.nextDone == true) "finished" else "overdue"
     return parts.joinToString(" · ")
 }
 

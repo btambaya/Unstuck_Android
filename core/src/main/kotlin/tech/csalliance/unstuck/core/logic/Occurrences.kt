@@ -188,7 +188,8 @@ fun overdueOccurrenceLabels(
 }
 
 private fun overdueLabelFor(b: CalBlock, todayIso: String): String? {
-    if (b.date >= todayIso) return null
+    // A ticked occurrence is completed, and a completed task never reads "Overdue".
+    if (b.done || b.date >= todayIso) return null
     val ms = Time.parseMillis(b.date) ?: return "Overdue"
     return "Overdue · ${OVERDUE_DOW[Time.dayOfWeekJs(ms)]}"
 }

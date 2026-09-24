@@ -4,6 +4,8 @@ import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tech.csalliance.unstuck.core.time.ClockMode
+import java.util.Locale
 import tech.csalliance.unstuck.core.logic.MONTH_BUSY_FLOOR_MIN
 import tech.csalliance.unstuck.core.logic.blockSlotText
 import tech.csalliance.unstuck.core.logic.busyMinutesByDay
@@ -103,10 +105,16 @@ class MonthPeekTest {
     // ── Labels ──────────────────────────────────────────────────────────────
 
     @Test fun slotTextReadsTimeThenDuration() {
-        assertEquals("09:00 · 45m", blockSlotText("09:00", 45))
-        assertEquals("09:00 · 1h", blockSlotText("09:00", 60))
-        assertEquals("09:00 · 1h 30m", blockSlotText("09:00", 90))
-        assertEquals("09:00 · 0m", blockSlotText("09:00", 0))
+        assertEquals("09:00 · 45m", blockSlotText("09:00", 45, ClockMode.H24))
+        assertEquals("09:00 · 1h", blockSlotText("09:00", 60, ClockMode.H24))
+        assertEquals("14:00 · 1h 30m", blockSlotText("14:00", 90, ClockMode.H24))
+        assertEquals("09:00 · 0m", blockSlotText("09:00", 0, ClockMode.H24))
+    }
+
+    @Test fun slotTextFollowsTheTwelveHourClock() {
+        assertEquals("9:00 AM · 45m", blockSlotText("09:00", 45, ClockMode.H12, Locale.US))
+        assertEquals("2:00 PM · 1h 30m", blockSlotText("14:00", 90, ClockMode.H12, Locale.US))
+        assertEquals("an untimed slot stays as given", " · 45m", blockSlotText("", 45, ClockMode.H12, Locale.US))
     }
 
     @Test fun peekTitleIsWeekdayMonthDay() {

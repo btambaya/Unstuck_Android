@@ -92,13 +92,14 @@ fun MonthDayPeekSheet(
     val sharedWithMe by vm.sharedWithMe.collectAsStateWithLifecycle()
     val tasks by vm.tasks.collectAsStateWithLifecycle()
     val peek = remember(iso, blocksRaw, sharedRaw) { dayPeek(iso, blocksRaw, sharedRaw) }
+    val clock = tech.csalliance.unstuck.ui.components.clockMode()
 
     // Own planned blocks. A block whose task has vanished from the local cache has
     // nowhere to go — it still lists, it just isn't tappable.
     val planned = peek.planned.map { b ->
         val task = taskForBlock(b, tasks)
         PeekRow(
-            key = b.id, title = b.taskName, meta = blockSlotText(b.startTime, b.durationMinutes),
+            key = b.id, title = b.taskName, meta = blockSlotText(b.startTime, b.durationMinutes, clock),
             done = b.done || task?.done == true, tint = c.primaryDeep, dashed = false,
             onClick = task?.let { t -> { onOpen(t) } },
         )
@@ -108,7 +109,7 @@ fun MonthDayPeekSheet(
     val shared = peek.shared.map { sb ->
         PeekRow(
             key = sb.blockId, title = sb.title,
-            meta = "${blockSlotText(sb.startTime, sb.durationMinutes)} · ${shareFirstName(sb.ownerName)}",
+            meta = "${blockSlotText(sb.startTime, sb.durationMinutes, clock)} · ${shareFirstName(sb.ownerName)}",
             done = sb.done, tint = c.primaryDeep, dashed = true,
             onClick = { onOpenShared(sharedWithMe.firstOrNull { it.taskId == sb.taskId }?.openedFrom(sb) ?: sb.asSharedWithMe()) },
         )
@@ -117,7 +118,7 @@ fun MonthDayPeekSheet(
     // is no Unstuck detail behind them.
     val events = peek.events.map { b ->
         PeekRow(
-            key = b.id, title = b.taskName, meta = blockSlotText(b.startTime, b.durationMinutes),
+            key = b.id, title = b.taskName, meta = blockSlotText(b.startTime, b.durationMinutes, clock),
             done = false, tint = c.ink3, dashed = false, onClick = null,
         )
     }

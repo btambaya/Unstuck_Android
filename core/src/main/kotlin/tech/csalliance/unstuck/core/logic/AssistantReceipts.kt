@@ -11,6 +11,8 @@ import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.Capture
 import tech.csalliance.unstuck.core.model.ProfileFact
 import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.time.ClockFormat
+import tech.csalliance.unstuck.core.time.ClockMode
 import tech.csalliance.unstuck.core.time.Time
 import java.security.MessageDigest
 
@@ -221,15 +223,24 @@ private val ADDED_TO_LIST_RE = Regex("^ok: added \"(.*)\" to \"(.*)\"")
  *  would claim a change (web receipts.ts `NOTHING_TO_CHANGE`). */
 const val NOTHING_TO_CHANGE = " — nothing to change"
 
-/** Build the receipt for one SUCCESSFUL tool call (result starts "ok").
- *  [tasks] resolves live entities for undo targets and quiet-win move counts
- *  (include this turn's scratch rows — the store lags the optimistic write);
- *  [tone] (from [toneFromFacts]) phrases the quiet-win line. Returns null for
- *  read-only tools and unrecognized results — no receipt beats a wrong receipt. */
 /** set_task_recurrence's ok line for an every-N-weeks rule: "now repeats every 2 weeks on …". */
 private val EVERY_N_WEEKS_RESULT = Regex("\\bnow repeats every (\\d+) weeks\\b")
 
-fun deriveReceipt(name: String, args: ReceiptArgs, result: String, tasks: List<TaskItem>, tone: Tone = Tone.GENTLE): Receipt? {
+/** Build the receipt for one SUCCESSFUL tool call (result starts "ok").
+ *  [tasks] resolves live entities for undo targets and quiet-win move counts
+ *  (include this turn's scratch rows — the store lags the optimistic write);
+ *  [tone] (from [toneFromFacts]) phrases the quiet-win line; [clock] is the
+ *  phone's 12/24-hour preference for the times a card shows (the tool's own
+ *  'HH:MM' is the 24-hour form). Returns null for read-only tools and
+ *  unrecognized results — no receipt beats a wrong receipt. */
+fun deriveReceipt(
+    name: String,
+    args: ReceiptArgs,
+    result: String,
+    tasks: List<TaskItem>,
+    tone: Tone = Tone.GENTLE,
+    clock: ClockMode = ClockMode.H24,
+): Receipt? {
     if (!result.startsWith("ok")) return null
     if (result.endsWith(NOTHING_TO_CHANGE)) return null
     return when (name) {
@@ -240,7 +251,7 @@ fun deriveReceipt(name: String, args: ReceiptArgs, result: String, tasks: List<T
         "schedule_task" -> {
             val nm = quotedFragment(result) ?: "task"
             val date = args.date.orEmpty()
-            val time = args.startTime.orEmpty()
+            val time = args.startTime.orEmpty().let { if (it.isEmpty()) it else ClockFormat.time(it, clock) }
             val suffix = (if (date.isNotEmpty()) " · $date" else "") + (if (time.isNotEmpty()) " $time" else "")
             Receipt(ReceiptIcon.CALENDAR, "Scheduled “$nm”$suffix")
         }
@@ -353,12 +364,12 @@ fun deriveReceipt(name: String, args: ReceiptArgs, result: String, tasks: List<T
         "request_call" -> {
             val m = CALL_BOOKED_RE.find(result) ?: return null
             val (date, hm, label, n, id) = m.destructured
-            Receipt(ReceiptIcon.CALENDAR, "Call booked ${shortWeekday(date)} $hm — $label · $n note${if (n == "1") "" else "s"}", ReceiptUndo.cancelCall(id))
+            Receipt(ReceiptIcon.CALENDAR, "Call booked ${shortWeekday(date)} ${ClockFormat.time(hm, clock)} — $label · $n note${if (n == "1") "" else "s"}", ReceiptUndo.cancelCall(id))
         }
         "update_call" -> {
             val m = CALL_UPDATED_RE.find(result) ?: return null
             val (label, date, hm, n) = m.destructured
-            Receipt(ReceiptIcon.PENCIL, "Call updated ${shortWeekday(date)} $hm — $label · $n note${if (n == "1") "" else "s"}")
+            Receipt(ReceiptIcon.PENCIL, "Call updated ${shortWeekday(date)} ${ClockFormat.time(hm, clock)} — $label · $n note${if (n == "1") "" else "s"}")
         }
         "cancel_call" -> Receipt(ReceiptIcon.TRASH, "Call cancelled — ${quotedFragment(result) ?: "call"}")
         else -> null

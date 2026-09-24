@@ -5,6 +5,8 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tech.csalliance.unstuck.core.time.ClockMode
+import java.util.Locale
 import tech.csalliance.unstuck.core.logic.IsoRange
 import tech.csalliance.unstuck.core.logic.SHARED_BLOCKS_MAX_DAYS
 import tech.csalliance.unstuck.core.logic.SHARED_BLOCK_ID_PREFIX
@@ -112,7 +114,7 @@ class SharedScheduleTest {
         assertEquals("2026-09-11", friday.nextDate)
         assertEquals("07:00", friday.nextStartTime)
         assertEquals(45, friday.nextDurationMinutes)
-        assertEquals("Planned Fri, Sep 11 · 07:00 · 45m", plannedLabel(friday, today))
+        assertEquals("Planned Fri, Sep 11 · 07:00 · 45m", plannedLabel(friday, today, ClockMode.H24))
         // The list row for the same task says Monday is next; opened from Friday's
         // block it must describe Friday.
         val live = slot("2026-09-07", "07:00")
@@ -157,27 +159,34 @@ class SharedScheduleTest {
     }
 
     @Test fun `shareSlotLabel - Today, a weekday inside the next 6 days, else weekday + date`() {
-        assertEquals("Today 04:30 · 45m", shareSlotLabel(slot(today), today))
-        assertEquals("Sun 04:30 · 45m", shareSlotLabel(slot("2026-09-06"), today))
-        assertEquals("Fri 04:30 · 45m", shareSlotLabel(slot("2026-09-11"), today))      // today + 6 → still a bare weekday
-        assertEquals("Sat Sep 12 04:30 · 45m", shareSlotLabel(slot("2026-09-12"), today))
-        assertEquals("Tue Sep 1 04:30 · 45m", shareSlotLabel(slot("2026-09-01"), today))  // past → dated
-        assertEquals("Sun · 45m", shareSlotLabel(slot("2026-09-06", time = null), today))
-        assertEquals("Sun 04:30", shareSlotLabel(slot("2026-09-06", dur = null), today))
-        assertNull(shareSlotLabel(slot(null), today))
+        assertEquals("Today 04:30 · 45m", shareSlotLabel(slot(today), today, ClockMode.H24))
+        assertEquals("Sun 04:30 · 45m", shareSlotLabel(slot("2026-09-06"), today, ClockMode.H24))
+        assertEquals("Fri 04:30 · 45m", shareSlotLabel(slot("2026-09-11"), today, ClockMode.H24))      // today + 6 → still a bare weekday
+        assertEquals("Sat Sep 12 04:30 · 45m", shareSlotLabel(slot("2026-09-12"), today, ClockMode.H24))
+        assertEquals("Tue Sep 1 04:30 · 45m", shareSlotLabel(slot("2026-09-01"), today, ClockMode.H24))  // past → dated
+        assertEquals("Sun · 45m", shareSlotLabel(slot("2026-09-06", time = null), today, ClockMode.H24))
+        assertEquals("Sun 04:30", shareSlotLabel(slot("2026-09-06", dur = null), today, ClockMode.H24))
+        assertNull(shareSlotLabel(slot(null), today, ClockMode.H24))
     }
 
     @Test fun `plannedLabel - the detail line, with an overdue suffix for a passed open slot`() {
-        assertEquals("Planned today · 04:30 · 45m", plannedLabel(slot(today), today))
-        assertEquals("Planned Sat, Sep 12 · 04:30 · 45m", plannedLabel(slot("2026-09-12"), today))
-        assertEquals("Planned Tue, Sep 1 · 04:30 · 45m · overdue", plannedLabel(slot("2026-09-01"), today))
-        assertEquals("Planned Tue, Sep 1 · 04:30 · 45m", plannedLabel(slot("2026-09-01", done = true), today))
+        assertEquals("Planned today · 04:30 · 45m", plannedLabel(slot(today), today, ClockMode.H24))
+        assertEquals("Planned Sat, Sep 12 · 04:30 · 45m", plannedLabel(slot("2026-09-12"), today, ClockMode.H24))
+        assertEquals("Planned Tue, Sep 1 · 04:30 · 45m · overdue", plannedLabel(slot("2026-09-01"), today, ClockMode.H24))
+        assertEquals("Planned Tue, Sep 1 · 04:30 · 45m", plannedLabel(slot("2026-09-01", done = true), today, ClockMode.H24))
         // A past block the owner already FINISHED (task still open) reads "finished",
         // not "overdue" — the web wording; nothing is due.
-        assertEquals("Planned Tue, Sep 1 · 04:30 · 45m · finished", plannedLabel(slot("2026-09-01", nextDone = true), today))
-        assertEquals("Planned today · 04:30 · 45m", plannedLabel(slot(today, nextDone = true), today))
-        assertEquals("Planned Sun, Sep 6", plannedLabel(slot("2026-09-06", time = null, dur = null), today))
-        assertNull(plannedLabel(slot(null), today))
+        assertEquals("Planned Tue, Sep 1 · 04:30 · 45m · finished", plannedLabel(slot("2026-09-01", nextDone = true), today, ClockMode.H24))
+        assertEquals("Planned today · 04:30 · 45m", plannedLabel(slot(today, nextDone = true), today, ClockMode.H24))
+        assertEquals("Planned Sun, Sep 6", plannedLabel(slot("2026-09-06", time = null, dur = null), today, ClockMode.H24))
+        assertNull(plannedLabel(slot(null), today, ClockMode.H24))
+    }
+
+    @Test fun `the shared labels follow a 12-hour phone`() {
+        assertEquals("Today 4:30 AM · 45m", shareSlotLabel(slot(today), today, ClockMode.H12, Locale.US))
+        assertEquals("Sat Sep 12 4:30 AM · 45m", shareSlotLabel(slot("2026-09-12"), today, ClockMode.H12, Locale.US))
+        assertEquals("Planned today · 4:30 AM · 45m", plannedLabel(slot(today), today, ClockMode.H12, Locale.US))
+        assertEquals("Planned Sun, Sep 6", plannedLabel(slot("2026-09-06", time = null, dur = null), today, ClockMode.H12, Locale.US))
     }
 
     @Test fun `shareFirstName drops the email domain and never blanks`() {
@@ -235,7 +244,7 @@ class SharedScheduleTest {
         assertEquals("04:30", s.nextStartTime)
         assertEquals(45, s.nextDurationMinutes)
         assertEquals("b1", s.nextBlockId)
-        assertEquals("Planned today · 04:30 · 45m", plannedLabel(s, today))
+        assertEquals("Planned today · 04:30 · 45m", plannedLabel(s, today, ClockMode.H24))
     }
 
     @Test fun `liveSharedBlocks drops skipped + external and sorts by date then start`() {

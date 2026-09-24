@@ -485,6 +485,12 @@ class AppViewModel(
 
     fun nowMs(): Long = nowProvider?.invoke() ?: System.currentTimeMillis()
 
+    /** The phone's 12/24-hour setting, for the times this ViewModel writes into
+     *  text the user sees (receipts, the harness's own closing line, the test
+     *  call's refusal). Read fresh: the setting can change while we're alive. */
+    internal fun clockMode(): tech.csalliance.unstuck.core.time.ClockMode =
+        tech.csalliance.unstuck.ui.components.DeviceClock.mode(graph.appContext)
+
     // Insights: a one-shot period to open on — the Today pill's "Last week"
     // variant sets it just before navigating; the screen consumes it once.
     private var insightsOpenAt: Pair<tech.csalliance.unstuck.core.logic.InsightsSpan, Int>? = null
@@ -3923,7 +3929,7 @@ class AppViewModel(
         val factsBefore = if (name == "save_profile_fact") runCatching { api.getProfileFacts() }.getOrNull() else emptyList()
         val inboxBefore = name == "promote_capture" && args.str("captureId")?.let { it !in api.getArchivedCaptureIds() } == true
         val result = runAssistantTool(name, args, api, scratch)
-        val receipt = deriveReceipt(name, args.receiptArgs, result, scratch.newTasks.values.toList() + api.getTasks())
+        val receipt = deriveReceipt(name, args.receiptArgs, result, scratch.newTasks.values.toList() + api.getTasks(), clock = clockMode())
         val undo = receipt?.undo ?: return result to receipt
         val exact = when (undo.kind) {
             ReceiptUndoKind.FORGET_FACT -> factsBefore?.let { before ->
@@ -4165,7 +4171,7 @@ class AppViewModel(
             val confirmTarget: suspend (HarnessToolCall) -> String? = { call ->
                 withContext(Dispatchers.Default) { confirmTargetName(call.name, ToolArgs.parse(call.argumentsJson), api, scratch) }
             }
-            AssistantHarness(ask, runner, confirmTarget).turn(base, text)
+            AssistantHarness(ask, runner, confirmTarget, clock = clockMode()).turn(base, text)
         } catch (e: HarnessAskFailed) {
             val code = (e.cause as? AssistantAskException)?.code ?: "network"
             // A failed FIRST round keeps the user's turn (the panel shows the
@@ -4893,6 +4899,8 @@ const val TEST_CALL_CALLS_OFF = "error: calls are off on this phone — switch t
  *  minute itself names the last one that rings (hoursLabel, audit 2026-09-22 C12). */
 @Suppress("FunctionName")
 fun TEST_CALL_OUTSIDE_HOURS(hm: String, s: CallSettings): String {
-    val hours = CallSettingsLogic.hoursLabel(s.hoursStart, s.hoursEnd, CallSettingsLogic.minutesOfDay(hm) ?: -1)
+    // Contract-shaped 'HH:MM' like every other bookTestCall result: the card shows
+    // it through CallMeLogic.userMessage, which puts its times the phone's way.
+    val hours = CallSettingsLogic.hoursLabel(s.hoursStart, s.hoursEnd, CallSettingsLogic.minutesOfDay(hm) ?: -1, tech.csalliance.unstuck.core.time.ClockMode.H24)
     return "error: $hm is outside your allowed hours ($hours) — the phone would decline it quietly. Widen the hours above to try it now."
 }

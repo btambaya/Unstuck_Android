@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tech.csalliance.unstuck.core.time.ClockMode
 import tech.csalliance.unstuck.core.logic.CallProactivePrefs
 import tech.csalliance.unstuck.core.logic.CallProactiveSync
 import tech.csalliance.unstuck.core.logic.CallRingNudge
@@ -203,12 +204,42 @@ class CallSettingsTest {
     }
 
     @Test fun `hoursLabel names the last minute only when the end itself is refused`() {
-        assertEquals("06:00–23:00; the latest it rings is 22:59", CallSettingsLogic.hoursLabel("06:00", "23:00", 23 * 60))
-        assertEquals("06:00–23:00", CallSettingsLogic.hoursLabel("06:00", "23:00", 23 * 60 + 30))
-        assertEquals("06:00–23:00", CallSettingsLogic.hoursLabel("06:00", "23:00", 5 * 60 + 59))
-        assertEquals("overnight", "22:00–02:00; the latest it rings is 01:59", CallSettingsLogic.hoursLabel("22:00", "02:00", 2 * 60))
-        assertEquals("an end at midnight", "08:00–00:00; the latest it rings is 23:59", CallSettingsLogic.hoursLabel("08:00", "00:00", 0))
-        assertEquals("08:00–junk", CallSettingsLogic.hoursLabel("08:00", "junk", 0))
+        assertEquals("06:00–23:00; the latest it rings is 22:59", CallSettingsLogic.hoursLabel("06:00", "23:00", 23 * 60, ClockMode.H24))
+        assertEquals("06:00–23:00", CallSettingsLogic.hoursLabel("06:00", "23:00", 23 * 60 + 30, ClockMode.H24))
+        assertEquals("06:00–23:00", CallSettingsLogic.hoursLabel("06:00", "23:00", 5 * 60 + 59, ClockMode.H24))
+        assertEquals("overnight", "22:00–02:00; the latest it rings is 01:59", CallSettingsLogic.hoursLabel("22:00", "02:00", 2 * 60, ClockMode.H24))
+        assertEquals("an end at midnight", "08:00–00:00; the latest it rings is 23:59", CallSettingsLogic.hoursLabel("08:00", "00:00", 0, ClockMode.H24))
+        assertEquals("08:00–junk", CallSettingsLogic.hoursLabel("08:00", "junk", 0, ClockMode.H24))
+    }
+
+    /** The Settings / task screens show the hours the phone's way (Ahmad,
+     *  2026-09-24); the assistant's refusals stay 24-hour. */
+    @Test fun `the call-hours copy follows a 12-hour phone`() {
+        val prev = java.util.Locale.getDefault()
+        try {
+            java.util.Locale.setDefault(java.util.Locale.US)
+            assertEquals("6:00 AM–11:00 PM; the latest it rings is 10:59 PM", CallSettingsLogic.hoursLabel("06:00", "23:00", 23 * 60, ClockMode.H12))
+            assertEquals("8:00–11:00 AM", CallSettingsLogic.hoursLabel("08:00", "11:00", 0, ClockMode.H12))
+            assertEquals(
+                "Unstuck only calls between 6:00 AM and 11:00 PM, so a call at 5:45 AM never rings.",
+                CallSettingsLogic.proactiveTimeWarning("05:45", true, "08:00", "21:00", ClockMode.H12),
+            )
+            assertEquals(
+                "Unstuck rings this call at about 7:30 AM, outside this phone's allowed hours (8:00 AM–9:00 PM), so it's declined here — widen the hours above or pick another time.",
+                CallSettingsLogic.proactiveTimeWarning("07:30", true, "08:00", "21:00", ClockMode.H12),
+            )
+            assertEquals(
+                "This phone only takes calls 8:00 AM–9:00 PM, so a check-in after a block that ends outside those hours is declined here.",
+                CallSettingsLogic.afterBlockWarning(true, "08:00", "21:00", ClockMode.H12),
+            )
+            // The model's refusal keeps its 'HH:MM' contract whatever the phone shows.
+            assertTrue(
+                CallSettingsLogic.snoozeRefusal(120, at(20, 30), CallSettings(hoursStart = "08:00", hoursEnd = "21:00"), london)!!
+                    .contains("ring at 22:30, outside this phone's call hours (08:00–21:00)"),
+            )
+        } finally {
+            java.util.Locale.setDefault(prev)
+        }
         assertTrue(CallSettingsLogic.withinWindow(1259, "08:00", "21:00"))
         assertFalse(CallSettingsLogic.withinWindow(1260, "08:00", "21:00"))
         assertTrue(CallSettingsLogic.withinWindow(60, "22:00", "02:00"))
@@ -232,7 +263,7 @@ class CallSettingsTest {
 
     @Test fun `proactiveTimeWarning covers the server window, the phone's hours and the switch`() {
         fun warn(t: String, enabled: Boolean = true, start: String = "08:00", end: String = "21:00") =
-            CallSettingsLogic.proactiveTimeWarning(t, enabled, start, end)
+            CallSettingsLogic.proactiveTimeWarning(t, enabled, start, end, ClockMode.H24)
         // Never booked at all — even with Calls off, that's the first thing to say.
         assertEquals("Unstuck only calls between 06:00 and 23:00, so a call at 05:45 never rings.", warn("05:45"))
         assertEquals(warn("05:45"), warn("05:45", enabled = false))
@@ -278,16 +309,16 @@ class CallSettingsTest {
     @Test fun `afterBlockWarning when calls are off or the hours are narrower`() {
         assertEquals(
             "Calls are off on this phone, so these check-ins are declined here — switch them on above.",
-            CallSettingsLogic.afterBlockWarning(false, "06:00", "23:00"),
+            CallSettingsLogic.afterBlockWarning(false, "06:00", "23:00", ClockMode.H24),
         )
-        assertNull("the defaults", CallSettingsLogic.afterBlockWarning(true, "06:00", "23:00"))
-        assertNull(CallSettingsLogic.afterBlockWarning(true, "05:00", "23:30"))
-        assertNull(CallSettingsLogic.afterBlockWarning(true, "00:00", "00:00"))
+        assertNull("the defaults", CallSettingsLogic.afterBlockWarning(true, "06:00", "23:00", ClockMode.H24))
+        assertNull(CallSettingsLogic.afterBlockWarning(true, "05:00", "23:30", ClockMode.H24))
+        assertNull(CallSettingsLogic.afterBlockWarning(true, "00:00", "00:00", ClockMode.H24))
         assertEquals(
             "This phone only takes calls 08:00–21:00, so a check-in after a block that ends outside those hours is declined here.",
-            CallSettingsLogic.afterBlockWarning(true, "08:00", "21:00"),
+            CallSettingsLogic.afterBlockWarning(true, "08:00", "21:00", ClockMode.H24),
         )
-        assertTrue("overnight misses the day", CallSettingsLogic.afterBlockWarning(true, "22:00", "07:00") != null)
+        assertTrue("overnight misses the day", CallSettingsLogic.afterBlockWarning(true, "22:00", "07:00", ClockMode.H24) != null)
     }
 
     /** "call me back in two hours" at 20:30 used to be answered ok, then

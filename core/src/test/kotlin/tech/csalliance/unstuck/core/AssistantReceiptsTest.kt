@@ -125,6 +125,26 @@ class AssistantReceiptsTest {
             deriveReceipt("schedule_task", ReceiptArgs(taskId = "t7", date = "2026-09-24", startTime = "10:30"), "ok: scheduled \"Office Focus\" 2026-09-24 10:30", listOf(t))!!.label)
     }
 
+    /** A card is drawn by the app, so its times follow the phone's 12/24-hour
+     *  setting; the tool result the model reads stays 'HH:MM'. */
+    @Test fun `receipt times follow the phone's clock`() {
+        val prev = java.util.Locale.getDefault()
+        try {
+            java.util.Locale.setDefault(java.util.Locale.US)
+            val t = task(id = "t7", name = "Office Focus")
+            assertEquals("Scheduled “Office Focus” · 2026-09-24 2:30 PM",
+                deriveReceipt("schedule_task", ReceiptArgs(taskId = "t7", date = "2026-09-24", startTime = "14:30"), "ok: scheduled \"Office Focus\" 2026-09-24 14:30", listOf(t), clock = tech.csalliance.unstuck.core.time.ClockMode.H12)!!.label)
+            assertEquals("Scheduled “Office Focus” · 2026-09-24 14:30",
+                deriveReceipt("schedule_task", ReceiptArgs(taskId = "t7", date = "2026-09-24", startTime = "14:30"), "ok: scheduled \"Office Focus\" 2026-09-24 14:30", listOf(t), clock = tech.csalliance.unstuck.core.time.ClockMode.H24)!!.label)
+            assertEquals("Call booked Thu 2:45 PM — speak to James · 4 notes",
+                deriveReceipt("request_call", ReceiptArgs(), "ok: call booked 2026-09-03 14:45 \"speak to James\" (4 notes) id=cr1", emptyList(), clock = tech.csalliance.unstuck.core.time.ClockMode.H12)!!.label)
+            assertEquals("Call updated Thu 9:05 AM — speak to James · 1 note",
+                deriveReceipt("update_call", ReceiptArgs(), "ok: updated call \"speak to James\" — 2026-09-03 09:05, 1 note", emptyList(), clock = tech.csalliance.unstuck.core.time.ClockMode.H12)!!.label)
+        } finally {
+            java.util.Locale.setDefault(prev)
+        }
+    }
+
     @Test fun `the remaining base write tools each get their own glyph`() {
         assertEquals(ReceiptIcon.PENCIL, r("update_task", "ok: updated \"Report\"")!!.icon)
         assertEquals(ReceiptIcon.TRASH, r("delete_task", "ok: deleted \"Report\"")!!.icon)

@@ -1,5 +1,6 @@
 package tech.csalliance.unstuck.core.logic
 
+import tech.csalliance.unstuck.core.time.ClockMode
 import java.time.Instant
 import java.time.ZoneId
 import java.util.Locale
@@ -29,10 +30,14 @@ import java.util.Locale
 // Kotlin strings are UTF-16, so every offset below maps 1:1 onto the Swift
 // NSString / JS string offsets the reference implementations use.
 
-/** Options for [polishReply]: "now" (and its zone) for the this-year date rule. */
+/** Options for [polishReply]: "now" (and its zone) for the this-year date rule;
+ *  [clock], the phone's 12/24-hour setting — a 24-hour phone keeps the reply's
+ *  "14:30" as it is instead of the reference "2:30pm" (Ahmad, 2026-09-24: one
+ *  clock app-wide). The default is the reference (web/iOS vectors). */
 data class PolishOptions(
     val nowMs: Long = System.currentTimeMillis(),
     val zone: ZoneId = ZoneId.systemDefault(),
+    val clock: ClockMode = ClockMode.H12,
 ) {
     val thisYear: Int get() = Instant.ofEpochMilli(nowMs).atZone(zone).year
 }
@@ -45,7 +50,7 @@ fun polishReply(text: String, opts: PolishOptions = PolishOptions()): String {
     out = ReplyPolish.stripOpener(out)
     out = ReplyPolish.stripCloser(out)
     out = ReplyPolish.restrainExclamations(out)
-    out = ReplyPolish.speakDatesAndTimes(out, opts.thisYear)
+    out = ReplyPolish.speakDatesAndTimes(out, opts.thisYear, opts.clock)
     out = ReplyPolish.tidyWhitespace(out)
     return if (out.trim().isEmpty()) trimmed else out
 }
@@ -302,7 +307,7 @@ internal object ReplyPolish {
     private val date = re("(^|[^A-Za-z0-9_/=-])(\\d{4})-(\\d{2})-(\\d{2})(?![A-Za-z0-9_/-])", ignoreCase = false)
     private val time = re("(^|[^A-Za-z0-9_:/=.-]|[-–—])([01]\\d|2[0-3]):([0-5]\\d)(?![0-9A-Za-z_:]|\\s*[ap]\\.?m\\b)")
 
-    fun speakDatesAndTimes(s: String, thisYear: Int): String {
+    fun speakDatesAndTimes(s: String, thisYear: Int, clock: ClockMode = ClockMode.H12): String {
         var spans = protectedSpans(s)
         var out = StringBuilder(s)
         for (m in date.findAll(s).toList().asReversed()) {
@@ -315,6 +320,8 @@ internal object ReplyPolish {
             out.replace(m.range.first, m.range.last + 1, pre + spoken)
         }
         val afterDates = out.toString()
+        // A 24-hour phone reads "14:30" — the token is already its own clock.
+        if (clock == ClockMode.H24) return afterDates
         spans = protectedSpans(afterDates)
         out = StringBuilder(afterDates)
         for (m in time.findAll(afterDates).toList().asReversed()) {

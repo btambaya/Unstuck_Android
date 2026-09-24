@@ -163,7 +163,7 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
             val dt = if (today.isBefore(java.time.LocalDateTime.now())) today.plusDays(1) else today
             val iso = dt.atZone(java.time.ZoneId.systemDefault()).toInstant().toString()
             vm.moveItemToTask(col, item, AppViewModel.PromoteMode.LOOP, iso)
-        }, now.hour, now.minute, false).show()
+        }, now.hour, now.minute, tech.csalliance.unstuck.ui.components.DeviceClock.mode(context) == tech.csalliance.unstuck.core.time.ClockMode.H24).show()
     }
 
     fun add() {
@@ -430,6 +430,7 @@ private fun CollItemRow(
     onMoveToTask: () -> Unit,
 ) {
     val c = UTheme.colors
+    val clock = tech.csalliance.unstuck.ui.components.clockMode()
     val done = item.done == true
     val isPinned = item.pinned == true
     val promoted = item.promoted == true
@@ -439,10 +440,10 @@ private fun CollItemRow(
     val struck = done || promoted          // promoted items read as "handled / in flight"
     val promotedLabel = if (!promoted) null else when {
         promotedDone -> "done by ${item.assignee ?: "someone"} ✓"
-        overdue -> "⚠ overdue · due ${fmtTime(item.dueAt)}"
+        overdue -> "⚠ overdue · due ${fmtTime(item.dueAt, clock)}"
         // Guard on the PARSED time (dueMs), not the raw string — an unparseable
         // dueAt would otherwise render a dangling "…'s on it · by ".
-        item.assignee != null && dueMs != null -> "${item.assignee}'s on it · by ${fmtTime(item.dueAt)}"
+        item.assignee != null && dueMs != null -> "${item.assignee}'s on it · by ${fmtTime(item.dueAt, clock)}"
         item.assignee != null -> "${item.assignee}'s on it"
         else -> "Promoted"
     }
@@ -668,8 +669,8 @@ private fun CollItemSwipeAction(title: String, icon: ImageVector, tint: Color, o
 private fun parseInstantMs(iso: String): Long? = runCatching { java.time.Instant.parse(iso).toEpochMilli() }
     .recoverCatching { java.time.OffsetDateTime.parse(iso).toInstant().toEpochMilli() }.getOrNull()
 
-private fun fmtTime(iso: String?): String {
+/** A due instant's local time the phone's way ([clock]): "14:30" / "2:30 PM". */
+private fun fmtTime(iso: String?, clock: tech.csalliance.unstuck.core.time.ClockMode): String {
     val ms = iso?.let { parseInstantMs(it) } ?: return ""
-    return java.time.Instant.ofEpochMilli(ms).atZone(java.time.ZoneId.systemDefault())
-        .format(java.time.format.DateTimeFormatter.ofPattern("h:mm a"))
+    return tech.csalliance.unstuck.core.time.ClockFormat.time(ms, clock)
 }

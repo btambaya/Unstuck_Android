@@ -141,14 +141,17 @@ fun areaColorFor(
 
 private val DOW = listOf("MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY", "SATURDAY", "SUNDAY")
 
-/** "FRIDAY · 12:12 PM" for the Today eyebrow. */
-fun dateEyebrow(nowMs: Long): String {
-    val z = java.time.Instant.ofEpochMilli(nowMs).atZone(java.time.ZoneId.systemDefault())
+/** "FRIDAY · 12:12 PM" / "FRIDAY · 12:12" for the Today eyebrow — the time
+ *  the phone's way ([clock]; it read "2:02 PM" under a "14:02" status bar). */
+fun dateEyebrow(
+    nowMs: Long,
+    clock: tech.csalliance.unstuck.core.time.ClockMode,
+    zone: java.time.ZoneId = java.time.ZoneId.systemDefault(),
+    locale: java.util.Locale = java.util.Locale.getDefault(),
+): String {
+    val z = java.time.Instant.ofEpochMilli(nowMs).atZone(zone)
     val day = DOW[z.dayOfWeek.value - 1]
-    val h = z.hour; val m = z.minute
-    val period = if (h >= 12) "PM" else "AM"
-    val h12 = ((h + 11) % 12) + 1
-    return "$day · $h12:${"%02d".format(m)} $period"
+    return "$day · ${tech.csalliance.unstuck.core.time.ClockFormat.time(z.hour, z.minute, clock, locale)}"
 }
 
 /** First name for the Today greeting: the first whitespace-separated word of the

@@ -44,7 +44,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.SHARED_BLOCK_ID_PREFIX
 import tech.csalliance.unstuck.core.logic.asCalBlock
 import tech.csalliance.unstuck.core.logic.asSharedWithMe
-import tech.csalliance.unstuck.core.logic.formatTime
 import tech.csalliance.unstuck.core.logic.isSharedBlockId
 import tech.csalliance.unstuck.core.logic.isTaskBlock
 import tech.csalliance.unstuck.core.logic.liveSharedBlocks
@@ -56,6 +55,7 @@ import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
+import tech.csalliance.unstuck.core.time.ClockFormat
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.design.theme.UFont
@@ -130,6 +130,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
     val tasksById = remember(tasks) { tasks.associateBy { it.id } }
     val density = LocalDensity.current
     val hourPx = with(density) { HOUR_HEIGHT.toPx() }
+    val clock = tech.csalliance.unstuck.ui.components.clockMode()
 
     // Saveable (ISO date string) so the viewed day doesn't snap back to today on rotation.
     var date by rememberSaveable { mutableStateOf(initialDate ?: Clock.todayIso()) }
@@ -252,7 +253,8 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
                     for (h in START_HOUR until END_HOUR) {
                         Row(Modifier.fillMaxWidth().height(HOUR_HEIGHT)) {
                             Text(
-                                formatTime("%02d:00".format(h)),
+                                // "14:00" / "2 PM" — the phone's 12/24-hour setting.
+                                ClockFormat.hour(h, clock),
                                 Modifier.width(64.dp).padding(start = 12.dp, top = 2.dp),
                                 style = UFont.mono(10), color = c.ink4,
                             )
@@ -416,7 +418,8 @@ private fun CalBlockEditSheet(vm: AppViewModel, block: CalBlock, onDismiss: () -
     val live = blocks.firstOrNull { it.id == block.id } ?: block
     // Full-day window (not the default 08:00–18:00) so an early-morning / evening block
     // can be rescheduled within its own time band.
-    val slots = tech.csalliance.unstuck.core.logic.findFreeSlotsForDate(blocks, live.durationMinutes, live.date, vm.nowMs(), limit = 5, dayStartMin = 0, dayEndMin = 24 * 60)
+    val clock = tech.csalliance.unstuck.ui.components.clockMode()
+    val slots = tech.csalliance.unstuck.core.logic.findFreeSlotsForDate(blocks, live.durationMinutes, live.date, vm.nowMs(), limit = 5, dayStartMin = 0, dayEndMin = 24 * 60, clock = clock)
     val times = (listOf(live.startTime) + slots.map { it.startTime }).distinct()
     androidx.compose.material3.ModalBottomSheet(
         onDismissRequest = onDismiss, sheetState = sheet, containerColor = c.surface, scrimColor = tech.csalliance.unstuck.design.component.SheetScrim,
@@ -428,7 +431,7 @@ private fun CalBlockEditSheet(vm: AppViewModel, block: CalBlock, onDismiss: () -
 
             tech.csalliance.unstuck.design.component.SectionLabel("Start time")
             Row(Modifier.horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                times.forEach { t -> tech.csalliance.unstuck.ui.tasks.SelectableChip(formatTime(t), selected = live.startTime == t) { vm.moveBlock(live, live.date, t) } }
+                times.forEach { t -> tech.csalliance.unstuck.ui.tasks.SelectableChip(ClockFormat.time(t, clock), selected = live.startTime == t) { vm.moveBlock(live, live.date, t) } }
             }
 
             tech.csalliance.unstuck.design.component.SectionLabel("Duration")

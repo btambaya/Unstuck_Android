@@ -54,6 +54,7 @@ import tech.csalliance.unstuck.core.logic.InterviewScript
 import tech.csalliance.unstuck.core.logic.InterviewThreadCopy
 import tech.csalliance.unstuck.core.logic.RITUAL_LABELS
 import tech.csalliance.unstuck.core.logic.RitualKey
+import tech.csalliance.unstuck.core.logic.displayLabel
 import tech.csalliance.unstuck.core.model.ProfileFactCategory
 import tech.csalliance.unstuck.core.model.ProfileFactSource
 import tech.csalliance.unstuck.design.theme.UFont
@@ -270,6 +271,9 @@ class InterviewThreadDriver(
     private val factCount: () -> Int,
     private val post: (String) -> String,
     private val echo: (String) -> Unit,
+    /** The chip as the user saw it — its clock hour the phone's way
+     *  ([displayLabel]); the echoed answer reads the same as the chip tapped. */
+    private val labelOf: (InterviewChip) -> String = { it.label },
 ) {
     private val _state = MutableStateFlow(InterviewThreadState())
     val state: StateFlow<InterviewThreadState> = _state.asStateFlow()
@@ -333,7 +337,7 @@ class InterviewThreadDriver(
         val before = controller.step
         controller.answer(chip)
         if (controller.step <= before) return
-        echo(chip.label)
+        echo(labelOf(chip))
         ask()
     }
 
@@ -399,6 +403,7 @@ fun InterviewPromptRow(driver: InterviewThreadDriver, ritualIsOn: (RitualKey) ->
     val flow by controller.state.collectAsStateWithLifecycle()
     var free by rememberSaveable(driver.promptTurnId) { mutableStateOf("") }
     val q = controller.current
+    val clock = tech.csalliance.unstuck.ui.components.clockMode()
     Column(
         Modifier.fillMaxWidth().padding(start = 4.dp).semantics { contentDescription = InterviewCopy.PANEL_LABEL },
         verticalArrangement = Arrangement.spacedBy(8.dp),
@@ -408,7 +413,8 @@ fun InterviewPromptRow(driver: InterviewThreadDriver, ritualIsOn: (RitualKey) ->
             FlowRow(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                 q.chips.forEach { chip ->
                     Text(
-                        chip.label, style = UFont.sans(13), color = c.ink,
+                        // "Before 09:00" / "Before 9am" — the phone's 12/24-hour setting.
+                        chip.displayLabel(clock), style = UFont.sans(13), color = c.ink,
                         modifier = Modifier
                             .clip(RoundedCornerShape(999.dp)).background(c.surface).border(1.dp, c.line2, RoundedCornerShape(999.dp))
                             .clickable(role = Role.Button) { scope.launch { driver.answer(chip); free = "" } }

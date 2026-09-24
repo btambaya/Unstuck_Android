@@ -221,11 +221,11 @@ There are three independent navigation layers, drawn bottom-to-top:
 │      Insights/Settings/SettingsSub/Palette)   │
 ├─────────────────────────────────────────────┤
 │  tab content (Today/Tasks/Calendar/Lists)     │ ← base
-│  + BottomNavBar (with CoralFab)               │
+│  + BottomNavBar (tabs + in-row coral +)       │
 └─────────────────────────────────────────────┘
 ```
 
-- **Tabs** are defined as `NavSpec` list (`NAV`): today, tasks, calendar, lists. `BottomNavBar` renders them with a center FAB gap; `onFab` opens `NewTaskSheet`. Switching tab clears the overlay stack.
+- **Tabs** are defined as `NavSpec` list (`NAV`): today, tasks, calendar, lists. `BottomNavBar` renders them in one row of five equal slots with the coral + in the middle slot (Today | Tasks | + | Calendar | Collections); `onFab` opens `NewTaskSheet` (New collection on the Collections tab — see `FabAction.kt`). Switching tab clears the overlay stack.
 - **Routes** are a `sealed interface Route` (`Detail(taskId)`, `Collection(id)`, `Insights(deep)`, `Settings`, `SettingsSub(section)`, `Palette`). `push(r)`/`pop()` mutate the stack; only `stack.lastOrNull()` is rendered.
 - **Sheets** (`Sheet.Avatar`, `Sheet.Areas`) and the FAB's `NewTaskSheet` ride on `ModalBottomSheet`.
 - **Focus** is its own overlay keyed by `focusTask`; `FocusScreen` is always given the **fresh** task (`tasks.firstOrNull { it.id == t.id } ?: t`) so edits propagate.
@@ -300,8 +300,8 @@ A Material `UnstuckTypography` is also defined and handed to `MaterialTheme`, bu
 
 **`component/Chrome.kt`** (Material-3 chrome):
 - `AppBar(title, leading, trailingSearch, onLeading, onSearch, avatarInitials, onAvatar)` — `enum Leading { MENU, BACK, NONE }`. Transparent over `bg`, 40dp round icon buttons.
-- `NavSpec(key, label, icon)` + `BottomNavBar(items, activeKey, onSelect, onFab)` — bottom nav with a `bg2` pill active indicator and the FAB floating in a center gap.
-- `CoralFab(onClick)` — 56×56 rounded-square coral FAB with a `+`.
+- `NavSpec(key, label, icon)` + `BottomNavBar(items, activeKey, onSelect, onFab)` — bottom nav: one row of five equal slots, tabs with a `bg2` pill active indicator, and the coral + (44×44, 13dp corners, no shadow) in the middle slot, vertically centred on the tab cells so it reads as one line with them. The + is part of the bar; nothing pokes above it.
+- `CoralFab(onClick)` — standalone 56×56 rounded-square coral FAB with a `+`, for a screen that floats one over its content. The bottom bar does NOT use it.
 - `SheetHandle` (32×4 drag handle) and `SheetScrim` (the indigo-tinted `0x4D141228` modal scrim — pass it as `scrimColor` on every `ModalBottomSheet`).
 
 **`component/Controls.kt`**: `MdField` (outlined field with a notched floating label), `MdToggle` (green-when-on switch), `MdSegment` (segmented control — used for Day/Week/Month, Theme, etc.).
@@ -392,7 +392,7 @@ Say you want a full-screen Streaks view reachable from the avatar menu. The work
 
 4. **Push it** from wherever — e.g. add a row to `AvatarMenu` and wire `MainScaffold`'s `Sheet.Avatar` branch to `{ sheet = null; push(Route.Streaks) }`.
 
-That's it — back handling already covers it (the second `BackHandler` pops any non-empty stack), and the overlay is automatically inset with `systemBarsPadding()` and drawn above the tab content. If instead you want a **new bottom tab**, add a `NavSpec` to `NAV` (and a `"streaks" -> StreaksScreen(...)` branch in the tab `when`), but note `BottomNavBar` hard-codes exactly four cells around the FAB gap — adding a fifth tab requires editing `BottomNavBar` itself.
+That's it — back handling already covers it (the second `BackHandler` pops any non-empty stack), and the overlay is automatically inset with `systemBarsPadding()` and drawn above the tab content. If instead you want a **new bottom tab**, add a `NavSpec` to `NAV` (and a `"streaks" -> StreaksScreen(...)` branch in the tab `when`), but note `BottomNavBar` splits the tabs evenly around the + slot and is designed for four — a fifth tab gives six narrower slots and an off-centre +, so revisit `BottomNavBar` itself.
 
 If you need a new write, add a `fun …() = launchWrite { write?.… }` method to `AppViewModel` (apply any rule from `:core` first), and the new state flows back automatically.
 

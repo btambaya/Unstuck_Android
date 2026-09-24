@@ -362,9 +362,18 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
         // Hour grid: time gutter + 7 day columns with positioned blocks.
         Row(Modifier.fillMaxWidth().height(WHOUR * (WEND - WSTART)).padding(top = 6.dp)) {
+            // Hour labels the phone's way — "14:00" / "2 PM", like the Day grid (it
+            // read a bare "14" here while the Day grid said "2:00 PM"). One line,
+            // never wrapped: a large font scale overhangs the first column instead.
+            val clock = tech.csalliance.unstuck.ui.components.clockMode()
             Column(Modifier.width(26.dp)) {
                 for (h in WSTART until WEND) {
-                    Box(Modifier.height(WHOUR)) { Text("%02d".format(h), style = UFont.mono(8), color = c.ink4) }
+                    Box(Modifier.height(WHOUR)) {
+                        Text(
+                            tech.csalliance.unstuck.core.time.ClockFormat.hour(h, clock), style = UFont.mono(8), color = c.ink4,
+                            maxLines = 1, softWrap = false, overflow = androidx.compose.ui.text.style.TextOverflow.Visible,
+                        )
+                    }
                 }
             }
             val weekDensity = androidx.compose.ui.platform.LocalDensity.current

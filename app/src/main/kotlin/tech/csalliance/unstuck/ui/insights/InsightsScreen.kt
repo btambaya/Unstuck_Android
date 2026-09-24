@@ -58,7 +58,7 @@ import tech.csalliance.unstuck.core.logic.captureBreakdown
 import tech.csalliance.unstuck.core.logic.comebackBins
 import tech.csalliance.unstuck.core.logic.earliestActivityDay
 import tech.csalliance.unstuck.core.logic.hourDayHeatmap
-import tech.csalliance.unstuck.core.logic.hourLabel
+import tech.csalliance.unstuck.core.time.ClockFormat
 import tech.csalliance.unstuck.core.logic.insightsComparisonLabel
 import tech.csalliance.unstuck.core.logic.insightsFacts
 import tech.csalliance.unstuck.core.logic.insightsPeriodLabel
@@ -534,6 +534,8 @@ private fun LabeledBar(label: String, frac: Float, value: String, color: Color) 
 @Composable
 private fun Heatmap(grid: List<List<Double>>) {
     val c = UTheme.colors
+    // The axis + the spoken summary read hours the phone's way: "6am" / "06:00".
+    val clock = tech.csalliance.unstuck.ui.components.clockMode()
     val max = (grid.flatten().maxOrNull() ?: 0.0).coerceAtLeast(0.001)
     val days = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
     val a11y = run {
@@ -543,7 +545,7 @@ private fun Heatmap(grid: List<List<Double>>) {
         for (h in 0 until 24) { val v = grid.sumOf { it[h] }; if (v > peakV) { peakV = v; peakH = h } }
         "Focus by hour and weekday. ${periodDur(grid.flatten().sum().roundToInt())} in all" +
             (busiest?.takeIf { it.second > 0 }?.let { ", busiest on ${it.first}" } ?: "") +
-            (if (peakH >= 0) ", most around ${hourLabel(peakH)}" else "") + "."
+            (if (peakH >= 0) ", most around ${ClockFormat.compactHour(peakH, clock)}" else "") + "."
     }
     Card(Modifier.fillMaxWidth().padding(top = 12.dp).semantics { contentDescription = a11y }, radius = 18) {
         Column(verticalArrangement = Arrangement.spacedBy(3.dp)) {
@@ -561,7 +563,7 @@ private fun Heatmap(grid: List<List<Double>>) {
             Row(Modifier.fillMaxWidth()) {
                 Spacer(Modifier.width(28.dp))
                 listOf(0, 6, 12, 18).forEach { h ->
-                    Text(hourLabel(h), style = UFont.mono(9), color = c.ink3, modifier = Modifier.weight(1f))
+                    Text(ClockFormat.compactHour(h, clock), style = UFont.mono(9), color = c.ink3, modifier = Modifier.weight(1f))
                 }
             }
         }

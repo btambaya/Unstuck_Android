@@ -110,7 +110,7 @@ fun SharedWithYouSection(
                     // The owner's slot leads — "Sat 04:30 · 45m · from anna" — so a shared
                     // task reads like one of your own rows (migration 052). Unscheduled falls
                     // back to the estimate; an overdue slot is tinted like a backlog age badge.
-                    val slot = shareSlotLabel(s, todayIso)
+                    val slot = shareSlotLabel(s, todayIso, tech.csalliance.unstuck.ui.components.clockMode())
                     val overdue = !done && shareBucket(s, todayIso) == ShareBucket.OVERDUE
                     val meta = listOfNotNull(slot ?: fmtDuration(s.estimateMin), "from ${shareFirstName(s.ownerName)}").joinToString(" · ")
                     Text(meta, style = UFont.sans(12), color = if (overdue) c.amberInk else c.ink3, modifier = Modifier.padding(top = 2.dp))

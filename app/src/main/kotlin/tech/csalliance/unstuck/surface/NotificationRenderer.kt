@@ -8,6 +8,8 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
 import tech.csalliance.unstuck.MainActivity
 import tech.csalliance.unstuck.R
+import tech.csalliance.unstuck.core.time.ClockFormat
+import tech.csalliance.unstuck.ui.components.DeviceClock
 
 /**
  * Builds + posts notifications in the design voice. Incoming pushes are routed
@@ -141,20 +143,10 @@ object NotificationRenderer {
         if (!enabled(context)) return
         val n = base(context, NotificationChannels.REMINDERS)
             .setContentTitle("Rescheduled")
-            .setContentText("“$taskName” moved to ${formatClock(newTime)}.")
+            .setContentText("“$taskName” moved to ${ClockFormat.time(newTime, DeviceClock.mode(context))}.")
             .setContentIntent(openApp(context, "unstuck://task/$taskId"))
             .setTimeoutAfter(8_000)
             .build()
         NotificationManagerCompat.from(context).notify(NotifIds.atStart(taskId), n)
-    }
-
-    /** HH:MM (24h) → a friendly 12h clock for copy. */
-    private fun formatClock(hhmm: String): String {
-        val p = hhmm.split(":")
-        val h = p.getOrNull(0)?.toIntOrNull() ?: return hhmm
-        val m = p.getOrNull(1)?.toIntOrNull() ?: 0
-        val period = if (h >= 12) "PM" else "AM"
-        val h12 = ((h + 11) % 12) + 1
-        return "%d:%02d %s".format(h12, m, period)
     }
 }

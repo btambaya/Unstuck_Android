@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import tech.csalliance.unstuck.core.logic.CallSettings
+import tech.csalliance.unstuck.core.time.ClockMode
 import tech.csalliance.unstuck.ui.TEST_CALL_CALLS_OFF
 import tech.csalliance.unstuck.ui.TEST_CALL_LABEL
 import tech.csalliance.unstuck.ui.TEST_CALL_NOTE
@@ -15,34 +16,71 @@ import tech.csalliance.unstuck.ui.TEST_CALL_OUTSIDE_HOURS
 class CallsSettingsCopyTest {
 
     @Test fun `a booked test call reports the time the row landed on`() {
-        assertEquals(TestCallState.Booked("14:31"), testCallStateFrom("ok: call booked 2026-09-07 14:31 \"Test call\" (1 note) id=c9"))
-        assertEquals("Booked. It rings at 14:31. Lock your phone and wait.", testCallBookedLine("14:31"))
+        assertEquals(TestCallState.Booked("14:31"), testCallStateFrom("ok: call booked 2026-09-07 14:31 \"Test call\" (1 note) id=c9", ClockMode.H24))
+        assertEquals("Booked. It rings at 14:31. Lock your phone and wait.", testCallBookedLine("14:31", ClockMode.H24))
     }
 
     @Test fun `a refused test call shows the guard's sentence`() {
         assertEquals(
             TestCallState.Failed("Calls can only be booked between 06:00 and 23:00 — suggest a time inside that window."),
-            testCallStateFrom("error: calls can only be booked between 06:00 and 23:00 — suggest a time inside that window"),
+            testCallStateFrom("error: calls can only be booked between 06:00 and 23:00 — suggest a time inside that window", ClockMode.H24),
         )
-        assertEquals(TestCallState.Failed("Couldn't book the call — check your connection and try again."), testCallStateFrom("error: couldn't reach the server — try again"))
+        assertEquals(TestCallState.Failed("Couldn't book the call — check your connection and try again."), testCallStateFrom("error: couldn't reach the server — try again", ClockMode.H24))
         val s = CallSettings(hoursStart = "08:00", hoursEnd = "21:00")
         assertEquals(
             TestCallState.Failed("23:10 is outside your allowed hours (08:00–21:00) — the phone would decline it quietly. Widen the hours above to try it now."),
-            testCallStateFrom(TEST_CALL_OUTSIDE_HOURS("23:10", s)),
+            testCallStateFrom(TEST_CALL_OUTSIDE_HOURS("23:10", s), ClockMode.H24),
         )
-        assertEquals(TestCallState.Failed("Calls are off on this phone — switch them on above to try it."), testCallStateFrom(TEST_CALL_CALLS_OFF))
+        assertEquals(TestCallState.Failed("Calls are off on this phone — switch them on above to try it."), testCallStateFrom(TEST_CALL_CALLS_OFF, ClockMode.H24))
         assertEquals(
             "the end minute names the last one that rings (C12)",
             TestCallState.Failed("21:00 is outside your allowed hours (08:00–21:00; the latest it rings is 20:59) — the phone would decline it quietly. Widen the hours above to try it now."),
-            testCallStateFrom(TEST_CALL_OUTSIDE_HOURS("21:00", s)),
+            testCallStateFrom(TEST_CALL_OUTSIDE_HOURS("21:00", s), ClockMode.H24),
         )
     }
 
     @Test fun `the test-call row says where it is`() {
-        assertEquals("We'll ring you in about a minute.", testCallLine(TestCallState.Idle))
-        assertEquals("Booking…", testCallLine(TestCallState.Booking))
-        assertEquals("Booked. It rings at 09:05. Lock your phone and wait.", testCallLine(TestCallState.Booked("09:05")))
-        assertEquals("Nope.", testCallLine(TestCallState.Failed("Nope.")))
+        assertEquals("We'll ring you in about a minute.", testCallLine(TestCallState.Idle, ClockMode.H24))
+        assertEquals("Booking…", testCallLine(TestCallState.Booking, ClockMode.H24))
+        assertEquals("Booked. It rings at 09:05. Lock your phone and wait.", testCallLine(TestCallState.Booked("09:05"), ClockMode.H24))
+        assertEquals("Nope.", testCallLine(TestCallState.Failed("Nope."), ClockMode.H24))
+    }
+
+    /** Ahmad, 2026-09-24: one rule app-wide — a 12-hour phone reads every time
+     *  on this screen as 12-hour, the refusals it shows included. */
+    @Test fun `a 12-hour phone reads the Calls block's times its own way`() {
+        val prev = java.util.Locale.getDefault()
+        try {
+            java.util.Locale.setDefault(java.util.Locale.US)
+            val h12 = ClockMode.H12
+            assertEquals("Booked. It rings at 2:31 PM. Lock your phone and wait.", testCallBookedLine("14:31", h12))
+            assertEquals("Booked. It rings at 9:05 AM. Lock your phone and wait.", testCallLine(TestCallState.Booked("09:05"), h12))
+            val s = CallSettings(hoursStart = "08:00", hoursEnd = "21:00")
+            assertEquals(
+                TestCallState.Failed("11:10 PM is outside your allowed hours (8:00 AM–9:00 PM) — the phone would decline it quietly. Widen the hours above to try it now."),
+                testCallStateFrom(TEST_CALL_OUTSIDE_HOURS("23:10", s), h12),
+            )
+            assertEquals(
+                "the end minute, the phone's way",
+                TestCallState.Failed("9:00 PM is outside your allowed hours (8:00 AM–9:00 PM; the latest it rings is 8:59 PM) — the phone would decline it quietly. Widen the hours above to try it now."),
+                testCallStateFrom(TEST_CALL_OUTSIDE_HOURS("21:00", s), h12),
+            )
+            assertEquals(
+                "a range inside one half of the day keeps one meridiem",
+                TestCallState.Failed("7:30 AM is outside your allowed hours (8:00–11:00 AM) — the phone would decline it quietly. Widen the hours above to try it now."),
+                testCallStateFrom(TEST_CALL_OUTSIDE_HOURS("07:30", CallSettings(hoursStart = "08:00", hoursEnd = "11:00")), h12),
+            )
+            assertEquals(
+                "the assistant's refusal shows the phone's clock too",
+                TestCallState.Failed("Calls can only be booked between 6:00 AM and 11:00 PM — suggest a time inside that window."),
+                testCallStateFrom("error: calls can only be booked between 06:00 and 23:00 — suggest a time inside that window", h12),
+            )
+            assertEquals("the booked time stays the wire time", TestCallState.Booked("14:31"), testCallStateFrom("ok: call booked 2026-09-07 14:31 \"Test call\" (1 note) id=c9", h12))
+            assertEquals("Calls from 8:00 AM. Change", callsHoursChipA11y(from = true, hhmm = "08:00", clock = h12))
+            assertEquals("Calls until 9:00 PM. Change", callsHoursChipA11y(from = false, hhmm = "21:00", clock = h12))
+        } finally {
+            java.util.Locale.setDefault(prev)
+        }
     }
 
     /** iOS shows the mic line whenever the microphone is denied, from the moment

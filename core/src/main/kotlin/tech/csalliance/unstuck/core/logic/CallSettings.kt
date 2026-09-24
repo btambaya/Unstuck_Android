@@ -3,6 +3,8 @@ package tech.csalliance.unstuck.core.logic
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import tech.csalliance.unstuck.core.model.CallRequest
+import tech.csalliance.unstuck.core.time.ClockFormat
+import tech.csalliance.unstuck.core.time.ClockMode
 import tech.csalliance.unstuck.core.time.WireTime
 import java.time.Instant
 import java.time.ZoneId
@@ -73,20 +75,24 @@ object CallSettingsLogic {
         return t >= a || t < b
     }
 
-    /** The allowed hours as a refusal names them, "08:00–21:00". The end is
+    /** The allowed hours as a refusal names them — "08:00–21:00", or
+     *  "8:00 AM–9:00 PM" on a 12-hour phone ([clock]; the assistant's refusals
+     *  always pass [ClockMode.H24], the model's 'HH:MM' contract). The end is
      *  exclusive, so refusing the end minute itself read as a contradiction
      *  ("23:00 is outside this phone's call hours (06:00–23:00)" on untouched
      *  defaults, where the server and the web take 23:00) — that one case
      *  also says the last minute that rings (parity with iOS build 81,
      *  audit 2026-09-22 C12). */
-    fun hoursLabel(start: String, end: String, refusingMin: Int): String {
+    fun hoursLabel(start: String, end: String, refusingMin: Int, clock: ClockMode): String {
+        val hours = if (clock == ClockMode.H24) "$start–$end" else ClockFormat.range(start, end, clock)
         val e = minutesOfDay(end)
-        if (e == null || refusingMin != e) return "$start–$end"
+        if (e == null || refusingMin != e) return hours
         val last = (e + 24 * 60 - 1) % (24 * 60)
         // ASCII like the hours beside it (and iOS): the phone's own digits here mixed
         // two scripts in one sentence, which the model also reads (Android audit
-        // 2026-09-23, A12).
-        return "$start–$end; the latest it rings is ${WireTime.hm(last / 60, last % 60)}"
+        // 2026-09-23, A12). The model's refusals pass H24 — its 'HH:MM' contract;
+        // the screens pass the phone's own mode.
+        return "$hours; the latest it rings is ${ClockFormat.ofMinutes(last, clock)}"
     }
 
     // ── will it ring here? (parity with iOS build 81, audit 2026-09-22 C12) ──
@@ -111,14 +117,14 @@ object CallSettingsLogic {
      *  will ring here. Judged at the minute the dispatcher really books it
      *  ([proactiveRingMinute]) and the minute after — call-dispatch runs every
      *  minute — against this phone's switch and hours. */
-    fun proactiveTimeWarning(hhmm: String, enabled: Boolean, start: String, end: String): String? {
+    fun proactiveTimeWarning(hhmm: String, enabled: Boolean, start: String, end: String, clock: ClockMode): String? {
         val t = minutesOfDay(hhmm) ?: return null
         val ring = proactiveRingMinute(t)
-            ?: return "Unstuck only calls between ${SERVER_WINDOW.start} and ${SERVER_WINDOW.endInclusive}, so a call at $hhmm never rings."
+            ?: return "Unstuck only calls between ${ClockFormat.time(SERVER_WINDOW.start, clock)} and ${ClockFormat.time(SERVER_WINDOW.endInclusive, clock)}, so a call at ${ClockFormat.time(hhmm, clock)} never rings."
         if (!enabled) return "Calls are off on this phone, so this call is declined here — switch them on above."
         val outside = listOf(ring, ring + 1).firstOrNull { !withinWindow(it, start, end) } ?: return null
         // The time in ASCII, as in hoursLabel (Android audit 2026-09-23, A12).
-        return "Unstuck rings this call at about ${WireTime.hm(outside / 60, outside % 60)}, outside this phone's allowed hours (${hoursLabel(start, end, outside)}), so it's declined here — widen the hours above or pick another time."
+        return "Unstuck rings this call at about ${ClockFormat.ofMinutes(outside, clock)}, outside this phone's allowed hours (${hoursLabel(start, end, outside, clock)}), so it's declined here — widen the hours above or pick another time."
     }
 
     /** The amber line under "Check in after a block" (it rings at the tick
@@ -126,12 +132,12 @@ object CallSettingsLogic {
      *  rings here. The 23:00 minute itself is left out: the default hours end
      *  there (exclusive), and one edge minute is not worth a warning on every
      *  untouched phone. */
-    fun afterBlockWarning(enabled: Boolean, start: String, end: String): String? {
+    fun afterBlockWarning(enabled: Boolean, start: String, end: String, clock: ClockMode): String? {
         if (!enabled) return "Calls are off on this phone, so these check-ins are declined here — switch them on above."
         val s = minutesOfDay(SERVER_WINDOW.start) ?: return null
         val e = minutesOfDay(SERVER_WINDOW.endInclusive) ?: return null
         if ((s until e).all { withinWindow(it, start, end) }) return null
-        return "This phone only takes calls $start–$end, so a check-in after a block that ends outside those hours is declined here."
+        return "This phone only takes calls ${ClockFormat.range(start, end, clock)}, so a check-in after a block that ends outside those hours is declined here."
     }
 
     /** THIS phone's Calls switch and allowed hours → the error string, or null
@@ -148,7 +154,7 @@ object CallSettingsLogic {
         val hm = hhmm(callAtMs, zone)
         val t = minutesOfDay(hm) ?: return null
         if (!withinWindow(t, s.hoursStart, s.hoursEnd)) {
-            return "error: $hm is outside this phone's call hours (${hoursLabel(s.hoursStart, s.hoursEnd, t)}), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Notifications & calls"
+            return "error: $hm is outside this phone's call hours (${hoursLabel(s.hoursStart, s.hoursEnd, t, ClockMode.H24)}), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Notifications & calls"
         }
         return null
     }
@@ -163,7 +169,7 @@ object CallSettingsLogic {
         val hm = hhmm(at, zone)
         val t = minutesOfDay(hm) ?: return null
         if (withinWindow(t, s.hoursStart, s.hoursEnd)) return null
-        return "error: a call-back in $m minutes would ring at $hm, outside this phone's call hours (${hoursLabel(s.hoursStart, s.hoursEnd, t)}), so it would be declined — ask them for a shorter wait, or for a time inside those hours to book with request_call"
+        return "error: a call-back in $m minutes would ring at $hm, outside this phone's call hours (${hoursLabel(s.hoursStart, s.hoursEnd, t, ClockMode.H24)}), so it would be declined — ask them for a shorter wait, or for a time inside those hours to book with request_call"
     }
 
     /** Server booking window check (inclusive 06:00 … 23:00). */

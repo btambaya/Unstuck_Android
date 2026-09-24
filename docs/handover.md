@@ -26,6 +26,35 @@ Single source of truth for "where is the Android build?". Update as phases land.
 - **Needs a device pass:** the consent sheet over the Assistant sheet, app open with a booked call, a call rung after
   turning sharing off on the web. The tour clip `tour_personalization.m4a` (and `tour_finish_more.m4a`) still need
   re-recording from the new copy (parked in `TOUR_STEPS_AWAITING_NARRATION` / `TOUR_MORE_AWAITING_NARRATION`).
+- **Copy canon (web · iOS · Android, `COPY-CANON.md`):** Notifications & calls, the Calls block, Focus ⋯ Options and the
+  leave question share one wording; Voice replies stays in place greyed out while the spoken coach is off; the leave question
+  is "Leave this session?" with Leave / Leave and don't ask again / Stay. Section links reduce a name to letters and digits
+  (`settingsAliasKey`: lowercase, "&" → "and") before matching, so "ai-assistant", "calls_from_unstuck" and "areas+tags" land.
+  The assistant says routines by name (Morning plan, …) in `get_settings` / `set_ritual`, as iOS and the web do.
+- **Merged with main's one clock:** the Calls block's time chips, pickers, warnings and test-call line go through
+  `ClockFormat` with the phone's `clockMode()` (the old Settings › Calls screen they were ported onto is gone).
+
+## 2026-09-24 (branch `clock/android`, NOT shipped) — one clock: every time on screen follows the phone's 12/24-hour setting
+
+- **Why:** Ahmad's phone was on 24-hour ("14:02") while Today said "THURSDAY · 2:02 PM", the Day grid "2:00 PM" and the Week
+  grid a bare "14" — each screen hard-coded its own format. Now ONE rule, app-wide.
+- **The formatter:** `core/time/ClockFormat.kt` (pure; the mode is passed in as `ClockMode.H12 / H24`): `time` "14:30" /
+  "2:30 PM", `hour` (grid labels) "14:00" / "2 PM", `compactHour` (heatmap axis) "14:00" / "2pm", `range` "14:00–15:30" /
+  "2:00–3:30 PM", `localizeTimes` (a tool refusal shown verbatim on a card). Locale AM/PM symbols, ASCII digits.
+- **The accessor:** `ui/components/DeviceClock.kt` — `DeviceClock.mode(context)` (`DateFormat.is24HourFormat`),
+  `ProvideDeviceClock` at `AppRoot` (re-read on every resume), `clockMode()` in composables, `vm.clockMode()` in the VM.
+- **Sites:** Today eyebrow; Week + Day grid hour labels; Day-grid move chips; month peek rows; new-task time chips + picker;
+  task detail schedule line, pickers, "Call me" rings line / hours hint / refusals; shared-with-you chips + "Planned …"; list
+  "due/by" times + picker; Insights heatmap axis; Settings › Calls (hours rows, proactive times, pickers, warnings, hints, test
+  call); the "Rescheduled" and late-reminder notifications; assistant receipts + the harness's own closing line; the
+  text reply polish (`PolishOptions.clock`: a 24-hour phone keeps the model's "14:30" instead of the "2:30pm" rewrite).
+  Review pass: the interview's never-schedule chips ("Before 9am" / "After 9pm" → `InterviewChip.displayLabel`: "Before
+  09:00" on a 24-hour phone; the echoed answer matches; the SAVED fact keeps the web's words for cross-device parity) and the
+  "Plan a quiet weekend" suggestion's message, which lands in the thread as the user's turn ("nothing before 10:00").
+- **Left 24-hour on purpose (machine / model text):** `WireTime` storage + sync, tool args/results and every `ok:`/`error:`
+  string the model reads (`deviceGuard`, `snoozeRefusal`, `timeGuard` pass `ClockMode.H24`), the assistant context
+  (goldenHours, patterns, get_insights' "Peak slot" via `hourLabel`), the call script/opening and TTS (`spokenTime`), Google/ICS
+  ISO stamps. The gateway brief/moment text is still raw `HH:MM` but no screen renders it any more (card left Today 2026-09-17).
 
 ## 2026-09-24 (overnight, branch `polish/android`, NOT shipped) — James's assistant reports + the cross-platform analytics rules
 

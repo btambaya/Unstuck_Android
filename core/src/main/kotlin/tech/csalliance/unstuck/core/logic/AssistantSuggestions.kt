@@ -4,6 +4,8 @@ import java.time.LocalDate
 import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.ItemCollection
 import tech.csalliance.unstuck.core.model.TaskItem
+import tech.csalliance.unstuck.core.time.ClockFormat
+import tech.csalliance.unstuck.core.time.ClockMode
 
 // Port of lib/assistant/suggestions.ts. Dynamic assistant suggestions — every
 // chip derives from the user's ACTUAL data (real task names, real list names)
@@ -60,6 +62,10 @@ fun buildSuggestions(
     blocks: List<CalBlock>,
     collections: List<ItemCollection>,
     todayIso: String,
+    /** The phone's 12/24-hour setting: a chip's message lands in the thread as
+     *  the user's own words, so its clock time reads the phone's way ("nothing
+     *  before 10:00" / "10am" — the web's copy on a 12-hour phone). */
+    clock: ClockMode = ClockMode.H12,
 ): SuggestionGroups {
     val open = openTasks(tasks)
     val gettingStarted = mutableListOf<AssistantSuggestion>()
@@ -116,7 +122,7 @@ fun buildSuggestions(
             planAndSchedule += AssistantSuggestion(
                 "Plan a quiet weekend",
                 "Schedule my lighter personal and home tasks across $sat and $sun, spaced out with " +
-                    "breathing room — nothing before 10am, and leave the rest of the weekend free.",
+                    "breathing room — nothing before ${ClockFormat.compactHour(10, clock)}, and leave the rest of the weekend free.",
             )
         }
     }

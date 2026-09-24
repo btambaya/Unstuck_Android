@@ -111,6 +111,16 @@ class ReplyPolishTest {
         assertEquals("11:59pm", spokenTime(23, 59))
     }
 
+    /** Ahmad, 2026-09-24: a 24-hour phone keeps the reply's 24-hour time — the
+     *  "2:30pm" rewrite made the chat the one 12-hour spot on a 24-hour phone.
+     *  Dates are still spoken; a 12-hour phone keeps the reference rewrite. */
+    @Test fun `a 24-hour phone keeps the reply's times`() {
+        val h24 = opts.copy(clock = tech.csalliance.unstuck.core.time.ClockMode.H24)
+        assertEquals("Gym is on Sat 5 Sep at 14:30.", polishReply("Gym is on 2026-09-05 at 14:30.", h24))
+        assertEquals("Gym is on Sat 5 Sep at 2:30pm.", polishReply("Gym is on 2026-09-05 at 14:30.", opts))
+        assertEquals("the reference default", tech.csalliance.unstuck.core.time.ClockMode.H12, PolishOptions().clock)
+    }
+
     @Test fun `vector count covers the contract`() {
         assertTrue(vectors.size >= 25)
     }

@@ -78,6 +78,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.AssistantHarnessRules
 import tech.csalliance.unstuck.core.logic.Receipt
 import tech.csalliance.unstuck.core.logic.assistantDayLabel
+import tech.csalliance.unstuck.core.logic.displayLabel
 import tech.csalliance.unstuck.core.logic.shouldCheckIn
 import tech.csalliance.unstuck.core.time.Clock
 import tech.csalliance.unstuck.design.component.SectionLabel
@@ -173,6 +174,7 @@ private fun AssistantChat(vm: AppViewModel, onNavigate: (AssistantDestination) -
             factCount = { vm.profileFacts.value.size },
             post = { text -> vm.appendLocalAssistant(text) ?: "" },
             echo = { text -> vm.appendLocalUser(text) },
+            labelOf = { chip -> chip.displayLabel(vm.clockMode()) },
         )
     }
     val interviewState by interview.state.collectAsStateWithLifecycle()

@@ -177,7 +177,10 @@ fun hourDayHeatmap(sessions: List<Session>, zone: ZoneId = ZoneId.systemDefault(
     return grid
 }
 
-/** "9am", "12pm", "7pm" — an hour-of-day label. */
+/** "9am", "12pm", "7pm" — an hour-of-day label in get_insights' "Peak slot"
+ *  line (the model's wording). A screen shows hours through
+ *  [tech.csalliance.unstuck.core.time.ClockFormat.compactHour], the phone's
+ *  12/24-hour way. */
 fun hourLabel(h: Int): String = when {
     h == 0 || h == 24 -> "12am"
     h < 12 -> "${h}am"

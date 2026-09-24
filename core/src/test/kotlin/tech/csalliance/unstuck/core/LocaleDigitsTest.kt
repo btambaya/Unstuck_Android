@@ -23,6 +23,7 @@ import tech.csalliance.unstuck.core.logic.wakeWindowSample
 import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.model.TaskListView
 import tech.csalliance.unstuck.core.time.Clock
+import tech.csalliance.unstuck.core.time.ClockMode
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.core.time.WireTime
 import java.time.LocalDate
@@ -154,11 +155,11 @@ class LocaleDigitsTest {
         // the warning read "about ۲۱:۰۰ … (08:00–21:00; the latest it rings is ۲۰:۵۹)",
         // and the model got the same mix in the refusal.
         underEachLocale { l ->
-            assertEquals("$l", "08:00–21:00; the latest it rings is 20:59", CallSettingsLogic.hoursLabel("08:00", "21:00", 21 * 60))
+            assertEquals("$l", "08:00–21:00; the latest it rings is 20:59", CallSettingsLogic.hoursLabel("08:00", "21:00", 21 * 60, ClockMode.H24))
             assertEquals(
                 "$l",
                 "Unstuck rings this call at about 21:00, outside this phone's allowed hours (08:00–21:00; the latest it rings is 20:59), so it's declined here — widen the hours above or pick another time.",
-                CallSettingsLogic.proactiveTimeWarning("20:58", enabled = true, start = "08:00", end = "21:00"),
+                CallSettingsLogic.proactiveTimeWarning("20:58", enabled = true, start = "08:00", end = "21:00", clock = ClockMode.H24),
             )
         }
     }

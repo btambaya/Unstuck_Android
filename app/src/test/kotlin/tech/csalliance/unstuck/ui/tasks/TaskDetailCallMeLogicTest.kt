@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import tech.csalliance.unstuck.core.time.ClockMode
 import tech.csalliance.unstuck.sync.CallRequest
 import tech.csalliance.unstuck.sync.CallsClient
 import tech.csalliance.unstuck.ui.assistant.CallToolLogic
@@ -49,11 +50,11 @@ class TaskDetailCallMeLogicTest {
     }
 
     @Test fun `tool results become the section's copy`() {
-        assertEquals("", CallMeLogic.userMessage("ok: call booked 2026-09-07 09:30 \"Board prep\" (0 notes) id=c1"))
-        assertEquals(CallMeLogic.BOOK_FAILED, CallMeLogic.userMessage(CallToolLogic.NETWORK))
-        assertEquals(CallMeLogic.CHANGED_UNDERNEATH, CallMeLogic.userMessage(CallToolLogic.CHANGED_UNDERNEATH))
+        assertEquals("", CallMeLogic.userMessage("ok: call booked 2026-09-07 09:30 \"Board prep\" (0 notes) id=c1", ClockMode.H24))
+        assertEquals(CallMeLogic.BOOK_FAILED, CallMeLogic.userMessage(CallToolLogic.NETWORK, ClockMode.H24))
+        assertEquals(CallMeLogic.CHANGED_UNDERNEATH, CallMeLogic.userMessage(CallToolLogic.CHANGED_UNDERNEATH, ClockMode.H24))
         assertEquals("Calls can only be booked between 06:00 and 23:00 — suggest a time inside that window",
-            CallMeLogic.userMessage("error: calls can only be booked between 06:00 and 23:00 — suggest a time inside that window"))
+            CallMeLogic.userMessage("error: calls can only be booked between 06:00 and 23:00 — suggest a time inside that window", ClockMode.H24))
         assertTrue(CallMeLogic.isOk("ok"))
         assertFalse(CallMeLogic.isOk("error: x"))
         assertTrue(CallMeLogic.isAlreadyGone("error: that call is already cancelled"))
@@ -86,20 +87,40 @@ class TaskDetailCallMeLogicTest {
 
     @Test fun `the hours hint names why this phone would decline, and is null when it rings`() {
         val narrow = tech.csalliance.unstuck.core.logic.CallSettings(hoursStart = "08:00", hoursEnd = "21:00")
-        assertNull(CallMeLogic.hoursHint(localMs("20:00"), narrow))
-        assertNull(CallMeLogic.hoursHint(null, narrow))
+        assertNull(CallMeLogic.hoursHint(localMs("20:00"), narrow, ClockMode.H24))
+        assertNull(CallMeLogic.hoursHint(null, narrow, ClockMode.H24))
         assertEquals(
             "21:00 is outside this phone's call hours (08:00–21:00; the latest it rings is 20:59), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Notifications & calls.",
-            CallMeLogic.hoursHint(localMs("21:00"), narrow),
+            CallMeLogic.hoursHint(localMs("21:00"), narrow, ClockMode.H24),
         )
         assertEquals(
             "07:45 is outside this phone's call hours (08:00–21:00), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Notifications & calls.",
-            CallMeLogic.hoursHint(localMs("07:45"), narrow),
+            CallMeLogic.hoursHint(localMs("07:45"), narrow, ClockMode.H24),
         )
         assertEquals(
             "Calls are off on this phone, so it would decline this call. Switch them on in Settings › Notifications & calls.",
-            CallMeLogic.hoursHint(localMs("12:00"), tech.csalliance.unstuck.core.logic.CallSettings(enabled = false)),
+            CallMeLogic.hoursHint(localMs("12:00"), tech.csalliance.unstuck.core.logic.CallSettings(enabled = false), ClockMode.H24),
         )
+    }
+
+    @Test fun `a 12-hour phone reads the section's times its own way`() {
+        val prev = java.util.Locale.getDefault()
+        try {
+            java.util.Locale.setDefault(java.util.Locale.US)
+            val narrow = tech.csalliance.unstuck.core.logic.CallSettings(hoursStart = "08:00", hoursEnd = "21:00")
+            assertEquals(
+                "7:45 AM is outside this phone's call hours (8:00 AM–9:00 PM), so it would decline this call. Pick another lead, move the task, or widen the hours in Settings › Notifications & calls.",
+                CallMeLogic.hoursHint(localMs("07:45"), narrow, ClockMode.H12),
+            )
+            val utc = java.time.ZoneId.of("UTC")
+            val at = java.time.Instant.parse("2026-09-24T14:05:00Z").toEpochMilli()
+            assertEquals("Rings 2026-09-24 2:05 PM", CallMeLogic.ringsLine(at, ClockMode.H12, utc))
+            assertEquals("Rings 2026-09-24 14:05", CallMeLogic.ringsLine(at, ClockMode.H24, utc))
+            assertEquals("Calls can only be booked between 6:00 AM and 11:00 PM — suggest a time inside that window",
+                CallMeLogic.userMessage("error: calls can only be booked between 06:00 and 23:00 — suggest a time inside that window", ClockMode.H12))
+        } finally {
+            java.util.Locale.setDefault(prev)
+        }
     }
 
     @Test fun `booking or a new ring time meets the hint, a notes-only edit does not`() {

@@ -9,7 +9,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
@@ -35,6 +34,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import tech.csalliance.unstuck.design.theme.UFont
@@ -99,7 +99,13 @@ private fun BarIcon(icon: ImageVector, tint: Color, label: String, onClick: () -
 
 data class NavSpec(val key: String, val label: String, val icon: ImageVector)
 
-/** M3 bottom nav with a filled bg2 pill active indicator + a floating coral FAB. */
+/**
+ * M3 bottom nav: ONE row of equal-width slots — the tabs split around the coral
+ * +, which sits in the row itself (Today | Tasks | + | Calendar | Collections).
+ * Tabs carry a filled bg2 pill active indicator. The + is vertically centred on
+ * the tab cells' full height (icon pill + label), so it reads as part of the
+ * same line; it no longer floats above the bar over the list's last row.
+ */
 @Composable
 fun BottomNavBar(
     items: List<NavSpec>,
@@ -107,7 +113,7 @@ fun BottomNavBar(
     onSelect: (String) -> Unit,
     onFab: () -> Unit,
     modifier: Modifier = Modifier,
-    /** Extra modifier on the FAB itself (e.g. the guided tour's anchor). */
+    /** Extra modifier on the + itself (e.g. the guided tour's anchor). */
     fabModifier: Modifier = Modifier,
     /** What the + creates here, for TalkBack. The button's look never changes,
      *  so its spoken label is the ONLY place its per-tab meaning surfaces. */
@@ -117,21 +123,25 @@ fun BottomNavBar(
     Box(modifier.fillMaxWidth()) {
         Row(
             Modifier.fillMaxWidth().background(c.bg).selectableGroup().padding(top = 8.dp, bottom = 6.dp),
-            horizontalArrangement = Arrangement.SpaceAround,
-            verticalAlignment = Alignment.Bottom,
+            // Every tab cell has the same height (fixed 20dp icon in a fixed-padding
+            // pill + a one-line label), so centring puts all pills on one line and
+            // all labels on one baseline — and centres the shorter + on them.
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            // Split the items around the centered FAB gap. Computed (not hardcoded
+            // Split the items around the + slot. Computed (not hardcoded
             // items[0..3]) so a list with fewer/more than 4 entries can't IOOBE; for
-            // the standard 4 it's still [0,1] | gap | [2,3].
+            // the standard 4 it's still [0,1] | + | [2,3].
             val mid = (items.size + 1) / 2
             items.take(mid).forEach { NavCell(it, activeKey, onSelect) }
-            Box(Modifier.width(56.dp)) {} // FAB gap
+            // The + gets an equal-width slot of its own. It is not a tab (no
+            // selected state), so the selectable group still reports 4 tabs.
+            Box(Modifier.weight(1f), contentAlignment = Alignment.Center) {
+                BarPlusButton(onFab, fabModifier, fabLabel)
+            }
             items.drop(mid).forEach { NavCell(it, activeKey, onSelect) }
         }
         // 0.5px top divider
         Box(Modifier.fillMaxWidth().height(1.dp).background(c.line).align(Alignment.TopCenter))
-        // Floating FAB, centered, lifted above the bar.
-        CoralFab(onFab, Modifier.align(Alignment.TopCenter).offset(y = (-28).dp).then(fabModifier), label = fabLabel)
     }
 }
 
@@ -154,11 +164,38 @@ private fun RowScope.NavCell(item: NavSpec, activeKey: String, onSelect: (String
             // description here made TalkBack announce the label twice).
             Icon(item.icon, contentDescription = null, tint = if (active) c.ink else c.ink3, modifier = Modifier.size(20.dp))
         }
-        Text(item.label, style = UFont.sans(11, if (active) FontWeight.SemiBold else FontWeight.Medium), color = if (active) c.ink else c.ink3)
+        // One line, always: a label that wrapped (narrow phone + large font scale)
+        // would make its cell taller than the rest and knock the row off one line.
+        Text(
+            item.label,
+            style = UFont.sans(11, if (active) FontWeight.SemiBold else FontWeight.Medium),
+            color = if (active) c.ink else c.ink3,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 
-/** 56×56, 16dp rounded-square coral FAB. [label] is what it creates (TalkBack). */
+/**
+ * The bar's in-row +: a 44×44 coral rounded square (13dp corners) with a white
+ * 22dp glyph and no shadow — it is part of the bar, not floating over it.
+ * [label] is what it creates (TalkBack).
+ */
+@Composable
+private fun BarPlusButton(onClick: () -> Unit, modifier: Modifier, label: String) {
+    val c = UTheme.colors
+    Box(
+        modifier.size(44.dp).clip(RoundedCornerShape(13.dp)).background(c.coral)
+            .clickable(onClick = onClick, role = Role.Button),
+        contentAlignment = Alignment.Center,
+    ) { Icon(Icons.Filled.Add, contentDescription = label, tint = Color.White, modifier = Modifier.size(22.dp)) }
+}
+
+/**
+ * Standalone 56×56, 16dp rounded-square coral FAB, for a screen that floats a +
+ * over its own content. The bottom bar does NOT use it any more — its + sits in
+ * the bar's row ([BottomNavBar]). [label] is what it creates (TalkBack).
+ */
 @Composable
 fun CoralFab(onClick: () -> Unit, modifier: Modifier = Modifier, label: String = "New") {
     val c = UTheme.colors

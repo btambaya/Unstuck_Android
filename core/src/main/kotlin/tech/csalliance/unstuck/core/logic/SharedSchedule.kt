@@ -5,6 +5,8 @@ import tech.csalliance.unstuck.core.model.CalBlockKind
 import tech.csalliance.unstuck.core.model.ShareSlot
 import tech.csalliance.unstuck.core.model.SharedBlock
 import tech.csalliance.unstuck.core.model.SharedWithMe
+import tech.csalliance.unstuck.core.time.ClockFormat
+import tech.csalliance.unstuck.core.time.ClockMode
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.core.time.WireTime
 import java.time.Instant
@@ -159,11 +161,12 @@ private fun monthDay(iso: String): String =
     parseYmd(iso)?.let { "${it.month.getDisplayName(TextStyle.SHORT, Locale.ENGLISH)} ${it.dayOfMonth}" } ?: iso
 
 /** The row chip: "Today 04:30 · 45m" / "Sat 04:30 · 45m" (inside the next 6 days)
- *  / "Sat Sep 12 04:30 · 45m" (further out, or in the past). Null when the owner
- *  hasn't scheduled it — callers fall back to the estimate. */
-fun shareSlotLabel(item: ShareSlot, todayIso: String): String? {
+ *  / "Sat Sep 12 04:30 · 45m" (further out, or in the past) — the time in the
+ *  phone's [clock] mode ("Today 4:30 AM · 45m"). Null when the owner hasn't
+ *  scheduled it — callers fall back to the estimate. */
+fun shareSlotLabel(item: ShareSlot, todayIso: String, clock: ClockMode, locale: Locale = Locale.getDefault()): String? {
     val d = item.nextDate ?: return null
-    val time = item.nextStartTime
+    val time = item.nextStartTime?.let { ClockFormat.time(it, clock, locale) }
     val day = when {
         d == todayIso -> "Today"
         d > todayIso && d <= addDaysIso(todayIso, 6) -> weekdayShort(d)
@@ -173,12 +176,13 @@ fun shareSlotLabel(item: ShareSlot, todayIso: String): String? {
 }
 
 /** The detail-sheet line: "Planned Sat, Sep 5 · 04:30 · 45m" (+ " · overdue" when
- *  the slot has passed and the task is still open). Null when nothing is planned. */
-fun plannedLabel(item: ShareSlot, todayIso: String): String? {
+ *  the slot has passed and the task is still open), the time in the phone's
+ *  [clock] mode. Null when nothing is planned. */
+fun plannedLabel(item: ShareSlot, todayIso: String, clock: ClockMode, locale: Locale = Locale.getDefault()): String? {
     val d = item.nextDate ?: return null
     val whenLabel = if (d == todayIso) "today" else "${weekdayShort(d)}, ${monthDay(d)}"
     val parts = mutableListOf("Planned $whenLabel")
-    item.nextStartTime?.let { parts += it }
+    item.nextStartTime?.let { parts += ClockFormat.time(it, clock, locale) }
     fmtDuration(item.nextDurationMinutes)?.let { parts += it }
     // A past block the owner already ticked done (task still open) reads "finished",
     // not "overdue" — nothing is due (web wording).

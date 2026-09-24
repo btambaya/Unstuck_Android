@@ -621,7 +621,7 @@ fun MainScaffold(vm: AppViewModel) {
             // FabAction.kt says cannot arise, and a control nobody can see or tap
             // has no business being announced at all, so clear it: the bar now
             // leaves the a11y tree exactly when it leaves the screen.
-            // (clearAndSetSemantics, not a removal — the FAB's tourAnchor measures
+            // (clearAndSetSemantics, not a removal — the +'s tourAnchor measures
             // through onGloballyPositioned, i.e. layout, which is untouched.)
             val barCovered = stack.isNotEmpty()
             BottomNavBar(
@@ -644,7 +644,8 @@ fun MainScaffold(vm: AppViewModel) {
 
         // Floating assistant/feedback bubble — sits above tab content (declared after
         // the Column) but hides under any overlay / sheet / focus (the guard), so it
-        // never covers a modal. Bottom-end, lifted above the nav bar to clear the FAB.
+        // never covers a modal. Bottom-end, lifted clear of the nav bar (74dp ≈ the
+        // bar's ~62dp + a gap; the + sits in the bar's row, so nothing pokes above it).
         // Opens the dual-purpose surface (Assistant chat + Feedback). Gated by the
         // build flags so it's a one-flip for a public build.
         if (assistantAllowed && stack.isEmpty() && !sheetOpen && focusTask == null && tab != "calendar") {

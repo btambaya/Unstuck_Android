@@ -6,6 +6,8 @@ import android.graphics.Canvas
 import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.runBlocking
@@ -81,6 +83,7 @@ class SettingsRenderTest {
     private lateinit var db: UnstuckDatabase
     private lateinit var write: WriteThrough
     private lateinit var vm: AppViewModel
+    private lateinit var graph: AppGraph
     private val drain = ViewModelDrain()
 
     @Before fun setup() {
@@ -89,10 +92,12 @@ class SettingsRenderTest {
         db = Room.inMemoryDatabaseBuilder(ctx, UnstuckDatabase::class.java).allowMainThreadQueries().build()
         val store = LocalStore(db)
         write = WriteThrough(store)
-        val graph = AppGraph(ctx, configured = false, storeOverride = store, uidOverride = { "u-render" })
+        graph = AppGraph(ctx, configured = false, storeOverride = store, uidOverride = { "u-render" })
         graph.onboarded = true
         runCatching { androidx.work.WorkManager.initialize(ctx, androidx.work.Configuration.Builder().build()) }
         vm = AppViewModel(graph = graph, writeOverride = write, currentUidProvider = { "u-render" })
+        // The account has agreed to AI data sharing (the consent shots clear it).
+        graph.aiConsent.set(tech.csalliance.unstuck.core.logic.AIConsent.Cache("u-render", tech.csalliance.unstuck.core.logic.AIConsent.grant(1_790_000_000_000L), pending = false))
         // A lived-in account: three areas, two tags, a few remembered facts.
         runBlocking {
             write.upsertLifeArea(LifeArea("a1", "Work", "indigo", 0))
@@ -190,6 +195,22 @@ class SettingsRenderTest {
 
     @Config(qualifiers = TALL)
     @Test fun account() { shell(dark = false); link("unstuck://settings?section=Account"); shot("android-account.png") }
+
+    // ── AI data sharing (core AIConsent) ──
+
+    @Config(qualifiers = TALL)
+    @Test fun notificationsWithoutSharing() {
+        graph.aiConsent.clear()
+        shell(dark = false); link("unstuck://settings?section=Notifications"); shot("android-notifications-calls-no-sharing.png")
+    }
+
+    /** Sharing off, then the switch tapped: the one consent sheet asks. */
+    @Test fun consentSheet() {
+        graph.aiConsent.clear()
+        shell(dark = false); link("unstuck://settings?section=Assistant")
+        compose.onNodeWithTag("settings-ai-data-sharing").performClick()
+        shot("android-ai-consent-sheet.png")
+    }
 
     // ── what moved out of Settings ──
 

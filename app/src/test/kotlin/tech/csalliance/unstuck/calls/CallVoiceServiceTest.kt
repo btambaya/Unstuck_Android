@@ -16,6 +16,7 @@ import org.junit.After
 import org.junit.Before
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotEquals
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -220,6 +221,50 @@ class CallVoiceServiceTest {
         // abandoned call into a reported `done`.
         controller.destroy()
         assertTrue(CallOutcomeStore.load(app).isEmpty)
+    }
+
+    /**
+     * The AI-consent OK turned off (on the web, another phone) while the call
+     * rang: the answer must not connect to the assistant. The call ends at once
+     * as `done` with the reason on the row, and a normal (not quiet) notice —
+     * they just picked up — says how to turn sharing back on (iOS noAIConsent).
+     */
+    @Test fun `an answer without the AI-consent OK hangs up at once with the way back on`() {
+        CallOutcomeStore.clear(app)
+        NotificationChannels.ensureAll(app)
+        CallRinger.ring(app, payload)
+        assertTrue(CallRinger.settle(app, payload.callId, CallOutcome.ANSWERED))
+        var instructionsBuilt = false
+        val noConsent = object : CallVoiceService.Deps {
+            override fun isVoiceConfigured() = true
+            override fun accessToken(): String = "jwt"
+            override val proxyUrl get() = "wss://proxy.invalid"
+            override val model get() = "m"
+            override suspend fun voiceInstructions(): String { instructionsBuilt = true; return "" }
+            override fun voiceTools(): JsonArray = buildJsonArray { }
+            override suspend fun runAppTool(name: String, args: JsonObject) = ""
+            override fun hasAIConsent() = false
+        }
+        CallVoiceService.bind(noConsent)
+        shadowOf(android.os.Looper.getMainLooper()).idle()
+        try {
+            val start = Intent(app, CallVoiceService::class.java)
+            payload.toData().forEach { (k, v) -> start.putExtra("p.$k", v) }
+            val controller = Robolectric.buildService(CallVoiceService::class.java, start).create()
+            controller.startCommand(0, 0)
+            shadowOf(android.os.Looper.getMainLooper()).idle()
+            assertNull("the call ended", CallVoiceService.activeCallId)
+            assertFalse("nothing was built for the assistant", instructionsBuilt)
+            assertEquals(listOf(CallOutcome.ANSWERED, CallOutcome.DONE), outcomes())
+            assertEquals(listOf(CallNotificationCopy.NO_AI_CONSENT_OUTCOME), CallOutcomeStore.load(app).items.last().outcomeNotes)
+            val n = shadowOf(app.getSystemService(NotificationManager::class.java)).getNotification(NotifIds.callResult(payload.callId))
+            assertNotNull(n)
+            assertTrue(n.extras.getCharSequence(Notification.EXTRA_BIG_TEXT).toString().endsWith(CallNotificationCopy.NO_AI_CONSENT_HINT))
+            assertNotEquals("they just picked up — a normal notice, not a quiet note", NotificationChannels.CALL_NOTES, n.channelId)
+            controller.destroy()
+        } finally {
+            CallVoiceService.unbind(noConsent)
+        }
     }
 
     // ── an in-call snooze is the call's outcome (Android audit 2026-09-23, A5) ──

@@ -5,6 +5,8 @@ import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeoutOrNull
 import tech.csalliance.unstuck.BuildConfig
 import tech.csalliance.unstuck.UnstuckApp
+import kotlinx.coroutines.launch
+import tech.csalliance.unstuck.core.logic.AIConsent
 import tech.csalliance.unstuck.core.logic.CallEnv
 import tech.csalliance.unstuck.core.logic.CallSettings
 import tech.csalliance.unstuck.core.logic.CallSettingsLogic
@@ -25,6 +27,8 @@ import java.time.ZoneId
  *  - assistantEnabled the build flag AND the AI Assistant setting — off means
  *                    the call is declined with a notification (plan risk 10);
  *  - callsEnabled    the per-account "Calls from Unstuck" toggle (Settings › Notifications & calls);
+ *  - aiConsent       the account's AI data-sharing OK (core AIConsent), this
+ *                    phone's copy — without it a call never connects;
  *  - withinHours     the user's Settings › Notifications & calls window (CallSettingsLogic:
  *                    start inclusive, end exclusive, overnight when end < start);
  *  - focusLive       a focus session is running (the live-session store);
@@ -66,8 +70,26 @@ object AppCallEnvironment {
             focusLive = focusLive(graph),
             anchorExists = anchorExists(graph, payload),
             callsEnabled = callSettings.enabled,
+            // The device copy of the account's OK (sign-out wipes it). No graph
+            // (can't happen in the app) → no OK: fail closed.
+            aiConsent = hasAIConsent(graph, uid),
         )
     }
+
+    /** The account's AI-consent OK as this phone holds it (core AIConsent). */
+    internal fun hasAIConsent(graph: tech.csalliance.unstuck.AppGraph?, uid: String?): Boolean =
+        graph != null && AIConsent.grantedFor(graph.aiConsent.value, uid)
+
+    /** A call passed the receipt rules and is ringing: re-read the account's
+     *  OK (off the FCM thread), so one turned off on the web or another phone
+     *  since this device last looked is known before the answer connects. */
+    fun callWillRing(context: Context) {
+        val graph = (context.applicationContext as? UnstuckApp)?.graph ?: return
+        graph.scope.launch { runCatching { withTimeoutOrNull(RING_REREAD_TIMEOUT_MS) { graph.aiConsentSync.refresh(force = true) } } }
+    }
+
+    /** The ring lasts 30 s; the read has until then. */
+    const val RING_REREAD_TIMEOUT_MS = 25_000L
 
     /** "HH:MM" in the device zone — the window is the user's local clock. */
     fun hhmm(nowMs: Long, zone: ZoneId = ZoneId.systemDefault()): String = CallSettingsLogic.hhmm(nowMs, zone)

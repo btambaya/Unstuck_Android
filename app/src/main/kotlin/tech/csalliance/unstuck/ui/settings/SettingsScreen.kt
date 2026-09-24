@@ -66,6 +66,9 @@ import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.sync.AuthOutcome
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.core.logic.AIConsent
+import tech.csalliance.unstuck.ui.assistant.AIConsentHost
+import tech.csalliance.unstuck.ui.assistant.AIConsentNoteLine
 import tech.csalliance.unstuck.ui.assistant.FactsPanelContent
 import tech.csalliance.unstuck.ui.tour.TourEvents
 
@@ -254,16 +257,28 @@ private fun AppearanceContent(vm: AppViewModel) {
 @Composable
 private fun AssistantPrivacyContent(vm: AppViewModel, onSection: (SettingsSection) -> Unit) {
     val s by vm.settings.collectAsStateWithLifecycle()
+    val consent by vm.aiConsent.collectAsStateWithLifecycle()
+    val sharing = vm.aiConsentGranted(consent)
     SettingsCard {
         // The kill-switch the privacy policy promises ("Assistant & privacy →
         // AI Assistant. Turn it off entirely"): off unmounts the launcher, so
         // nothing reaches the AI provider; calls are declined with it.
-        ToggleRow(SettingsCopy.AI_ASSISTANT, s.assistantEnabled, sub = SettingsCopy.AI_ASSISTANT_SUB, last = true, modifier = Modifier.testTag("settings-ai-assistant")) { v ->
+        ToggleRow(SettingsCopy.AI_ASSISTANT, s.assistantEnabled, sub = SettingsCopy.AI_ASSISTANT_SUB, modifier = Modifier.testTag("settings-ai-assistant")) { v ->
             vm.updateSettings { it.copy(assistantEnabled = v) }
         }
-    }
-    SettingsNote(SettingsCopy.AI_NOTE, Modifier.padding(bottom = 6.dp))
-    SettingsCard {
+        // "AI data sharing" (core AIConsent; the policy's "Assistant & privacy →
+        // AI data sharing"): whether the account has agreed to its words and
+        // voice going to OpenAI. Off clears the OK on every device and turns
+        // Calls off; on shows the consent sheet. Locked during the tour.
+        ToggleRow(
+            SettingsCopy.AI_DATA_SHARING, sharing,
+            sub = if (sharing) SettingsCopy.AI_DATA_SHARING_ON else SettingsCopy.AI_DATA_SHARING_OFF,
+            enabled = !TourEvents.running,
+            modifier = Modifier.testTag(SettingsCopy.AI_DATA_SHARING_TAG),
+        ) { want ->
+            if (want) vm.withAIConsent(AIConsent.Action.SETTINGS, AIConsentHost.SETTINGS) {} else vm.revokeAIConsent()
+        }
+        AIConsentNoteLine(vm, AIConsentHost.SETTINGS, Modifier.padding(start = 16.dp, end = 16.dp, bottom = 10.dp))
         SettingRow(SettingsSection.MEMORY.row, SettingsSection.MEMORY.rowSub, chevron = true, modifier = Modifier.testTag(SettingsSection.MEMORY.testTag)) {
             onSection(SettingsSection.MEMORY)
         }

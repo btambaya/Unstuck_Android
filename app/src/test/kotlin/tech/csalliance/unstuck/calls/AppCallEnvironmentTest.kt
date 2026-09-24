@@ -68,7 +68,7 @@ class AppCallEnvironmentTest {
 
     private fun decide(p: IncomingCallPayload = payload): CallDecision = CallCoordinatorLogic.decide(
         p, CallEnv(signedIn = true, assistantEnabled = true, withinHours = true, focusLive = false,
-            anchorExists = AppCallEnvironment.anchorExists(graph, p)),
+            anchorExists = AppCallEnvironment.anchorExists(graph, p), aiConsent = true),
     )
 
     @Test fun `a task made on another device and not synced here yet rings, never stale`() {

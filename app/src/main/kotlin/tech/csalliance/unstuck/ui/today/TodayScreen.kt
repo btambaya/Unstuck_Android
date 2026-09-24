@@ -286,7 +286,17 @@ fun TodayScreen(
             // The way into the assistant + Talk: ONE input pill directly under the
             // week pill (it replaced the gateway card — brief / moment / chips /
             // "Personalise your assistant" left the home, 2026-09-17).
-            if (assistantOn) AssistantInputPill(vm, onTalk = { voiceOpen = true }, modifier = Modifier.padding(top = 8.dp, bottom = 6.dp))
+            if (assistantOn) {
+                // Talk sends their voice to OpenAI — the first time, it asks.
+                AssistantInputPill(
+                    vm,
+                    onTalk = {
+                        vm.withAIConsent(tech.csalliance.unstuck.core.logic.AIConsent.Action.TALK, tech.csalliance.unstuck.ui.assistant.AIConsentHost.TODAY) { voiceOpen = true }
+                    },
+                    modifier = Modifier.padding(top = 8.dp, bottom = 6.dp),
+                )
+                tech.csalliance.unstuck.ui.assistant.AIConsentNoteLine(vm, tech.csalliance.unstuck.ui.assistant.AIConsentHost.TODAY, Modifier.padding(start = 4.dp, end = 4.dp, bottom = 6.dp))
+            }
         }
         // ── Scrolling content: the filter pills (which stick to the top as you
         //    scroll), then the list. ─────────────────────────────────────────────

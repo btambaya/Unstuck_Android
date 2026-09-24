@@ -163,6 +163,9 @@ fun MainScaffold(vm: AppViewModel) {
     // Today's input pill asked for the keyboard in the sheet's composer.
     var assistantHandoff by rememberSaveable { mutableStateOf(false) }
     var assistantFocusComposer by rememberSaveable { mutableStateOf(false) }
+    // A chat moment's text parked in the composer, unsent: the account hasn't
+    // agreed to AI data sharing yet, so Send asks first (AppViewModel.openAssistantWith).
+    var assistantDraft by rememberSaveable { mutableStateOf<String?>(null) }
     // Set by `open_screen week|month|calendar` — CalendarScreen owns its Day/Week/Month
     // tab, so this is a one-shot request it consumes (null again) on arrival.
     var calendarView by rememberSaveable { mutableStateOf<String?>(null) }
@@ -236,8 +239,19 @@ fun MainScaffold(vm: AppViewModel) {
             if (!assistantAllowed) return@collect
             assistantHandoff = req.handoff
             assistantFocusComposer = req.focusComposer
+            assistantDraft = req.draft
             sheet = Sheet.Assistant
         }
+    }
+    // App open with Calls on for this account and no AI-consent OK: ask once
+    // per launch (AppViewModel.askAboutCallsOnOpenIfNeeded), after each read of
+    // the account, and only over the bare scaffold — never over a sheet, a
+    // pushed screen or the Focus overlay.
+    val consentReads by vm.aiConsentReads.collectAsStateWithLifecycle()
+    val consentIdle = stack.isEmpty() && sheet == null && !showNewTask && !showNewCollection && !showFeedback &&
+        focusTask == null && sharedDetail == null
+    LaunchedEffect(consentReads, consentIdle) {
+        if (consentReads > 0 && consentIdle) vm.askAboutCallsOnOpenIfNeeded(idle = true)
     }
     // ── the get-to-know-you interview's stand-down (plan F9) ────────────────
     // The interview itself is asked INSIDE the assistant (text thread + voice
@@ -749,13 +763,20 @@ fun MainScaffold(vm: AppViewModel) {
                 // Same resolver as `open_screen`, so a chip and a tool call can
                 // never land on different screens.
                 onNavigate = { dest -> goAssistantScreen(dest.screen, dest.id) },
-                onDismiss = { sheet = null; assistantHandoff = false; assistantFocusComposer = false },
+                onDismiss = { sheet = null; assistantHandoff = false; assistantFocusComposer = false; assistantDraft = null },
                 handoff = assistantHandoff,
                 focusComposer = assistantFocusComposer,
+                draft = assistantDraft,
             )
             null -> {}
         }
         if (showFeedback) tech.csalliance.unstuck.ui.feedback.FeedbackSheet(vm, currentScreen = "settings", onDismiss = { showFeedback = false })
+        // The ONE AI-consent sheet (AppViewModel.withAIConsent), over whatever
+        // asked — composed after the other sheets so it sits on top of them.
+        val consentAsk by vm.aiConsentAsk.collectAsStateWithLifecycle()
+        consentAsk?.let { tech.csalliance.unstuck.ui.assistant.AIConsentSheet(vm, it) }
+        // App open's "Not now": Calls went off, and a dialog says so.
+        tech.csalliance.unstuck.ui.assistant.AIConsentRootNote(vm)
         // Read-only detail for a task shared WITH me (T1). Its Focus action starts a
         // shared focus session (T3); Complete goes through shared_task_set_done.
         sharedDetail?.let { s ->

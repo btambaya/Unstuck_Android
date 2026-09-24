@@ -14,6 +14,9 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.assertIsEnabled
 import androidx.compose.ui.test.hasClickAction
 import androidx.compose.ui.test.assert
+import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.test.assertIsOn
+import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.room.Room
@@ -74,6 +77,9 @@ class MainScaffoldSettingsTest {
         graph.onboarded = true
         runCatching { androidx.work.WorkManager.initialize(ctx, androidx.work.Configuration.Builder().build()) }
         vm = AppViewModel(graph = graph, writeOverride = WriteThrough(store), currentUidProvider = { "u-settings" })
+        // The account has agreed to AI data sharing (the calls block shows); the
+        // consent tests below clear it.
+        graph.aiConsent.set(tech.csalliance.unstuck.core.logic.AIConsent.Cache("u-settings", tech.csalliance.unstuck.core.logic.AIConsent.grant(1_790_000_000_000L), pending = false))
     }
 
     @After fun teardown() {
@@ -264,6 +270,50 @@ class MainScaffoldSettingsTest {
         compose.onNodeWithTag("settings-footer-privacy").performScrollTo().performClick()
         compose.waitForIdle()
         org.junit.Assert.assertEquals("https://unstucknow.io/privacy", shadowOf(app).nextStartedActivity.dataString)
+    }
+
+    // ── AI data sharing (core AIConsent) ──
+
+    /** The consent row sits in Assistant & privacy with its fixed id; off clears
+     *  the OK, turns Calls off and says so. */
+    @Test
+    fun aiDataSharingSitsInAssistantAndPrivacyAndOffRevokes() {
+        shell()
+        link("unstuck://settings?section=Assistant")
+        compose.onNodeWithTag("settings-ai-data-sharing").assertIsDisplayed().assertIsOn()
+        compose.onNodeWithTag("settings-ai-data-sharing").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithTag("settings-ai-data-sharing").assertIsOff()
+        compose.onNodeWithText(tech.csalliance.unstuck.core.logic.AIConsent.REVOKED_NOTE).assertIsDisplayed()
+        compose.runOnIdle { org.junit.Assert.assertFalse(vm.aiConsentGranted); org.junit.Assert.assertFalse(vm.callSettings.value.enabled) }
+    }
+
+    /** Without the OK a call can't connect: the whole Calls block is one line naming it. */
+    @Test
+    fun withoutTheOKTheCallsBlockIsOneLineNamingIt() {
+        compose.runOnIdle { graph.aiConsent.clear() }
+        shell()
+        link("unstuck://settings?section=Notifications")
+        compose.onNodeWithText("Calls need AI data sharing, which is off.").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithTag("settings-calls-switch").assertDoesNotExist()
+    }
+
+    /** Sharing on asks with the one consent sheet; Agree turns it on. */
+    @Test
+    fun turningSharingOnAsksWithTheSheet() {
+        compose.runOnIdle { graph.aiConsent.clear() }
+        shell()
+        link("unstuck://settings?section=Assistant")
+        compose.onNodeWithTag("settings-ai-data-sharing").assertIsOff().performClick()
+        compose.waitForIdle()
+        compose.onNodeWithTag("ai-consent-sheet").assertIsDisplayed()
+        compose.onNodeWithText("Your assistant uses OpenAI").assertIsDisplayed()
+        // The sheet is its own window: Robolectric doesn't route injected touches
+        // into it (see MainScaffoldFabTest) — the semantics click runs the real onClick.
+        compose.onNodeWithTag("ai-consent-agree").performSemanticsAction(androidx.compose.ui.semantics.SemanticsActions.OnClick)
+        compose.waitForIdle()
+        compose.onNodeWithTag("ai-consent-sheet").assertDoesNotExist()
+        compose.onNodeWithTag("settings-ai-data-sharing").assertIsOn()
     }
 
     @Test

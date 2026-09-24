@@ -103,8 +103,8 @@ object SettingsCopy {
     const val CALLS_AT = "at"
     const val CALLS_TEST = "Try a test call"
     const val CALLS_TEST_SUB = "We'll ring you in about a minute."
-    /** The whole Calls block while the Assistant is off (calls are part of it). */
-    const val CALLS_NEED_ASSISTANT = "Calls need the Assistant, which is off."
+    /** The whole Calls block while the Assistant or AI data sharing is off is
+     *  ONE line (core CallsBlockState.needsLine) with this fix. */
     const val CALLS_NEED_ASSISTANT_FIX = "Turn on"
     const val CALLS_FULL_SCREEN = "Calls can't ring over the lock screen yet."
     const val CALLS_FULL_SCREEN_FIX = "Allow"
@@ -116,7 +116,11 @@ object SettingsCopy {
     // ── Assistant & privacy ──
     const val AI_ASSISTANT = "AI Assistant"
     const val AI_ASSISTANT_SUB = "Off hides the Assistant, Talk and calls."
-    const val AI_NOTE = "What you type or say to the assistant goes to our AI provider so it can answer. It doesn't train on it."
+    /** The account's OK to share with OpenAI (core AIConsent) — iOS's words. */
+    const val AI_DATA_SHARING = "AI data sharing"
+    const val AI_DATA_SHARING_ON = "On. What you ask the Assistant goes to OpenAI so it can answer."
+    const val AI_DATA_SHARING_OFF = "Off. The Assistant asks before anything is sent."
+    const val AI_DATA_SHARING_TAG = "settings-ai-data-sharing"
     const val MEMORY_ROW = "What Unstuck remembers"
     const val DELETE_HISTORY = "Delete conversation history"
 

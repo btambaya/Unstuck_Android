@@ -59,7 +59,7 @@ class PushTest {
     )
     private val callId = contract.getValue("callId")
 
-    private val ringEnv = CallEnv(signedIn = true, assistantEnabled = true, withinHours = true, focusLive = false, anchorExists = true)
+    private val ringEnv = CallEnv(signedIn = true, assistantEnabled = true, withinHours = true, focusLive = false, anchorExists = true, aiConsent = true)
     private fun queued(): List<PendingOutcome> = CallOutcomeStore.load(context).items
     private fun handle(data: Map<String, String> = contract, env: CallEnv = ringEnv, at: Long = now): Boolean {
         NotificationChannels.ensureAll(context)
@@ -168,6 +168,30 @@ class PushTest {
         assertTrue(n.extras.getCharSequence(Notification.EXTRA_BIG_TEXT).toString().endsWith("(calls are switched off — Settings › Notifications & calls)"))
         assertEquals("the user switched calls off — a quiet note, never a buzz", NotificationChannels.CALL_NOTES, n.channelId)
         assertEquals(listOf(CallOutcome.DECLINED, CallOutcome.DECLINED), queued().map { it.outcome })
+    }
+
+    /** No AI-consent OK (core AIConsent): the call never connects to the
+     *  assistant — declined, and a QUIET note with the way to turn sharing on. */
+    @Test fun `no AI-consent OK declines with the data-sharing notice`() {
+        var rereads = 0
+        NotificationChannels.ensureAll(context)
+        assertTrue(CallPushHandler.handle(context, contract, nowMs = now, env = { ringEnv.copy(aiConsent = false) }, callWillRing = { rereads++ }))
+        assertNull("no ring", shadowOf(nm).getNotification(NotifIds.CALL))
+        assertEquals(listOf(CallOutcome.DECLINED), queued().map { it.outcome })
+        val n = shadowOf(nm).getNotification(NotifIds.callResult(callId))
+        assertEquals("I called about speak to James", n.extras.getCharSequence(Notification.EXTRA_TITLE).toString())
+        assertEquals("A\nB\n" + CallNotificationCopy.NO_AI_CONSENT_HINT, n.extras.getCharSequence(Notification.EXTRA_BIG_TEXT).toString())
+        assertEquals("nothing rang — a quiet note", NotificationChannels.CALL_NOTES, n.channelId)
+        assertEquals("a declined call asks for no re-read", 0, rereads)
+    }
+
+    /** A ringing call re-reads the OK while the user reaches for the phone. */
+    @Test fun `a ring asks for a fresh read of the OK`() {
+        var rereads = 0
+        NotificationChannels.ensureAll(context)
+        assertTrue(CallPushHandler.handle(context, contract, nowMs = now, env = { ringEnv }, callWillRing = { rereads++ }))
+        assertNotNull(shadowOf(nm).getNotification(NotifIds.CALL))
+        assertEquals(1, rereads)
     }
 
     @Test fun `a live focus session → busy + notice`() {

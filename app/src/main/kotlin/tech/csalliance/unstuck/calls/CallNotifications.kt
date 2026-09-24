@@ -56,6 +56,13 @@ object CallNotifications {
     /** Answered, but the voice stack could not start. */
     fun voiceFailed(context: Context, p: IncomingCallPayload) = post(context, CallNotificationCopy.voiceFailed(p))
 
+    /** No AI-consent OK (core AIConsent): the call never connected to the
+     *  assistant. Declined on receipt it is QUIET (nothing rang); [answered] =
+     *  they picked up and it hung up at once (the OK was turned off while it
+     *  rang) — a normal alert, so they see why (iOS noAIConsent parity). */
+    fun noAIConsent(context: Context, p: IncomingCallPayload, answered: Boolean = false) =
+        post(context, CallNotificationCopy.noAIConsent(p), quiet = !answered)
+
     /** Declined by a kill-switch (Settings › Notifications & calls off, or the AI Assistant
      *  switched off) — the Android decision for plan risk 10. */
     fun callsOff(context: Context, p: IncomingCallPayload) = post(

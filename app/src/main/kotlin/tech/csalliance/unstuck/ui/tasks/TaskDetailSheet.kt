@@ -750,7 +750,15 @@ internal fun CallMeSection(vm: AppViewModel, task: TaskItem, taskBlocks: List<Ca
 
     fun toggle(on: Boolean) {
         error = null
-        if (on) { enabled = true; return }
+        // A call is a conversation with the assistant: the first one asks for the
+        // AI-consent OK; "Not now" leaves the toggle off (iOS CallMeSection).
+        if (on) {
+            vm.withAIConsent(
+                tech.csalliance.unstuck.core.logic.AIConsent.Action.CALLS_ON,
+                tech.csalliance.unstuck.ui.assistant.AIConsentHost.TASK_EDITOR,
+            ) { enabled = true }
+            return
+        }
         enabled = false
         val r = row ?: return
         busy = true
@@ -840,6 +848,7 @@ internal fun CallMeSection(vm: AppViewModel, task: TaskItem, taskBlocks: List<Ca
                 loaded -> Text(CallMeLogic.OFF_HINT, style = UFont.sans(12), color = c.ink3)
             }
             error?.let { Text(it, style = UFont.sans(12), color = c.red) }
+            tech.csalliance.unstuck.ui.assistant.AIConsentNoteLine(vm, tech.csalliance.unstuck.ui.assistant.AIConsentHost.TASK_EDITOR)
         }
     }
 }

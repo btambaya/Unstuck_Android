@@ -44,7 +44,11 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 import tech.csalliance.unstuck.NotificationLevel
+import tech.csalliance.unstuck.core.logic.AIConsent
 import tech.csalliance.unstuck.core.logic.CallSettingsLogic
+import tech.csalliance.unstuck.core.logic.CallsBlockState
+import tech.csalliance.unstuck.ui.assistant.AIConsentHost
+import tech.csalliance.unstuck.ui.assistant.AIConsentNoteLine
 import tech.csalliance.unstuck.core.time.WireTime
 import tech.csalliance.unstuck.design.component.MdToggle
 import tech.csalliance.unstuck.design.theme.UFont
@@ -202,14 +206,23 @@ internal fun NotificationsCallsContent(vm: AppViewModel, onSection: (SettingsSec
         }
 
         SettingsGroupLabel(SettingsCopy.CALLS, Modifier.padding(top = 14.dp))
-        if (!s.assistantEnabled) {
-            // Calls are part of the AI Assistant: the whole block is one line.
-            FixItLine(SettingsCopy.CALLS_NEED_ASSISTANT, SettingsCopy.CALLS_NEED_ASSISTANT_FIX, tint = c.ink2, modifier = Modifier.testTag("settings-calls-need-assistant")) {
-                onSection(SettingsSection.ASSISTANT)
+        val consent by vm.aiConsent.collectAsStateWithLifecycle()
+        val aiOn = vm.aiConsentGranted(consent)
+        if (!s.assistantEnabled || !aiOn) {
+            // A call is a conversation with the assistant: without the Assistant
+            // or AI data sharing the whole block is one line, and "Turn on"
+            // switches on what's missing (the sharing OK asks with the usual sheet).
+            FixItLine(
+                CallsBlockState.needsLine(assistantOn = s.assistantEnabled, aiSharingOn = aiOn), SettingsCopy.CALLS_NEED_ASSISTANT_FIX,
+                tint = c.ink2, modifier = Modifier.testTag("settings-calls-need-assistant"),
+            ) {
+                if (!vm.settings.value.assistantEnabled) vm.updateSettings { it.copy(assistantEnabled = true) }
+                if (!vm.aiConsentGranted) vm.withAIConsent(AIConsent.Action.CALLS_ON, AIConsentHost.CALL_SETTINGS) {}
             }
         } else {
             CallsBlock(vm, recheck)
         }
+        AIConsentNoteLine(vm, AIConsentHost.CALL_SETTINGS, Modifier.padding(horizontal = 4.dp))
     }
 }
 
@@ -294,6 +307,11 @@ private fun CallsBlock(vm: AppViewModel, recheck: Int) {
         android.app.TimePickerDialog(context, { _, h, m -> commit(WireTime.hm(h, m)) }, parts.getOrNull(0) ?: 8, parts.getOrNull(1) ?: 0, true).show()
     }
     fun proactiveOn(v: Boolean) { if (v && cs.enabled) ensureMicrophone() }
+    /** A proactive call switched on asks for the AI-consent OK first; off never does. */
+    fun setProactive(on: Boolean, apply: () -> Unit) {
+        if (!on) { apply(); return }
+        vm.withAIConsent(AIConsent.Action.CALLS_ON, AIConsentHost.CALL_SETTINGS) { apply(); proactiveOn(true) }
+    }
     val tourRunning = TourEvents.running
 
     Text(SettingsCopy.CALLS_INTRO, style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(horizontal = 4.dp))
@@ -337,8 +355,12 @@ private fun CallsBlock(vm: AppViewModel, recheck: Int) {
             sub = if (cs.enabled) null else SettingsCopy.CALLS_SWITCH_OFF_SUB,
             modifier = Modifier.testTag("settings-calls-switch"),
         ) { v ->
-            vm.updateCallSettings { it.copy(enabled = v) }
-            if (v) ensureMicrophone()
+            if (!v) vm.updateCallSettings { it.copy(enabled = false) }
+            // On asks for the AI-consent OK first; "Not now" leaves it off.
+            else vm.withAIConsent(AIConsent.Action.CALLS_ON, AIConsentHost.CALL_SETTINGS) {
+                vm.updateCallSettings { it.copy(enabled = true) }
+                ensureMicrophone()
+            }
         }
         if (cs.enabled) {
             // The one guard on when a loud call can ring.
@@ -350,19 +372,19 @@ private fun CallsBlock(vm: AppViewModel, recheck: Int) {
             // The three proactive calls are ACCOUNT-wide, off by default
             // (notification_preferences.call_*; AppViewModel.setCallProactivePrefs).
             ProactiveRow(SettingsCopy.CALLS_MORNING, SettingsCopy.CALLS_MORNING_SUB, proactive.morningEnabled, proactive.morningTime, "settings-calls-morning",
-                onToggle = { v -> vm.setCallProactivePrefs(proactive.copy(morningEnabled = v)); proactiveOn(v) },
+                onToggle = { v -> setProactive(v) { vm.setCallProactivePrefs(vm.callProactivePrefs.value.copy(morningEnabled = v)) } },
                 onTime = { pickTime(proactive.morningTime) { hm -> vm.setCallProactivePrefs(vm.callProactivePrefs.value.copy(morningTime = hm)) } },
                 warning = if (proactive.morningEnabled) CallSettingsLogic.proactiveTimeWarning(proactive.morningTime, cs.enabled, cs.hoursStart, cs.hoursEnd) else null,
             )
             CardDivider()
             ProactiveRow(SettingsCopy.CALLS_EVENING, SettingsCopy.CALLS_EVENING_SUB, proactive.eveningEnabled, proactive.eveningTime, "settings-calls-evening",
-                onToggle = { v -> vm.setCallProactivePrefs(proactive.copy(eveningEnabled = v)); proactiveOn(v) },
+                onToggle = { v -> setProactive(v) { vm.setCallProactivePrefs(vm.callProactivePrefs.value.copy(eveningEnabled = v)) } },
                 onTime = { pickTime(proactive.eveningTime) { hm -> vm.setCallProactivePrefs(vm.callProactivePrefs.value.copy(eveningTime = hm)) } },
                 warning = if (proactive.eveningEnabled) CallSettingsLogic.proactiveTimeWarning(proactive.eveningTime, cs.enabled, cs.hoursStart, cs.hoursEnd) else null,
             )
             CardDivider()
             ProactiveRow(SettingsCopy.CALLS_AFTER_BLOCK, SettingsCopy.CALLS_AFTER_BLOCK_SUB, proactive.afterBlockEnabled, time = null, tag = "settings-calls-after-block",
-                onToggle = { v -> vm.setCallProactivePrefs(proactive.copy(afterBlockEnabled = v)); proactiveOn(v) },
+                onToggle = { v -> setProactive(v) { vm.setCallProactivePrefs(vm.callProactivePrefs.value.copy(afterBlockEnabled = v)) } },
                 onTime = {},
                 warning = if (proactive.afterBlockEnabled) CallSettingsLogic.afterBlockWarning(cs.enabled, cs.hoursStart, cs.hoursEnd) else null,
             )
@@ -375,13 +397,16 @@ private fun CallsBlock(vm: AppViewModel, recheck: Int) {
                 lockedSub = if (tourRunning) TOUR_LOCKED_ROW_SUB else testCallLine(testState),
                 modifier = Modifier.testTag("settings-calls-test"),
             ) {
-                // A test call that rings and then can't hear them is worse than none:
-                // ask first, while the app is in front of them (iOS build 78).
-                if (!micGranted()) {
-                    testAfterMic = true
-                    runCatching { micLauncher.launch(android.Manifest.permission.RECORD_AUDIO) }
-                        .onFailure { testAfterMic = false; testState = TestCallState.Failed(CALLS_TEST_MIC_REFUSED) }
-                } else bookTest()
+                // A call is a conversation with the assistant: the AI-consent OK first.
+                vm.withAIConsent(AIConsent.Action.CALLS_ON, AIConsentHost.CALL_SETTINGS) {
+                    // A test call that rings and then can't hear them is worse than none:
+                    // ask first, while the app is in front of them (iOS build 78).
+                    if (!micGranted()) {
+                        testAfterMic = true
+                        runCatching { micLauncher.launch(android.Manifest.permission.RECORD_AUDIO) }
+                            .onFailure { testAfterMic = false; testState = TestCallState.Failed(CALLS_TEST_MIC_REFUSED) }
+                    } else bookTest()
+                }
             }
         }
     }

@@ -70,8 +70,8 @@ The assistant is the app's gateway with memory, 1:1 with web + iOS:
   `docs/assistant-tool-contract.md` is vendored from the web repo and
   `ContractDiffTest` fails on any drift.
 - **Surfaces** — `GatewayCard` on Today (brief + one moment + composer + mic),
-  the 7-question interview (`InterviewFlow`), Settings › Memory "What Unstuck
-  knows" (`FactsPanel`), a voice integrity guard in Talk mode.
+  the 7-question interview (`InterviewFlow`), Settings › Assistant & privacy ›
+  "What Unstuck remembers" (`FactsPanel`), a voice integrity guard in Talk mode.
 - **Calls** — the server sends a `kind=call` FCM data push and `surface/Push.kt`
   rings a high-priority notification; the full in-app call (full-screen intent,
   voice service, outcomes) is phase C1, pending.

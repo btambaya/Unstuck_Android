@@ -204,6 +204,13 @@ class VoiceSessionHolder(private val appContext: Context) : ViewModel() {
         val token = vm.voiceAccessToken()
         if (token.isNullOrBlank()) { fail("Please sign in to use voice."); return }
         if (!vm.voiceConfigured()) { fail("Voice isn't set up yet."); return }
+        // Talk sends the user's voice to the AI provider: never without the
+        // account's OK (AIConsent). The Talk buttons ask first; this is the
+        // backstop — nothing connects.
+        if (!vm.aiConsentGranted) {
+            fail(tech.csalliance.unstuck.core.logic.AIConsent.decline(tech.csalliance.unstuck.core.logic.AIConsent.Action.TALK).note)
+            return
+        }
         note = null; caption = ""; state = VoiceState.CONNECTING
         reconnects = 0
         vm.resetVoiceScratch()

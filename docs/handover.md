@@ -4,6 +4,23 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
+## 2026-09-24 (overnight, branch `polish/android`, NOT shipped) — James's assistant reports + the cross-platform analytics rules
+
+- **Wrong date (James, TestFlight b51):** schedule_task refuses a weekly series onto a day it doesn't repeat on
+  (`rejectOffSeriesDay`, :core AssistantTime.kt), naming the nearest matching days; nothing is written. The same call again in
+  the turn/voice session is a deliberate one-off move (result says "a one-off on a Sunday, off the days it repeats on"). A day
+  that already holds an occurrence is retimed as before.
+- **Stray deletes (James, b51):** confirm-first is enforced in the TEXT harness (`ConfirmFirstRules`, :core
+  AssistantConfirmFirst.kt; pinned to ToolRegistry.CONFIRM_FIRST): a delete/cancel/leave runs only when the user's latest
+  message asked for THIS thing (verb + its name / "it" / "all" / a plural / a pick among things the last reply named), or said a
+  short yes to the assistant's question proposing it. Otherwise `error: not confirmed — …` and the model asks. Voice and calls
+  are not gated (a hold-to-talk transcript can arrive after the tool call). "Undo all" was already current-turn-only (A17).
+- **Analytics rules (all three platforms):** off-list areas are their own series by name (chart + get_insights); repeating
+  series order kept → due → name; All time starts at the earliest task created / task done / counted session; get_insights
+  minutes floor((sec+30)/60) incl. pause minutes from summed seconds; runaway start = completedAt − real length (already
+  Android's). The voice recap ends only when the app answers a real user turn (`BargeInController.answeredTurns`), never on a
+  raw speech_started. Vectors: `core/.../CrossPlatformRulesTest.kt`.
+
 ## 2026-09-24 (overnight, branch `analytics/android`, NOT shipped) — Insights on real data + the assistant's period review
 
 - **Engine:** `core/logic/PeriodReview.kt` ports `period-review.ref.mjs` (get_period_review; all 25 shared vectors pass byte for

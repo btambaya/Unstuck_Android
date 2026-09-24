@@ -53,8 +53,8 @@ private const val MAX_NAME = 40
 private val DAY_SHORT = listOf("Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat")
 private val MONTHS = listOf("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
 
-/** Heatmap columns (timeOfDayHeatmap): six 2-hour buckets from 7am, Mon–Fri only. */
-private val HEAT_BUCKETS = listOf("7–9am", "9–11am", "11am–1pm", "1–3pm", "3–5pm", "5–7pm")
+/** Monday-anchored day names for the hour × day heatmap rows. */
+private val DAY_MON_FIRST = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
 
 /** Same display order as the DeepDive "Captures by kind" band, with the web's wire names. */
 private val TAG_ORDER = listOf(
@@ -89,7 +89,10 @@ fun insightsWindowLabel(window: InsightsWindow): String = when (window) {
 // ---- small formatters
 
 /** Identical to the DeepDive "Focus this week" stat: `2h 45m`. */
-private fun fmtHM(sec: Int): String = "${sec / 3600}h ${(sec % 3600) / 60}m"
+/** Seconds as the Insights page shows them — rounded minutes, `45m` / `2h` /
+ *  `1h 5m` (the page's "Focused" card and get_period_review use the same rule,
+ *  so the model never quotes a number one minute off the screen). */
+private fun fmtFocus(sec: Int): String = periodDur(periodMinutes(sec))
 
 /** `Wed 2 Sep` — local getters only. */
 private fun fmtDay(ms: Long, zone: ZoneId): String {
@@ -110,7 +113,7 @@ private fun quote(name: String): String {
     return "\"$shown\""
 }
 
-/** DeepDive's median: sorted, then the element at floor(n/2). */
+/** DeepDive's median: sorted, then the element at floor(n/2). [sessions] are counted ones. */
 private fun medianSec(sessions: List<Session>): Int {
     val arr = sessions.map { it.actualSec }.sorted()
     return arr[arr.size / 2]
@@ -146,9 +149,15 @@ fun renderInsights(
     nowMs: Long,
     window: InsightsWindow,
     zone: ZoneId = ZoneId.systemDefault(),
+    /** The user's own area names in their order — the SAME list the Insights
+     *  screen's "When focus happens" chart uses (DEFAULT_AREAS when they have
+     *  none), so the assistant's By area equals the screen (cross-check P1-1). */
+    areas: List<String> = DEFAULT_AREAS,
 ): String {
     val start = insightsWindowStart(window, nowMs, zone)
-    val scopedSessions = sessions.filter { inWindow(it.completedAt, start) }
+    // The shared D1 filter: no sub-minute starts, runaway timers clamped.
+    val rawScoped = sessions.filter { inWindow(it.completedAt, start) }
+    val scopedSessions = countableSessions(rawScoped)
     val scopedCaptures = captures.filter { inWindow(it.at, start) }
     val reasonLogs = reasons.filter { inWindow(it.at, start) }
 
@@ -164,29 +173,31 @@ fun renderInsights(
         lines += "Focus: no focus sessions in this window."
     } else {
         val totalSec = scopedSessions.sumOf { it.actualSec }
-        lines += "Focus: ${fmtHM(totalSec)} across ${plural(scopedSessions.size, "session")}, median ${jsRound(medianSec(scopedSessions) / 60.0)}m."
+        lines += "Focus: ${fmtFocus(totalSec)} across ${plural(scopedSessions.size, "session")}, median ${fmtFocus(medianSec(scopedSessions))}."
 
-        // By area over the Report's default area order (web AREA_ORDER).
-        val bars = weekdayAreaHours(scopedSessions, tasks)
+        // By area — the screen's own list plus its "No area" bar.
+        val bars = weekdayAreaHours(scopedSessions, tasks, areas, withNoArea = true)
         val areaLines = ArrayList<String>()
-        for ((i, area) in DEFAULT_AREAS.withIndex()) {
+        for ((i, area) in (areas + NO_AREA_LABEL).withIndex()) {
             val hours = bars.sumOf { it.data[i] }
             if (hours > 0) areaLines += "$area ${toFixed1(hours)}h"
         }
         if (areaLines.isNotEmpty()) lines += "By area: ${areaLines.joinToString(", ")}."
 
-        val grid = timeOfDayHeatmap(scopedSessions)
+        // Peak slot — the Deep dive heatmap (7 days × 24 h, by the hours each
+        // session spanned), read in 2-hour steps.
+        val grid = hourDayHeatmap(rawScoped, zone)
         var peakDow = -1
-        var peakBucket = -1
-        var peakHours = 0.0
+        var peakHour = -1
+        var peakMin = 0.0
         for ((dow, row) in grid.withIndex()) {
-            for ((bucket, hours) in row.withIndex()) {
-                if (hours > peakHours) { peakDow = dow; peakBucket = bucket; peakHours = hours }
+            for (h in 0 until 24 step 2) {
+                val m = row[h] + row[h + 1]
+                if (m > peakMin + 1e-9) { peakDow = dow; peakHour = h; peakMin = m }
             }
         }
-        if (peakHours > 0) {
-            // Heatmap rows are Mon..Fri (Monday-anchored index 0..4).
-            lines += "Peak slot: ${DAY_SHORT[peakDow + 1]} ${HEAT_BUCKETS[peakBucket]} (${jsRound(peakHours * 60)} min)."
+        if (peakMin > 0) {
+            lines += "Peak slot: ${DAY_MON_FIRST[peakDow]} ${hourLabel(peakHour)}–${hourLabel(peakHour + 2)} (${jsRound(peakMin)} min)."
         }
     }
 
@@ -216,18 +227,20 @@ fun renderInsights(
     }
 
     // Interruptions: Report histogram — captures written mid-session, by minutes in.
-    val bins = interruptionBins(scopedCaptures, scopedSessions)
+    val bins = interruptionBins(scopedCaptures, rawScoped)
     val linked = bins.sum()
-    if (linked > 0) {
+    // Same gate as the screen: fewer than 3 linked captures says nothing.
+    if (linked >= INTERRUPTIONS_MIN_LINKED) {
         val peakIdx = bins.indexOf(bins.maxOrNull() ?: 0).coerceAtLeast(0)
         lines += "Interruptions: ${plural(linked, "capture")} mid-session, most around ${peakIdx * 3}–${(peakIdx + 1) * 3} min in."
     }
 
-    // Re-entry: DeepDive "Re-entry within 5m" — only when a gap was measurable.
-    val reentry = reEntryDistribution(scopedSessions)
-    val gaps = reentry.sum()
-    if (gaps > 0) {
-        lines += "Re-entry: ${pct(reentry[0].toDouble() / gaps)}% of ${plural(gaps, "return")} to a task came within 5 min."
+    // Coming back: DeepDive "How fast you come back" — pause → resume, only
+    // when a pause length was measured.
+    val back = comebackBins(reasonLogs)
+    val measured = back.sum()
+    if (measured > 0) {
+        lines += "Coming back: ${pct(back[0].toDouble() / measured)}% of ${plural(measured, "timed pause")} ended within 5 min."
     }
 
     // Slipping: Report "Gentle friction" count + DeepDive slip detector names.
@@ -261,7 +274,7 @@ fun renderInsights(
     }
     if (planned.isNotEmpty()) {
         val mins = planned.sumOf { it.durationMinutes }
-        lines += "Planned: ${plural(planned.size, "calendar block")} (${fmtHM(mins * 60)}) dated in this window."
+        lines += "Planned: ${plural(planned.size, "calendar block")} (${periodDur(mins)}) dated in this window."
     }
 
     // Worth noticing: the Report's own narrative cards — on OUR clock, so a

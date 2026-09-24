@@ -119,7 +119,8 @@ Backend lives in the `unstuck` repo's `supabase/functions/` (Edge functions + `_
 
 ## 9. Insights
 
-`:core/Analytics.kt` computes reflections from sessions/tasks/captures: calibration (estimate accuracy), the time-of-day heatmap, capture breakdown, slip detection, pause anatomy. Report = stat cards; Deep dive = a stat grid + hour×day heatmap. Gated behind a few sessions; framed as observations, never a score.
+Every number comes from one engine shared with the assistant's `get_period_review`: `:core/PeriodReview.kt` (the period resolver, the strict stamp grammar, `collectWindow` / `planFacts`) and `:core/PeriodFacts.kt` (the page's facts: headline, per-day rhythm, showed-up days, plan vs followed through, repeating-task dots, got-unstuck wins, done by area, the trend). Sessions always go through `:core/FocusFilter.kt` first (D1: under 60 s never counts; each session counts at most max(3× estimate, estimate + 60 min), capped at 4 h). `:core/Analytics.kt` keeps the pattern charts (area bars with a No area series, the 7×24 hour×day heatmap by the hours a session spanned, calibration, interruptions, pause anatomy, pause→resume "coming back", slip detection without repeating series or Later tasks).
+The page: Week / Month / All time with a ‹ › stepper to any past week or month. Report = the period's story (Done · Focused · Showed up with neutral deltas, daily rhythm, got unstuck, plan vs followed through, repeating tasks, when focus happens, gentle friction, worth noticing); Deep dive = patterns (8-week / 6-month trend, done by area, stats + estimates, heatmap, interruptions, pauses, coming back, captures, slip detector). The Today pill is this week's focus from the same engine, hidden at 0 (last week on a Monday/Tuesday). Pause lengths are written onto the pause's reason log on resume (`LiveSession.pendingReasonId`). Framed as observations, never a score: no streaks, "open" not "missed", ink scale + area colours only.
 
 ---
 

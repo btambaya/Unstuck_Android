@@ -173,7 +173,13 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
     // Settings, 0 = off). Keyed on the TEMPLATE for occurrences — that's the id
     // ReminderScheduler looks up per block.
     var reminderLead by remember(editTarget.id) { mutableStateOf(vm.reminderOverride(editTarget.id)) }
-    val taskSessions = sessions.filter { it.taskId == task.id }
+    // Sessions accrue on the TEMPLATE for a repeating task's day (the row's id is
+    // the day's block id), newest first, through the shared D1 filter so this
+    // list agrees with Insights (analytics P1-10, 2026-09-24).
+    val taskSessions = remember(sessions, editTarget.id) {
+        tech.csalliance.unstuck.core.logic.countableSessions(sessions.filter { it.taskId == editTarget.id })
+            .sortedByDescending { tech.csalliance.unstuck.core.time.Time.parseMillis(it.completedAt) ?: 0L }
+    }
     val taskCaptures = captures.filter { it.taskId == task.id }
     val myBlocks = blocks.filter { it.taskId == task.id }.sortedWith(compareBy({ it.date }, { it.startTime }))
     val scheduleLabel = when {
@@ -345,9 +351,15 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
 
             if (taskSessions.isNotEmpty()) {
                 SectionLabel("Sessions", Modifier.padding(top = 18.dp, bottom = 6.dp))
+                val todayIso = tech.csalliance.unstuck.core.time.Clock.todayIso()
                 taskSessions.take(6).forEach { s ->
-                    Text("• ${s.actualSec / 60}m focused", style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(vertical = 2.dp))
+                    val whenLabel = tech.csalliance.unstuck.core.logic.doneWhenLabel(s.completedAt, todayIso)
+                    Text(
+                        "• ${tech.csalliance.unstuck.core.logic.periodDur(tech.csalliance.unstuck.core.logic.periodMinutes(s.actualSec))} focused${whenLabel?.let { " · $it" } ?: ""}",
+                        style = UFont.sans(13), color = c.ink2, modifier = Modifier.padding(vertical = 2.dp),
+                    )
                 }
+                if (taskSessions.size > 6) Text("+${taskSessions.size - 6} more in Insights", style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(vertical = 2.dp))
             }
 
             SectionLabel("Captures", Modifier.padding(top = 18.dp, bottom = 6.dp))

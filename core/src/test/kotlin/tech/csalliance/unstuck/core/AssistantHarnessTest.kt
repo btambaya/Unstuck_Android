@@ -67,6 +67,9 @@ class AssistantHarnessTest {
                 }
                 "create_tasks" -> if (args["tasks"] == null) "error: tasks required" else "ok: created 2 tasks ids=a,b — \"a\", \"b\""
                 "get_schedule" -> "ok:\nMonday 2026-09-07 (TODAY): —"
+                "get_period_review" ->
+                    if (args["period"]?.jsonPrimitive?.content == "fortnight") "error: unknown period \"fortnight\" — use today, …"
+                    else "ok: review of last week (Mon 14 Sep – Sun 20 Sep).\nDone: 1 task — \"Draft chapter 3\"."
                 "share_task" -> { staged += 1; "ok: staged" }
                 "open_screen" -> "ok: opened ${args["screen"]?.jsonPrimitive?.content}"
                 "boom" -> throw IllegalStateException("kaboom")
@@ -116,6 +119,32 @@ class AssistantHarnessTest {
         // The user never sees the claim or the check.
         assertEquals(listOf("add milk", "Which list should it go on?"), visible(turn))
         assertEquals(2, AssistantHarnessRules.hiddenIndices(turn.messages).size)
+    }
+
+    // ---- the period-review recap (week-review-spec §5.4)
+
+    private val recapReply = "You finished \"Draft chapter 3\" and skipped \"Stretch\" once. Before that you did less, and that's fine."
+
+    @Test fun `a review reply after an ok get_period_review is not bounced`() {
+        val ask = ScriptedAsk(call("get_period_review", """{"period":"last_week"}"""), text(recapReply))
+        val turn = run("how was last week?", ask)
+        assertFalse(turn.bounced)
+        assertEquals(2, ask.asks.size)
+        assertEquals(recapReply, turn.text)
+    }
+
+    @Test fun `the same reply is bounced when the review failed or never ran`() {
+        val failed = ScriptedAsk(call("get_period_review", """{"period":"fortnight"}"""), text(recapReply), text("Which week did you mean?"))
+        assertTrue(run("how was my fortnight?", failed).bounced)
+        val noReview = ScriptedAsk(call("get_schedule", """{"range":"week"}"""), text(recapReply), text("Here's the week."))
+        assertTrue(run("how was last week?", noReview).bounced)
+        val none = ScriptedAsk(text(recapReply), text("Let me look."))
+        assertTrue(run("how was last week?", none).bounced)
+    }
+
+    @Test fun `a real claim is still bounced after a review`() {
+        val ask = ScriptedAsk(call("get_period_review", """{"period":"last_week"}"""), text("You finished \"Draft chapter 3\". I moved \"Tax return\" to Friday."), text("Want me to move it?"))
+        assertTrue(run("how was last week?", ask).bounced)
     }
 
     @Test fun `the guard bounces only once per turn`() {
@@ -338,7 +367,7 @@ class AssistantHarnessTest {
     @Test fun `the rules expose the registry's tool classes`() {
         // Pinned copies of ToolRegistry.READ_ONLY / NAVIGATION / STAGED (:core can't
         // see the generated file) — ToolRegistryParityTest in :app holds them equal.
-        assertEquals(setOf("get_tasks", "find_tasks", "get_schedule", "get_lists", "get_captures", "get_settings", "get_insights", "get_calls"), AssistantHarnessRules.READ_ONLY_TOOLS)
+        assertEquals(setOf("get_tasks", "find_tasks", "get_schedule", "get_lists", "get_captures", "get_settings", "get_insights", "get_period_review", "get_calls"), AssistantHarnessRules.READ_ONLY_TOOLS)
         assertEquals(setOf("open_screen"), AssistantHarnessRules.NAVIGATION_TOOLS)
         assertEquals(setOf("share_task", "share_list"), AssistantHarnessRules.STAGED_TOOLS)
         assertEquals(5, AssistantHarnessRules.MAX_ROUNDS)

@@ -150,16 +150,42 @@ object AssistantGuard {
 
     private fun sentenceClaimsAction(c: String): Boolean = CLAIM_PATTERNS.any { it.containsMatchIn(c) }
 
+    // ---- the period-review recap (week-review-spec §5.4, 2026-09-24)
+
+    // A review reply describes what the USER did ("You finished "Draft chapter 3"
+    // and skipped "Stretch" once.") — verb + quote, which the patterns above read
+    // as a claim. On a turn where get_period_review returned `ok:` (and ONLY
+    // there: applied globally it would wave through a fabricated write phrased
+    // at the user, "you've moved "Dentist" to Friday") user-subject verb phrases
+    // are neutralised to "you did" before the patterns run. Same regexes as web
+    // receipts.ts and iOS AssistantGuard.swift.
+    private const val USER_SUBJECT =
+        "\\b(?:you|you['’]ve|you have|you['’]d|you had)\\s+(?:(?:also|just|then|only|still|already|even|finally)\\s+)?"
+    private val USER_DID = re("$USER_SUBJECT(?:$CLAIM_VERBS)\\b")
+    // A verb coordinated with one already neutralised, in the same clause:
+    // "you did "Draft" and skipped "Stretch"", "…, then moved on to …".
+    private val AND_DID = re("(\\byou did\\b[^.!?;—]*?(?:,|\\band\\b|\\bthen\\b)\\s+(?:(?:also|then)\\s+)?)(?:$CLAIM_VERBS)\\b")
+
+    /** "You finished X and skipped Y" → "you did X and did Y". Loops to a
+     *  fixpoint; terminates because "did" is not a claim verb. */
+    fun neutraliseUserRecap(c: String): String {
+        var s = USER_DID.replace(c, "you did")
+        var prev = ""
+        while (prev != s) { prev = s; s = AND_DID.replace(s, "\$1did") }
+        return s
+    }
+
     /** Does a no-tool-call reply read like a claimed COMPLETED action or a
      *  memory promise? ("Done — added 'X'", "the task has been created",
      *  "I'll make a note of that"). Used by BOTH the text loop and the voice
      *  session guard. Deliberately careful: honest answers ABOUT existing state
      *  ("your dentist slot is on Friday") must not trip it, and neither must a
      *  truthful reference to a PREVIOUS turn's action ("I moved it earlier") —
-     *  only a sentence about THIS turn counts. */
-    fun looksLikeActionClaim(content: String?): Boolean {
+     *  only a sentence about THIS turn counts. [recap] = this turn's
+     *  get_period_review returned `ok:` (see [neutraliseUserRecap]). */
+    fun looksLikeActionClaim(content: String?, recap: Boolean = false): Boolean {
         val whole = (content ?: "").trim()
         if (whole.isEmpty()) return false
-        return sentences(whole).any { !refersToEarlierTurn(it) && sentenceClaimsAction(it) }
+        return sentences(whole).any { !refersToEarlierTurn(it) && sentenceClaimsAction(if (recap) neutraliseUserRecap(it) else it) }
     }
 }

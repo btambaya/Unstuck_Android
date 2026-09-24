@@ -57,6 +57,20 @@ class SoakCoreLogicPerfTest {
         val pats = derivePatterns(tasks, blocks, today)
         Bench.run("patternGaps (patterns=${pats.size})") { patternGaps(pats, blocks, today) }
         Bench.run("goldenHours") { goldenHours(sessions, now) }
+        // Insights (analytics build, 2026-09-24): the page's facts, its trend
+        // and the Today pill, recomputed on the minute tick.
+        val captures = SoakSeed.captures()
+        val zone = java.time.ZoneId.systemDefault()
+        val data = tech.csalliance.unstuck.core.logic.PeriodData(tasks, blocks, sessions, captures, emptyList())
+        val today0 = tech.csalliance.unstuck.core.logic.localToday(now, zone)
+        val week = tech.csalliance.unstuck.core.logic.insightsRange(tech.csalliance.unstuck.core.logic.InsightsSpan.WEEK, 0, today0, null)
+        Bench.run("PeriodData (D1 filter)") { tech.csalliance.unstuck.core.logic.PeriodData(tasks, blocks, sessions, captures, emptyList()) }
+        Bench.run("insightsFacts(this week)") { tech.csalliance.unstuck.core.logic.insightsFacts(data, week, now, zone) }
+        Bench.run("insightsTrend(8 weeks)") { tech.csalliance.unstuck.core.logic.insightsTrend(data, tech.csalliance.unstuck.core.logic.InsightsSpan.WEEK, 0, now, zone) }
+        Bench.run("thisWeekFocusSec (pill)") { tech.csalliance.unstuck.core.logic.thisWeekFocusSec(data, now, zone) }
+        Bench.run("renderPeriodReview(last_week)") {
+            tech.csalliance.unstuck.core.logic.renderPeriodReview(tech.csalliance.unstuck.core.logic.PeriodReviewArgs("last_week", null, null, null), tasks, blocks, sessions, captures, emptyList(), now, zone)
+        }
 
         val state = MomentState(
             tasks = tasks, blocks = blocks, sessions = sessions, reasons = emptyList(),

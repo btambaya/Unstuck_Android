@@ -1457,6 +1457,36 @@ class AssistantToolsTest {
         assertEquals("error: window must be week, month, or all", h.run("get_insights", "window" to "year"))
     }
 
+    // ── PERIOD REVIEW (week-review-spec) ───────────────────────────────────
+
+    @Test fun `get_period_review dispatches and reviews the stores`() = runTest {
+        val h = makeApi {
+            tasks += task("a", "Alpha", done = true, completedAt = "${YESTERDAY}T11:00:00.000Z")
+            tasks += task("b", "Beta")
+        }
+        val r = h.run("get_period_review", "period" to "yesterday")
+        assertTrue(r, r.startsWith("ok: review of yesterday ("))
+        assertTrue(r, r.contains("\nDone: 1 task — \"Alpha\".\n"))
+        assertTrue(r, r.contains("\nFocus: no focus sessions logged."))
+        assertFalse(r, r.contains("note:"))
+        // Errors are the spec's exact strings, never the unknown-tool fallback.
+        assertEquals(
+            "error: period required — today, yesterday, this_week, last_week, this_month, last_month, week_of (with date), month_of (with date), or dates (with from and to)",
+            h.run("get_period_review"),
+        )
+        assertEquals("error: period=week_of needs date (YYYY-MM-DD)", h.run("get_period_review", "period" to "week_of"))
+        assertTrue(h.run("get_period_review", "period" to 7).startsWith("error: period required"))   // non-string = absent
+    }
+
+    @Test fun `get_period_review notes a capped calendar pull and never a history floor`() = runTest {
+        val fake = makeApi { tasks += task("a", "Alpha", done = true, completedAt = "${YESTERDAY}T11:00:00.000Z") }.api
+        val capped = object : AssistantApi by fake { override suspend fun calBlocksMayBeTruncated() = true }
+        val r = runAssistantTool("get_period_review", ToolArgs(json("period" to "yesterday")), capped, TurnScratch())
+        assertTrue(r, r.endsWith("\nnote: this device may be missing some calendar slots (over the 1,000-slot sync limit) — repeating check-offs and plan numbers may be low."))
+        assertFalse(r, r.contains("only holds focus"))
+        assertTrue("a read never disarms the fabrication guard", "get_period_review" in READ_ONLY_TOOLS)
+    }
+
     // ── NAVIGATE ───────────────────────────────────────────────────────────
 
     @Test fun `open_screen navigates to the mapped screen, deep-linking a task or list id`() = runTest {
@@ -2267,7 +2297,7 @@ class AssistantToolsTest {
         }
         val note = "note: this is the CURRENT week"
         val mon = insights("2026-09-21", "week")
-        assertTrue(mon, mon.endsWith("\nnote: this is the CURRENT week, today only so far — it says nothing about last week. If they asked about last week, say the app has no last-week window yet and offer the month (window: month)."))
+        assertTrue(mon, mon.endsWith("\nnote: this is the CURRENT week, today only so far — it says nothing about last week. If they asked about last week, call get_period_review with period=last_week — or, if you don't have that tool, say this window can't show last week and offer the month (window: month)."))
         assertTrue(insights("2026-09-22", "week").contains("$note, two days so far"))   // Tuesday
         assertFalse(insights("2026-09-23", "week").contains(note))                        // Wednesday
         assertFalse(insights("2026-09-27", "week").contains(note))                        // Sunday: day 7

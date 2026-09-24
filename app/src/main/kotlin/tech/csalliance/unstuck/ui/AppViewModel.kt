@@ -61,6 +61,7 @@ import tech.csalliance.unstuck.sync.ProfileFactsService
 import tech.csalliance.unstuck.core.logic.InterviewFlag
 import tech.csalliance.unstuck.core.logic.labelNameTaken
 import tech.csalliance.unstuck.ui.onboarding.OnboardingGate
+import tech.csalliance.unstuck.surface.FocusCommands
 import tech.csalliance.unstuck.core.logic.relabelingArea
 import tech.csalliance.unstuck.core.logic.renamingTag
 import tech.csalliance.unstuck.core.logic.strippingTag
@@ -102,6 +103,7 @@ import tech.csalliance.unstuck.core.logic.HarnessToolRunner
 import tech.csalliance.unstuck.ui.assistant.ToolArgs
 import tech.csalliance.unstuck.ui.assistant.TurnScratch
 import tech.csalliance.unstuck.ui.assistant.buildAssistantContext
+import tech.csalliance.unstuck.ui.assistant.buildTextRequestContext
 import tech.csalliance.unstuck.ui.assistant.buildVoiceInstructions
 import tech.csalliance.unstuck.ui.assistant.buildVoiceOpening
 import tech.csalliance.unstuck.ui.assistant.runAssistantTool
@@ -481,6 +483,15 @@ class AppViewModel(
     // --- helpers ---
 
     fun nowMs(): Long = nowProvider?.invoke() ?: System.currentTimeMillis()
+
+    // Insights: a one-shot period to open on — the Today pill's "Last week"
+    // variant sets it just before navigating; the screen consumes it once.
+    private var insightsOpenAt: Pair<tech.csalliance.unstuck.core.logic.InsightsSpan, Int>? = null
+    fun openInsightsAt(span: tech.csalliance.unstuck.core.logic.InsightsSpan, offset: Int) { insightsOpenAt = span to offset }
+    fun consumeInsightsOpenAt(): Pair<tech.csalliance.unstuck.core.logic.InsightsSpan, Int>? = insightsOpenAt.also { insightsOpenAt = null }
+
+    /** The last cal_blocks pull hit the server's row cap (get_period_review's note). */
+    internal fun calBlocksMayBeTruncated(): Boolean = graph.coordinator?.calBlocksMayBeTruncated() == true
     fun isoNow(): String = ISO.format(Instant.now())
 
     private fun launchWrite(block: suspend () -> Unit) { viewModelScope.launch { block() } }
@@ -1978,7 +1989,10 @@ class AppViewModel(
             return
         }
         val sid = cur.id ?: newUuid()
-        write?.upsertSession(Session(id = sid, taskId = prev.id, taskName = prev.name, estimateMin = prev.estimateMin, actualSec = elapsed, completedAt = isoNow()))
+        // estimateMin = the session's OWN plan (the live estimate, extends included),
+        // as the web and the notification End write it — the D1 clamp reads it
+        // (analytics P1-13, 2026-09-24).
+        write?.upsertSession(Session(id = sid, taskId = prev.id, taskName = prev.name, estimateMin = cur.sessionEstimateMin, actualSec = elapsed, completedAt = isoNow()))
         if (accruesViaSharedLedger(cur, prev.id, shareBadges.value)) {
             // One-true-shared-session accrual: a partner-shared task's total accrues
             // EXCLUSIVELY via the ledger (exactly-once per session id — the partner may
@@ -1997,7 +2011,17 @@ class AppViewModel(
     }
 
     fun pauseFocus() = launchWrite { mutateLive(control = true) { FocusTimer.pause(it, nowMs()) } }
-    fun resumeFocus() = launchWrite { mutateLive(control = true) { FocusTimer.resume(it, nowMs()) } }
+    fun resumeFocus() = launchWrite { resumeFocusNow() }
+
+    /** Resume, and write the pause's length onto the reason log picked for it
+     *  (analytics P0-3 / D5). FALSE when there is no live session. */
+    internal suspend fun resumeFocusNow(): Boolean {
+        val before = store.getLiveSession() ?: return false
+        val now = nowMs()
+        if (!mutateLive(control = true) { FocusTimer.resume(it, now) }) return false
+        FocusCommands.recordPauseLength(store, write, before, now)
+        return true
+    }
     fun setTreatment(t: FocusTreatment) = launchWrite {
         mutateLive { FocusTimer.setTreatment(it, t) }
         updateSettings { it.copy(treatment = t) }
@@ -2020,6 +2044,8 @@ class AppViewModel(
     internal suspend fun finishFocusNow(task: TaskItem, markDone: Boolean = false, onSharedTick: ((refusal: String?) -> Unit)? = null): Boolean {
         val live = store.getLiveSession() ?: return false
         val elapsed = FocusTimer.elapsedSec(live, nowMs())
+        // Finishing while paused: the pause's reason log gets its length too.
+        FocusCommands.recordPauseLength(store, write, live, nowMs())
         // Shared focus (T3, Option B): the task isn't in MY store — reflect the time
         // onto the OWNER's task via log_shared_focus (partner/assign only) instead of
         // writing an own Session row / totalFocused, and complete it via
@@ -2093,7 +2119,9 @@ class AppViewModel(
         // Reuse the live-session id so captures taken during the session join back
         // to this Session row (the interruption histogram depends on it).
         write?.upsertSession(
-            Session(id = sid, taskId = stored?.id, taskName = realTask.name, estimateMin = realTask.estimateMin, actualSec = elapsed, completedAt = isoNow()),
+            // estimateMin = the session's own plan (live estimate incl. extends) — web
+            // and the notification End already wrote this; the D1 clamp reads it (P1-13).
+            Session(id = sid, taskId = stored?.id, taskName = realTask.name, estimateMin = live.sessionEstimateMin, actualSec = elapsed, completedAt = isoNow()),
         )
         // NEVER flip `done` on a recurring TEMPLATE: that ends the whole series
         // (the template stops generating and shows in no list), which is not what
@@ -2179,7 +2207,17 @@ class AppViewModel(
     }
 
     fun saveReasonLog(taskId: String?, reason: String, action: ReasonAction = ReasonAction.PAUSE, durationSec: Int? = null) = launchWrite {
-        write?.upsertReasonLog(ReasonLog(id = newUuid(), taskId = ownTaskIdFor(taskId), reason = reason, action = action, at = isoNow(), durationSec = durationSec))
+        val id = newUuid()
+        write?.upsertReasonLog(ReasonLog(id = id, taskId = ownTaskIdFor(taskId), reason = reason, action = action, at = isoNow(), durationSec = durationSec))
+        // A reason picked for the CURRENT pause: remember it on the live session so
+        // the resume (or a finish while paused) writes the pause's length back onto
+        // it (analytics P0-3 / D5). Device-local; not a shared control. After the
+        // row is stored, so a resume always finds the row it updates; the read and
+        // write are back to back and only touch a still-paused session.
+        if (action == ReasonAction.PAUSE && durationSec == null) {
+            val cur = store.getLiveSession()
+            if (cur != null && cur.paused && cur.pausedAt != null) store.setLiveSession(cur.copy(pendingReasonId = id))
+        }
     }
 
     /** The task a capture or pause reason filed on row [rowId] belongs to. Focus on
@@ -4075,7 +4113,9 @@ class AppViewModel(
             // — the one place the codebase's own "decode off the main thread" rule
             // was missed (review section 4). Off Main now.
             val wire = messages.map { it.toChat() }
-            val context = withContext(Dispatchers.Default) { buildAssistantContext(api) }
+            // The TEXT request reports the gated tools this build can run
+            // (toolCaps, week-review-spec D9); the voice + tour contexts never do.
+            val context = withContext(Dispatchers.Default) { buildTextRequestContext(api) }
             when (val r = a.ask(wire, context)) {
                 is AssistantResult.Ok -> HarnessReply(
                     text = r.reply.content,

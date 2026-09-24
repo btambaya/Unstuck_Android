@@ -94,6 +94,17 @@ class AssistantInsightsTest {
         assertEquals(28800.0 / 34800.0, g.share, 1e-5)
     }
 
+    @Test fun `a forgotten timer weighs its counted length at the hour it really started`() {
+        // Ten 20-min sessions at 9:00 (200 min) vs one timer started 22:00 on the
+        // 20th and stopped 34 h later (no plan → counts 4 h). Its start is 22:00 —
+        // the hour the heatmap shows it — not 4 h before it was stopped (04:00).
+        val tens = repeatN(10) { sessAt(10 + it, 9, 0, 1200) }
+        val runaway = sessAt(20, 22, 0, 34 * 3600)
+        val g = goldenHours(tens + runaway, FIXED_NOW)!!
+        assertEquals(listOf(22, 23), g.hours)
+        assertEquals(240.0 / 440.0, g.share, 1e-5)
+    }
+
     @Test fun `grows to a three-hour band when the neighbouring hour carries weight`() {
         val sessions = repeatN(4) { sessAt(10 + it, 13, 0, 1800) } +
             repeatN(4) { sessAt(10 + it, 14, 0, 1800) } +

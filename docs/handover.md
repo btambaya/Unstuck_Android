@@ -4,6 +4,29 @@ Single source of truth for "where is the Android build?". Update as phases land.
 
 > **New engineer? Start with the onboarding handbook: [`handbook/`](handbook/README.md)** (8 deep chapters) + the quick [`APP_GUIDE.md`](APP_GUIDE.md). (All project docs now live under `docs/`.)
 
+## 2026-09-24 (overnight, branch `analytics/android`, NOT shipped) — Insights on real data + the assistant's period review
+
+- **Engine:** `core/logic/PeriodReview.kt` ports `period-review.ref.mjs` (get_period_review; all 25 shared vectors pass byte for
+  byte, JVM default zone kept at UTC) and exposes `collectWindow` / `planFacts`; `PeriodFacts.kt` builds the Insights page's facts
+  from it, so the page and the assistant agree. `FocusFilter.kt` is the D1 session filter every focus number reads.
+- **Insights:** Week / Month / All time + stepper to any past week or month; Report = headline (Done · Focused · Showed up),
+  daily rhythm, got unstuck, plan vs followed through, repeating tasks, when focus happens (No area series), gentle friction;
+  Deep dive = trend, done by area, stats, estimates, 7×24 heatmap, interruptions (≥ 3 linked captures), pauses (count axis until
+  lengths exist), coming back (pause → resume). Honest empty state ("Nothing logged this week yet" + last week).
+- **Fixes:** slip detector skips repeating series + Later (true count); usable time excludes done/skipped blocks; the Today pill
+  is this week from the engine (hidden at 0; last week on Mon/Tue); pause lengths written on resume / finish-while-paused
+  (in app, notification, assistant); sessions record their own plan as estimate_min; task-detail sessions list works for a
+  repeating task's day.
+- **Assistant:** get_period_review executor (historyFloor null; blocksPartial from the last cal_blocks pull), toolCaps on the
+  TEXT request only, the §5.2 voice rule, the get_insights early-week note, the §5.4 recap-scoped fabrication guard (text + voice).
+- **Follow-ups (not tonight):** co-focus sessions for the recipient (P0-9), calendar month-cell meaning (P1-8), voice-minutes
+  meter, meeting load; estimate accuracy per finished task; the Friday week-review moment is still not rendered.
+- **Review pass (same night):** the voice recap now also ends on a confirmed barge-in / Interrupt / hold-to-talk release (it
+  outlived the review into the user's next turn); "kept N of M" no longer counts days skipped on purpose (web/iOS parity);
+  the Plan card's deadline line says "done later" instead of calling a late-finished task "still open"; get_insights' Focus /
+  median / planned read like the page (rounded, `1h 40m`, not a floored `1h 39m`); golden hours and the interruptions chart
+  place a forgotten timer from its REAL start (as the heatmap does), weighted by its counted length.
+
 ## 2026-09-23 (night) — vc104 / 0.5.20: sign-up links that open the app; "account already exists"
 
 - **vc104** (34e7752, Firebase release 1q9mvhh7qgcn8, 2 testers): signUpWith(Email) and signInWith(OTP) pass

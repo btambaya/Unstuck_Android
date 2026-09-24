@@ -158,20 +158,32 @@ object FocusTimer {
 
     fun pause(cur: LiveSession, now: Long): LiveSession {
         if (cur.sessionStart == null) return cur
-        return cur.copy(paused = true, pausedAt = now)
+        // A new pause starts with no reason picked yet.
+        return cur.copy(paused = true, pausedAt = now, pendingReasonId = if (cur.paused) cur.pendingReasonId else null)
     }
 
     fun resume(cur: LiveSession, now: Long): LiveSession {
         val start = cur.sessionStart ?: return cur
         val pausedDuration = if (cur.pausedAt != null) now - cur.pausedAt else 0L
-        return cur.copy(paused = false, pausedAt = null, sessionStart = start + pausedDuration)
+        return cur.copy(paused = false, pausedAt = null, sessionStart = start + pausedDuration, pendingReasonId = null)
+    }
+
+    /** The pause length to write back onto the current pause's reason log —
+     *  (reason log id, seconds paused) — or null when no reason was picked for
+     *  this pause or the session isn't paused. Call it with the session as it
+     *  was BEFORE a resume / finish. */
+    fun pendingPauseLength(cur: LiveSession, now: Long): Pair<String, Int>? {
+        val id = cur.pendingReasonId ?: return null
+        val at = cur.pausedAt ?: return null
+        if (!cur.paused) return null
+        return id to max(0, ((now - at) / 1000).toInt())
     }
 
     /** Ends the session: clears sessionStart so elapsed resets to 0 (the
      *  Session-row writeback already happened with the pre-done elapsed). The
      *  UI separately forces a transient `done` display state. */
     fun done(cur: LiveSession): LiveSession =
-        cur.copy(id = null, sessionStart = null, paused = false, pausedAt = null)
+        cur.copy(id = null, sessionStart = null, paused = false, pausedAt = null, pendingReasonId = null)
 
     fun cancel(cur: LiveSession): LiveSession = empty.copy(treatment = cur.treatment)
 

@@ -50,6 +50,15 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.BuildConfig
+import tech.csalliance.unstuck.core.logic.InsightsSpan
+import tech.csalliance.unstuck.core.logic.PeriodData
+import tech.csalliance.unstuck.core.logic.PeriodWindow
+import tech.csalliance.unstuck.core.logic.collectWindow
+import tech.csalliance.unstuck.core.logic.insightsRange
+import tech.csalliance.unstuck.core.logic.localToday
+import tech.csalliance.unstuck.core.logic.periodDur
+import tech.csalliance.unstuck.core.logic.periodMinutes
+import tech.csalliance.unstuck.core.logic.thisWeekFocusSec
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.areaFilterFollowing
 import tech.csalliance.unstuck.core.logic.daysSinceCreated
@@ -206,11 +215,13 @@ fun TodayScreen(
         liveId?.let { id -> tasks.firstOrNull { it.id == id } }
             ?: live?.let { l -> l.sharedTitle?.let { title -> TaskItem(id = l.taskId, name = title, estimateMin = l.sessionEstimateMin, createdAt = "", updatedAt = "") } }
     }
-    // The 7-day focus roll-up re-ran an ISO parse for every session on every
-    // minute tick. Parse once per sessions list; the per-tick pass is then
-    // arithmetic. Unparseable stays 0L, i.e. still outside the window.
-    val sessionCompletedMs = remember(sessions) { sessions.map { it.completedAtMs() ?: 0L } }
-    val weekMin = remember(sessionCompletedMs, now) { weekFocusMinutes(sessions, sessionCompletedMs, now) }
+    // "This week · Xh focused": THIS week (Monday-anchored, so far) from the
+    // shared periodFacts engine over the D1-filtered sessions — the same number
+    // the Insights page's This week shows (analytics D3; it was a rolling 7 days
+    // that tapped through to a Monday-anchored page). Hidden at 0; on a Monday
+    // or Tuesday with nothing yet this week it offers last week instead.
+    val pillData = remember(sessions) { PeriodData(emptyList(), emptyList(), sessions, emptyList(), emptyList()) }
+    val pill = remember(pillData, now) { weekPill(pillData, now) }
 
     Column(Modifier.fillMaxWidth()) {
         // ── Pinned header: avatar + bell, greeting, and (when there's content) the
@@ -239,13 +250,15 @@ fun TodayScreen(
             // from the same source Settings → Account reads (reactive, so it fills
             // in once auth hydrates); "Unstuck." when unset (iOS GreetingName.line).
             GreetingLine(greetingLine(now, displayName), modifier = Modifier.padding(top = 6.dp, bottom = 6.dp))
-            Row(
-                Modifier.padding(top = 2.dp, bottom = 4.dp).clip(RoundedCornerShape(999.dp)).background(c.bg2).clickable(onClick = onInsights).padding(horizontal = 12.dp, vertical = 7.dp),
+            if (pill != null) Row(
+                Modifier.padding(top = 2.dp, bottom = 4.dp).clip(RoundedCornerShape(999.dp)).background(c.bg2)
+                    .clickable { if (pill.lastWeek) vm.openInsightsAt(InsightsSpan.WEEK, -1); onInsights() }
+                    .padding(horizontal = 12.dp, vertical = 7.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 Box(Modifier.size(6.dp).clip(CircleShape).background(c.coral))
-                Text("This week · ", style = UFont.sans(12), color = c.ink2)
-                Text(if (weekMin >= 60) "${weekMin / 60}h${if (weekMin % 60 != 0) " ${weekMin % 60}m" else ""} focused" else "${weekMin}m focused", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
+                Text(if (pill.lastWeek) "Last week · " else "This week · ", style = UFont.sans(12), color = c.ink2)
+                Text("${periodDur(pill.minutes)} focused", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink)
                 Text("→", style = UFont.sans(12), color = c.ink3)
             }
             // The way into the assistant + Talk: ONE input pill directly under the
@@ -525,22 +538,18 @@ private fun DelegatedSection(rows: List<TaskItem>, assignedOut: Map<String, Stri
     }
 }
 
-private fun tech.csalliance.unstuck.core.model.Session.completedAtMs(): Long? =
-    tech.csalliance.unstuck.core.time.Time.parseMillis(completedAt)
+/** What the Today pill shows: this week's focused minutes, or — on a Monday or
+ *  Tuesday with none yet this week — last week's, opening Insights on last
+ *  week. Null (hidden) when there is nothing to show. */
+internal data class WeekPill(val minutes: Int, val lastWeek: Boolean)
 
-/** Minutes focused in the 7 days up to [now] — the Today header's week total.
- *  [completedMs] is `sessions.map { it.completedAtMs() ?: 0L }`, hoisted out of
- *  the minute ticker so the roll-up doesn't re-parse every session's timestamp
- *  once a minute. Same total as summing `actualSec` over the sessions whose
- *  completion falls in `[now - 7d, now]` and dividing by 60. */
-internal fun weekFocusMinutes(
-    sessions: List<tech.csalliance.unstuck.core.model.Session>,
-    completedMs: List<Long>,
-    now: Long,
-): Int {
-    var sec = 0
-    for (i in sessions.indices) {
-        if ((now - completedMs[i]) in 0..(7L * 86_400_000)) sec += sessions[i].actualSec
-    }
-    return sec / 60
+internal fun weekPill(data: PeriodData, now: Long, zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): WeekPill? {
+    val thisWeek = periodMinutes(thisWeekFocusSec(data, now, zone))
+    if (thisWeek > 0) return WeekPill(thisWeek, lastWeek = false)
+    val dow = java.time.Instant.ofEpochMilli(now).atZone(zone).dayOfWeek.value   // 1 = Monday
+    if (dow > 2) return null
+    val today = localToday(now, zone)
+    val last = insightsRange(InsightsSpan.WEEK, -1, today, null)
+    val sec = collectWindow(data, PeriodWindow(last.from, last.end, null), zone).focusSec
+    return periodMinutes(sec).takeIf { it > 0 }?.let { WeekPill(it, lastWeek = true) }
 }

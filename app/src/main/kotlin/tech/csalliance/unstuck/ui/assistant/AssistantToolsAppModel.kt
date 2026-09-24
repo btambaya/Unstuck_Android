@@ -57,6 +57,7 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
 
     override suspend fun getSessions(): List<Session> = store.snapshot(Tables.SESSIONS, Session.serializer())
     override suspend fun getReasonLogs(): List<ReasonLog> = store.snapshot(Tables.REASON_LOGS, ReasonLog.serializer())
+    override suspend fun calBlocksMayBeTruncated(): Boolean = vm.calBlocksMayBeTruncated()
     /** The account's onboarding struggles (user_preferences.adhd_struggles),
      *  canonicalised + cached per account on the ViewModel at every pull. */
     override fun getStruggles(): List<String> = vm.struggles.value
@@ -193,7 +194,7 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
         return vm.startFocusNow(row)
     }
     override suspend fun pauseFocus(): Boolean = vm.mutateLiveControl { FocusTimer.pause(it, vm.nowMs()) }
-    override suspend fun resumeFocus(): Boolean = vm.mutateLiveControl { FocusTimer.resume(it, vm.nowMs()) }
+    override suspend fun resumeFocus(): Boolean = vm.resumeFocusNow()
     override suspend fun extendFocus(minutes: Int): Boolean = vm.mutateLiveControl { FocusTimer.extend(it, minutes) }
     /** The Focus screen's Done (markDone) / Stop here path: finishFocusNow logs
      *  the Session row + totalFocused, then the timer notification and the

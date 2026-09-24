@@ -1985,7 +1985,10 @@ class AppViewModel(
             return
         }
         val sid = cur.id ?: newUuid()
-        write?.upsertSession(Session(id = sid, taskId = prev.id, taskName = prev.name, estimateMin = prev.estimateMin, actualSec = elapsed, completedAt = isoNow()))
+        // estimateMin = the session's OWN plan (the live estimate, extends included),
+        // as the web and the notification End write it — the D1 clamp reads it
+        // (analytics P1-13, 2026-09-24).
+        write?.upsertSession(Session(id = sid, taskId = prev.id, taskName = prev.name, estimateMin = cur.sessionEstimateMin, actualSec = elapsed, completedAt = isoNow()))
         if (accruesViaSharedLedger(cur, prev.id, shareBadges.value)) {
             // One-true-shared-session accrual: a partner-shared task's total accrues
             // EXCLUSIVELY via the ledger (exactly-once per session id — the partner may
@@ -2112,7 +2115,9 @@ class AppViewModel(
         // Reuse the live-session id so captures taken during the session join back
         // to this Session row (the interruption histogram depends on it).
         write?.upsertSession(
-            Session(id = sid, taskId = stored?.id, taskName = realTask.name, estimateMin = realTask.estimateMin, actualSec = elapsed, completedAt = isoNow()),
+            // estimateMin = the session's own plan (live estimate incl. extends) — web
+            // and the notification End already wrote this; the D1 clamp reads it (P1-13).
+            Session(id = sid, taskId = stored?.id, taskName = realTask.name, estimateMin = live.sessionEstimateMin, actualSec = elapsed, completedAt = isoNow()),
         )
         // NEVER flip `done` on a recurring TEMPLATE: that ends the whole series
         // (the template stops generating and shows in no list), which is not what

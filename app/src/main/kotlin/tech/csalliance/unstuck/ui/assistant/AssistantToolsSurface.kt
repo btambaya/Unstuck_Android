@@ -1,5 +1,6 @@
 package tech.csalliance.unstuck.ui.assistant
 
+import tech.csalliance.unstuck.core.logic.DEFAULT_AREAS
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.InsightsWindow
 import tech.csalliance.unstuck.core.logic.IsoDate
@@ -792,7 +793,10 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
         "get_insights" -> {
             val w = InsightsWindow.fromWire((args.str("window") ?: "week").lowercase())
                 ?: return "error: window must be week, month, or all"
-            val out = renderInsights(api.getTasks(), api.getSessions(), api.getCaptures(), api.getReasonLogs(), api.getBlocks(), api.nowMs(), w)
+            // By area over the user's OWN areas in their order — the list the
+            // Insights screen draws (analytics P1-1, 2026-09-24).
+            val areas = api.getAreaRows().sortedBy { it.sortOrder }.map { it.name }.ifEmpty { DEFAULT_AREAS }
+            val out = renderInsights(api.getTasks(), api.getSessions(), api.getCaptures(), api.getReasonLogs(), api.getBlocks(), api.nowMs(), w, areas = areas)
             // The week window starts on Monday: early in the week it is a day or
             // two of data. "How was my last week?" on a Monday was answered from
             // it as if it were the week before (Ahmad, 2026-09-20) (parity with

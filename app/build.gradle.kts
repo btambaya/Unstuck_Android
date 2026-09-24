@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 111
-        versionName = "0.5.27"
+        versionCode = 112
+        versionName = "0.5.28"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.27 — Insights: \"+N more\" under a list now opens the rest of it (\"Show less\" folds it back). Today: the logo is now the same size as your profile picture, lined up with the page margins."
+    releaseNotes = "v0.5.28 — The + now sits in the tab bar with the other tabs. Times everywhere follow your phone's 12/24-hour setting — no more mix of \"14:30\" and \"2:30 PM\"."
 }
 
 dependencies {

@@ -100,7 +100,9 @@ class NotificationsClient(private val client: SupabaseClient) {
     }.getOrDefault(false)
 
     /** One `notification_queue` row as the bell reads it (the web's
-     *  useNotificationQueue / iOS NotificationQueueCard shape). */
+     *  useNotificationQueue / iOS NotificationQueueCard shape). `deepLink` is
+     *  the link the server's push carried (migration 084); null on older rows
+     *  and on a server without the column — the bell derives a coarse one. */
     @Serializable
     data class QueueCard(
         val id: String,
@@ -108,21 +110,36 @@ class NotificationsClient(private val client: SupabaseClient) {
         val title: String? = null,
         val body: String? = null,
         @kotlinx.serialization.SerialName("created_at") val createdAt: String? = null,
+        @kotlinx.serialization.SerialName("deep_link") val deepLink: String? = null,
     )
 
-    /** The server's own cards for one moment, newest first — owner-RLS
-     *  (`notification_queue_own`). The bell reads moment `call`, so a call the
-     *  server rang (answered, missed, or on a phone that couldn't take it)
-     *  shows up on every device (parity with iOS build 72). Throws on a
-     *  transport failure; the caller keeps what it had. */
-    suspend fun queueCards(moment: String, limit: Long = 30): List<QueueCard> =
-        client.from("notification_queue")
-            .select(Columns.list("id", "moment", "title", "body", "created_at")) {
-                filter { eq("moment", moment) }
+    /** The server's own cards for [moments], newest first — owner-RLS
+     *  (`notification_queue_own`). The bell reads every moment it can show
+     *  (calls, sharing/collaboration, brief, recap), so an event whose push
+     *  went to another device, was held back, or was swiped away still has a
+     *  record here (parity with the web bell). A server that predates the
+     *  `deep_link` column (084) is read without it rather than losing the
+     *  bell. Throws on a transport failure; the caller keeps what it had. */
+    suspend fun queueCards(moments: List<String>, limit: Long = 30): List<QueueCard> =
+        try {
+            readQueueCards(moments, limit, withDeepLink = true)
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (e.message?.contains("deep_link") != true) throw e
+            readQueueCards(moments, limit, withDeepLink = false)
+        }
+
+    private suspend fun readQueueCards(moments: List<String>, limit: Long, withDeepLink: Boolean): List<QueueCard> {
+        val cols = listOf("id", "moment", "title", "body", "created_at") + (if (withDeepLink) listOf("deep_link") else emptyList())
+        return client.from("notification_queue")
+            .select(Columns.list(*cols.toTypedArray())) {
+                filter { isIn("moment", moments) }
                 order("created_at", io.github.jan.supabase.postgrest.query.Order.DESCENDING)
                 limit(limit)
             }
             .decodeList()
+    }
 }
 
 class LoginTrackerClient(private val client: SupabaseClient) {

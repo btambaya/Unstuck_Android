@@ -64,6 +64,7 @@ import tech.csalliance.unstuck.core.logic.insightsComparisonLabel
 import tech.csalliance.unstuck.core.logic.insightsFacts
 import tech.csalliance.unstuck.core.logic.insightsPeriodLabel
 import tech.csalliance.unstuck.core.logic.insightsRange
+import tech.csalliance.unstuck.core.logic.insightsTrend
 import tech.csalliance.unstuck.core.logic.interruptionBins
 import tech.csalliance.unstuck.core.logic.localToday
 import tech.csalliance.unstuck.core.logic.pauseAnatomy
@@ -137,6 +138,8 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
     val slips = remember(tasks, now) { slipping(tasks, now) }
     val comeback = remember(reasons) { comebackBins(reasons) }
     val periodName = insightsPeriodLabel(range, today)
+    val year = periodParseYmd(today)!!.year
+    val trend = remember(data, span, offset, now) { insightsTrend(data, span, offset, now, zone) }
 
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
@@ -174,43 +177,48 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
             }
 
             if (!deep) {
+                // ── Report: this period's story (the same facts the assistant reads out).
+                item { HeadlineRow(facts, span) }
                 item {
-                    Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                        StatCard("Estimates", if (dots.isNotEmpty()) "$hit%" else "—", "${dots.size} tracked", c.greenSoft, c.greenInk, "landed within 5 min")
-                        StatCard("Focus sessions", "${sessions.size}", "${captures.size} captures", c.blueSoft, c.blueInk, "a minute or longer, this period")
-                        StatCard("Gentle friction", "${slips.size} tasks", if (slips.isEmpty()) "All clear." else "Watch these", if (slips.isEmpty()) c.greenSoft else c.amberSoft, if (slips.isEmpty()) c.greenInk else c.amberInk, "slipping")
-                    }
+                    if (span == InsightsSpan.ALL) TrendCard(trend, span)
+                    else DailyRhythmCard(facts.days, span, year)
                 }
+                item { GotUnstuckCard(facts.wins) }
+                item { PlanCard(facts.plan, year, zone) }
+                if (span != InsightsSpan.ALL) item { RepeatingRhythmCard(facts.series, lifeAreas) }
                 if (hasFocus) {
                     item {
                         val weekdayBars = remember(sessions, tasks, areaNames) { weekdayAreaHours(sessions, tasks, areaNames, withNoArea = true).map { it.d to it.data } }
                         StackedBars("When focus happens", weekdayBars, areaNames + NO_AREA_LABEL, lifeAreas)
                     }
-                    if (dots.isNotEmpty()) item { CalibrationScatter(dots, hit) }
-                    item {
-                        val interruptions = remember(captures, sessions) { interruptionBins(captures, sessions) }
-                        // Fewer than 3 captures linked to a session say nothing (P0-11).
-                        if (interruptions.sum() >= INTERRUPTIONS_MIN_LINKED) {
-                            Histogram(
-                                "When interruptions happen", interruptions, c.ink3,
-                                labels = List(interruptions.size) { i -> if (i % 3 == 0) "${i * 3}m" else "" }.let { it.dropLast(1) + "27m+" },
-                                noun = "captures",
-                            )
+                }
+                if (slips.isNotEmpty()) item {
+                    // Gentle friction: the true count, the first few names; the full
+                    // list is the Deep dive's slip detector.
+                    Card(Modifier.fillMaxWidth().padding(top = 12.dp), radius = 18) {
+                        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                            Text("Gentle friction", style = UFont.sans(13, FontWeight.SemiBold), color = c.ink)
+                            Text(if (slips.size == 1) "1 task has been waiting a while or keeps moving." else "${slips.size} tasks have been waiting a while or keep moving.", style = UFont.sans(12), color = c.ink2)
+                            slips.take(3).forEach { s -> Text("· ${s.name}", style = UFont.sans(12), color = c.ink3, maxLines = 1) }
+                            if (slips.size > 3) Text("The rest are in Deep dive.", style = UFont.sans(11), color = c.ink3)
                         }
                     }
-                    item {
-                        val insights = remember(sessions, tasks, captures, reasons, now) { topInsights(sessions, tasks, captures, reasons, now) }
-                        if (insights.isNotEmpty()) {
-                            SectionLabel("Worth noticing", Modifier.padding(top = 18.dp, bottom = 6.dp))
-                            insights.forEach { ins ->
-                                Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), radius = 14) {
-                                    Column { Text(ins.title, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink); Text(ins.sub, style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 4.dp)) }
-                                }
+                }
+                if (hasFocus) item {
+                    val insights = remember(sessions, tasks, captures, reasons, now) { topInsights(sessions, tasks, captures, reasons, now) }
+                    if (insights.isNotEmpty()) {
+                        SectionLabel("Worth noticing", Modifier.padding(top = 18.dp, bottom = 6.dp))
+                        insights.forEach { ins ->
+                            Card(Modifier.fillMaxWidth().padding(vertical = 4.dp), radius = 14) {
+                                Column { Text(ins.title, style = UFont.sans(14, FontWeight.SemiBold), color = c.ink); Text(ins.sub, style = UFont.sans(12), color = c.ink2, modifier = Modifier.padding(top = 4.dp)) }
                             }
                         }
                     }
                 }
             } else {
+                // ── Deep dive: patterns over time.
+                if (span != InsightsSpan.ALL) item { TrendCard(trend, span) }
+                item { DoneByAreaCard(facts.doneByArea, facts.doneNoArea, lifeAreas) }
                 item {
                     // Median over counted SECONDS (round once at display).
                     val median = remember(sessions) {
@@ -227,6 +235,22 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                             StatCard("Back <5m", if (timed > 0) "${(comeback[0] * 100.0 / timed).roundToInt()}%" else "—", caption = "of timed pauses", modifier = Modifier.weight(1f))
                             StatCard("Captures", "${captures.size}", caption = "kept this period", modifier = Modifier.weight(1f))
                         }
+                        // Estimates: each session against its task's estimate, ±5 min.
+                        StatCard("Estimates", if (dots.isNotEmpty()) "$hit%" else "—", "${dots.size} tracked", c.bg2, c.ink2, "landed within 5 min of the estimate")
+                    }
+                }
+                if (dots.isNotEmpty()) item { CalibrationScatter(dots, hit) }
+                if (hasFocus) item { Heatmap(remember(rawSessions, zone) { hourDayHeatmap(rawSessions, zone) }) }
+                item {
+                    val interruptions = remember(captures, sessions) { interruptionBins(captures, sessions) }
+                    // Fewer than 3 captures linked to a session say nothing (P0-11).
+                    if (interruptions.sum() >= INTERRUPTIONS_MIN_LINKED) {
+                        Histogram(
+                            "When interruptions happen", interruptions, c.ink3,
+                            labels = List(interruptions.size) { i -> if (i % 3 == 0) "${i * 3}m" else "" }.let { it.dropLast(1) + "27m+" },
+                            noun = "captures",
+                            caption = "Thoughts you captured mid-session, by minutes in.",
+                        )
                     }
                 }
                 item {
@@ -287,7 +311,6 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                         if (slips.size > SLIP_SHOWN) Text("+${slips.size - SLIP_SHOWN} more", style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 4.dp))
                     }
                 }
-                if (hasFocus) item { Heatmap(remember(rawSessions, zone) { hourDayHeatmap(rawSessions, zone) }) }
             }
             item { Box(Modifier.padding(24.dp)) {} }
         }

@@ -1,6 +1,7 @@
 package tech.csalliance.unstuck.core.logic
 
 import tech.csalliance.unstuck.core.model.CalBlock
+import tech.csalliance.unstuck.core.model.Recurrence
 import tech.csalliance.unstuck.core.time.Time
 import tech.csalliance.unstuck.core.time.WireTime
 import java.time.Instant
@@ -178,6 +179,47 @@ fun rejectPastDate(today: String, date: String, weekdayNames: List<String> = WEE
     val next = IsoDate.addDays(today, ahead)
     val name = weekdayNames[dow]
     return "error: $date is in the PAST (today is $today). If the user meant the coming $name, use $next — see context.upcoming. Never schedule into the past."
+}
+
+/** "Saturday" / "Saturday and Sunday" / "Monday, Wednesday and Friday". */
+private fun weekdayList(days: List<Int>): String {
+    val names = days.map { WEEKDAY_NAMES_CAP[it] }
+    return if (names.size <= 1) names.joinToString("") else names.dropLast(1).joinToString(", ") + " and " + names.last()
+}
+
+/**
+ * A weekly series asked onto a day it doesn't repeat on — the model's date
+ * maths gone wrong ("Saturday" → 2026-09-20, a Sunday: James's Park run,
+ * TestFlight build 51, 2026-09-13). The executor used to write that date
+ * exactly as given, so the series' first occurrence landed on the Sunday and
+ * the coming Saturday had none. Refuse, naming the matching days on either
+ * side of [date] (the nearest one on or after [today] before it, and the first
+ * after it) in plain words, so the model re-calls with the right one. Null =
+ * fine: not weekly, a day in the series, or a malformed date (the date
+ * checks own that). Shared wording on web, iOS and Android.
+ */
+fun rejectOffSeriesDay(taskName: String, recurrence: Recurrence?, date: String, today: String): String? {
+    val weekly = recurrence as? Recurrence.Weekly ?: return null
+    if (!ISO_DATE_RE.matches(date) || IsoDate.parse(date) == null) return null
+    val days = weekly.daysOfWeek.filter { it in 0..6 }.distinct().sorted()
+    if (days.isEmpty()) return null
+    val dow = IsoDate.dayOfWeek(date)
+    if (dow in days) return null
+    val nearest = ArrayList<String>()
+    for (back in 1..6) {
+        val d = IsoDate.addDays(date, -back)
+        if (d < today) break
+        if (IsoDate.dayOfWeek(d) in days) { nearest += d; break }
+    }
+    for (ahead in 1..6) {
+        val d = IsoDate.addDays(date, ahead)
+        if (IsoDate.dayOfWeek(d) in days) { nearest += d; break }
+    }
+    val asked = WEEKDAY_NAMES_CAP[dow]
+    val label = if (days.size == 1) "${WEEKDAY_NAMES_CAP[days[0]]}s" else "matching days"
+    return "error: \"$taskName\" repeats every ${weekdayList(days)}, but $date is a $asked — nothing was scheduled. " +
+        "The nearest $label: ${nearest.joinToString(", ") { "${WEEKDAY_NAMES_CAP[IsoDate.dayOfWeek(it)]} $it" }}. " +
+        "Call schedule_task again with the day the user meant; only if they asked for $asked itself (a one-off move off its usual day), call it again with $date unchanged."
 }
 
 // ---- Context dates

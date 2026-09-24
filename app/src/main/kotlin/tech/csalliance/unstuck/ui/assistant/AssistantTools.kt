@@ -19,6 +19,7 @@ import tech.csalliance.unstuck.core.logic.hmToMin
 import tech.csalliance.unstuck.core.logic.jsDayOfWeek
 import tech.csalliance.unstuck.core.logic.rejectPastDate
 import tech.csalliance.unstuck.core.logic.rejectPastTime
+import tech.csalliance.unstuck.core.logic.rejectOffSeriesDay
 import tech.csalliance.unstuck.core.logic.ReceiptArgs
 import tech.csalliance.unstuck.core.logic.ChosenDateAction
 import tech.csalliance.unstuck.core.logic.ChosenDateWrite
@@ -94,7 +95,11 @@ class TurnScratch {
     /** Task id → the block schedule_task placed for it, which a
      *  set_task_recurrence after it takes as the series' day and time. */
     val placedBlocks = HashMap<String, String>()
-    fun clear() { newTasks.clear(); newLists.clear(); placedBlocks.clear() }
+    /** "taskId|date" pairs schedule_task refused as off a weekly series' days
+     *  ([rejectOffSeriesDay]). The SAME call again is the model's deliberate
+     *  one-off move after reading the refusal, and goes through. */
+    val offDayRefused = HashSet<String>()
+    fun clear() { newTasks.clear(); newLists.clear(); placedBlocks.clear(); offDayRefused.clear() }
 }
 
 /** Typed accessors over the model's JSON arguments. `str` treats blank as
@@ -469,6 +474,18 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             val date = args.str("date") ?: return "error: date required"
             val startTime = args.str("startTime")
             rejectPastDate(api, date)?.let { return it }
+            // A weekly series onto a day it doesn't repeat on is refused ONCE,
+            // naming the right days — the model's date maths put James's
+            // Saturday Park run on a Sunday (TestFlight build 51). A day that
+            // already holds one of its occurrences (a one-off moved there) is
+            // fine, and the same call again is a deliberate one-off move.
+            var offDay: String? = null
+            if (api.getBlocks().none { it.taskId == t.id && isTaskBlock(it) && it.date == date }) {
+                rejectOffSeriesDay(t.name, t.recurrence, date, api.todayIso())?.let { refusal ->
+                    if (scratch.offDayRefused.add("${t.id}|$date")) return refusal
+                    offDay = WEEKDAY_NAMES_CAP[jsDayOfWeek(date)]
+                }
+            }
             // No time given AND the task has never had one: don't guess — ask,
             // suggesting a slot (Ahmad, 2026-09-01: "when confused, prompt").
             val own = api.getBlocks().firstOrNull { it.taskId == t.id && !it.done && !it.skipped && it.startTime.isNotEmpty() }
@@ -478,7 +495,8 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             rejectPastTime(api, date, startTime ?: own?.startTime)?.let { return it }
             val landed = scheduleTask(api, t, date, startTime, scratch)
                 ?: return "error: \"${t.name}\" is already done on $date — nothing changed"
-            "ok: scheduled \"${t.name}\" $date $landed${if (startTime == null) " (kept its existing time — say so)" else ""}"
+            "ok: scheduled \"${t.name}\" $date $landed${if (startTime == null) " (kept its existing time — say so)" else ""}" +
+                (offDay?.let { " — a one-off on a $it, off the days it repeats on" } ?: "")
         }
 
         "update_task" -> {

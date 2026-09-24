@@ -1,5 +1,11 @@
 package tech.csalliance.unstuck.soak
 
+import kotlinx.serialization.builtins.ListSerializer
+import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonArray
+import kotlinx.serialization.json.jsonObject
+import kotlinx.serialization.json.jsonPrimitive
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
@@ -16,6 +22,7 @@ import tech.csalliance.unstuck.core.model.Session
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.ui.today.WeekPill
 import tech.csalliance.unstuck.ui.today.weekPill
+import java.io.File
 import java.time.Instant
 import java.time.ZoneId
 
@@ -128,6 +135,47 @@ class WeekFocusMinutesTest {
         // Something done already this Monday: this week's, not last week's.
         val doneMon = PeriodData(listOf(done("a", "2026-09-21T08:00:00Z")), emptyList(), d.sessions, emptyList(), emptyList())
         assertEquals("1 done this week →", weekPill(doneMon, mon, utc).text)
+    }
+
+    /** THE shared pill vectors (lib/assistant/period-review-vectors.json →
+     *  weekPill, P1–P10), the cases web and iOS run: every state, done beating
+     *  last week, local days and the "so far" cut, odd timestamps. Read from
+     *  core's generated copy (app tests can't see core's test classes). */
+    @Test fun sharedWeekPillVectors() {
+        val json = Json { ignoreUnknownKeys = true }
+        val rel = "core/src/test/kotlin/tech/csalliance/unstuck/core/PeriodReviewVectors.generated.kt"
+        val src = listOf(File("../$rel"), File(rel)).first { it.exists() }.readText()
+        val open = "const val JSON: String = \"\"\""
+        val body = src.substring(src.indexOf(open) + open.length, src.lastIndexOf("\"\"\"")).replace("\${\"$\"}", "$")
+        val root = json.parseToJsonElement(body).jsonObject
+        val datasets = root["datasets"]!!.jsonObject
+        val vectors = root["weekPill"]!!.jsonObject["vectors"]!!.jsonArray
+        assertEquals((1..10).map { "P$it" }, vectors.map { it.jsonObject["id"]!!.jsonPrimitive.content })
+        for (v in vectors) {
+            val o = v.jsonObject
+            val id = o["id"]!!.jsonPrimitive.content
+            val zone = ZoneId.of(o["tz"]!!.jsonPrimitive.content)
+            val now = ms(o["now"]!!.jsonPrimitive.content)
+            val d = datasets[o["dataset"]!!.jsonPrimitive.content]!!.jsonObject
+            val data = PeriodData(
+                json.decodeFromJsonElement(ListSerializer(TaskItem.serializer()), d["tasks"]!!),
+                json.decodeFromJsonElement(ListSerializer(CalBlock.serializer()), d["blocks"]!!),
+                json.decodeFromJsonElement(ListSerializer(Session.serializer()), d["sessions"]!!),
+                emptyList(), emptyList(),
+            )
+            val pill = weekPill(data, now, zone)
+            val want = o["expect"]!!.jsonObject
+            val kind = when (pill.kind) {
+                WeekPill.Kind.FOCUSED, WeekPill.Kind.LAST_WEEK -> "focus"
+                WeekPill.Kind.DONE -> "done"
+                WeekPill.Kind.EMPTY -> "empty"
+            }
+            assertEquals(id, want["kind"]!!.jsonPrimitive.content, kind)
+            assertEquals(id, want["text"]!!.jsonPrimitive.content, pill.words)
+            // `at`: the week the tap opens — last week's Monday, else this week (null).
+            val at = if (pill.lastWeek) insightsRange(InsightsSpan.WEEK, -1, localToday(now, zone), null).from else null
+            assertEquals(id, want["at"]!!.jsonPrimitive.contentOrNull, at)
+        }
     }
 
     @Test fun mondayAnchorFollowsTheZone() {

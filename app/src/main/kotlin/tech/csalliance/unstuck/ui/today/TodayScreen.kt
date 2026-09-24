@@ -585,8 +585,12 @@ internal data class WeekPill(val kind: Kind, val minutes: Int = 0, val done: Int
     }
     val tail: String get() = if (kind == Kind.DONE) " this week" else ""
 
+    /** The pill's words without the arrow (web's weekPillText; the shared
+     *  period-review vectors' weekPill `text`). */
+    val words: String get() = "$lead$value$tail"
+
     /** The whole pill as read: "This week · 2h 5m focused →". */
-    val text: String get() = "$lead$value$tail →"
+    val text: String get() = "$words →"
 }
 
 internal fun weekPill(data: PeriodData, now: Long, zone: java.time.ZoneId = java.time.ZoneId.systemDefault()): WeekPill {

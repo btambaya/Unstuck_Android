@@ -487,7 +487,10 @@ internal fun CalBlockEditSheetBody(
     onUnschedule: () -> Unit,
 ) {
     val c = UTheme.colors
-    Column(Modifier.fillMaxWidth().padding(horizontal = 22.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+    // Scrolls when it outgrows the sheet, like the Month peek and New task sheets.
+    // With the task actions the body is ~410 dp at normal text and ~575 dp at 200 %,
+    // more than a 640 dp phone's sheet holds, so Unschedule was cut off there.
+    Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp).padding(bottom = 28.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
         tech.csalliance.unstuck.design.component.SectionLabel("Edit block")
         // Struck through once done, like the block on the grid.
         Text(

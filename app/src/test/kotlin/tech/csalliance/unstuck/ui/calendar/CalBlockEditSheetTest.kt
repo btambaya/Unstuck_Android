@@ -2,6 +2,9 @@ package tech.csalliance.unstuck.ui.calendar
 
 import android.content.ComponentName
 import androidx.activity.ComponentActivity
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.ui.Modifier
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.SemanticsActions
 import androidx.compose.ui.semantics.SemanticsProperties
@@ -10,7 +13,11 @@ import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performSemanticsAction
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
 import androidx.test.core.app.ApplicationProvider
 import org.junit.Assert.assertEquals
 import org.junit.Rule
@@ -61,15 +68,18 @@ class CalBlockEditSheetTest {
 
     private val taps = mutableListOf<String>()
 
-    private fun show(actions: CalBlockSheetActions) {
+    /** [maxHeight]: the room the sheet gives the body (null = the whole screen). */
+    private fun show(actions: CalBlockSheetActions, maxHeight: Dp? = null) {
         compose.setContent {
             UnstuckTheme(dark = false) {
-                CalBlockEditSheetBody(
-                    taskName = "Write report", actions = actions, times = listOf("09:00", "10:30"), startTime = "09:00",
-                    durationMinutes = 45, clock = ClockMode.H24,
-                    onToggleDone = { taps += "toggle" }, onStartFocus = { taps += "focus" }, onOpenTask = { taps += "open" },
-                    onPickTime = { taps += "time $it" }, onPickDuration = { taps += "duration $it" }, onUnschedule = { taps += "unschedule" },
-                )
+                Box(if (maxHeight != null) Modifier.heightIn(max = maxHeight) else Modifier) {
+                    CalBlockEditSheetBody(
+                        taskName = "Write report", actions = actions, times = listOf("09:00", "10:30"), startTime = "09:00",
+                        durationMinutes = 45, clock = ClockMode.H24,
+                        onToggleDone = { taps += "toggle" }, onStartFocus = { taps += "focus" }, onOpenTask = { taps += "open" },
+                        onPickTime = { taps += "time $it" }, onPickDuration = { taps += "duration $it" }, onUnschedule = { taps += "unschedule" },
+                    )
+                }
             }
         }
         compose.waitForIdle()
@@ -127,5 +137,16 @@ class CalBlockEditSheetTest {
         compose.onNodeWithText("Unschedule").performSemanticsAction(SemanticsActions.OnClick)
         compose.waitForIdle()
         assertEquals(listOf("time 10:30", "duration 60", "unschedule"), taps)
+    }
+
+    @Test fun aSheetShorterThanItsContent_scrollsToUnschedule() {
+        // The task actions made the body ~575 dp tall at 200 % text, more than a
+        // 640 dp phone's sheet holds; the bottom (Unschedule) must scroll into reach.
+        show(CalBlockSheetActions(row = taskRow, canComplete = true, canFocus = true), maxHeight = 200.dp)
+
+        compose.onNodeWithText("Unschedule").performScrollTo().assertIsDisplayed()
+        compose.onNodeWithText("Unschedule").performSemanticsAction(SemanticsActions.OnClick)
+        compose.waitForIdle()
+        assertEquals(listOf("unschedule"), taps)
     }
 }

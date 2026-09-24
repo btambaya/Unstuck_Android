@@ -42,8 +42,10 @@ import kotlin.math.roundToInt
 /**
  * Renders the bottom bar to PNGs for design review — NOT an assertion suite.
  *
- * Opt-in: every case is skipped (JUnit assumption) unless `UNSTUCK_RENDER_DIR`
- * (env var) or `-Dunstuck.renderDir` names an output directory, so a normal
+ * Opt-in: every case is skipped (JUnit assumption) unless the
+ * `UNSTUCK_RENDER_DIR` env var (or an `unstuck.renderDir` system property set
+ * on the TEST JVM — a `-D` on the gradlew command line does not reach it, as
+ * the build doesn't forward it) names an output directory, so a normal
  * `:design:test` run never writes files. Run with, e.g.:
  *
  *     UNSTUCK_RENDER_DIR=/tmp/shots ./gradlew :design:testDebugUnitTest \

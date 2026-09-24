@@ -1511,11 +1511,13 @@ class AssistantToolsTest {
         assertEquals("error: could not save (offline?)", offline.run("set_reminder_lead", "minutes" to 5))
     }
 
-    @Test fun `set_ritual turns a moment on (default) or off, rejects an unknown ritual`() = runTest {
+    /** Said by the routine's name (Morning plan, …), as on iOS and the web. */
+    @Test fun `set_ritual turns a routine on (default) or off, rejects an unknown ritual`() = runTest {
         val h = makeApi()
-        assertEquals("ok: morning moment on", h.run("set_ritual", "ritual" to "Morning"))
-        assertEquals("ok: sunday moment off", h.run("set_ritual", "ritual" to "sunday", "on" to false))
-        assertEquals("error: the morning moment is already on — nothing changed", h.run("set_ritual", "ritual" to "morning"))
+        assertEquals("ok: Morning plan on", h.run("set_ritual", "ritual" to "Morning"))
+        assertEquals("ok: Sunday plan-ahead off", h.run("set_ritual", "ritual" to "sunday", "on" to false))
+        assertEquals("error: Morning plan is already on — nothing changed", h.run("set_ritual", "ritual" to "morning"))
+        assertFalse("never the old word", h.run("set_ritual", "ritual" to "evening").contains("moment"))
         assertEquals(listOf("ritual:morning:true", "ritual:sunday:false"), h.state.prefCalls)
         assertEquals("error: ritual must be morning, evening, friday, or sunday", h.run("set_ritual", "ritual" to "lunch"))
     }
@@ -1619,6 +1621,15 @@ class AssistantToolsTest {
         // share-notify's ping is bare `unstuck://tasks` and deliberately lands on
         // Today ("Shared with you" lives there) — open_screen must not reuse it.
         assertEquals("unstuck://tasks/all", assistantScreenLink("tasks", null))
+        // The settings screens use the query form iOS and the web route too;
+        // `notifications` is Settings → Notifications & calls, not the bell.
+        assertEquals("unstuck://settings", assistantScreenLink("settings", null))
+        assertEquals("unstuck://settings?section=People", assistantScreenLink("people", null))
+        assertEquals("unstuck://settings?section=Notifications", assistantScreenLink("notifications", null))
+        assertEquals("unstuck://settings?section=Areas", assistantScreenLink("areas", null))
+        for (s in listOf("settings", "people", "notifications", "areas")) {
+            assertTrue(s, tech.csalliance.unstuck.ui.settings.settingsLinkTarget(assistantScreenLink(s, null)) != null)
+        }
     }
 
     // ── Never ok for a no-op (harness audit, 2026-09-05) ───────────────────
@@ -1711,7 +1722,7 @@ class AssistantToolsTest {
         val narrow = tech.csalliance.unstuck.core.logic.CallSettings(hoursStart = "08:00", hoursEnd = "21:00")
         val h = makeApi { callStoreAvailable = true; callSettings = narrow }
         assertEquals(
-            "error: 21:00 is outside this phone's call hours (08:00–21:00; the latest it rings is 20:59), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Calls",
+            "error: 21:00 is outside this phone's call hours (08:00–21:00; the latest it rings is 20:59), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Notifications & calls",
             h.run("request_call", "label" to "meds", "when" to "$TOMORROW 21:00"),
         )
         val early = h.run("request_call", "label" to "meds", "when" to "$TOMORROW 07:30")
@@ -1729,7 +1740,7 @@ class AssistantToolsTest {
         assertTrue(d.run("request_call", "label" to "late", "when" to "$TOMORROW 23:00").contains("(06:00–23:00; the latest it rings is 22:59)"))
         val off = makeApi { callStoreAvailable = true; callSettings = tech.csalliance.unstuck.core.logic.CallSettings(enabled = false) }
         assertEquals(
-            "error: calls are off on this phone, so it would decline this call — tell them to switch Calls on in Settings › Calls first",
+            "error: calls are off on this phone, so it would decline this call — tell them to switch Calls on in Settings › Notifications & calls first",
             off.run("request_call", "label" to "dentist", "when" to "$TOMORROW 18:00"),
         )
         assertTrue(off.state.calls.isEmpty())
@@ -2019,15 +2030,25 @@ class AssistantToolsTest {
         assertEquals("team", h.state.tasks[1].sourceCollectionId)
     }
 
-    @Test fun `get_settings reads everything the Settings screen shows`() = runTest {
+    @Test fun `get_settings reads everything that still has a control, and where it lives`() = runTest {
         val h = makeApi { theme = "dark"; ambient = "brown"; focusOverrunMin = 0 }
+        val out = h.run("get_settings")
         assertEquals(
-            "ok: settings:\n- notifications: balanced\n- reminders: 10 minutes before (the default for every task)\n" +
+            "ok: settings:\n- notifications: balanced (Settings → Notifications & calls)\n- reminders: 10 minutes before (the default for every task)\n" +
                 "- usable minutes: not readable in this app (set_usable_minutes still sets them)\n" +
-                "- focus defaults: 25m sessions, overrun off, soft exit on, pause reasons on\n- theme: dark\n- ambient sound: brown\n" +
-                "- rituals: morning off, evening on, friday off, sunday on",
-            h.run("get_settings"),
+                "- focus options (⋯ Options on the Focus screen): new tasks start at 25m, check in never, ask before leaving on, ask why pausing on\n" +
+                "- theme: dark (Settings → Appearance)\n- text size: default (Settings → Appearance)\n" +
+                "- background noise: on (the speaker button on the Focus screen)\n" +
+                "- routines (web assistant panel): Morning plan off, Evening wind-down on, Friday look-back off, Sunday plan-ahead on",
+            out,
         )
+        // Slim settings: never a retired control the user would go looking for.
+        for (gone in listOf("accent", "density", "high contrast", "reduce motion", "larger type", "sound:", "rail")) {
+            assertFalse(gone, out.contains(gone, ignoreCase = true))
+        }
+        // An old "pink" is the same loop — on.
+        assertTrue(makeApi { ambient = "pink" }.run("get_settings").contains("- background noise: on"))
+        assertTrue(makeApi { ambient = "off" }.run("get_settings").contains("- background noise: off"))
         assertTrue("get_settings" in READ_ONLY_TOOLS)
     }
 
@@ -2037,9 +2058,14 @@ class AssistantToolsTest {
         assertEquals("dark", h.state.theme)
         assertEquals("error: the theme is already dark — nothing changed", h.run("set_theme", "theme" to "dark"))
         assertEquals("error: theme must be system, light, dark", h.run("set_theme", "theme" to "sepia"))
-        assertEquals("ok: ambient sound set to pink noise", h.run("set_ambient_sound", "sound" to "pink"))
-        assertEquals("ok: ambient sound off", h.run("set_ambient_sound", "sound" to "off"))
-        assertEquals("error: sound must be off, brown, pink", h.run("set_ambient_sound", "sound" to "rain"))
+        // Background noise is on/off: brown = on; an older client's "pink" is
+        // taken as on (tolerated, never rejected); off = off.
+        assertEquals("ok: background noise on", h.run("set_ambient_sound", "sound" to "pink"))
+        assertEquals("brown", h.state.ambient)
+        assertEquals("error: background noise is already on — nothing changed", h.run("set_ambient_sound", "sound" to "brown"))
+        assertEquals("ok: background noise off", h.run("set_ambient_sound", "sound" to "off"))
+        assertEquals("off", h.state.ambient)
+        assertEquals("error: sound must be off, brown", h.run("set_ambient_sound", "sound" to "rain"))
         assertEquals("ok: focus defaults — length 45m, overrun off, soft exit off", h.run("set_focus_defaults", "defaultMinutes" to 45, "overrunMinutes" to 0, "softExit" to false))
         assertEquals(45, h.state.focusDefaultMin); assertEquals(0, h.state.focusOverrunMin); assertEquals(false, h.state.focusSoftExit)
         assertEquals("error: the focus defaults are already set that way — nothing changed", h.run("set_focus_defaults", "defaultMinutes" to 45))
@@ -2048,9 +2074,9 @@ class AssistantToolsTest {
         assertEquals("error: give at least one of defaultMinutes, overrunMinutes, softExit, pauseReasons", h.run("set_focus_defaults"))
         val offline = makeApi { settingsSaveOk = false }
         assertEquals("error: could not save the theme", offline.run("set_theme", "theme" to "light"))
-        assertEquals("error: could not save the ambient sound", offline.run("set_ambient_sound", "sound" to "brown"))
+        assertEquals("error: could not save background noise", offline.run("set_ambient_sound", "sound" to "brown"))
         assertEquals("error: could not save the focus defaults", offline.run("set_focus_defaults", "pauseReasons" to false))
-        assertEquals("error: could not save the morning moment (offline?)", offline.run("set_ritual", "ritual" to "morning"))
+        assertEquals("error: couldn't save Morning plan — it is still off", offline.run("set_ritual", "ritual" to "morning"))
     }
 
     @Test fun `forget_fact reports a store that refused`() = runTest {

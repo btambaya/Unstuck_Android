@@ -131,7 +131,7 @@ fun TodayScreen(
     // session's screen).
     var voiceOpen by rememberSaveable { mutableStateOf(false) }
     if (voiceOpen) VoiceModeScreen(vm) { voiceOpen = false }
-    // Privacy §21 kill-switch (Settings → Interface → AI Assistant): with AI off
+    // Privacy §21 kill-switch (Settings → Assistant & privacy → AI Assistant): with AI off
     // the input pill draws nothing at all (web / iOS parity).
     val settings by vm.settings.collectAsStateWithLifecycle()
     val assistantOn = BuildConfig.ASSISTANT_ENABLED && settings.assistantEnabled
@@ -286,7 +286,17 @@ fun TodayScreen(
             // The way into the assistant + Talk: ONE input pill directly under the
             // week pill (it replaced the gateway card — brief / moment / chips /
             // "Personalise your assistant" left the home, 2026-09-17).
-            if (assistantOn) AssistantInputPill(vm, onTalk = { voiceOpen = true }, modifier = Modifier.padding(top = 8.dp, bottom = 6.dp))
+            if (assistantOn) {
+                // Talk sends their voice to OpenAI — the first time, it asks.
+                AssistantInputPill(
+                    vm,
+                    onTalk = {
+                        vm.withAIConsent(tech.csalliance.unstuck.core.logic.AIConsent.Action.TALK, tech.csalliance.unstuck.ui.assistant.AIConsentHost.TODAY) { voiceOpen = true }
+                    },
+                    modifier = Modifier.padding(top = 8.dp, bottom = 6.dp),
+                )
+                tech.csalliance.unstuck.ui.assistant.AIConsentNoteLine(vm, tech.csalliance.unstuck.ui.assistant.AIConsentHost.TODAY, Modifier.padding(start = 4.dp, end = 4.dp, bottom = 6.dp))
+            }
         }
         // ── Scrolling content: the filter pills (which stick to the top as you
         //    scroll), then the list. ─────────────────────────────────────────────

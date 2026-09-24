@@ -32,7 +32,7 @@ class InterviewVoiceTest {
     @Test fun `the thread greeting is the web greeting plus the disclosure, and the closing lines are iOS verbatim`() {
         assertEquals(InterviewCopy.greeting("Maya") + "\n\n" + InterviewCopy.DISCLOSURE, InterviewThreadCopy.greeting("Maya"))
         assertTrue(InterviewThreadCopy.greeting(null).startsWith("Hey. A few quick questions"))
-        assertEquals("Last one — which moments should I run for you? All optional, all changeable in Settings.", InterviewThreadCopy.PICKER_QUESTION)
-        assertEquals("That’s everything — I’ll plan around it. Change any of it in Settings → What Unstuck knows.", InterviewThreadCopy.CLOSING)
+        assertEquals("Last one — which moments should I run for you? All optional — ask me anytime to change them.", InterviewThreadCopy.PICKER_QUESTION)
+        assertEquals("That’s everything — I’ll plan around it. Change any of it in Settings → Assistant & privacy.", InterviewThreadCopy.CLOSING)
     }
 }

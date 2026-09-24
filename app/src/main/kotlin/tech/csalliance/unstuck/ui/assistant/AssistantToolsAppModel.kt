@@ -271,6 +271,7 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
             theme = s.theme.name.lowercase(),
             ambient = s.ambient,
             rituals = RitualKey.entries.associate { it.raw to r[it] },
+            textSize = s.textSize.name.lowercase(),
         )
     }
     /** The budget lives on the server (`user_preferences.usable_minutes_*`), so
@@ -303,6 +304,7 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
         vm.updateSettings { it.copy(theme = t) }
         return vm.settings.value.theme == t
     }
+    /** "off" or "brown" (the executor maps pink/on to brown). */
     override fun setAmbientSound(sound: String): Boolean {
         vm.updateSettings { it.copy(ambient = sound) }
         return vm.settings.value.ambient == sound
@@ -351,9 +353,14 @@ fun assistantScreenLink(screen: String, id: String?): String = when (screen) {
     "focus" -> "unstuck://focus"
     "insights", "analytics" -> "unstuck://insights"
     "captures", "inbox" -> "unstuck://captures"
+    // The query forms iOS and the web route too (MainScaffold resolves every
+    // `unstuck://settings…` link through SettingsModel.settingsLinkTarget).
     "settings" -> "unstuck://settings"
-    "people" -> "unstuck://settings/people"
-    "notifications" -> "unstuck://notifications"
-    "areas" -> "unstuck://settings/areas"
+    "people" -> "unstuck://settings?section=People"
+    // Settings → Notifications & calls, as on iOS and the web (the bell is
+    // `unstuck://notifications`, which no tool opens).
+    "notifications" -> "unstuck://settings?section=Notifications"
+    // Areas & tags live on Tasks: the tab with its Areas & tags sheet.
+    "areas" -> "unstuck://settings?section=Areas"
     else -> "unstuck://today"
 }

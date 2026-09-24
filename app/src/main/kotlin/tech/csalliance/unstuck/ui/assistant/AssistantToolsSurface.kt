@@ -2,6 +2,7 @@ package tech.csalliance.unstuck.ui.assistant
 
 import tech.csalliance.unstuck.core.logic.renderPeriodReview
 import tech.csalliance.unstuck.core.logic.PeriodReviewArgs
+import tech.csalliance.unstuck.core.logic.RITUAL_LABELS
 import tech.csalliance.unstuck.core.logic.DEFAULT_AREAS
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.InsightsWindow
@@ -73,6 +74,9 @@ private fun captureTagOf(raw: String): CaptureTag? = when (raw) {
 private fun CaptureTag.wire(): String = name.lowercase().replace('_', '-')
 
 private fun onOff(b: Boolean) = if (b) "on" else "off"
+
+/** The stored ambient value → the speaker button's state ("pink" was the same loop). */
+internal fun ambientIsOn(stored: String): Boolean = stored == "brown" || stored == "pink"
 
 /** One task as the read tools list it: name, id, estimate, area, next slot,
  *  repeat / Later / slip / done markers. Recurring rows are OCCURRENCES whose
@@ -691,15 +695,22 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             val s = api.getSettings()
             val usable = if (s.usableWeekdayMin == null && s.usableWeekendMin == null) "not readable in this app (set_usable_minutes still sets them)"
             else "weekdays ${s.usableWeekdayMin ?: "?"}m, weekend days ${s.usableWeekendMin ?: "?"}m"
+            // Only what still has a control (slim settings, 2026-09-24): no accent,
+            // density, high contrast or in-app reduce motion — naming them would
+            // send the user looking for switches that are gone.
             "ok: settings:\n" +
-                "- notifications: ${s.notificationLevel}\n" +
+                "- notifications: ${s.notificationLevel} (Settings → Notifications & calls)\n" +
                 "- reminders: ${if (s.reminderLeadMin == 0) "off" else "${s.reminderLeadMin} minutes before"} (the default for every task)\n" +
                 "- usable minutes: $usable\n" +
-                "- focus defaults: ${s.focusDefaultMin}m sessions, overrun ${if (s.focusOverrunMin == 0) "off" else "${s.focusOverrunMin}m"}, " +
-                "soft exit ${onOff(s.focusSoftExit)}, pause reasons ${onOff(s.focusPauseReasons)}\n" +
-                "- theme: ${s.theme}\n" +
-                "- ambient sound: ${s.ambient}\n" +
-                "- rituals: ${listOf("morning", "evening", "friday", "sunday").joinToString(", ") { "$it ${onOff(s.rituals[it] ?: false)}" }}"
+                "- focus options (⋯ Options on the Focus screen): new tasks start at ${s.focusDefaultMin}m, " +
+                "check in ${if (s.focusOverrunMin == 0) "never" else "${s.focusOverrunMin}m after the timer runs out"}, " +
+                "ask before leaving ${onOff(s.focusSoftExit)}, ask why pausing ${onOff(s.focusPauseReasons)}\n" +
+                "- theme: ${s.theme} (Settings → Appearance)\n" +
+                "- text size: ${s.textSize} (Settings → Appearance)\n" +
+                "- background noise: ${onOff(ambientIsOn(s.ambient))} (the speaker button on the Focus screen)\n" +
+                // Said by the routine's name (Morning plan, …): the words the web
+                // assistant panel's Routines switches show (iOS + web parity).
+                "- routines (web assistant panel): ${RITUAL_LABELS.joinToString(", ") { "${it.label} ${onOff(s.rituals[it.key.raw] ?: false)}" }}"
         }
 
         "set_usable_minutes" -> {
@@ -729,9 +740,12 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             val r = (args.str("ritual") ?: "").lowercase()
             if (r !in listOf("morning", "evening", "friday", "sunday")) return "error: ritual must be morning, evening, friday, or sunday"
             val on = args.bool("on") ?: true
-            if (api.getSettings().rituals[r] == on) return "error: the $r moment is already ${onOff(on)} — nothing changed"
-            if (!api.setRitual(r, on)) return "error: could not save the $r moment (offline?)"
-            "ok: $r moment ${onOff(on)}"
+            val cur = api.getSettings().rituals[r] ?: false
+            // Said by the routine's name (Morning plan, …), as on iOS and the web.
+            val name = RITUAL_LABELS.firstOrNull { it.key.raw == r }?.label ?: r
+            if (cur == on) return "error: $name is already ${onOff(on)} — nothing changed"
+            if (!api.setRitual(r, on)) return "error: couldn't save $name — it is still ${onOff(cur)}"
+            "ok: $name ${onOff(on)}"
         }
 
         "set_theme" -> {
@@ -743,13 +757,19 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             "ok: theme set to $t"
         }
 
+        // Background noise is on/off now (the Focus screen's speaker button): brown
+        // or pink = on — pink was the same loop, and an older model or client may
+        // still send it, so it is taken, never rejected — off = off.
         "set_ambient_sound" -> {
             val sounds = RegistryTools.enumOf("set_ambient_sound", "sound")
-            val snd = (args.str("sound") ?: "").lowercase()
-            if (snd !in sounds) return "error: sound must be ${sounds.joinToString(", ")}"
-            if (api.getSettings().ambient == snd) return "error: ambient sound is already $snd — nothing changed"
-            if (!api.setAmbientSound(snd)) return "error: could not save the ambient sound"
-            "ok: ambient sound ${if (snd == "off") "off" else "set to $snd noise"}"
+            val on = when ((args.str("sound") ?: "").lowercase()) {
+                "off" -> false
+                "brown", "pink", "on" -> true
+                else -> return "error: sound must be ${sounds.joinToString(", ")}"
+            }
+            if (ambientIsOn(api.getSettings().ambient) == on) return "error: background noise is already ${onOff(on)} — nothing changed"
+            if (!api.setAmbientSound(if (on) "brown" else "off")) return "error: could not save background noise"
+            "ok: background noise ${onOff(on)}"
         }
 
         "set_focus_defaults" -> {

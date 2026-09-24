@@ -65,7 +65,7 @@ import tech.csalliance.unstuck.design.theme.UTheme
 // Scripted and ZERO-token: chip answers and free text write profile facts
 // directly (source INTERVIEW) through the host; the LLM is never involved. One
 // question at a time, every question skippable. Everything saved is visible
-// (and deletable) in Settings → "What Unstuck knows".
+// (and deletable) in Settings → Assistant & privacy → "What Unstuck remembers".
 //
 // RE-HOSTED INSIDE THE ASSISTANT THREAD (Ahmad, 2026-09-17). The Today card
 // that carried it (its "Personalise your assistant" pill and bottom sheet) is
@@ -467,7 +467,7 @@ fun InterviewPromptRow(driver: InterviewThreadDriver, ritualIsOn: (RitualKey) ->
         } else if (controller.isPicker) {
             // Final step — which recurring moments the assistant should run. The
             // rituals themselves are a personalisation choice; all changeable in
-            // Settings → What Unstuck knows.
+            // Settings → Assistant & privacy → What Unstuck remembers.
             RitualChips(ritualIsOn, setRitual)
             Text(
                 InterviewCopy.THATS_ME_SET_UP, style = UFont.sans(13, FontWeight.SemiBold), color = Color.White,

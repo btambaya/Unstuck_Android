@@ -49,10 +49,21 @@ class FactsPanelLogicTest {
             FactsPanelCopy.DISCLOSURE,
         )
         assertEquals("Nothing yet — it learns as you talk to it.", FactsPanelCopy.EMPTY)
-        assertEquals("What Unstuck knows", FactsPanelCopy.NAV_TITLE)
+        // Slim settings (2026-09-24): "What Unstuck remembers", plain category names.
+        assertEquals("What Unstuck remembers", FactsPanelCopy.NAV_TITLE)
         assertEquals("Forget everything the assistant has learned about you? This can’t be undone.", FactsPanelCopy.FORGET_ALL_MESSAGE)
-        assertEquals("Edit · person", FactsPanelCopy.editTitle(fact()))
+        assertEquals("Edit · About me", FactsPanelCopy.editTitle(fact()))
         assertEquals("Forget \"Maleek — son, 9\"", FactsPanelCopy.forgetA11y(fact()))
+        assertEquals("Forgot “Maleek — son, 9”.", FactsPanelCopy.forgot(fact()))
+        assertEquals("Undo", FactsPanelCopy.UNDO)
+    }
+
+    /** The categories read as plain words, the same on iOS and the web. */
+    @Test fun `categories have plain names`() {
+        assertEquals(
+            listOf("About me", "Routine", "Limits", "Likes", "Other"),
+            tech.csalliance.unstuck.core.model.ProfileFactCategory.entries.map { it.plainLabel },
+        )
     }
 
     /** An edit that doesn't land is SAID. It used to be swallowed: the panel

@@ -192,17 +192,35 @@ class TourLogicTest {
         assertEquals(listOf("tab:today"), callsFor("assistant"))
         assertEquals(listOf("tab:tasks"), callsFor("sharing"))
         assertEquals(listOf("insights"), callsFor("insights"))
-        assertEquals(listOf("settings:FOCUS"), callsFor("notifications"))
-        assertEquals(listOf("settings:INTERFACE"), callsFor("personalization"))
+        assertEquals(listOf("settings:NOTIFICATIONS"), callsFor("notifications"))
+        assertEquals(listOf("settings:APPEARANCE"), callsFor("personalization"))
         assertEquals(listOf("tab:today"), callsFor("finish"))
     }
 
     @Test
     fun settingsSectionMapping() {
-        // Android keeps the Calm/Balanced/Coach presence control in Settings→Focus.
-        assertEquals(SettingsSection.FOCUS, tourSettingsSection("Notifications"))
-        assertEquals(SettingsSection.INTERFACE, tourSettingsSection("Interface"))
+        // Slim settings (2026-09-24): Calm/Balanced/Coach is in Notifications &
+        // calls, the look in Appearance ("Interface" is its old name).
+        assertEquals(SettingsSection.NOTIFICATIONS, tourSettingsSection("Notifications"))
+        assertEquals(SettingsSection.APPEARANCE, tourSettingsSection("Appearance"))
+        assertEquals(SettingsSection.APPEARANCE, tourSettingsSection("Interface"))
         assertEquals(SettingsSection.ACCOUNT, tourSettingsSection(null))
+        assertEquals("Appearance", FULL_STEPS.first { it.id == "personalization" }.section)
+        assertEquals("Notifications", ESSENTIAL_STEPS.first { it.id == "notifications" }.section)
+    }
+
+    /** The personalization step names only what Appearance holds now — no
+     *  accent or density anywhere in the tour's copy. */
+    @Test
+    fun personalizationCopyMatchesTheSlimSettings() {
+        val p = FULL_STEPS.first { it.id == "personalization" }
+        assertEquals("Pick light or dark and your text size here. Areas and tags live on Tasks; focus options live on the Focus screen.", p.body)
+        for (s in FULL_STEPS + ESSENTIAL_STEPS) {
+            for (text in listOfNotNull(s.body, s.narration, s.more)) {
+                assertFalse("${s.id} still names a retired control", text.contains("accent", ignoreCase = true) || text.contains("density", ignoreCase = true))
+                assertFalse("${s.id} still names Settings → Account", text.contains("Settings → Account"))
+            }
+        }
     }
 
     /* ── two-tap assistant primary ──────────────────────────────────────── */
@@ -232,7 +250,7 @@ class TourLogicTest {
     fun answerForMatchesKnownQuestions() {
         assertTrue(answerFor("What is usable time?").contains("focus time you realistically have"))
         assertTrue(answerFor("does it work offline?").contains("works offline"))
-        assertTrue(answerFor("How do I restart the tour later?").contains("Settings → Account"))
+        assertTrue(answerFor("How do I restart the tour later?").contains("Settings → Replay the tour"))
         assertTrue(answerFor("who can see my data?").contains("Nothing is shared by default"))
     }
 
@@ -573,10 +591,10 @@ class TourLogicTest {
 
     @Test
     fun androidLocalizedCannedAnswers() {
-        // The presence control lives in Settings → Focus on Android…
-        assertTrue(answerFor("can I turn notifications off?").contains("Settings → Focus"))
-        // …and the restart row is Settings → Account → Product tour.
-        assertTrue(answerFor("how do I restart the tour?").contains("Settings → Account → Product tour"))
+        // The presence control lives in Settings → Notifications & calls…
+        assertTrue(answerFor("can I turn notifications off?").contains("Settings → Notifications & calls"))
+        // …and the restart row is Settings → Replay the tour.
+        assertTrue(answerFor("how do I restart the tour?").contains("Settings → Replay the tour"))
     }
 
     /* ── listen: speed cycle + audio resource naming ────────────────────── */
@@ -738,9 +756,14 @@ class TourLogicTest {
                 assertTrue("no raw resource wired for ${s.id}", tourAudioRes(s.id) != 0)
             }
         }
-        // The today clips were re-recorded for the hero-less home (2026-09-18):
-        // nothing is parked any more — every step narrates, including today.
-        assertEquals(emptySet<String>(), TOUR_STEPS_AWAITING_NARRATION)
+        // Slim settings (2026-09-24): the personalization clip names accent and
+        // density, so it is parked until re-recorded; the finish step still
+        // narrates, only its Tell-me-more clip ("Settings → Account") is parked.
+        assertEquals(setOf("personalization"), TOUR_STEPS_AWAITING_NARRATION)
+        assertEquals(setOf("finish"), TOUR_MORE_AWAITING_NARRATION)
+        assertEquals(0, tourAudioRes("personalization"))
+        assertTrue(tourAudioRes("finish") != 0)
+        assertEquals(0, tourMoreAudioRes("finish"))
         assertTrue(tourAudioRes("today") != 0)
         assertTrue(tourMoreAudioRes("today") != 0)
         assertEquals(0, tourAudioRes("nope"))
@@ -753,7 +776,7 @@ class TourLogicTest {
         // Exactly the steps carrying `more` text have a more clip; the rest
         // resolve to 0 (the section expands silently — never a crash).
         for (s in (FULL_STEPS + ESSENTIAL_STEPS).distinctBy { it.id }) {
-            if (s.more != null && s.id !in TOUR_STEPS_AWAITING_NARRATION) {
+            if (s.more != null && s.id !in TOUR_STEPS_AWAITING_NARRATION && s.id !in TOUR_MORE_AWAITING_NARRATION) {
                 assertTrue("no more-clip wired for ${s.id}", tourMoreAudioRes(s.id) != 0)
             } else {
                 assertEquals("unexpected more-clip for ${s.id}", 0, tourMoreAudioRes(s.id))
@@ -778,7 +801,7 @@ class TourLogicTest {
         )
         assertFalse(TOUR_WELCOME_INTRO.contains("two-minute"))
         assertEquals(
-            "Pause anytime — pick it back up from Settings → Account → Product tour.",
+            "Pause anytime — pick it back up from Settings → Replay the tour.",
             TOUR_WELCOME_FOOTER,
         )
     }
@@ -786,7 +809,7 @@ class TourLogicTest {
     @Test
     fun pauseConfirmNamesTheSettingsPath() {
         assertEquals("Pause the tour? Your progress is saved.", TOUR_PAUSE_CONFIRM_TITLE)
-        assertTrue(TOUR_PAUSE_SETTINGS_PATH.contains("Settings → Account → Product tour"))
+        assertTrue(TOUR_PAUSE_SETTINGS_PATH.contains("Settings → Replay the tour"))
     }
 
     /* ── round-2 #2: live captions (sentence split + char-weighted spans) ── */
@@ -861,12 +884,12 @@ class TourLogicTest {
         // window ABOVE the blockers, so it stays interactive while open —
         // same as the reentry step; the app beneath stays locked.
         assertTrue(tourScrimConsumesInput(step("assistant"), openSection = null))
-        assertTrue(tourScrimConsumesInput(step("assistant"), openSection = SettingsSection.FOCUS))
+        assertTrue(tourScrimConsumesInput(step("assistant"), openSection = SettingsSection.NOTIFICATIONS))
         // Settings steps: the exemption is LIVE, not per-step, and SCOPED to
         // the step's OWN section — interactive only while that SettingsSub
         // route is topmost; closing it mid-step re-applies the lockdown.
-        assertFalse(tourScrimConsumesInput(step("notifications"), openSection = SettingsSection.FOCUS))
-        assertFalse(tourScrimConsumesInput(step("personalization"), openSection = SettingsSection.INTERFACE))
+        assertFalse(tourScrimConsumesInput(step("notifications"), openSection = SettingsSection.NOTIFICATIONS))
+        assertFalse(tourScrimConsumesInput(step("personalization"), openSection = SettingsSection.APPEARANCE))
         assertTrue(tourScrimConsumesInput(step("notifications"), openSection = null))
         assertTrue(tourScrimConsumesInput(step("personalization"), openSection = null))
     }
@@ -880,24 +903,25 @@ class TourLogicTest {
         // every other section stay locked.
         val notifications = FULL_STEPS.first { it.id == "notifications" }
         val personalization = FULL_STEPS.first { it.id == "personalization" }
-        assertEquals(SettingsSection.FOCUS, tourSettingsSection(notifications.section))
-        assertEquals(SettingsSection.INTERFACE, tourSettingsSection(personalization.section))
+        assertEquals(SettingsSection.NOTIFICATIONS, tourSettingsSection(notifications.section))
+        assertEquals(SettingsSection.APPEARANCE, tourSettingsSection(personalization.section))
         for (section in SettingsSection.values()) {
             assertEquals(
-                "notifications step: only FOCUS is exempt (got $section)",
-                section != SettingsSection.FOCUS,
+                "notifications step: only NOTIFICATIONS is exempt (got $section)",
+                section != SettingsSection.NOTIFICATIONS,
                 tourScrimConsumesInput(notifications, openSection = section),
             )
             assertEquals(
-                "personalization step: only INTERFACE is exempt (got $section)",
-                section != SettingsSection.INTERFACE,
+                "personalization step: only APPEARANCE is exempt (got $section)",
+                section != SettingsSection.APPEARANCE,
                 tourScrimConsumesInput(personalization, openSection = section),
             )
         }
         // The danger section is locked on BOTH settings steps, explicitly.
         assertTrue(tourScrimConsumesInput(notifications, openSection = SettingsSection.ACCOUNT))
         assertTrue(tourScrimConsumesInput(personalization, openSection = SettingsSection.ACCOUNT))
-        assertTrue(tourScrimConsumesInput(notifications, openSection = SettingsSection.BACKUP))
+        assertTrue(tourScrimConsumesInput(notifications, openSection = SettingsSection.ASSISTANT))
+        assertTrue(tourScrimConsumesInput(personalization, openSection = SettingsSection.PEOPLE))
         // The hub itself (no SettingsSub topmost) is locked too.
         assertTrue(tourScrimConsumesInput(notifications, openSection = null))
     }
@@ -921,7 +945,7 @@ class TourLogicTest {
         assertTrue(tourHidesAppContent(false, true, tourLockdownPolicy(today, openSection = null, overlayAboveTour = true)))
         // The ONE reachable frame — the step's own settings section, live and
         // exempt — stays reachable by screen reader too.
-        assertFalse(tourHidesAppContent(false, true, tourLockdownPolicy(notifications, openSection = SettingsSection.FOCUS, overlayAboveTour = false)))
+        assertFalse(tourHidesAppContent(false, true, tourLockdownPolicy(notifications, openSection = SettingsSection.NOTIFICATIONS, overlayAboveTour = false)))
         // …but not when the user has popped to the hub / another section.
         assertTrue(tourHidesAppContent(false, true, tourLockdownPolicy(notifications, openSection = null, overlayAboveTour = false)))
         assertTrue(tourHidesAppContent(false, true, tourLockdownPolicy(notifications, openSection = SettingsSection.ACCOUNT, overlayAboveTour = false)))
@@ -979,7 +1003,7 @@ class TourLogicTest {
         )
         assertEquals(
             TourLockdownPolicy(consumeInput = false, cutoutInteractive = false, degradeToFullBlocker = false),
-            tourLockdownPolicy(notifications, openSection = SettingsSection.FOCUS, overlayAboveTour = false),
+            tourLockdownPolicy(notifications, openSection = SettingsSection.NOTIFICATIONS, overlayAboveTour = false),
         )
         // A Focus takeover above the anchored surface: EVERY step degrades to
         // the whisper scrim + one full-screen blocker — no stale hole can leak
@@ -987,7 +1011,7 @@ class TourLogicTest {
         for (s in FULL_STEPS + ESSENTIAL_STEPS) {
             assertEquals(
                 TourLockdownPolicy(consumeInput = true, cutoutInteractive = false, degradeToFullBlocker = true),
-                tourLockdownPolicy(s, openSection = SettingsSection.FOCUS, overlayAboveTour = true),
+                tourLockdownPolicy(s, openSection = SettingsSection.NOTIFICATIONS, overlayAboveTour = true),
             )
         }
     }

@@ -133,6 +133,7 @@ object CallPushHandler {
         data: Map<String, String>,
         nowMs: Long = System.currentTimeMillis(),
         env: (IncomingCallPayload) -> CallEnv = { AppCallEnvironment.env(context, it, nowMs) },
+        callWillRing: (Context) -> Unit = AppCallEnvironment::callWillRing,
     ): Boolean {
         if (!IncomingCallPayload.isCallPush(data["kind"])) return false
         val payload = IncomingCallPayload.fromData(data) ?: return false
@@ -164,16 +165,27 @@ object CallPushHandler {
         }
 
         val e = env(payload)
-        when (CallCoordinatorLogic.decide(payload, e)) {
+        when (val decision = CallCoordinatorLogic.decide(payload, e)) {
             is CallDecision.Ring ->
                 if (CallCoordinatorLogic.isLate(payload, nowMs)) CallOutcomeStore.enqueue(context, payload.callId, CallOutcome.STALE, nowMs = nowMs)
-                else CallRinger.ring(context, payload, nowMs)
+                else {
+                    CallRinger.ring(context, payload, nowMs)
+                    // Ringing: read the account's AI-consent OK fresh while the user
+                    // reaches for the phone — one turned off on the web or another
+                    // phone is known before the answer connects (the call voice
+                    // service checks it again then). iOS callWillRing.
+                    callWillRing(context)
+                }
             is CallDecision.Silent -> Unit
             is CallDecision.Declined -> {
                 CallOutcomeStore.enqueue(context, payload.callId, CallOutcome.DECLINED, nowMs = nowMs)
-                // The kill-switch and the hours window both decline; tell the user which.
-                if (!e.withinHours) CallNotifications.outsideHours(context, payload)
-                else CallNotifications.callsOff(context, payload)
+                // The kill-switches, the AI-consent OK and the hours window all
+                // decline; tell the user which.
+                when (decision.reason) {
+                    CallCoordinatorLogic.NO_AI_CONSENT -> CallNotifications.noAIConsent(context, payload)
+                    "outside hours" -> CallNotifications.outsideHours(context, payload)
+                    else -> CallNotifications.callsOff(context, payload)
+                }
             }
             is CallDecision.Busy -> {
                 CallOutcomeStore.enqueue(context, payload.callId, CallOutcome.BUSY, nowMs = nowMs)

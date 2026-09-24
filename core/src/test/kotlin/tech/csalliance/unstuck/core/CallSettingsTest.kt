@@ -28,7 +28,8 @@ class CallSettingsTest {
         assertTrue(s.enabled)
         assertEquals("06:00", s.hoursStart)
         assertEquals("23:00", s.hoursEnd)
-        assertEquals(10, s.defaultLeadMin)
+        // 15 on both phones since the slim settings (iOS always was).
+        assertEquals(15, s.defaultLeadMin)
         assertEquals(CallSettings.DEFAULTS, s)
         assertEquals(listOf(5, 10, 15, 30), CallSettingsLogic.LEAD_OPTIONS)
     }
@@ -85,8 +86,8 @@ class CallSettingsTest {
         assertNull(CallSettingsLogic.validHM("junk"))
         assertNull(CallSettingsLogic.validHM(null))
         assertEquals(15, CallSettingsLogic.validLead(15))
-        assertEquals(10, CallSettingsLogic.validLead(0))
-        assertEquals(10, CallSettingsLogic.validLead(null))
+        assertEquals(15, CallSettingsLogic.validLead(0))
+        assertEquals(15, CallSettingsLogic.validLead(null))
     }
 
     private fun assertTrue(v: Boolean, message: String) = assertTrue(message, v)
@@ -177,11 +178,11 @@ class CallSettingsTest {
             CallSettingsLogic.deviceGuard(at(h, m), CallSettings(enabled = enabled, hoursStart = start, hoursEnd = end), london)
         assertNull(guardAt(20, 59))
         assertEquals(
-            "error: 21:00 is outside this phone's call hours (08:00–21:00; the latest it rings is 20:59), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Calls",
+            "error: 21:00 is outside this phone's call hours (08:00–21:00; the latest it rings is 20:59), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Notifications & calls",
             guardAt(21, 0),
         )
         assertEquals(
-            "error: 07:59 is outside this phone's call hours (08:00–21:00), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Calls",
+            "error: 07:59 is outside this phone's call hours (08:00–21:00), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Notifications & calls",
             guardAt(7, 59),
         )
         assertNull(guardAt(8, 0))
@@ -189,7 +190,7 @@ class CallSettingsTest {
         assertNull("start == end → always", guardAt(3, 0, start = "09:00", end = "09:00"))
         // The switch is checked before the hours.
         assertEquals(
-            "error: calls are off on this phone, so it would decline this call — tell them to switch Calls on in Settings › Calls first",
+            "error: calls are off on this phone, so it would decline this call — tell them to switch Calls on in Settings › Notifications & calls first",
             guardAt(12, 0, enabled = false),
         )
         assertEquals(guardAt(12, 0, enabled = false), guardAt(22, 0, enabled = false))
@@ -198,7 +199,7 @@ class CallSettingsTest {
         assertNull(guardAt(22, 59, start = "06:00", end = "23:00"))
         assertEquals(
             "the server takes 23:00, the phone doesn't — never '23:00 is outside 06:00–23:00' alone",
-            "error: 23:00 is outside this phone's call hours (06:00–23:00; the latest it rings is 22:59), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Calls",
+            "error: 23:00 is outside this phone's call hours (06:00–23:00; the latest it rings is 22:59), so it would decline this call — ask them for a time inside those hours, or tell them they can widen them in Settings › Notifications & calls",
             guardAt(23, 0, start = "06:00", end = "23:00"),
         )
     }

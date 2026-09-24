@@ -69,7 +69,9 @@ import tech.csalliance.unstuck.ui.focus.FocusScreen
 import tech.csalliance.unstuck.ui.sharing.SharedTaskDetailSheet
 import tech.csalliance.unstuck.ui.insights.InsightsScreen
 import tech.csalliance.unstuck.ui.settings.SettingsHub
+import tech.csalliance.unstuck.ui.settings.SettingsLinkTarget
 import tech.csalliance.unstuck.ui.settings.SettingsSection
+import tech.csalliance.unstuck.ui.settings.settingsLinkTarget
 import tech.csalliance.unstuck.ui.tasks.NewTaskSheet
 import tech.csalliance.unstuck.core.logic.taskForBlock
 import tech.csalliance.unstuck.core.logic.areaFilterFollowing
@@ -110,19 +112,22 @@ private sealed interface Route {
     data object Inbox : Route
 }
 
-// Feedback is no longer a sheet here: it moved to Settings -> Account -> Send
-// feedback (web parity), so the bubble is a pure assistant surface.
+// Feedback is not a bubble sheet: it is Settings → Send feedback (web parity),
+// so the bubble is a pure assistant surface.
 private sealed interface Sheet {
     /** Stable id so the OPEN sheet can be saved across a configuration change. */
     val key: String
     data object Avatar : Sheet { override val key = "avatar" }
     data object Areas : Sheet { override val key = "areas" }
+    /** Areas & tags — the Tasks tab's "Edit" pill (slim settings, 2026-09-24). */
+    data object AreasTags : Sheet { override val key = "areas-tags" }
     data object Assistant : Sheet { override val key = "assistant" }
 
     companion object {
         fun of(key: String?): Sheet? = when (key) {
             Avatar.key -> Avatar
             Areas.key -> Areas
+            AreasTags.key -> AreasTags
             Assistant.key -> Assistant
             else -> null
         }
@@ -150,11 +155,17 @@ fun MainScaffold(vm: AppViewModel) {
     // rememberSaveable so a rotation mid-typing doesn't drop it (same reason as
     // showNewTask above).
     var showNewCollection by rememberSaveable { mutableStateOf(false) }
+    // Settings → Send feedback (and `unstuck://settings?section=feedback`). Held
+    // here so a link can open it over the hub; saveable like the other sheets.
+    var showFeedback by rememberSaveable { mutableStateOf(false) }
     // Whether the Assistant sheet was opened by a hand-off (a chat moment with
     // its message already queued — it then opens onto the thread) and whether
     // Today's input pill asked for the keyboard in the sheet's composer.
     var assistantHandoff by rememberSaveable { mutableStateOf(false) }
     var assistantFocusComposer by rememberSaveable { mutableStateOf(false) }
+    // A chat moment's text parked in the composer, unsent: the account hasn't
+    // agreed to AI data sharing yet, so Send asks first (AppViewModel.openAssistantWith).
+    var assistantDraft by rememberSaveable { mutableStateOf<String?>(null) }
     // Set by `open_screen week|month|calendar` — CalendarScreen owns its Day/Week/Month
     // tab, so this is a one-shot request it consumes (null again) on arrival.
     var calendarView by rememberSaveable { mutableStateOf<String?>(null) }
@@ -186,7 +197,7 @@ fun MainScaffold(vm: AppViewModel) {
     LifecycleEventEffect(Lifecycle.Event.ON_STOP) {
         if (hostActivity?.isChangingConfigurations != true) {
             tab = "today"; stack.clear(); sheet = null; showNewTask = false; newTaskPrefill = null
-            showNewCollection = false
+            showNewCollection = false; showFeedback = false
             assistantHandoff = false; assistantFocusComposer = false
         }
     }
@@ -211,7 +222,7 @@ fun MainScaffold(vm: AppViewModel) {
         activeArea = areaFilterFollowing(activeArea, prevLifeAreas, lifeAreas)
         prevLifeAreas = lifeAreas
     }
-    // Privacy §21 kill-switch (Settings → Interface → AI Assistant): when the
+    // Privacy §21 kill-switch (Settings → Assistant & privacy → AI Assistant): when the
     // user turns AI off there is NO launcher, NO sheet, and no voice — and an
     // open-assistant request from anywhere else (e.g. the tour) is ignored.
     // The published privacy policy promises this on every platform.
@@ -228,8 +239,19 @@ fun MainScaffold(vm: AppViewModel) {
             if (!assistantAllowed) return@collect
             assistantHandoff = req.handoff
             assistantFocusComposer = req.focusComposer
+            assistantDraft = req.draft
             sheet = Sheet.Assistant
         }
+    }
+    // App open with Calls on for this account and no AI-consent OK: ask once
+    // per launch (AppViewModel.askAboutCallsOnOpenIfNeeded), after each read of
+    // the account, and only over the bare scaffold — never over a sheet, a
+    // pushed screen or the Focus overlay.
+    val consentReads by vm.aiConsentReads.collectAsStateWithLifecycle()
+    val consentIdle = stack.isEmpty() && sheet == null && !showNewTask && !showNewCollection && !showFeedback &&
+        focusTask == null && sharedDetail == null
+    LaunchedEffect(consentReads, consentIdle) {
+        if (consentReads > 0 && consentIdle) vm.askAboutCallsOnOpenIfNeeded(idle = true)
     }
     // ── the get-to-know-you interview's stand-down (plan F9) ────────────────
     // The interview itself is asked INSIDE the assistant (text thread + voice
@@ -316,10 +338,35 @@ fun MainScaffold(vm: AppViewModel) {
             "insights" -> { tab = "today"; push(Route.Insights(false)) }
             "captures", "inbox" -> { tab = "today"; push(Route.Inbox) }
             "settings" -> { tab = "today"; push(Route.Settings) }
-            "people" -> { tab = "today"; push(Route.SettingsSub(SettingsSection.PEOPLE)) }
-            "areas" -> { tab = "today"; push(Route.SettingsSub(SettingsSection.AREAS)) }
-            "notifications" -> { tab = "today"; openNotifs() }
+            // A Settings screen always opens over the hub, so back lands there.
+            "people" -> { tab = "today"; push(Route.Settings); push(Route.SettingsSub(SettingsSection.PEOPLE)) }
+            // Settings → Notifications & calls (the bell is `unstuck://notifications`).
+            "notifications" -> { tab = "today"; push(Route.Settings); push(Route.SettingsSub(SettingsSection.NOTIFICATIONS)) }
+            // Areas & tags live on Tasks now: the tab, with its sheet open.
+            "areas" -> { tab = "tasks"; sheet = Sheet.AreasTags }
             else -> tab = "today"
+        }
+    }
+
+    /** Where an `unstuck://settings…` link lands (SettingsModel.settingsLinkTarget):
+     *  the bare link is the hub (the server's invite / share pushes rely on
+     *  that), a section opens over the hub, and the sections that moved out of
+     *  Settings go to their new homes. */
+    fun openSettingsTarget(target: SettingsLinkTarget) {
+        when (target) {
+            SettingsLinkTarget.Hub -> goAssistantScreen("settings")
+            is SettingsLinkTarget.Section -> {
+                stack.clear(); tab = "today"; push(Route.Settings)
+                // What Unstuck remembers is pushed from Assistant & privacy.
+                if (target.section == SettingsSection.MEMORY) push(Route.SettingsSub(SettingsSection.ASSISTANT))
+                push(Route.SettingsSub(target.section))
+            }
+            SettingsLinkTarget.Feedback -> { goAssistantScreen("settings"); showFeedback = true }
+            SettingsLinkTarget.AreasAndTags -> goAssistantScreen("areas")
+            // Focus options are on the Focus screen: the live session's, else the hub.
+            SettingsLinkTarget.Focus ->
+                if (liveSession?.taskId?.let { sid -> tasks.any { it.id == sid } } == true) goAssistantScreen("focus")
+                else goAssistantScreen("settings")
         }
     }
 
@@ -485,10 +532,13 @@ fun MainScaffold(vm: AppViewModel) {
             dl == "unstuck://focus" -> goAssistantScreen("focus")
             dl == "unstuck://insights" -> goAssistantScreen("insights")
             dl == "unstuck://captures" -> goAssistantScreen("captures")
-            dl == "unstuck://settings" -> goAssistantScreen("settings")
-            dl == "unstuck://settings/people" -> goAssistantScreen("people")
-            dl == "unstuck://settings/areas" -> goAssistantScreen("areas")
-            dl == "unstuck://notifications" -> goAssistantScreen("notifications")
+            // Every `unstuck://settings…` form: bare (the hub), `/people`, `/areas`,
+            // and `?section=<any old or new name>` (plan §4 "Deep links") — the
+            // query form iOS and the web already route, which the server can send
+            // once this build is the Play floor.
+            settingsLinkTarget(dl) != null -> openSettingsTarget(settingsLinkTarget(dl)!!)
+            // The bell (notification centre) — not Settings.
+            dl == "unstuck://notifications" -> { tab = "today"; stack.clear(); openNotifs() }
             // Today hosts the "Shared with you" + "Delegated" sections, so the sharing
             // pings (unstuck://tasks: task_share / shared_task_done / shared_session_*)
             // land there alongside unstuck://today, /recap, /brief.
@@ -508,7 +558,7 @@ fun MainScaffold(vm: AppViewModel) {
     // keeps the live session running.) NewCollection counts here for the same
     // reason NewTask does: while it is up, back must not pop a route or switch
     // tabs underneath it, and the assistant bubble must stay hidden.
-    val sheetOpen = showNewTask || showNewCollection || sheet != null
+    val sheetOpen = showNewTask || showNewCollection || showFeedback || sheet != null
     BackHandler(enabled = focusTask != null) { focusTask = null; focusAutoCapture = false; focusShared = null }
     BackHandler(enabled = focusTask == null && !sheetOpen && stack.isNotEmpty()) { pop() }
     BackHandler(enabled = focusTask == null && !sheetOpen && stack.isEmpty() && tab != "today") { tab = "today" }
@@ -551,7 +601,7 @@ fun MainScaffold(vm: AppViewModel) {
                         inboxCount = inboxCaptures.size,
                         onOpenShared = { sharedDetail = it },
                     )
-                    "tasks" -> TasksScreen(vm, activeArea = activeArea, onClearArea = { activeArea = null }, onAreaPick = { activeArea = it }, onOpen = { push(Route.Detail(it.id)) }, onOpenShared = { sharedDetail = it }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
+                    "tasks" -> TasksScreen(vm, activeArea = activeArea, onClearArea = { activeArea = null }, onAreaPick = { activeArea = it }, onOpen = { push(Route.Detail(it.id)) }, onOpenShared = { sharedDetail = it }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials, onEditAreas = { sheet = Sheet.AreasTags })
                     "calendar" -> CalendarScreen(vm, onOpen = { push(Route.Detail(it.id)) }, onOpenShared = { sharedDetail = it }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials, onCreateAt = { d, t -> newTaskPrefill = d to t; showNewTask = true }, requestedView = calendarView, onViewApplied = { calendarView = null })
                     TAB_COLLECTIONS -> CollectionsScreen(vm, onOpen = { push(Route.Collection(it)) }, onNewCollection = { showNewCollection = true }, onSearch = { push(Route.Palette) }, onMenu = { sheet = Sheet.Areas }, onAvatar = { sheet = Sheet.Avatar }, onNotifications = openNotifs, notifUnread = notifUnread, avatarInitials = initials)
                 }
@@ -641,8 +691,8 @@ fun MainScaffold(vm: AppViewModel) {
                     }
                     is Route.Collection -> CollectionDetailScreen(vm, route.id, onBack = ::pop)
                     is Route.Insights -> InsightsScreen(vm, deep = route.deep, onBack = ::pop, onToggleDeep = { stack[stack.lastIndex] = Route.Insights(it) })
-                    Route.Settings -> SettingsHub(vm, onBack = ::pop, onSection = { push(Route.SettingsSub(it)) }, onInsights = { push(Route.Insights(false)) })
-                    is Route.SettingsSub -> tech.csalliance.unstuck.ui.settings.SettingsSubScreen(vm, route.section, onBack = ::pop)
+                    Route.Settings -> SettingsHub(vm, onBack = ::pop, onSection = { push(Route.SettingsSub(it)) }, onFeedback = { showFeedback = true })
+                    is Route.SettingsSub -> tech.csalliance.unstuck.ui.settings.SettingsSubScreen(vm, route.section, onBack = ::pop, onSection = { push(Route.SettingsSub(it)) })
                     Route.Palette -> tech.csalliance.unstuck.ui.palette.CommandPalette(
                         vm,
                         onDismiss = ::pop,
@@ -705,6 +755,7 @@ fun MainScaffold(vm: AppViewModel) {
                 onPick = { area -> activeArea = area; tab = "tasks"; stack.clear(); sheet = null },
                 onDismiss = { sheet = null },
             )
+            Sheet.AreasTags -> tech.csalliance.unstuck.ui.tasks.AreasTagsSheet(vm, onDismiss = { sheet = null })
             Sheet.Assistant -> tech.csalliance.unstuck.ui.assistant.AssistantSheet(
                 vm,
                 // The context strip's pieces are real jumps: NEXT -> Tasks,
@@ -713,12 +764,20 @@ fun MainScaffold(vm: AppViewModel) {
                 // Same resolver as `open_screen`, so a chip and a tool call can
                 // never land on different screens.
                 onNavigate = { dest -> goAssistantScreen(dest.screen, dest.id) },
-                onDismiss = { sheet = null; assistantHandoff = false; assistantFocusComposer = false },
+                onDismiss = { sheet = null; assistantHandoff = false; assistantFocusComposer = false; assistantDraft = null },
                 handoff = assistantHandoff,
                 focusComposer = assistantFocusComposer,
+                draft = assistantDraft,
             )
             null -> {}
         }
+        if (showFeedback) tech.csalliance.unstuck.ui.feedback.FeedbackSheet(vm, currentScreen = "settings", onDismiss = { showFeedback = false })
+        // The ONE AI-consent sheet (AppViewModel.withAIConsent), over whatever
+        // asked — composed after the other sheets so it sits on top of them.
+        val consentAsk by vm.aiConsentAsk.collectAsStateWithLifecycle()
+        consentAsk?.let { tech.csalliance.unstuck.ui.assistant.AIConsentSheet(vm, it) }
+        // App open's "Not now": Calls went off, and a dialog says so.
+        tech.csalliance.unstuck.ui.assistant.AIConsentRootNote(vm)
         // Read-only detail for a task shared WITH me (T1). Its Focus action starts a
         // shared focus session (T3); Complete goes through shared_task_set_done.
         sharedDetail?.let { s ->
@@ -759,27 +818,27 @@ fun MainScaffold(vm: AppViewModel) {
                     // Leaving the focus overlay keeps a live session running, so
                     // clearing it here is non-destructive.
                     stack.clear(); sheet = null; showNewTask = false; newTaskPrefill = null
-                    showNewCollection = false
+                    showNewCollection = false; showFeedback = false
                     sharedDetail = null; focusTask = null; focusAutoCapture = false; focusShared = null
                     tab = t
                 },
                 openTaskDetail = { id ->
-                    stack.clear(); sheet = null; showNewTask = false; showNewCollection = false; sharedDetail = null
+                    stack.clear(); sheet = null; showNewTask = false; showNewCollection = false; showFeedback = false; sharedDetail = null
                     focusTask = null; focusAutoCapture = false; focusShared = null
                     tab = "tasks"; push(Route.Detail(id))
                 },
                 openInbox = {
-                    stack.clear(); sheet = null; showNewTask = false; showNewCollection = false; sharedDetail = null
+                    stack.clear(); sheet = null; showNewTask = false; showNewCollection = false; showFeedback = false; sharedDetail = null
                     focusTask = null; focusAutoCapture = false; focusShared = null
                     tab = "today"; push(Route.Inbox)
                 },
                 openInsights = {
-                    stack.clear(); sheet = null; showNewTask = false; showNewCollection = false; sharedDetail = null
+                    stack.clear(); sheet = null; showNewTask = false; showNewCollection = false; showFeedback = false; sharedDetail = null
                     focusTask = null; focusAutoCapture = false; focusShared = null
                     push(Route.Insights(false))
                 },
                 openSettingsSection = { s ->
-                    stack.clear(); sheet = null; showNewTask = false; showNewCollection = false; sharedDetail = null
+                    stack.clear(); sheet = null; showNewTask = false; showNewCollection = false; showFeedback = false; sharedDetail = null
                     focusTask = null; focusAutoCapture = false; focusShared = null
                     // Hub first, then the section — popping back lands somewhere sane.
                     push(Route.Settings); push(Route.SettingsSub(s))

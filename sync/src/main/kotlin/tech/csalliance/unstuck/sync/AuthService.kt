@@ -10,10 +10,14 @@ import io.github.jan.supabase.auth.providers.builtin.OTP
 import io.github.jan.supabase.auth.user.UserInfo
 import io.github.jan.supabase.exceptions.RestException
 import io.github.jan.supabase.functions.functions
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
+import tech.csalliance.unstuck.core.logic.AIConsent
 import tech.csalliance.unstuck.core.logic.AuthErrorInfo
 import tech.csalliance.unstuck.core.logic.detectSignupAlreadyExists
 import tech.csalliance.unstuck.core.logic.humanizeAuthError
@@ -28,6 +32,9 @@ sealed class AuthOutcome {
      *  sign-up screen offers Sign in / Forgot password instead of "check your email". */
     data class Error(val message: String, val accountExists: Boolean = false) : AuthOutcome()
 }
+
+/** The account's AI-consent record as the server just returned it. */
+data class AIConsentSnapshot(val userId: String, val record: AIConsent.Record)
 
 class AuthService(private val client: SupabaseClient) {
 
@@ -64,6 +71,28 @@ class AuthService(private val client: SupabaseClient) {
                 hasSession = hasSession,
             )
             return if (exists) AuthOutcome.Error(ACCOUNT_EXISTS, accountExists = true) else AuthOutcome.Ok
+        }
+
+        // ── AI data-sharing consent (core AIConsent; iOS AuthService parity) ──
+
+        /** The account's OK to share with the AI provider, as a user's metadata
+         *  carries it (`ai_consent_at` / `ai_consent_version`). Anything missing,
+         *  null, blank or not a string reads as no OK. */
+        fun aiConsent(fromMetadata: JsonObject?): AIConsent.Record {
+            fun string(key: String): String? =
+                (fromMetadata?.get(key) as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotEmpty() }
+            return AIConsent.Record(at = string(AIConsent.AT_KEY), version = string(AIConsent.VERSION_KEY))
+        }
+
+        fun aiConsent(from: UserInfo?): AIConsent.Record = aiConsent(from?.userMetadata)
+
+        /** The user_metadata change for [record]: an OK writes both keys; "off"
+         *  sends `ai_consent_at: null`, which GoTrue treats as delete-the-key. */
+        fun aiConsentData(record: AIConsent.Record): JsonObject {
+            val at = record.at
+            val version = record.version
+            if (!record.isGranted || at == null || version == null) return buildJsonObject { put(AIConsent.AT_KEY, JsonNull) }
+            return buildJsonObject { put(AIConsent.AT_KEY, at); put(AIConsent.VERSION_KEY, version) }
         }
 
         /** The same case with confirmations off: GoTrue refuses with
@@ -132,6 +161,25 @@ class AuthService(private val client: SupabaseClient) {
         runCatching {
             client.auth.updateUser { data = buildJsonObject { put("full_name", name); put("display_name", name) } }
         }.fold({ AuthOutcome.Ok }, { AuthOutcome.Error(friendly(it)) })
+
+    /** The OK as the session held on this device carries it (no network). */
+    val storedAIConsent: AIConsent.Record get() = aiConsent(client.auth.currentUserOrNull())
+
+    /** Write the OK (or clear it) to the account. Returns what the account
+     *  holds afterwards, or null when the write didn't land (offline) — the
+     *  caller keeps its change pending and sends it again later. */
+    suspend fun setAIConsent(record: AIConsent.Record): AIConsent.Record? =
+        runCatching { client.auth.updateUser { data = aiConsentData(record) } }
+            .getOrNull()?.let { aiConsent(it) }
+
+    /** The account's OK read fresh from the server (GET /user) — an OK given on
+     *  the web counts here at once, which the saved session can't tell. Null =
+     *  couldn't ask (signed out, offline). */
+    suspend fun fetchAIConsent(): AIConsentSnapshot? {
+        if (client.auth.currentSessionOrNull() == null) return null
+        val user = runCatching { client.auth.retrieveUserForCurrentSession(updateSession = true) }.getOrNull() ?: return null
+        return AIConsentSnapshot(userId = user.id, record = aiConsent(user))
+    }
 
     /** Invoke the server-side `account-delete` Edge Function ONLY (no sign-out). The
      *  coordinator calls this so it can ALWAYS run push-unregister + signOut afterwards

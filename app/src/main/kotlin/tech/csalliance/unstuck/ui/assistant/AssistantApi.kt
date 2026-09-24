@@ -56,10 +56,12 @@ data class AssistantSettingsSnapshot(
     val focusPauseReasons: Boolean,
     /** system | light | dark */
     val theme: String,
-    /** off | brown | pink */
+    /** off | brown (an old "pink" also means on) — the Focus screen's speaker button. */
     val ambient: String,
     /** morning / evening / friday / sunday → on? */
     val rituals: Map<String, Boolean>,
+    /** smaller | default | larger (Settings → Appearance → Text size). */
+    val textSize: String = "default",
 )
 
 /** The call_requests reads/writes the call tools need — [CallsClient] in
@@ -257,7 +259,7 @@ interface AssistantApi {
     fun currentUserId(): String?
     /** Null when signed out / not configured → the call tools say so. */
     fun callStore(): AssistantCallStore?
-    /** THIS phone's Calls switch + allowed hours (Settings › Calls) — what
+    /** THIS phone's Calls switch + allowed hours (Settings › Notifications & calls) — what
      *  decides on receipt, so request_call / update_call refuse a time it would
      *  decline (CallSettingsLogic.deviceGuard; parity with iOS build 81, audit
      *  2026-09-22 C12). The defaults (on, 06:00–23:00) when not wired. */

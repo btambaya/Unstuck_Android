@@ -24,6 +24,16 @@ enum class ProfileFactCategory {
         CONTEXT -> "context"
     }
 
+    /** The plain name Settings → What Unstuck remembers shows (never the
+     *  internal id) — the same words on iOS and the web. */
+    val plainLabel: String get() = when (this) {
+        PERSON -> "About me"
+        RHYTHM -> "Routine"
+        CONSTRAINT -> "Limits"
+        PREFERENCE -> "Likes"
+        CONTEXT -> "Other"
+    }
+
     companion object {
         fun fromRaw(s: String?): ProfileFactCategory? = entries.firstOrNull { it.raw == s }
     }

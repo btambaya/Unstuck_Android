@@ -59,14 +59,14 @@ const val TOUR_WELCOME_INTRO =
 
 /** Quiet welcome-card footer line. */
 const val TOUR_WELCOME_FOOTER =
-    "Pause anytime — pick it back up from Settings → Account → Product tour."
+    "Pause anytime — pick it back up from Settings → Replay the tour."
 
 /** Inline pause-confirm (footer of the running panel). */
 const val TOUR_PAUSE_CONFIRM_TITLE = "Pause the tour? Your progress is saved."
 
 /** The pause confirm also names the Settings path (round-2 #5). */
 const val TOUR_PAUSE_SETTINGS_PATH =
-    "Pick it back up anytime from Settings → Account → Product tour."
+    "Pick it back up anytime from Settings → Replay the tour."
 
 /* ============================================================
  * STEP DATA — copy ported verbatim from the web tour-data.ts.
@@ -181,7 +181,9 @@ val ESSENTIAL_STEPS: List<TourStep> = listOf(
         title = "You’re ready to begin",
         body = "That’s the loop: Today narrows things down, the first physical action gets you moving, Focus sustains it, and the Assistant helps when you’re stuck. Pick one real next step.",
         narration = "That’s the core loop. Today narrows things down. The first physical action gets you moving. Focus sustains it. And the Assistant is there when you get stuck. You don’t need to learn everything today — just choose one real next step, and begin.",
-        more = "You can reopen this tour anytime from Settings → Account. Nothing you skip is lost.",
+        // Its Tell-me-more clip still says "Settings → Account" — parked in
+        // TOUR_MORE_AWAITING_NARRATION until it is re-recorded.
+        more = "You can reopen this tour anytime from Settings → Replay the tour. Nothing you skip is lost.",
         primary = "Begin",
     ),
 )
@@ -232,10 +234,14 @@ val FULL_STEPS: List<TourStep> = ESSENTIAL_STEPS.take(3) + listOf(
     ),
     essential("notifications"),
     TourStep(
-        id = "personalization", stage = "Personalize", view = TourView.SETTINGS, section = "Interface", target = null,
+        // Slim settings (2026-09-24): the step opens Appearance. Its Cherry clip
+        // (tour_personalization.m4a) still names accent and density, so Listen
+        // is parked on this step (TOUR_STEPS_AWAITING_NARRATION) until the
+        // clip is re-recorded from this narration.
+        id = "personalization", stage = "Personalize", view = TourView.SETTINGS, section = "Appearance", target = null,
         title = "Make it yours",
-        body = "Theme, accent, density, and text size; focus defaults; your areas and tags. Adjust what helps, ignore the rest.",
-        narration = "Personalization covers appearance — theme, accent, density, text size — plus your focus defaults and how you manage areas and tags. Change what helps you; leave the rest.",
+        body = "Pick light or dark and your text size here. Areas and tags live on Tasks; focus options live on the Focus screen.",
+        narration = "Make it yours. Pick light or dark, and your text size, here in Appearance. Areas and tags live on the Tasks screen, and focus options live on the Focus screen, right where you use them.",
         primary = "Continue",
     ),
     essential("finish"),
@@ -260,12 +266,11 @@ val TOUR_QA: List<TourQAEntry> = listOf(
     TourQAEntry(Regex("shared focus|focus.*work.*together", RegexOption.IGNORE_CASE), "One timer per shared task. Either person can start; the other joins mid-session. Either can pause, extend, or finish, with clear labels like “Paused by Sam”."),
     TourQAEntry(Regex("who can see|my data|privacy", RegexOption.IGNORE_CASE), "Nothing is shared by default. You share per-task, per-person, and can revoke it. Your Trusted Circle is invite-only."),
     TourQAEntry(Regex("partner.*assign|difference.*partner", RegexOption.IGNORE_CASE), "Partner: either of you can complete it and focus together. Assign: it becomes their task entirely."),
-    // ANDROID LOCALIZATION (everything else verbatim): the presence control
-    // (Calm/Balanced/Coach) lives in Settings → Focus on Android.
-    TourQAEntry(Regex("notifications off|turn.*off|can i turn", RegexOption.IGNORE_CASE), "Yes. Calm mode keeps only essentials, and you can adjust it anytime in Settings → Focus."),
+    // The presence control (Calm/Balanced/Coach) lives in Settings →
+    // Notifications & calls on every platform (slim settings, 2026-09-24).
+    TourQAEntry(Regex("notifications off|turn.*off|can i turn", RegexOption.IGNORE_CASE), "Yes. Calm mode keeps only essentials, and you can adjust it anytime in Settings → Notifications & calls."),
     TourQAEntry(Regex("offline|lose signal", RegexOption.IGNORE_CASE), "Unstuck works offline. Your changes sync automatically when you reconnect."),
-    // ANDROID LOCALIZATION: the Settings row is labelled "Product tour".
-    TourQAEntry(Regex("restart|tour again|find the tour", RegexOption.IGNORE_CASE), "Reopen it anytime from Settings → Account → Product tour."),
+    TourQAEntry(Regex("restart|tour again|find the tour", RegexOption.IGNORE_CASE), "Reopen it anytime from Settings → Replay the tour."),
 )
 
 const val TOUR_FALLBACK_ANSWER =
@@ -291,7 +296,7 @@ data class TourState(
     val speed: Float = 1f,
     val index: Int = 0,
     /** Round-2 #5: the floating "Resume tour" chip was ✕-dismissed — gone for
-     *  good (the Settings → Account → Product tour path remains). */
+     *  good (the Settings → Replay the tour path remains). */
     val chipDismissed: Boolean = false,
 )
 
@@ -341,7 +346,7 @@ class TourStateStore(context: Context) {
 
 /* ============================================================
  * Events — the Android stand-in for the web's window events.
- * Settings → Account → "Product tour" emits a restart; TourHost
+ * Settings → "Replay the tour" emits a restart; TourHost
  * collects it wherever it's mounted.
  * ============================================================ */
 object TourEvents {
@@ -390,7 +395,7 @@ sealed interface ResumeDecision {
     data object Welcome : ResumeDecision
 }
 
-/** Explicit open (Settings → Account → "Product tour"): a paused/UNFINISHED
+/** Explicit open (Settings → "Replay the tour"): a paused/UNFINISHED
  *  run offers the resume card at its saved step (never an unconditional wipe —
  *  Settings must be able to rescue a paused or stranded run); a FINISHED tour
  *  (or a fresh account) resets and shows the welcome. */
@@ -624,7 +629,7 @@ fun tourMoreAudioResName(stepId: String): String = tourAudioResName(stepId) + "_
  *  • settings-view steps pass the settings SECTION currently on top of the nav
  *    stack ([openSection], null when no SettingsSub route is topmost). The
  *    exemption applies ONLY while the step's OWN section (the spotlighted
- *    Focus / Interface screen — [tourSettingsSection]) is the topmost route:
+ *    Notifications & calls / Appearance screen — [tourSettingsSection]) is the topmost route:
  *    popping back to the Settings hub, or into any other section (Account:
  *    Sign out / Delete my account / Export; Backup; People…), re-applies the
  *    lockdown immediately (the tour panel stays reachable above the blockers

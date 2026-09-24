@@ -62,7 +62,9 @@ import tech.csalliance.unstuck.core.logic.occurrenceBlockFor
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.ui.platform.testTag
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -89,6 +91,8 @@ fun TasksScreen(
     onNotifications: () -> Unit,
     notifUnread: Int,
     avatarInitials: String,
+    /** The "Edit" pill at the end of the area filter: the Areas & tags sheet. */
+    onEditAreas: () -> Unit = {},
 ) {
     val c = UTheme.colors
     val tasks by vm.tasks.collectAsStateWithLifecycle()
@@ -180,6 +184,9 @@ fun TasksScreen(
             Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 FilterPill("All", activeArea == null) { onAreaPick(null) }
                 areas.forEach { a -> FilterPill(a.name, activeArea == a.name, dotColor = c.areaColor(a.color)) { onAreaPick(if (activeArea == a.name) null else a.name) } }
+                // Areas and tags are edited where they're used (slim settings,
+                // 2026-09-24): one sheet for both, from the end of the filter.
+                EditAreasPill(onEditAreas)
             }
             if (activeTag != null) {
                 Row(
@@ -270,4 +277,23 @@ fun TasksScreen(
 
     // The ONE Share screen, opened from a row's "Share…".
     shareTarget?.let { ShareScreen(vm, it, onDismiss = { shareTarget = null }) }
+}
+
+/** "Edit" at the end of the area filter — an outlined pill (never a filter,
+ *  so it never looks selected) that opens the Areas & tags sheet. */
+@Composable
+private fun EditAreasPill(onClick: () -> Unit) {
+    val c = UTheme.colors
+    Row(
+        Modifier.clip(RoundedCornerShape(999.dp)).border(1.dp, c.line2, RoundedCornerShape(999.dp))
+            .clickable(role = Role.Button, onClick = onClick)
+            .minimumInteractiveComponentSize()
+            .semantics(mergeDescendants = true) { contentDescription = AreasTagsCopy.EDIT_PILL_A11Y }
+            .testTag("tasks-edit-areas")
+            .padding(horizontal = 12.dp, vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Icon(Icons.Filled.Edit, contentDescription = null, tint = c.ink2, modifier = Modifier.size(12.dp))
+        Text(AreasTagsCopy.EDIT_PILL, style = UFont.sans(12, FontWeight.Medium), color = c.ink2)
+    }
 }

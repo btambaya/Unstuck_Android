@@ -123,6 +123,10 @@ class CallVoiceService : Service() {
         /** This phone's Calls switch + hours: an in-call snooze that would ring
          *  outside them is refused, the call left up (C12). */
         fun callSettings(): CallSettings = CallSettings.DEFAULTS
+        /** The account's AI data-sharing OK (core AIConsent). The receipt rule
+         *  already declined a call without it; this catches one turned off
+         *  between the ring and the answer. Default: granted (tests). */
+        fun hasAIConsent(): Boolean = true
 
         companion object {
             /** The production seams over the live AppViewModel. */
@@ -152,6 +156,7 @@ class CallVoiceService : Service() {
                     return CallDayContext.lines(kind, api.getTasks(), api.getBlocks(), api.todayIso(), api.nowHM())
                 }
                 override fun callSettings(): CallSettings = vm.callSettings.value
+                override fun hasAIConsent(): Boolean = vm.aiConsentGranted
             }
         }
     }
@@ -270,6 +275,9 @@ class CallVoiceService : Service() {
         if (!d.isVoiceConfigured()) { finish(CallEndReason.Failed("voice not configured")); return }
         val token = d.accessToken()
         if (token.isNullOrBlank()) { finish(CallEndReason.Failed("not signed in")); return }
+        // Without the account's AI-consent OK nothing may reach the assistant:
+        // hang up at once, and the notice says why (iOS noAIConsent).
+        if (!d.hasAIConsent()) { finish(CallEndReason.NoAIConsent); return }
         scope.launch {
             // The prompt is the whole app context (a dozen Room reads) — never on main.
             val base = runCatching { withContext(Dispatchers.Default) { d.voiceInstructions() } }.getOrNull()
@@ -391,6 +399,14 @@ class CallVoiceService : Service() {
                     CallOutcomeStore.enqueue(applicationContext, p.callId, r.outcome, outcomeNotes = r.outcomeNotes)
                     CallRinger.clear(applicationContext)
                     runCatching { CallNotifications.voiceFailed(applicationContext, p) }
+                }
+                // Answered, but the AI-consent OK was gone: nothing reached the
+                // assistant. Done, with the reason on the row and the way back on.
+                CallEndReason.NoAIConsent -> {
+                    val r = CallCoordinatorLogic.endOutcome(end)
+                    CallOutcomeStore.enqueue(applicationContext, p.callId, r.outcome, outcomeNotes = r.outcomeNotes)
+                    CallRinger.clear(applicationContext)
+                    runCatching { CallNotifications.noAIConsent(applicationContext, p, answered = true) }
                 }
             }
         }

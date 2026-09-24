@@ -270,7 +270,7 @@ class AppViewModel(
     private val _callProactive = MutableStateFlow(CallProactivePrefs.DEFAULTS)
     val callProactivePrefs: StateFlow<CallProactivePrefs> = _callProactive.asStateFlow()
 
-    /** The one-time Settings › Calls "allow full-screen calls" nudge was dismissed. */
+    /** The one-time Settings › Notifications & calls "allow full-screen calls" nudge was dismissed. */
     private val _ringNudgeDismissed = MutableStateFlow(false)
     val ringNudgeDismissed: StateFlow<Boolean> = _ringNudgeDismissed.asStateFlow()
     private val _receiptUndosInFlight = MutableStateFlow<Set<String>>(emptySet())
@@ -1190,6 +1190,9 @@ class AppViewModel(
             graph.foregrounds.collect {
                 runCatching { coFocusSession?.nudgeSocket() }
                 runCatching { reExchangeCoFocus() }
+                // The AI-consent OK follows the account: re-read it (at most once
+                // a minute), re-send a change that didn't land.
+                runCatching { refreshAIConsent() }
             }
         }
     }
@@ -3082,7 +3085,7 @@ class AppViewModel(
         // nothing after it depends on the server, and arming after the network
         // write below could delay it past TourHost's mount (a lost/late offer).
         // Only accounts that complete onboarding AFTER this ships get it —
-        // existing accounts reach the tour via Settings → Account → Product tour.
+        // existing accounts reach the tour via Settings → Replay the tour.
         runCatching {
             tech.csalliance.unstuck.ui.tour.TourStateStore(graph.appContext).patch { it.copy(eligible = true) }
         }
@@ -3129,6 +3132,13 @@ class AppViewModel(
         if (changed.isNotEmpty()) {
             settingsStore.savePendingNotifPrefWrites(settingsStore.loadPendingNotifPrefWrites() + changed)
             viewModelScope.launch { auth?.currentUserId?.let { uid -> runCatching { drainNotifPrefWrites(uid) } } }
+            // Re-arm the on-device alarms off the new level / lead — here, not in
+            // each caller: the assistant's set_notification_level and
+            // set_reminder_lead used to change the setting and leave the alarms
+            // armed for the old one until the next sync (slim-settings plan, C3).
+            (graph.appContext as? tech.csalliance.unstuck.UnstuckApp)?.let { app ->
+                runCatching { tech.csalliance.unstuck.surface.ReminderScheduler.reschedule(app) }
+            }
         }
     }
 
@@ -3288,12 +3298,18 @@ class AppViewModel(
                     // clearAssistant() mutates assistantHistory (a SnapshotStateList) which
                     // must only be touched on the main thread. Hop explicitly.
                     if (status is SessionStatus.NotAuthenticated && status.isSignOut) {
-                        withContext(Dispatchers.Main.immediate) { clearAssistant() }
+                        withContext(Dispatchers.Main.immediate) { clearAssistant(); resetAIConsentState() }
                         scrubAssistantUserState()
                     }
                     // A (re)sign-in: this account's cached rituals / dismissals /
                     // interview flag replace whatever the previous one left in memory.
                     if (status is SessionStatus.Authenticated) reloadAssistantUserState()
+                    // …and the account's AI-consent OK rides on the session's
+                    // user_metadata (the saved launch session only fills an empty
+                    // copy; the fresh read settles it).
+                    if (status is SessionStatus.Authenticated) {
+                        withContext(Dispatchers.Main.immediate) { runCatching { adoptAIConsentFrom(status) } }
+                    }
                     // A just-exchanged auth-callback session: classify it. A "recovery"
                     // session (forgot-password link) routes to set-new-password; magic-
                     // link / OAuth fall through to the normal app. One-shot probe so a
@@ -3587,7 +3603,7 @@ class AppViewModel(
      *  — MainScaffold presents the sheet. [handoff] = a message is already on
      *  its way through [sendAssistant]'s queue (open onto the thread);
      *  [focusComposer] = put the keyboard in the sheet's composer. */
-    data class AssistantOpenRequest(val handoff: Boolean, val focusComposer: Boolean)
+    data class AssistantOpenRequest(val handoff: Boolean, val focusComposer: Boolean, val draft: String? = null)
     private val _assistantOpenRequests = MutableSharedFlow<AssistantOpenRequest>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
     val assistantOpenRequests: SharedFlow<AssistantOpenRequest> = _assistantOpenRequests.asSharedFlow()
 
@@ -3596,6 +3612,12 @@ class AppViewModel(
     fun openAssistantWith(text: String) {
         val t = text.trim()
         if (t.isEmpty()) return
+        // Without the AI-consent OK nothing is sent: the text waits in the
+        // composer, and Send asks first (withAIConsent) — iOS's Siri prompt rule.
+        if (assistant != null && !aiConsentGranted) {
+            _assistantOpenRequests.tryEmit(AssistantOpenRequest(handoff = false, focusComposer = false, draft = t))
+            return
+        }
         _assistantOpenRequests.tryEmit(AssistantOpenRequest(handoff = true, focusComposer = false))
         sendAssistant(t)
     }
@@ -3706,7 +3728,7 @@ class AppViewModel(
     override suspend fun saveProfileFact(category: ProfileFactCategory, fact: String, source: ProfileFactSource, whenIso: String?): ProfileFact? =
         profileFactsService.save(category, fact, source, whenIso)
 
-    /** Edit one remembered fact IN PLACE (Settings → "What Unstuck knows"): the
+    /** Edit one remembered fact IN PLACE (Settings → Assistant & privacy → "What Unstuck remembers"): the
      *  same row and id, `updatedAt` bumped; a fresh save only when the row has
      *  vanished. The Result carries the [ProfileFactSaveError] so the panel can
      *  tell the user why nothing changed instead of silently reverting. */
@@ -4057,6 +4079,10 @@ class AppViewModel(
     fun sendAssistant(userText: String) {
         val t = userText.trim()
         if (t.isEmpty()) return
+        // Nothing reaches the AI provider without the account's OK (AIConsent).
+        // The surfaces ask first (withAIConsent); this is the backstop for a
+        // path that didn't — nothing is sent.
+        if (assistant != null && !aiConsentGranted) { _assistantError.value = ASSISTANT_CONSENT_ERROR; return }
         if (_assistantSending.value) {
             _assistantQueued.value = _assistantQueued.value + QueuedSend(newUuid(), t)
             return
@@ -4094,6 +4120,14 @@ class AppViewModel(
     /** Drain the queue one message per idle moment. */
     private fun drainAssistantQueue() {
         if (_assistantSending.value) return
+        if (_assistantQueued.value.isEmpty()) return
+        // AI data sharing turned off while a turn ran: what was queued behind it
+        // is dropped unsent, like sendAssistant (AIConsent).
+        if (assistant != null && !aiConsentGranted) {
+            _assistantQueued.value = emptyList()
+            _assistantError.value = ASSISTANT_CONSENT_ERROR
+            return
+        }
         val next = _assistantQueued.value.firstOrNull() ?: return
         _assistantQueued.value = _assistantQueued.value.drop(1)
         startAssistantTurn(next.text)
@@ -4243,6 +4277,9 @@ class AppViewModel(
      *  reply, or null on any error → the caller answers from canned TOUR_QA. */
     suspend fun tourAsk(messages: List<ChatMessage>, stepId: String, stepTitle: String): String? {
         val a = assistant ?: return null
+        // Without the AI-consent OK the tour answers from its canned script — the
+        // question never leaves the phone.
+        if (!aiConsentGranted) return null
         val context = buildJsonObject {
             buildAssistantContext(assistantApi).forEach { (k, v) -> put(k, v) }
             putJsonObject("tour") { put("step", stepId); put("title", stepTitle) }
@@ -4262,10 +4299,226 @@ class AppViewModel(
     val voiceProxyUrl: String get() = tech.csalliance.unstuck.BuildConfig.VOICE_PROXY_URL
     val voiceModel: String get() = "qwen3.5-omni-flash-realtime"
     /** Realtime voice is available only when a proxy is configured AND the user
-     *  hasn't switched AI off (Settings → Interface → AI Assistant). The
+     *  hasn't switched AI off (Settings → Assistant & privacy → AI Assistant). The
      *  kill-switch has to reach EVERY assistant surface, voice included — the
      *  published privacy policy promises exactly that. */
     fun voiceConfigured(): Boolean = voiceProxyUrl.isNotBlank() && settings.value.assistantEnabled
+
+    // ── AI data-sharing consent (core AIConsent; the gate is [withAIConsent]) ──
+    // Port of iOS AppModel's consent section (build 91 + 86c6a77). The device
+    // copy lives on the graph (AIConsentStore / AIConsentSync) so the call path
+    // reads it without a ViewModel; the ask / note / app-open state lives here.
+
+    /** This device's copy of the account's OK (sign-out wipes it). */
+    val aiConsent: StateFlow<tech.csalliance.unstuck.core.logic.AIConsent.Cache?> get() = graph.aiConsent.cache
+
+    /** The signed-in account's OK counts right now (given, for this version). */
+    val aiConsentGranted: Boolean
+        get() = tech.csalliance.unstuck.core.logic.AIConsent.grantedFor(graph.aiConsent.value, currentUid())
+
+    /** [aiConsentGranted] for a copy a composable already collected. */
+    fun aiConsentGranted(cache: tech.csalliance.unstuck.core.logic.AIConsent.Cache?): Boolean =
+        tech.csalliance.unstuck.core.logic.AIConsent.grantedFor(cache, currentUid())
+
+    private val _aiConsentAsk = MutableStateFlow<tech.csalliance.unstuck.ui.assistant.AIConsentAsk?>(null)
+    /** The consent sheet on screen (MainScaffold hosts it): what agreeing or
+     *  declining go on to do. null = none. */
+    val aiConsentAsk: StateFlow<tech.csalliance.unstuck.ui.assistant.AIConsentAsk?> = _aiConsentAsk.asStateFlow()
+    private val _aiConsentNote = MutableStateFlow<tech.csalliance.unstuck.ui.assistant.AIConsentNote?>(null)
+    /** The last "Not now" line, shown by the surface that asked. */
+    val aiConsentNote: StateFlow<tech.csalliance.unstuck.ui.assistant.AIConsentNote?> = _aiConsentNote.asStateFlow()
+    private val _aiConsentReads = MutableStateFlow(0)
+    /** Reads of the account finished (or failed) this launch — 0 = none yet:
+     *  app open never asks on a stale copy the account may already have fixed,
+     *  and every read gives app open its look (MainScaffold keys on it). */
+    val aiConsentReads: StateFlow<Int> = _aiConsentReads.asStateFlow()
+    /** A gate is reading the account before it asks (one at a time). */
+    private var aiConsentChecking = false
+    /** App open asks once per launch (Calls on without an OK). */
+    internal var aiConsentAskedOnOpen = false
+    /** The ask whose sheet actually came up (the sheet reports in). */
+    private var aiConsentShownAskId: String? = null
+    /** How long an ask may wait for its sheet to show before it's dropped. */
+    internal var aiConsentShowGraceMs = 2_000L
+    /** How long a gate waits for the account before it asks anyway. */
+    internal var aiConsentCheckTimeoutMs = 1_500L
+
+    /**
+     * THE gate for everything that sends the user's words or voice to the AI
+     * provider — a message, Talk, switching Calls on. With the OK, [proceed]
+     * runs now. Without it the account is read once more (an OK given on the
+     * web a moment ago counts), then the consent sheet asks: "Agree and
+     * continue" runs [proceed]; "Not now" runs [onDecline] and [host] shows
+     * AIConsent.decline's line.
+     */
+    fun withAIConsent(
+        action: tech.csalliance.unstuck.core.logic.AIConsent.Action,
+        host: tech.csalliance.unstuck.ui.assistant.AIConsentHost,
+        onDecline: () -> Unit = {},
+        proceed: () -> Unit,
+    ) {
+        if (_aiConsentNote.value?.host == host) _aiConsentNote.value = null
+        if (aiConsentGranted) { proceed(); return }
+        viewModelScope.launch { askForAIConsent(action, host, onDecline, proceed) }
+    }
+
+    /** The asking half of [withAIConsent]. One sheet at a time: a second tap
+     *  while one is up (or the account is being read) does nothing. */
+    internal suspend fun askForAIConsent(
+        action: tech.csalliance.unstuck.core.logic.AIConsent.Action,
+        host: tech.csalliance.unstuck.ui.assistant.AIConsentHost,
+        onDecline: () -> Unit = {},
+        proceed: () -> Unit,
+    ) {
+        if (_aiConsentAsk.value != null || aiConsentChecking) return
+        aiConsentChecking = true
+        try {
+            kotlinx.coroutines.withTimeoutOrNull(aiConsentCheckTimeoutMs) { graph.aiConsentSync.refresh(force = true) }
+        } finally {
+            aiConsentChecking = false
+        }
+        if (aiConsentGranted) { proceed(); return }
+        if (_aiConsentAsk.value != null) return
+        presentAIConsentAsk(tech.csalliance.unstuck.ui.assistant.AIConsentAsk(newUuid(), action, host, proceed, onDecline))
+    }
+
+    /** Put [ask] up. If its sheet never comes up it is dropped after a moment —
+     *  left in place it would silence every later gate until relaunch. */
+    internal fun presentAIConsentAsk(ask: tech.csalliance.unstuck.ui.assistant.AIConsentAsk) {
+        _aiConsentAsk.value = ask
+        viewModelScope.launch {
+            kotlinx.coroutines.delay(aiConsentShowGraceMs)
+            if (_aiConsentAsk.value?.id != ask.id || aiConsentShownAskId == ask.id) return@launch
+            _aiConsentAsk.value = null
+            // App open's one look didn't happen: a later foreground tries again.
+            if (ask.action == tech.csalliance.unstuck.core.logic.AIConsent.Action.CALLS_ON_OPEN) aiConsentAskedOnOpen = false
+        }
+    }
+
+    /** The consent sheet came up for ask [id]. */
+    fun aiConsentSheetShown(id: String?) { aiConsentShownAskId = id }
+
+    /** The consent sheet for ask [id] has gone. An answer normally settled it
+     *  already; torn down under its surface it counts as "Not now". */
+    fun aiConsentSheetGone(id: String?) {
+        if (id != null && _aiConsentAsk.value?.id == id) declineAIConsent()
+    }
+
+    /** "Agree and continue": recorded here at once (so it holds offline) and
+     *  written to the account; then what was asked for runs. */
+    fun agreeAIConsent() {
+        val ask = _aiConsentAsk.value ?: return
+        _aiConsentAsk.value = null
+        _aiConsentNote.value = null
+        val cache = graph.aiConsentSync.recordLocally(tech.csalliance.unstuck.core.logic.AIConsent.grant(nowMs()))
+        viewModelScope.launch { graph.aiConsentSync.push(cache) }
+        ask.onAgree()
+    }
+
+    /** "Not now" (or the sheet swiped away): the action doesn't happen, Calls go
+     *  off when app open asked, and the surface says why. */
+    fun declineAIConsent() {
+        val ask = _aiConsentAsk.value ?: return
+        _aiConsentAsk.value = null
+        val decline = tech.csalliance.unstuck.core.logic.AIConsent.decline(ask.action)
+        if (decline.turnCallsOff) turnCallsOffForAIConsent()
+        _aiConsentNote.value = tech.csalliance.unstuck.ui.assistant.AIConsentNote(ask.host, decline.note)
+        ask.onDecline()
+    }
+
+    /** The surface read its note (the ROOT dialog's OK). */
+    fun clearAIConsentNote() { _aiConsentNote.value = null }
+
+    /** Settings → AI data sharing → off: cleared here and on the account, and
+     *  Calls go off with it (a call is a conversation with the assistant). The
+     *  assistant and Talk ask again before their next use. */
+    fun revokeAIConsent() {
+        val prev = graph.aiConsent.value?.record ?: tech.csalliance.unstuck.core.logic.AIConsent.Record.NONE
+        val cache = graph.aiConsentSync.recordLocally(tech.csalliance.unstuck.core.logic.AIConsent.revoked(prev))
+        viewModelScope.launch { graph.aiConsentSync.push(cache) }
+        turnCallsOffForAIConsent()
+        _aiConsentNote.value = tech.csalliance.unstuck.ui.assistant.AIConsentNote(
+            tech.csalliance.unstuck.ui.assistant.AIConsentHost.SETTINGS, tech.csalliance.unstuck.core.logic.AIConsent.REVOKED_NOTE,
+        )
+    }
+
+    /** Calls off for a missing OK: this phone's switch, and the proactive calls
+     *  the account would otherwise keep booking. Calls already booked are
+     *  declined quietly when they arrive; their notes still land. */
+    fun turnCallsOffForAIConsent() {
+        if (_callSettings.value.enabled) updateCallSettings { it.copy(enabled = false) }
+        val p = _callProactive.value
+        if (p.morningEnabled || p.eveningEnabled || p.afterBlockEnabled) {
+            setCallProactivePrefs(p.copy(morningEnabled = false, eveningEnabled = false, afterBlockEnabled = false))
+        }
+    }
+
+    /** Calls count as on for this account (AIConsent.callsAreOn): this phone
+     *  takes them, and a proactive call is on or a call is booked. */
+    internal suspend fun callsAreOnForAIConsent(): Boolean {
+        val p = _callProactive.value
+        val hasLiveCall = runCatching { tech.csalliance.unstuck.sync.CallRequestsMirror(store).live().isNotEmpty() }.getOrDefault(false)
+        return tech.csalliance.unstuck.core.logic.AIConsent.callsAreOn(
+            deviceSwitch = _callSettings.value.enabled,
+            proactiveOn = p.morningEnabled || p.eveningEnabled || p.afterBlockEnabled,
+            hasLiveCall = hasLiveCall,
+        )
+    }
+
+    /** Bring the device copy up to date (at most once a minute unless
+     *  [force]d); marks this launch's first read done either way. */
+    fun refreshAIConsent(force: Boolean = false) {
+        if (currentUid() == null) return
+        viewModelScope.launch {
+            if (runCatching { graph.aiConsentSync.refresh(force) }.getOrDefault(true)) _aiConsentReads.value += 1
+        }
+    }
+
+    /** App open with Calls on for this account and no OK: ask once per launch;
+     *  "Not now" turns Calls off and says so. Only once this launch has read the
+     *  account, and only over a bare scaffold ([idle]) — never over a sheet, a
+     *  pushed screen, the tour or the password-recovery screen. */
+    fun askAboutCallsOnOpenIfNeeded(idle: Boolean) {
+        if (!idle || _aiConsentReads.value == 0 || currentUid() == null || !graph.onboarded) return
+        if (graph.pendingPasswordRecovery.value || tech.csalliance.unstuck.ui.tour.TourEvents.running) return
+        if (_aiConsentAsk.value != null || aiConsentChecking || aiConsentAskedOnOpen || aiConsentGranted) return
+        viewModelScope.launch {
+            val callsOn = callsAreOnForAIConsent()
+            if (!tech.csalliance.unstuck.core.logic.AIConsent.asksOnOpen(aiConsentGranted, callsOn, aiConsentAskedOnOpen)) return@launch
+            if (_aiConsentAsk.value != null) return@launch
+            aiConsentAskedOnOpen = true
+            presentAIConsentAsk(
+                tech.csalliance.unstuck.ui.assistant.AIConsentAsk(
+                    newUuid(), tech.csalliance.unstuck.core.logic.AIConsent.Action.CALLS_ON_OPEN,
+                    tech.csalliance.unstuck.ui.assistant.AIConsentHost.ROOT, onAgree = {}, onDecline = {},
+                ),
+            )
+        }
+    }
+
+    /** The account's answer as a session carries it (sign-in, launch, a token
+     *  refresh, our own update) — the device copy follows (AIConsent.merge). */
+    private fun adoptAIConsentFrom(status: SessionStatus.Authenticated) {
+        val user = status.session.user
+        if (user != null) {
+            val source = if (status.source is SessionSource.Storage) tech.csalliance.unstuck.core.logic.AIConsent.Source.STORED
+            else tech.csalliance.unstuck.core.logic.AIConsent.Source.FRESH
+            graph.aiConsentSync.adopt(tech.csalliance.unstuck.sync.AuthService.aiConsent(user), user.id, source)
+        }
+        // A launch or a fresh sign-in reads the account (an OK given on the web
+        // counts here). Not on a refresh or our own write — those carry it already.
+        if (status.source !is SessionSource.Refresh && status.source !is SessionSource.UserChanged) refreshAIConsent(force = true)
+    }
+
+    /** Sign-out: this account's ask / note / app-open look go with it (the
+     *  device copy is wiped by the graph's sign-out hook). */
+    private fun resetAIConsentState() {
+        _aiConsentAsk.value = null
+        _aiConsentNote.value = null
+        _aiConsentReads.value = 0
+        aiConsentAskedOnOpen = false
+        aiConsentShownAskId = null
+    }
     /** The stored access token. It may be EXPIRED (supabase-kt refreshes only
      *  while the app is in the foreground), so it is only the "signed in?" gate
      *  and the fallback — a dial goes through [freshVoiceAccessToken]. */
@@ -4403,7 +4656,7 @@ class AppViewModel(
     /** Calls need a signed-in Supabase client (the tools say so otherwise). */
     fun callsAvailable(): Boolean = currentUid() != null && assistantApi.callStore() != null
 
-    /** A USER change from Settings → Calls: cache for this account (+ the in-memory
+    /** A USER change from Settings → Notifications & calls: cache for this account (+ the in-memory
      *  value Push.kt's decide() reads). Signed out → in-memory only. */
     fun updateCallSettings(transform: (CallSettings) -> CallSettings) {
         val next = transform(_callSettings.value)
@@ -4412,7 +4665,7 @@ class AppViewModel(
         runCatching { CallSettingsStore.save(graph.appContext, uid, next) }
     }
 
-    /** A USER change from Settings › Calls to the proactive calls: cache it for
+    /** A USER change from Settings › Notifications & calls to the proactive calls: cache it for
      *  this account, mark it pending, and push it to `notification_preferences`
      *  now (best-effort — a failure leaves it pending for the next pull, which
      *  re-pushes rather than pulling the server's older value over it). */
@@ -4426,7 +4679,7 @@ class AppViewModel(
         viewModelScope.launch { runCatching { pushCallProactivePrefs(uid) } }
     }
 
-    /** Settings › Calls opened: pull the account's proactive prefs (a toggle
+    /** Settings › Notifications & calls opened: pull the account's proactive prefs (a toggle
      *  made on the web / iPhone reaches this phone). */
     fun refreshCallProactivePrefs() {
         val uid = currentUid() ?: return
@@ -4681,7 +4934,7 @@ class AppViewModel(
         runCatching { tech.csalliance.unstuck.surface.PausedCheckinScheduler.cancel(ctx) }
     }
 
-    /** Settings › Interface › "Clear Assistant history": the server-side delete
+    /** Settings › Assistant & privacy › "Delete conversation history": the server-side delete
      *  of this user's stored conversations (`delete_my_assistant_turns`,
      *  migration 074) — the control the privacy policy promises. The rows
      *  deleted, or a failure (signed out, offline). Local chat threads are
@@ -4889,7 +5142,11 @@ data class Nudge(
  *  use the same words). */
 const val VOICE_SESSION_RECEIPTS = "While we talked:"
 
-// ── "Test call now" (Settings → Calls) — copy from iOS CallSettingsView ──
+/** The assistant error code for a send stopped by the AI-consent gate (the
+ *  sheet shows AIConsent.decline(CHAT)'s line for it). iOS "consent". */
+const val ASSISTANT_CONSENT_ERROR = "consent"
+
+// ── "Test call now" (Settings → Notifications & calls) — copy from iOS CallSettingsView ──
 /** The label of the row "Test call now" books (a live one is cancelled before a retry). */
 const val TEST_CALL_LABEL = TestCallLogic.LABEL
 const val TEST_CALL_NOTE = TestCallLogic.NOTE

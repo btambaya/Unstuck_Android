@@ -141,7 +141,7 @@ private fun AreasSection(vm: AppViewModel) {
         draft = ""
     }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SectionLabel(AreasTagsCopy.AREAS, color = c.primaryDeep, modifier = Modifier.semantics { heading() })
+        SectionLabel(AreasTagsCopy.AREAS, modifier = Modifier.semantics { heading() })
         Text(AreasTagsCopy.AREAS_SUB, style = UFont.sans(12), color = c.ink3)
         areas.sortedBy { it.sortOrder }.forEach { a ->
             val open = tasks.count { it.lifeArea == a.name && !it.done && it.recurrence == null }
@@ -185,7 +185,7 @@ private fun TagsSection(vm: AppViewModel) {
         draft = ""
     }
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        SectionLabel(AreasTagsCopy.TAGS, color = c.primaryDeep, modifier = Modifier.semantics { heading() })
+        SectionLabel(AreasTagsCopy.TAGS, modifier = Modifier.semantics { heading() })
         Text(AreasTagsCopy.TAGS_SUB, style = UFont.sans(12), color = c.ink3)
         if (tags.isEmpty()) Text(AreasTagsCopy.NO_TAGS, style = UFont.sans(13), color = c.ink3)
         tags.sortedBy { it.sortOrder }.forEach { tag ->

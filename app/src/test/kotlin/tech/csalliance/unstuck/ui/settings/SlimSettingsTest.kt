@@ -182,4 +182,16 @@ class SlimSettingsTest {
         assertEquals("Download a copy of everything you've put in Unstuck", SettingsCopy.EXPORT_SUB)
         assertEquals("Delete my account", SettingsCopy.DELETE_ACCOUNT)
     }
+
+    /** Delete my account deletes only once the account is typed back. */
+    @Test fun `delete my account needs the email typed back`() {
+        assertFalse(deleteAccountConfirmed("", "maya@example.com"))
+        assertFalse(deleteAccountConfirmed("maya@", "maya@example.com"))
+        assertTrue(deleteAccountConfirmed(" Maya@Example.com ", "maya@example.com"))
+        assertFalse(deleteAccountConfirmed("DELETE", "maya@example.com"))
+        // No email on the account: DELETE, never a dead button.
+        assertTrue(deleteAccountConfirmed("delete", null))
+        assertTrue(deleteAccountConfirmed("DELETE", " "))
+        assertFalse(deleteAccountConfirmed("", null))
+    }
 }

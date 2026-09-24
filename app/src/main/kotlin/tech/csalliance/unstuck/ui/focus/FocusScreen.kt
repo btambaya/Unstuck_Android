@@ -282,17 +282,21 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
                             )
                         }
                     }
-                    // Background noise on/off — the setting itself, remembered.
-                    HeaderIconButton(
-                        icon = if (noiseOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
-                        description = FocusOptionsCopy.speakerA11y(noiseOn),
-                        active = noiseOn,
-                        tag = "focus-speaker",
-                    ) {
-                        vm.updateSettings { it.copy(ambient = if (it.ambientOn) SettingsState.AMBIENT_OFF else SettingsState.AMBIENT_ON) }
+                    // The two icon buttons sit flush: each 48dp hit target already
+                    // pads its 32dp disc, so the discs keep the cluster's even gap.
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        // Background noise on/off — the setting itself, remembered.
+                        HeaderIconButton(
+                            icon = if (noiseOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
+                            description = FocusOptionsCopy.speakerA11y(noiseOn),
+                            active = noiseOn,
+                            tag = "focus-speaker",
+                        ) {
+                            vm.updateSettings { it.copy(ambient = if (it.ambientOn) SettingsState.AMBIENT_OFF else SettingsState.AMBIENT_ON) }
+                        }
+                        // ⋯ Options — the focus controls that left Settings.
+                        HeaderIconButton(icon = Icons.Filled.MoreHoriz, description = FocusOptionsCopy.BUTTON_A11Y, active = false, tag = "focus-options") { showOptions = true }
                     }
-                    // ⋯ Options — the focus controls that left Settings.
-                    HeaderIconButton(icon = Icons.Filled.MoreHoriz, description = FocusOptionsCopy.BUTTON_A11Y, active = false, tag = "focus-options") { showOptions = true }
                 }
             }
 

@@ -383,9 +383,6 @@ private fun AccountContent(vm: AppViewModel) {
     if (showDelete) {
         var typed by remember { mutableStateOf("") }
         val email = vm.currentEmail ?: ""
-        // Fall back to typing DELETE when there's no email — otherwise the confirm button
-        // is permanently un-clickable for an email-less account, trapping the user.
-        val confirmWord = email.ifBlank { "DELETE" }
         AlertDialog(
             onDismissRequest = { showDelete = false },
             title = { Text("Delete your account?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
@@ -396,7 +393,7 @@ private fun AccountContent(vm: AppViewModel) {
                 }
             },
             confirmButton = {
-                TextButton(enabled = typed.trim().equals(confirmWord, ignoreCase = true), onClick = {
+                TextButton(enabled = deleteAccountConfirmed(typed, email), onClick = {
                     showDelete = false; scope.launch { val r = vm.deleteAccount(); if (r is AuthOutcome.Error) { msgErr = true; msg = r.message } }
                 }) { Text("Delete forever", color = c.red) }
             },
@@ -405,6 +402,12 @@ private fun AccountContent(vm: AppViewModel) {
         )
     }
 }
+
+/** Delete my account's confirm: the account's email typed back (any case,
+ *  stray spaces ignored) — or DELETE when the account has no email, so an
+ *  email-less account is never trapped behind a button it can't enable. */
+internal fun deleteAccountConfirmed(typed: String, email: String?): Boolean =
+    typed.trim().equals(email?.takeIf { it.isNotBlank() } ?: "DELETE", ignoreCase = true)
 
 @Composable
 private fun PasswordDialog(hasPassword: Boolean, onSave: (current: String, newPw: String) -> Unit, onDismiss: () -> Unit) {

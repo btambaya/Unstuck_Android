@@ -10,6 +10,10 @@ import androidx.compose.ui.test.isSelectable
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
+import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.assertIsEnabled
+import androidx.compose.ui.test.hasClickAction
+import androidx.compose.ui.test.assert
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollTo
 import androidx.room.Room
@@ -182,6 +186,84 @@ class MainScaffoldSettingsTest {
         compose.onNodeWithTag("settings-export").assertIsDisplayed()
         compose.onNodeWithTag("settings-sign-out").assertIsDisplayed()
         compose.onNodeWithTag("settings-delete-account").performScrollTo().assertIsDisplayed()
+    }
+
+    @Test
+    fun backFromASectionLandsOnTheHub() {
+        shell()
+        link("unstuck://settings?section=People")
+        compose.onNodeWithText("People you share with").assertIsDisplayed()
+        compose.onNodeWithContentDescription("Back").performClick()
+        compose.waitForIdle()
+        compose.onNodeWithTag("settings-row-people").assertIsDisplayed()
+        compose.onNodeWithText("How Unstuck behaves.").assertIsDisplayed()
+    }
+
+    /** Send feedback is a hub action, and `?section=feedback` opens the same sheet. */
+    @Test
+    fun sendFeedbackOpensTheSheetFromTheRowAndTheLink() {
+        shell()
+        link("unstuck://settings")
+        compose.onNodeWithTag("settings-row-feedback").performScrollTo().performClick()
+        compose.waitForIdle()
+        compose.onNodeWithText("Bugs, ideas, anything — straight to the team.").assertIsDisplayed()
+    }
+
+    @Test
+    fun theFeedbackLinkOpensTheSheetOverTheHub() {
+        shell()
+        link("unstuck://settings?section=feedback")
+        compose.onNodeWithText("Bugs, ideas, anything — straight to the team.").assertIsDisplayed()
+    }
+
+    /** Focus options live on the Focus screen: with no session running the
+     *  old names land on the hub, never a dead end. */
+    @Test
+    fun focusAndSoundWithoutASessionLandOnTheHub() {
+        shell()
+        link("unstuck://settings?section=focus")
+        compose.onNodeWithTag("settings-row-notifications").assertIsDisplayed()
+        link("unstuck://settings?section=Sound")
+        compose.onNodeWithTag("settings-row-appearance").assertIsDisplayed()
+    }
+
+    /** The assistant's open_screen targets land where plan §4 says. */
+    @Test
+    fun openScreenTargetsLandOnTheirNewHomes() {
+        shell()
+        link(tech.csalliance.unstuck.ui.assistant.assistantScreenLink("notifications", null))
+        compose.onNodeWithText("How much Unstuck checks in").assertIsDisplayed()
+        link(tech.csalliance.unstuck.ui.assistant.assistantScreenLink("people", null))
+        compose.onNodeWithText("People you share with").assertIsDisplayed()
+        link(tech.csalliance.unstuck.ui.assistant.assistantScreenLink("areas", null))
+        compose.onNodeWithTag("areas-tags-sheet").assertIsDisplayed()
+    }
+
+    /** Delete my account (App Store 5.1.1(v), Play): Account's last row, live
+     *  and tappable. (Its confirm dialog can't be opened here — a text field in
+     *  a Dialog never reports idle under Robolectric — so the confirm rule is
+     *  pinned in SlimSettingsTest.) */
+    @Test
+    fun deleteMyAccountIsReachableAndLive() {
+        shell()
+        link("unstuck://settings?section=account")
+        compose.onNodeWithTag("settings-delete-account").performScrollTo().assertIsDisplayed().assertIsEnabled().assert(hasClickAction())
+    }
+
+    /** Terms and Privacy: one tap from the hub, the published pages (the stores ask). */
+    @Test
+    fun termsAndPrivacyOpenThePublishedPages() {
+        shell()
+        link("unstuck://settings")
+        val app = ApplicationProvider.getApplicationContext<android.app.Application>()
+        compose.onNodeWithTag("settings-footer-terms").performScrollTo().performClick()
+        compose.waitForIdle()
+        val terms = shadowOf(app).nextStartedActivity
+        org.junit.Assert.assertEquals(android.content.Intent.ACTION_VIEW, terms.action)
+        org.junit.Assert.assertEquals("https://unstucknow.io/terms", terms.dataString)
+        compose.onNodeWithTag("settings-footer-privacy").performScrollTo().performClick()
+        compose.waitForIdle()
+        org.junit.Assert.assertEquals("https://unstucknow.io/privacy", shadowOf(app).nextStartedActivity.dataString)
     }
 
     @Test

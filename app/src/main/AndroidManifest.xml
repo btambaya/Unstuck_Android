@@ -12,7 +12,7 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- Punctual pre-task reminders ("5 min before") + reschedule after reboot.
          SCHEDULE_EXACT_ALARM is user-grantable (denied by default to a new install on
-         Android 14+: asked for on Today and in Settings › Focus) and we fall back to
+         Android 14+: asked for on Today and in Settings › Notifications & calls) and we fall back to
          inexact, Doze-allowed alarms while denied (ReminderScheduler.arm). We
          deliberately do NOT request the restricted USE_EXACT_ALARM — Play limits it
          to alarm-clock/calendar apps. -->
@@ -25,7 +25,7 @@
     <!-- "Unstuck calls you" (C1-android): the ring shows full-screen over the lock
          screen (API 34: special access, pre-granted only to apps Play classifies
          as calling — declared on the Play form; otherwise the ring degrades to a
-         heads-up and Settings › Calls offers ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT),
+         heads-up and Settings › Notifications & calls offers ACTION_MANAGE_APP_USE_FULL_SCREEN_INTENT),
          the in-call voice service is a `microphone` foreground service started
          ONLY from the Answer tap, and the ring channel vibrates. WAKE_LOCK: the
          ring activity keeps the screen on while it rings. -->

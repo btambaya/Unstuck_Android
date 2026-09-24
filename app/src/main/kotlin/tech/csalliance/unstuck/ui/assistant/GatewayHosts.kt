@@ -7,7 +7,7 @@ import tech.csalliance.unstuck.core.model.ProfileFact
 import tech.csalliance.unstuck.core.model.ProfileFactCategory
 import tech.csalliance.unstuck.core.model.ProfileFactSource
 
-// The slice of AppViewModel the interview and the "What Unstuck knows" panel
+// The slice of AppViewModel the interview and the "What Unstuck remembers" panel
 // need (gateway A2). Declared here — not on the ViewModel — so the two
 // surfaces compile and unit-test against a fake host; AppViewModel implements
 // both (`: InterviewHost, FactsHost`) and every member below is already one of
@@ -38,7 +38,7 @@ interface InterviewHost {
     suspend fun saveProfileFact(category: ProfileFactCategory, fact: String, source: ProfileFactSource, whenIso: String? = null): ProfileFact?
 }
 
-/** What Settings → "What Unstuck knows" needs from the host. */
+/** What Settings → "What Unstuck remembers" needs from the host. */
 interface FactsHost {
     /** Active facts, newest first. */
     val profileFacts: StateFlow<List<ProfileFact>>

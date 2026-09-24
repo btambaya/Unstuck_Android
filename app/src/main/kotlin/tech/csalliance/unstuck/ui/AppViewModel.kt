@@ -3076,7 +3076,7 @@ class AppViewModel(
         // nothing after it depends on the server, and arming after the network
         // write below could delay it past TourHost's mount (a lost/late offer).
         // Only accounts that complete onboarding AFTER this ships get it —
-        // existing accounts reach the tour via Settings → Account → Product tour.
+        // existing accounts reach the tour via Settings → Replay the tour.
         runCatching {
             tech.csalliance.unstuck.ui.tour.TourStateStore(graph.appContext).patch { it.copy(eligible = true) }
         }
@@ -3707,7 +3707,7 @@ class AppViewModel(
     override suspend fun saveProfileFact(category: ProfileFactCategory, fact: String, source: ProfileFactSource, whenIso: String?): ProfileFact? =
         profileFactsService.save(category, fact, source, whenIso)
 
-    /** Edit one remembered fact IN PLACE (Settings → "What Unstuck knows"): the
+    /** Edit one remembered fact IN PLACE (Settings → Assistant & privacy → "What Unstuck remembers"): the
      *  same row and id, `updatedAt` bumped; a fresh save only when the row has
      *  vanished. The Result carries the [ProfileFactSaveError] so the panel can
      *  tell the user why nothing changed instead of silently reverting. */

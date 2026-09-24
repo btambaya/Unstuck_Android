@@ -148,11 +148,12 @@ class ShareWithRowTest {
         assertEquals(mapOf("maya@example.com" to ShareLevel.PARTNER), m.state.value.shares.emails)
         compose.onNodeWithText("maya@example.com").assertIsDisplayed()
         compose.onNodeWithText("Gets it when you add the task · can edit").assertIsDisplayed()
-        compose.onNodeWithText("✓ maya@example.com gets it when you add the task — they can edit.").assertIsDisplayed()
+        compose.onNodeWithText("✓ maya@example.com gets it once you add the task.").assertIsDisplayed()
         compose.onNodeWithContentDescription("Remove maya@example.com").performSemanticsAction(SemanticsActions.OnClick)
         compose.waitForIdle()
         assertTrue(m.state.value.shares.isEmpty)
         compose.onNodeWithText("Gets it when you add the task · can edit").assertDoesNotExist()
+        compose.onNodeWithText("✓ maya won't get this task.").assertIsDisplayed()
     }
 
     @Test

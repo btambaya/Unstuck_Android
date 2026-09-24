@@ -11,9 +11,14 @@ Single source of truth for "where is the Android build?". Update as phases land.
   drop out when they and the summary don't both fit), the summary, a chevron. TalkBack: "Share with, <summary>, Button".
 - **The summary** (core `ShareWithSummary.kt`, one rule on all three, 28-character budget): 0 "Only you" · 1 "James · can
   edit|can view|handed over" · 2 same "James, Anna · can edit" · 2 mixed "James · edit, Anna · view" · 3+ "James + 2 more",
-  plus " · can edit|can view" only when everyone has the same grade. Names are cut with "…" BEFORE the grade (two names: one
-  no longer than half the room stays whole). Pick order: connections, then held addresses (the part before the @).
-  The shared case table is `ShareWithSummaryTest.sharedCases`.
+  plus " · can edit|can view|handed over" only when everyone has the same grade. Names are cut with "…" BEFORE the grade,
+  never the grade: names that must be cut share ONE common length (the largest that fits — not a half split), a short name
+  stays whole, a cut name keeps ≥ 1 letter + "…". Order (`shareSummaryOrder`, also the monograms): connections first, then
+  held addresses (the part before the @), each in pick order; submit keeps pick order. iOS's `shareDraftSummary` is the
+  canonical rule; `ShareWithSummaryTest.sharedCases` is the SAME 26-case table as iOS `ShareDraftTests.sharedCases` / web.
+- **Pre-create lines (same strings on all three):** pick / grade change "Maya can edit|view once you add the task." · hand
+  over "Maya gets it as their task once you add it — you keep view." · add an address "maya@example.com gets it once you
+  add the task." (the whole address) · remove "Maya won't get this task." (an address: "maya won't get this task.").
 - **Pre-create Share screen:** "Someone new" HOLDS the address ("Add"; listed "Gets it when you add the task · <grade>",
   ✕ takes it off) and "Add task" runs `share-task add` for THIS task after the row lands (`AppViewModel.addTask(shareEmails=)`
   → `applyCreatedShares`); a cancelled sheet sends nothing. The link is its own "Invite with a link" row (connect-only

@@ -112,8 +112,9 @@ class PreCreateShareTest {
         assertEquals("keyed by USER id — what task_share takes", mapOf("u3" to ShareLevel.PARTNER, "u1" to ShareLevel.ASSIGN), shares.people)
         assertEquals("pick order", listOf("u3", "u1"), shares.people.keys.toList())
         // …and the row on the New task sheet reads them back in PICK order; the
-        // pair is too long for the row, so the names are cut and both grades kept.
-        assertEquals("An… · edit, M… · handed over", shareWithSummary(newTaskSharePicks(roster, shares)))
+        // pair is too long for the row, so both names are cut to ONE common
+        // length and both grades kept.
+        assertEquals("A… · edit, M… · handed over", shareWithSummary(newTaskSharePicks(roster, shares)))
         m.setAccess(m.row("Maya Chen"), null)
         assertEquals("Anna · can edit", shareWithSummary(newTaskSharePicks(roster, m.state.value.shares)))
         assertNull(m.state.value.error)
@@ -185,7 +186,7 @@ class PreCreateShareTest {
         assertTrue("connections untouched", s.shares.people.isEmpty())
         assertEquals("", s.email)
         assertNull(s.busyId)
-        assertEquals("maya@example.com gets it when you add the task — they can view.", s.result)
+        assertEquals("maya@example.com gets it once you add the task.", s.result)
         // Listed where the pending invites would be — held, not sent.
         assertEquals(listOf("email:maya@example.com"), s.pending.map { it.id })
         assertEquals(ShareAccess.VIEW, s.pending.single().access)
@@ -211,7 +212,8 @@ class PreCreateShareTest {
         m.cancelPending(m.state.value.pending.first())
         assertEquals(mapOf("c@d.co" to ShareLevel.VIEW), m.state.value.shares.emails)
         assertEquals(listOf("c@d.co"), m.state.value.pending.map { it.email })
-        assertEquals("a@b.co won't get this task.", m.state.value.result)
+        // An address is named by the part before the @ when it comes off.
+        assertEquals("a won't get this task.", m.state.value.result)
     }
 
     @Test fun `people and addresses come back together to the sheet`() = runTest {
@@ -223,6 +225,22 @@ class PreCreateShareTest {
         assertEquals(mapOf("u2" to ShareLevel.PARTNER, "u3" to ShareLevel.PARTNER), shares.people)
         assertEquals(listOf("x@y.io", "z@y.io"), shares.emails.keys.toList())
         assertEquals("James + 3 more", shareWithSummary(newTaskSharePicks(roster, shares)))
+    }
+
+    @Test fun `an address added before a person is still named after them`() = runTest {
+        val m = model()
+        m.load()
+        m.setAccess(ShareAccess.VIEW)
+        m.setEmail("maya@example.com"); m.shareWithEmail()
+        assertEquals("maya@example.com gets it once you add the task.", m.state.value.result)
+        m.tap(m.row("James Wilson"))                          // Can view, picked second
+        assertEquals("James can view once you add the task.", m.state.value.result)
+        // Connections first, then held addresses — whatever order they were picked in.
+        assertEquals("James, maya · can view", shareWithSummary(newTaskSharePicks(roster, m.state.value.shares)))
+        m.setAccess(ShareAccess.EDIT)
+        m.setEmail("maya@example.com"); m.shareWithEmail()   // re-grade the address
+        assertEquals("maya@example.com gets it once you add the task.", m.state.value.result)
+        assertEquals("James · view, maya · edit", shareWithSummary(newTaskSharePicks(roster, m.state.value.shares)))
     }
 
     @Test fun `a blank field adds nothing and a bad address says why`() = runTest {

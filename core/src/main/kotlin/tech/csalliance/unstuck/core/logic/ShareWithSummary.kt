@@ -17,17 +17,24 @@ import tech.csalliance.unstuck.core.model.ShareLevel
 //                          everyone has the same one) / James + 2 more
 //
 // Names are first names ("James" from "James Wilson"; the part before the @ of
-// a typed address; a blank name is "Someone"), in PICK order — connections
-// first, then typed addresses. The line is held to [SHARE_SUMMARY_MAX]
-// characters: a long name is cut with "…" BEFORE the grade, so the grade always
-// shows. With two names, a name no longer than half the room stays whole and
-// the other gets the rest; when both are longer, the first gets the larger half.
+// a typed address; a blank name is "Someone"). ORDER ([shareSummaryOrder]):
+// connections first, in pick order, then held addresses, in pick order — the
+// summary and the monograms both read it; what is SENT keeps pick order. The
+// line is held to [SHARE_SUMMARY_MAX] characters: the NAMES are cut with "…"
+// (never the grade). Names that must be cut share ONE common length — the
+// largest that lets the line fit (not a half split each) — so a short name
+// stays whole and a long one gives way; a cut name keeps at least one letter
+// + "…", and spaces before the "…" are dropped. iOS's `shareDraftSummary`
+// (ShareDraft.swift) is the canonical rule; the shared case table
+// (ShareWithSummaryTest.sharedCases) is the same on iOS, Android and web.
 //
 // Pure so the sheet, the screen and the tests share one source of truth.
 
 /** One pick on the New task sheet: a display name (a typed address is its own
- *  name) and the level the create applies (`task_share.p_level`). */
-data class SharePick(val name: String, val level: ShareLevel)
+ *  name), the level the create applies (`task_share.p_level`), and whether it
+ *  is a typed [address] (held until "Add task") rather than a connection — the
+ *  summary names connections first ([shareSummaryOrder]). */
+data class SharePick(val name: String, val level: ShareLevel, val address: Boolean = false)
 
 /** What the New task sheet will share once the task is added. Nothing leaves the
  *  device before "Add task"; a cancelled sheet sends nothing.
@@ -103,7 +110,7 @@ const val SHARE_ROW_MAX_MONOGRAMS = 3
 
 /** Everything picked, named, in PICK order: connections (named from the roster;
  *  one it doesn't know reads "Someone" — never silently dropped), then typed
- *  addresses (the address is the name). */
+ *  addresses (the address is the name, [SharePick.address] set). */
 fun newTaskSharePicks(roster: List<CircleMember>, shares: NewTaskShares): List<SharePick> {
     if (shares.isEmpty) return emptyList()
     val names = HashMap<String, String>()
@@ -113,12 +120,19 @@ fun newTaskSharePicks(roster: List<CircleMember>, shares: NewTaskShares): List<S
         if (n.isNotEmpty() && uid !in names) names[uid] = n
     }
     return shares.people.map { (uid, level) -> SharePick(names[uid] ?: SHARE_PICK_UNNAMED, level) } +
-        shares.emails.map { (email, level) -> SharePick(email, level) }
+        shares.emails.map { (email, level) -> SharePick(email, level, address = true) }
 }
 
+/** The order the summary and the row's monograms name picks in: connections
+ *  first, in pick order, then typed addresses, in pick order (iOS
+ *  `shareDraftSummaryOrder`). Stable: already-ordered input is unchanged. */
+fun shareSummaryOrder(picks: List<SharePick>): List<SharePick> =
+    picks.filter { !it.address } + picks.filter { it.address }
+
 /** The one-line summary on the "Share with…" row (see the rule above). */
-fun shareWithSummary(picks: List<SharePick>, max: Int = SHARE_SUMMARY_MAX): String {
-    if (picks.isEmpty()) return SHARE_SUMMARY_NONE
+fun shareWithSummary(picked: List<SharePick>, max: Int = SHARE_SUMMARY_MAX): String {
+    if (picked.isEmpty()) return SHARE_SUMMARY_NONE
+    val picks = shareSummaryOrder(picked)
     val names = picks.map { summaryName(it.name) }
     val uniform = picks.all { it.level == picks[0].level }
     val grade = gradeLong(picks[0].level)
@@ -137,7 +151,7 @@ fun shareWithSummary(picks: List<SharePick>, max: Int = SHARE_SUMMARY_MAX): Stri
 /** The row's monogram letters: the first [SHARE_ROW_MAX_MONOGRAMS] picks, in the
  *  summary's order, one upper-case letter each. */
 fun shareRowMonograms(picks: List<SharePick>): List<String> =
-    picks.take(SHARE_ROW_MAX_MONOGRAMS).map { p ->
+    shareSummaryOrder(picks).take(SHARE_ROW_MAX_MONOGRAMS).map { p ->
         val n = p.name.trim().ifEmpty { SHARE_PICK_UNNAMED }
         n.first().uppercaseChar().toString()
     }
@@ -160,12 +174,13 @@ fun sharePreCreateLine(name: String, level: ShareLevel?): String {
 }
 
 /** The honest line after "Someone new" on the PRE-CREATE Share screen: the
- *  address is HELD until "Add task". [level] null = it was taken off. */
-fun sharePreCreateEmailLine(email: String, level: ShareLevel?): String = when (level) {
-    null -> "$email won't get this task."
-    ShareLevel.VIEW -> "$email gets it when you add the task — they can view."
-    else -> "$email gets it when you add the task — they can edit."
-}
+ *  address is HELD until "Add task". Adding (or re-grading) names the whole
+ *  address (trimmed, lower-cased): "maya@example.com gets it once you add the
+ *  task."; taking it off ([level] null) names the part before the @: "maya
+ *  won't get this task." The SAME strings on iOS, Android and web. */
+fun sharePreCreateEmailLine(email: String, level: ShareLevel?): String =
+    if (level == null) "${shareShortName(email)} won't get this task."
+    else "${normalizedShareEmail(email)} gets it once you add the task."
 
 /** Under a held address on the PRE-CREATE Share screen: "Gets it when you add
  *  the task · can edit". */
@@ -184,30 +199,28 @@ private fun gradeLong(level: ShareLevel): String =
 private fun gradeShort(level: ShareLevel): String =
     ShareAccess.fromTaskLevel(level)?.verb ?: "handed over"
 
-/** [line] with [names] in it, the names cut so the whole stays within [max]. */
+/** [line] with [names] in it; when it is longer than [max], the names are
+ *  capped at ONE common length — the largest whose total fits the room the
+ *  fixed text (the grade included) leaves — and cut with "…". A name no
+ *  longer than the cap stays whole; the cap never goes below one letter + "…"
+ *  (past that the Text ellipsizes, never the rule). */
 private fun fitNames(names: List<String>, max: Int, line: (List<String>) -> String): String {
     val full = line(names)
     if (full.length <= max) return full
     val room = max - line(names.map { "" }).length
-    return line(
-        if (names.size == 1) listOf(clip(names[0], room))
-        else {
-            val (a, b) = names
-            val half = room / 2
-            when {
-                a.length <= half -> listOf(a, clip(b, room - a.length))
-                b.length <= half -> listOf(clip(a, room - b.length), b)
-                else -> listOf(clip(a, room - half), clip(b, half))
-            }
-        },
-    )
+    val floor = 2 // one letter + "…"
+    var cap = names.maxOfOrNull { it.length } ?: floor
+    while (cap > floor && names.sumOf { minOf(it.length, cap) } > room) cap--
+    return line(names.map { clip(it, cap) })
 }
 
-/** [s] in at most [room] characters, the last an ellipsis — never below one
- *  letter + "…", never splitting a surrogate pair. */
-private fun clip(s: String, room: Int): String {
-    if (s.length <= room) return s
-    var head = s.take(maxOf(room, 2) - 1)
+/** [s] in at most [cap] characters, the last an ellipsis — never below one
+ *  letter + "…", spaces before the "…" dropped, never splitting a surrogate
+ *  pair. */
+private fun clip(s: String, cap: Int): String {
+    if (s.length <= cap) return s
+    var head = s.take(maxOf(cap, 2) - 1)
     if (head.isNotEmpty() && head.last().isHighSurrogate()) head = head.dropLast(1)
-    return head.trimEnd().ifEmpty { s.take(1) } + "…"
+    val kept = head.trimEnd().ifEmpty { s.take(if (s.length > 1 && s[0].isHighSurrogate()) 2 else 1) }
+    return "$kept…"
 }

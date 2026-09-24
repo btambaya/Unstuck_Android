@@ -5,6 +5,7 @@ import android.os.Looper
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.test.click
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.hasContentDescription
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
 import androidx.compose.ui.test.junit4.createComposeRule
@@ -205,7 +206,12 @@ class CollItemRowGestureTest {
 
         compose.onNodeWithContentDescription("Save").performClick()
         waitForStored("saved") { it.body == "Buy oat milk" }
-        compose.onNodeWithContentDescription("Buy oat milk").assertExists()
+        // Stored is not yet shown: the row re-reads the store through Room's own
+        // query thread, so the screen catches up a beat later. Asserting in the
+        // same instant raced it (caught failing with the row there a moment on).
+        compose.waitUntil("the row shows the edit", WAIT_MS) {
+            compose.onAllNodes(hasContentDescription("Buy oat milk")).fetchSemanticsNodes().isNotEmpty()
+        }
     }
 
     private companion object {

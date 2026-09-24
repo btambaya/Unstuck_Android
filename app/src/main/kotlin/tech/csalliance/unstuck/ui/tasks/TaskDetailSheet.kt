@@ -199,7 +199,10 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
 
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
+        // imePadding before verticalScroll: the keyboard must shrink the scroll's
+        // viewport, or a field near the bottom (Capture a thought…, the call
+        // notes) stays under it (see CollectionDetailScreen, KeyboardInsetsTest).
+        Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 AreaDotColor(areaColorFor(task.lifeArea, areas, c), size = 6)
                 SectionLabel("${(task.lifeArea ?: "Task").uppercase()} · TASK")

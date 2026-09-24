@@ -146,7 +146,7 @@ fun FactsPanelScreen(host: FactsHost, onBack: () -> Unit) {
     val c = UTheme.colors
     Column(Modifier.fillMaxSize().background(c.bg)) {
         AppBar(title = FactsPanelCopy.NAV_TITLE, leading = Leading.BACK, trailingSearch = false, onLeading = onBack)
-        Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 18.dp)) {
+        Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp)) {
             SectionLabel(FactsPanelCopy.EYEBROW, color = c.primaryDeep, modifier = Modifier.padding(top = 4.dp))
             Text(FactsPanelCopy.TITLE, style = UFont.serifItalic(26), color = c.ink, modifier = Modifier.padding(top = 4.dp, bottom = 12.dp))
             FactsPanelContent(host)

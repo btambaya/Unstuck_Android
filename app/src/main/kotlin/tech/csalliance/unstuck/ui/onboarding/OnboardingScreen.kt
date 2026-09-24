@@ -88,7 +88,7 @@ fun OnboardingScreen(vm: AppViewModel, onDone: () -> Unit) {
         onDone()
     }
 
-    Column(Modifier.fillMaxSize().background(c.bg).verticalScroll(rememberScrollState()).imePadding().padding(horizontal = 22.dp, vertical = 30.dp)) {
+    Column(Modifier.fillMaxSize().background(c.bg).imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 22.dp, vertical = 30.dp)) {
         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp, Alignment.CenterHorizontally)) {
             (0..lastStep).forEach { i ->
                 Box(Modifier.height(6.dp).width(if (i == step) 16.dp else 6.dp).clip(RoundedCornerShape(999.dp)).background(if (i <= step) c.ink else c.line2))

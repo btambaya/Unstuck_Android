@@ -81,28 +81,30 @@ object SettingsCopy {
     // ── Notifications & calls ──
     const val REMINDERS = "Reminders"
     const val LEVEL_ROW = "How much Unstuck checks in"
-    const val LEVEL_COACH_NOTE = "This also sets how often the focus coach talks during a session."
+    const val LEVEL_COACH_NOTE = "This also sets how often Unstuck talks you through a focus session."
     const val LEAD_ROW = "Remind me before a task"
+    const val LEAD_SUB = "Reminders work even offline. Any task can have its own time."
     const val NOTIFS_OFF = "Notifications are off for Unstuck, so reminders can't reach you."
     const val NOTIFS_OFF_FIX = "Turn on"
     const val EXACT_ALARM = "Reminders may arrive late."
     const val EXACT_ALARM_FIX = "Fix"
     const val CALLS = "Calls"
-    const val CALLS_INTRO = "Ask the assistant, or tick “Call me about this” on a task, and your phone rings with your notes."
+    const val CALLS_INTRO = "Unstuck can ring your phone to plan, check in or go over your notes. It only rings when you ask, or for the calls you turn on below."
     const val CALLS_SWITCH = "Let Unstuck call this phone"
-    const val CALLS_SWITCH_OFF_SUB = "Off: calls are declined and you get the notes as a notification."
+    const val CALLS_SWITCH_OFF_SUB = "Off: this phone won't ring. You'll get a notification with the notes instead."
     const val CALLS_HOURS = "Only call between"
     const val CALLS_HOURS_AND = "and"
-    const val CALLS_HOURS_SUB = "Outside these hours a call is declined and you get the notes as a notification."
+    const val CALLS_HOURS_SUB = "Outside these hours it won't ring. You'll get a notification with the notes instead."
     const val CALLS_MORNING = "Morning call"
     const val CALLS_MORNING_SUB = "Rings to plan the day with you."
     const val CALLS_EVENING = "Evening call"
-    const val CALLS_EVENING_SUB = "Rings to go over the day and what moves to tomorrow."
+    const val CALLS_EVENING_SUB = "Rings to go over what got done and what moves to tomorrow."
     const val CALLS_AFTER_BLOCK = "Call me after a focus block"
-    const val CALLS_AFTER_BLOCK_SUB = "When a block ends without its task marked done."
+    const val CALLS_AFTER_BLOCK_SUB = "Rings when a block ends and its task isn't done yet."
     const val CALLS_AT = "at"
     const val CALLS_TEST = "Try a test call"
     const val CALLS_TEST_SUB = "We'll ring you in about a minute."
+    const val CALLS_TEST_BOOKING = "Booking…"
     /** The whole Calls block while the Assistant or AI data sharing is off is
      *  ONE line (core CallsBlockState.needsLine) with this fix. */
     const val CALLS_NEED_ASSISTANT_FIX = "Turn on"
@@ -172,24 +174,29 @@ fun settingsLinkTarget(link: String): SettingsLinkTarget? {
 }
 
 /**
- * Every name a section has ever had, case-insensitive (plan §4 "Deep links").
- * Spaces, dashes, underscores and "&"/"and" are ignored, so "Areas & tags",
- * "areas-and-tags" and "AreasTags" are one key. Unknown → the hub.
+ * Every name a section has ever had (plan §4 "Deep links"). One matching rule
+ * on all three platforms (copy canon §5): lowercase, "&" → "and", then drop
+ * everything that isn't a letter or a digit — so spaces, dashes, underscores
+ * and "+" all fall out, and "Areas & tags", "areas-and-tags", "areas_tags" and
+ * "AreasTags" are one key. The names below are written in that reduced form
+ * (anything else never matches). Unknown → the hub.
  */
 fun settingsSectionAlias(raw: String): SettingsLinkTarget {
-    val k = raw.lowercase().replace("&", "and").filter { it.isLetterOrDigit() }
-    return when (k) {
-        "notifications", "notification", "notificationsandcalls", "calls", "call", "reminders" ->
+    return when (settingsAliasKey(raw)) {
+        "notifications", "notification", "notificationsandcalls", "notificationscalls",
+        "calls", "call", "callsfromunstuck", "reminders", "reminder" ->
             SettingsLinkTarget.Section(SettingsSection.NOTIFICATIONS)
-        "assistant", "assistantandprivacy", "ai", "privacy", "memory", "knows", "whatunstuckknows" ->
+        "assistant", "assistantandprivacy", "assistantprivacy", "ai", "aiassistant", "aidatasharing",
+        "privacy", "memory", "knows", "whatunstuckknows" ->
             SettingsLinkTarget.Section(SettingsSection.ASSISTANT)
+        // One level deeper than the other platforms: straight onto the screen.
         "remembers", "whatunstuckremembers", "facts" ->
             SettingsLinkTarget.Section(SettingsSection.MEMORY)
-        "interface", "appearance", "accessibility", "a11y", "theme", "textsize" ->
+        "interface", "appearance", "accessibility", "a11y", "theme", "textsize", "display" ->
             SettingsLinkTarget.Section(SettingsSection.APPEARANCE)
-        "people", "connections", "circle", "peopleyousharewith" ->
+        "people", "connections", "circle", "trustedcircle", "peopleyousharewith", "sharing" ->
             SettingsLinkTarget.Section(SettingsSection.PEOPLE)
-        "account", "backup", "export" ->
+        "account", "backup", "export", "sync", "profile", "password", "delete" ->
             SettingsLinkTarget.Section(SettingsSection.ACCOUNT)
         "feedback", "sendfeedback" -> SettingsLinkTarget.Feedback
         "areas", "area", "tags", "tag", "areasandtags", "areastags" -> SettingsLinkTarget.AreasAndTags
@@ -197,6 +204,10 @@ fun settingsSectionAlias(raw: String): SettingsLinkTarget {
         else -> SettingsLinkTarget.Hub
     }
 }
+
+/** The reduced form a section name is matched in (see [settingsSectionAlias]). */
+internal fun settingsAliasKey(raw: String): String =
+    raw.lowercase().replace("&", "and").filter { it.isLetterOrDigit() }
 
 private fun decodeLinkPart(s: String): String =
     runCatching { java.net.URLDecoder.decode(s, "UTF-8") }.getOrDefault(s)

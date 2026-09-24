@@ -220,7 +220,7 @@ class AssistantReceiptsTest {
         assertEquals("usable time set — weekdays 240 min", r("set_usable_minutes", "ok: usable time set — weekdays 240 min")!!.label)
         assertEquals(ReceiptIcon.PENCIL, r("set_notification_level", "ok: notifications set to calm")!!.icon)
         assertEquals("reminders 10 min before", r("set_reminder_lead", "ok: reminders 10 min before")!!.label)
-        assertEquals(Receipt(ReceiptIcon.PENCIL, "morning moment on"), r("set_ritual", "ok: morning moment on"))
+        assertEquals(Receipt(ReceiptIcon.PENCIL, "Morning plan on"), r("set_ritual", "ok: Morning plan on"))
     }
 
     @Test fun `call tools (Part B)`() {

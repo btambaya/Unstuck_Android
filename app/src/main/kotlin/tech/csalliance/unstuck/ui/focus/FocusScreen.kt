@@ -430,18 +430,18 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
 
         if (confirmExit) androidx.compose.material3.AlertDialog(
             onDismissRequest = { confirmExit = false },
-            title = { Text("Leave focus?", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
-            text = { Text("Your timer keeps running — you can pick it back up from Today.", style = UFont.sans(13), color = c.ink2) },
-            confirmButton = { androidx.compose.material3.TextButton(onClick = { confirmExit = false; onClose() }) { Text("Leave", color = c.primaryDeep) } },
+            title = { Text(FocusOptionsCopy.LEAVE_TITLE, style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
+            text = { Text(FocusOptionsCopy.LEAVE_BODY, style = UFont.sans(13), color = c.ink2) },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { confirmExit = false; onClose() }) { Text(FocusOptionsCopy.LEAVE, color = c.primaryDeep) } },
             dismissButton = {
                 Row {
-                    // Leave now and stop asking (Focus ⋯ → "Ask before I leave" turns it back on).
+                    // Leave now and stop asking (Focus ⋯ → "Ask before I leave a session" turns it back on).
                     androidx.compose.material3.TextButton(onClick = {
                         confirmExit = false
                         vm.updateSettings { it.copy(focusSoftExit = false) }
                         onClose()
-                    }) { Text(FocusOptionsCopy.DONT_ASK, color = c.ink2) }
-                    androidx.compose.material3.TextButton(onClick = { confirmExit = false }) { Text("Stay", color = c.ink2) }
+                    }) { Text(FocusOptionsCopy.LEAVE_DONT_ASK, color = c.ink2) }
+                    androidx.compose.material3.TextButton(onClick = { confirmExit = false }) { Text(FocusOptionsCopy.STAY, color = c.ink2) }
                 }
             },
             containerColor = c.surface,

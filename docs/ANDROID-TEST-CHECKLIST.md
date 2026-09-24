@@ -236,7 +236,7 @@ The must-pass set. If any item fails, do not ship.
 - [ ] Overrun +10 / +15 extends estimate, resets promptFired, returns to RUNNING.
 - [ ] Overrun "Stop here": stop service, finishFocus(markDone=false), Session recorded, task stays open, screen closes.
 - [ ] focusOverrunMin=0 disables prompt forever (grace=∞).
-- [ ] Soft-exit confirm on RUNNING (focusSoftExit=true): "Leave focus? Your timer keeps running" → Stay/Leave; live session persists.
+- [ ] Soft-exit confirm on RUNNING (focusSoftExit=true): "Leave this session? Your timer keeps running" → Leave / Leave and don't ask again / Stay; live session persists.
 - [ ] Capture sheet saves with tag (follow-up/idea/edit/question/distraction), correct sessionId; shows in cockpit rail.
 - [ ] Capture from notification action opens focus with CaptureSheet already open (autoCapture=true).
 - [ ] Ambient audio plays only when ambient≠off + focus active; loops at low volume; continues in background; stops on dispose.

@@ -1511,11 +1511,13 @@ class AssistantToolsTest {
         assertEquals("error: could not save (offline?)", offline.run("set_reminder_lead", "minutes" to 5))
     }
 
-    @Test fun `set_ritual turns a moment on (default) or off, rejects an unknown ritual`() = runTest {
+    /** Said by the routine's name (Morning plan, …), as on iOS and the web. */
+    @Test fun `set_ritual turns a routine on (default) or off, rejects an unknown ritual`() = runTest {
         val h = makeApi()
-        assertEquals("ok: morning moment on", h.run("set_ritual", "ritual" to "Morning"))
-        assertEquals("ok: sunday moment off", h.run("set_ritual", "ritual" to "sunday", "on" to false))
-        assertEquals("error: the morning moment is already on — nothing changed", h.run("set_ritual", "ritual" to "morning"))
+        assertEquals("ok: Morning plan on", h.run("set_ritual", "ritual" to "Morning"))
+        assertEquals("ok: Sunday plan-ahead off", h.run("set_ritual", "ritual" to "sunday", "on" to false))
+        assertEquals("error: Morning plan is already on — nothing changed", h.run("set_ritual", "ritual" to "morning"))
+        assertFalse("never the old word", h.run("set_ritual", "ritual" to "evening").contains("moment"))
         assertEquals(listOf("ritual:morning:true", "ritual:sunday:false"), h.state.prefCalls)
         assertEquals("error: ritual must be morning, evening, friday, or sunday", h.run("set_ritual", "ritual" to "lunch"))
     }
@@ -2037,7 +2039,7 @@ class AssistantToolsTest {
                 "- focus options (⋯ Options on the Focus screen): new tasks start at 25m, check in never, ask before leaving on, ask why pausing on\n" +
                 "- theme: dark (Settings → Appearance)\n- text size: default (Settings → Appearance)\n" +
                 "- background noise: on (the speaker button on the Focus screen)\n" +
-                "- routines: morning off, evening on, friday off, sunday on",
+                "- routines (web assistant panel): Morning plan off, Evening wind-down on, Friday look-back off, Sunday plan-ahead on",
             out,
         )
         // Slim settings: never a retired control the user would go looking for.
@@ -2074,7 +2076,7 @@ class AssistantToolsTest {
         assertEquals("error: could not save the theme", offline.run("set_theme", "theme" to "light"))
         assertEquals("error: could not save background noise", offline.run("set_ambient_sound", "sound" to "brown"))
         assertEquals("error: could not save the focus defaults", offline.run("set_focus_defaults", "pauseReasons" to false))
-        assertEquals("error: could not save the morning moment (offline?)", offline.run("set_ritual", "ritual" to "morning"))
+        assertEquals("error: couldn't save Morning plan — it is still off", offline.run("set_ritual", "ritual" to "morning"))
     }
 
     @Test fun `forget_fact reports a store that refused`() = runTest {

@@ -89,13 +89,13 @@ internal fun testCallStateFrom(result: String): TestCallState {
     else TestCallState.Failed(tech.csalliance.unstuck.ui.tasks.CallMeLogic.userMessage(result).let { if (it.endsWith(".")) it else "$it." })
 }
 
-/** iOS "Booked — ringing at HH:MM. Lock your phone and wait." */
-internal fun testCallBookedLine(at: String) = "Booked — ringing at $at. Lock your phone and wait."
+/** "Booked. It rings at HH:MM. Lock your phone and wait." (copy canon #13). */
+internal fun testCallBookedLine(at: String) = "Booked. It rings at $at. Lock your phone and wait."
 
 /** The test-call row's sub-line through each state. */
 internal fun testCallLine(state: TestCallState): String = when (state) {
     TestCallState.Idle -> SettingsCopy.CALLS_TEST_SUB
-    TestCallState.Booking -> "Booking…"
+    TestCallState.Booking -> SettingsCopy.CALLS_TEST_BOOKING
     is TestCallState.Booked -> testCallBookedLine(state.at)
     is TestCallState.Failed -> state.why
 }
@@ -199,7 +199,7 @@ internal fun NotificationsCallsContent(vm: AppViewModel, onSection: (SettingsSec
                 }
             }
             CardDivider()
-            SegBlock(SettingsCopy.LEAD_ROW, LEAD_LABELS.map { it.first }, leadLabel(s.reminderLeadMin), last = true) { v ->
+            SegBlock(SettingsCopy.LEAD_ROW, LEAD_LABELS.map { it.first }, leadLabel(s.reminderLeadMin), sub = SettingsCopy.LEAD_SUB, last = true) { v ->
                 val min = LEAD_LABELS.firstOrNull { it.first == v }?.second ?: 0
                 vm.updateSettings { it.copy(reminderLeadMin = min) }
             }

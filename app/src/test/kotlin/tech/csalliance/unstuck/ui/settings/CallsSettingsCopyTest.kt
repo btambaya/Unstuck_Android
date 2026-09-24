@@ -16,7 +16,7 @@ class CallsSettingsCopyTest {
 
     @Test fun `a booked test call reports the time the row landed on`() {
         assertEquals(TestCallState.Booked("14:31"), testCallStateFrom("ok: call booked 2026-09-07 14:31 \"Test call\" (1 note) id=c9"))
-        assertEquals("Booked — ringing at 14:31. Lock your phone and wait.", testCallBookedLine("14:31"))
+        assertEquals("Booked. It rings at 14:31. Lock your phone and wait.", testCallBookedLine("14:31"))
     }
 
     @Test fun `a refused test call shows the guard's sentence`() {
@@ -41,7 +41,7 @@ class CallsSettingsCopyTest {
     @Test fun `the test-call row says where it is`() {
         assertEquals("We'll ring you in about a minute.", testCallLine(TestCallState.Idle))
         assertEquals("Booking…", testCallLine(TestCallState.Booking))
-        assertEquals("Booked — ringing at 09:05. Lock your phone and wait.", testCallLine(TestCallState.Booked("09:05")))
+        assertEquals("Booked. It rings at 09:05. Lock your phone and wait.", testCallLine(TestCallState.Booked("09:05")))
         assertEquals("Nope.", testCallLine(TestCallState.Failed("Nope.")))
     }
 
@@ -77,6 +77,18 @@ class CallsSettingsCopyTest {
         assertEquals("Evening call", SettingsCopy.CALLS_EVENING)
         assertEquals("Call me after a focus block", SettingsCopy.CALLS_AFTER_BLOCK)
         assertEquals("Try a test call", SettingsCopy.CALLS_TEST)
+        // The copy canon (web · iOS · Android, 2026-09-24).
+        assertEquals(
+            "Unstuck can ring your phone to plan, check in or go over your notes. It only rings when you ask, or for the calls you turn on below.",
+            SettingsCopy.CALLS_INTRO,
+        )
+        assertEquals("Off: this phone won't ring. You'll get a notification with the notes instead.", SettingsCopy.CALLS_SWITCH_OFF_SUB)
+        assertEquals("Outside these hours it won't ring. You'll get a notification with the notes instead.", SettingsCopy.CALLS_HOURS_SUB)
+        assertEquals("Rings to plan the day with you.", SettingsCopy.CALLS_MORNING_SUB)
+        assertEquals("Rings to go over what got done and what moves to tomorrow.", SettingsCopy.CALLS_EVENING_SUB)
+        assertEquals("Rings when a block ends and its task isn't done yet.", SettingsCopy.CALLS_AFTER_BLOCK_SUB)
+        assertEquals("We'll ring you in about a minute.", SettingsCopy.CALLS_TEST_SUB)
+        assertEquals("Booking…", SettingsCopy.CALLS_TEST_BOOKING)
         assertEquals("Calls need the Assistant, which is off.", tech.csalliance.unstuck.core.logic.CallsBlockState.needsLine(assistantOn = false, aiSharingOn = true))
         assertEquals("Turn on", SettingsCopy.CALLS_NEED_ASSISTANT_FIX)
         assertEquals("Calls need microphone access — turn it on for Unstuck in Android Settings.", CALLS_TEST_MIC_REFUSED)

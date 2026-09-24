@@ -2,6 +2,7 @@ package tech.csalliance.unstuck.ui.assistant
 
 import tech.csalliance.unstuck.core.logic.renderPeriodReview
 import tech.csalliance.unstuck.core.logic.PeriodReviewArgs
+import tech.csalliance.unstuck.core.logic.RITUAL_LABELS
 import tech.csalliance.unstuck.core.logic.DEFAULT_AREAS
 import tech.csalliance.unstuck.core.logic.FocusTimer
 import tech.csalliance.unstuck.core.logic.InsightsWindow
@@ -707,7 +708,9 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
                 "- theme: ${s.theme} (Settings → Appearance)\n" +
                 "- text size: ${s.textSize} (Settings → Appearance)\n" +
                 "- background noise: ${onOff(ambientIsOn(s.ambient))} (the speaker button on the Focus screen)\n" +
-                "- routines: ${listOf("morning", "evening", "friday", "sunday").joinToString(", ") { "$it ${onOff(s.rituals[it] ?: false)}" }}"
+                // Said by the routine's name (Morning plan, …): the words the web
+                // assistant panel's Routines switches show (iOS + web parity).
+                "- routines (web assistant panel): ${RITUAL_LABELS.joinToString(", ") { "${it.label} ${onOff(s.rituals[it.key.raw] ?: false)}" }}"
         }
 
         "set_usable_minutes" -> {
@@ -737,9 +740,12 @@ suspend fun runSurfaceTool(name: String, args: ToolArgs, api: AssistantApi, scra
             val r = (args.str("ritual") ?: "").lowercase()
             if (r !in listOf("morning", "evening", "friday", "sunday")) return "error: ritual must be morning, evening, friday, or sunday"
             val on = args.bool("on") ?: true
-            if (api.getSettings().rituals[r] == on) return "error: the $r moment is already ${onOff(on)} — nothing changed"
-            if (!api.setRitual(r, on)) return "error: could not save the $r moment (offline?)"
-            "ok: $r moment ${onOff(on)}"
+            val cur = api.getSettings().rituals[r] ?: false
+            // Said by the routine's name (Morning plan, …), as on iOS and the web.
+            val name = RITUAL_LABELS.firstOrNull { it.key.raw == r }?.label ?: r
+            if (cur == on) return "error: $name is already ${onOff(on)} — nothing changed"
+            if (!api.setRitual(r, on)) return "error: couldn't save $name — it is still ${onOff(cur)}"
+            "ok: $name ${onOff(on)}"
         }
 
         "set_theme" -> {

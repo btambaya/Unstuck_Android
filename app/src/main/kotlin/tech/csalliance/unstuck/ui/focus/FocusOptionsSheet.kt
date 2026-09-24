@@ -46,18 +46,30 @@ internal object FocusOptionsCopy {
     const val DONE = "Done"
     const val OVERRUN = "Check in when I run over"
     val OVERRUN_OPTIONS = listOf("Never" to 0, "5 min" to 5, "10 min" to 10)
-    const val OVERRUN_SUB = "How long after the timer runs out before Unstuck asks how it's going."
+    const val OVERRUN_SUB = "How long after time's up before Unstuck asks how it's going."
     const val SOFT_EXIT = "Ask before I leave a session"
-    const val SOFT_EXIT_SUB = "Leaving keeps the timer running either way."
+    const val SOFT_EXIT_SUB = "A quick check before you leave. Your timer keeps running either way."
     const val PAUSE_REASONS = "Ask why I'm pausing"
-    const val PAUSE_REASONS_SUB = "One tap, and it helps you pick back up."
+    const val PAUSE_REASONS_SUB = "One tap on a reason. It helps you spot patterns later."
     const val COACH = "Talk me through the session"
-    const val COACH_SUB = "Short spoken check-ins: halfway, five to go, time's up. How often follows your check-in level in Settings."
+    const val COACH_SUB = "Short spoken updates: halfway, five minutes left, time's up. How often is set in Settings → Notifications & calls."
     const val VOICE = "Voice replies"
-    const val VOICE_SUB = "After a spoken question it listens for a few seconds (“add five”, “stop”, “keep going”). Nothing is recorded or sent."
+    const val VOICE_SUB = "After a question, answer out loud: “add five”, “stop” or “keep going”. It listens on this phone for a few seconds; nothing is recorded."
+    /** Voice replies while the spoken coach is off: the row stays, greyed out. */
+    const val VOICE_OFF_SUB = "Turn on “Talk me through the session” first."
 
-    /** The leave / pause questions' opt-out. */
+    /** The pause question's opt-out (it doesn't leave the session). */
     const val DONT_ASK = "Don't ask again"
+
+    // The leave-focus question (copy canon §4): the title uses the option's own
+    // words ("Ask before I leave a session"); the opt-out also leaves.
+    const val LEAVE_TITLE = "Leave this session?"
+    const val LEAVE_BODY = "Your timer keeps running. You can pick it back up from Today."
+    const val LEAVE = "Leave"
+    const val LEAVE_DONT_ASK = "Leave and don't ask again"
+    const val STAY = "Stay"
+
+    fun voiceSub(coachOn: Boolean): String = if (coachOn) VOICE_SUB else VOICE_OFF_SUB
 
     fun overrunLabel(min: Int): String = OVERRUN_OPTIONS.firstOrNull { it.second == min }?.first ?: "$min min"
     fun overrunMinutes(label: String): Int = OVERRUN_OPTIONS.firstOrNull { it.first == label }?.second ?: 5
@@ -103,15 +115,16 @@ internal fun FocusOptionsSheet(vm: AppViewModel, onDismiss: () -> Unit) {
             }
             // Hands-Free Focus Copilot (Phase 1, on-device, no LLM/network).
             SettingsCard {
-                ToggleRow(FocusOptionsCopy.COACH, s.focusCopilotSpeak, sub = FocusOptionsCopy.COACH_SUB, last = !s.focusCopilotSpeak, modifier = Modifier.testTag("focus-options-coach")) { v ->
+                ToggleRow(FocusOptionsCopy.COACH, s.focusCopilotSpeak, sub = FocusOptionsCopy.COACH_SUB, modifier = Modifier.testTag("focus-options-coach")) { v ->
                     vm.updateSettings { it.copy(focusCopilotSpeak = v) }
                 }
-                // Only meaningful while the spoken coach is on (it adds the mic).
-                if (s.focusCopilotSpeak) {
-                    ToggleRow(FocusOptionsCopy.VOICE, s.focusCopilotVoice, sub = FocusOptionsCopy.VOICE_SUB, last = true, modifier = Modifier.testTag("focus-options-voice")) { v ->
-                        vm.updateSettings { it.copy(focusCopilotVoice = v) }
-                    }
-                }
+                // Only works while the spoken coach is on (it adds the mic): off,
+                // the row stays in place, greyed out, and says what to turn on.
+                val voiceUsable = s.focusCopilotSpeak
+                ToggleRow(
+                    FocusOptionsCopy.VOICE, s.focusCopilotVoice, last = true, enabled = voiceUsable,
+                    sub = FocusOptionsCopy.voiceSub(voiceUsable), modifier = Modifier.testTag("focus-options-voice"),
+                ) { v -> vm.updateSettings { it.copy(focusCopilotVoice = v) } }
             }
         }
     }

@@ -114,6 +114,49 @@ class SlimSettingsTest {
         assertEquals(Hub, settingsSectionAlias("insights"))
     }
 
+    /** One matching rule on all three platforms (copy canon §5): lowercase,
+     *  "&" → "and", then drop everything that isn't a letter or a digit. */
+    @Test fun `aliases fold case, ampersands, spaces, dashes, underscores and plus`() {
+        assertEquals("notificationsandcalls", settingsAliasKey("Notifications & Calls"))
+        assertEquals("aiassistant", settingsAliasKey("ai-assistant"))
+        assertEquals("callsfromunstuck", settingsAliasKey("calls_from_unstuck"))
+        assertEquals("areastags", settingsAliasKey("areas+tags"))
+        assertEquals(Section(SettingsSection.ASSISTANT), settingsSectionAlias("ai-assistant"))
+        assertEquals(Section(SettingsSection.NOTIFICATIONS), settingsSectionAlias("calls_from_unstuck"))
+        assertEquals(AreasAndTags, settingsSectionAlias("areas+tags"))
+        // "+" in a query arrives as a space after URL decoding — it drops out too.
+        assertEquals(Section(SettingsSection.ASSISTANT), settingsLinkTarget("unstuck://settings?section=ai+assistant"))
+        assertEquals(Section(SettingsSection.PEOPLE), settingsLinkTarget("unstuck://settings/trusted_circle"))
+    }
+
+    /** The canonical names, in the reduced form (copy canon §5). */
+    @Test fun `every canonical name opens its section`() {
+        for (k in listOf("account", "backup", "export", "sync", "profile", "password", "delete")) {
+            assertEquals(k, Section(SettingsSection.ACCOUNT), settingsSectionAlias(k))
+        }
+        for (k in listOf(
+            "notifications", "notification", "notificationsandcalls", "notificationscalls",
+            "calls", "call", "callsfromunstuck", "reminders", "reminder",
+        )) assertEquals(k, Section(SettingsSection.NOTIFICATIONS), settingsSectionAlias(k))
+        for (k in listOf(
+            "assistant", "assistantandprivacy", "assistantprivacy", "ai", "aiassistant", "aidatasharing",
+            "privacy", "memory", "knows", "whatunstuckknows",
+        )) assertEquals(k, Section(SettingsSection.ASSISTANT), settingsSectionAlias(k))
+        // Android opens these one level deeper, on What Unstuck remembers.
+        for (k in listOf("remembers", "whatunstuckremembers", "facts")) {
+            assertEquals(k, Section(SettingsSection.MEMORY), settingsSectionAlias(k))
+        }
+        for (k in listOf("people", "peopleyousharewith", "connections", "circle", "trustedcircle", "sharing")) {
+            assertEquals(k, Section(SettingsSection.PEOPLE), settingsSectionAlias(k))
+        }
+        for (k in listOf("appearance", "interface", "accessibility", "a11y", "theme", "textsize", "display")) {
+            assertEquals(k, Section(SettingsSection.APPEARANCE), settingsSectionAlias(k))
+        }
+        for (k in listOf("feedback", "sendfeedback")) assertEquals(k, Feedback, settingsSectionAlias(k))
+        for (k in listOf("areas", "area", "tags", "tag", "areasandtags", "areastags")) assertEquals(k, AreasAndTags, settingsSectionAlias(k))
+        for (k in listOf("focus", "sound", "sounds")) assertEquals(k, Focus, settingsSectionAlias(k))
+    }
+
     // ── appearance: one text size ──
 
     @Test fun `text size replaces density and larger type`() {
@@ -172,8 +215,31 @@ class SlimSettingsTest {
         assertEquals("Also a nudge when a task should start, a check-in if you've paused a while, and a morning summary.", NotificationLevel.BALANCED.blurb)
         assertEquals("Also a second nudge if you haven't started 10 minutes in.", NotificationLevel.COACH.blurb)
         assertEquals("How much Unstuck checks in", SettingsCopy.LEVEL_ROW)
-        assertEquals("This also sets how often the focus coach talks during a session.", SettingsCopy.LEVEL_COACH_NOTE)
+        assertEquals("This also sets how often Unstuck talks you through a focus session.", SettingsCopy.LEVEL_COACH_NOTE)
         assertEquals("Remind me before a task", SettingsCopy.LEAD_ROW)
+        assertEquals("Reminders work even offline. Any task can have its own time.", SettingsCopy.LEAD_SUB)
+    }
+
+    /** Focus ⋯ Options and the leave question (copy canon §3–§4). */
+    @Test fun `focus options and the leave question use the canon`() {
+        val f = tech.csalliance.unstuck.ui.focus.FocusOptionsCopy
+        assertEquals("How long after time's up before Unstuck asks how it's going.", f.OVERRUN_SUB)
+        assertEquals("A quick check before you leave. Your timer keeps running either way.", f.SOFT_EXIT_SUB)
+        assertEquals("One tap on a reason. It helps you spot patterns later.", f.PAUSE_REASONS_SUB)
+        assertEquals(
+            "Short spoken updates: halfway, five minutes left, time's up. How often is set in Settings → Notifications & calls.",
+            f.COACH_SUB,
+        )
+        assertEquals(
+            "After a question, answer out loud: “add five”, “stop” or “keep going”. It listens on this phone for a few seconds; nothing is recorded.",
+            f.voiceSub(coachOn = true),
+        )
+        assertEquals("Turn on “Talk me through the session” first.", f.voiceSub(coachOn = false))
+        assertEquals("Leave this session?", f.LEAVE_TITLE)
+        assertEquals("Your timer keeps running. You can pick it back up from Today.", f.LEAVE_BODY)
+        assertEquals(listOf("Leave", "Leave and don't ask again", "Stay"), listOf(f.LEAVE, f.LEAVE_DONT_ASK, f.STAY))
+        // The pause question's opt-out doesn't leave, so it stays plain.
+        assertEquals("Don't ask again", f.DONT_ASK)
     }
 
     /** "Export everything" keeps its label: the privacy policy names it. */

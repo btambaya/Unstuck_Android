@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.27 — Insights: \"+N more\" under a list now opens the rest of it (\"Show less\" folds it back). Today: the logo is now the same size as your profile picture, lined up with the page margins."every other Thursday\"). Today always shows your week pill now — tap it to open Insights."
+    releaseNotes = "v0.5.27 — Insights: \"+N more\" under a list now opens the rest of it (\"Show less\" folds it back). Today: the logo is now the same size as your profile picture, lined up with the page margins."
 }
 
 dependencies {

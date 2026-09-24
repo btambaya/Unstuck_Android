@@ -61,6 +61,12 @@ object AppCallEnvironment {
         val uid = graph?.coordinator?.session?.let { gate ->
             runCatching { runBlocking { gate.ensure(SESSION_TIMEOUT_MS) } }.getOrNull()?.accountId
         }
+        // A ring before the app has run since it was installed / updated has no
+        // AI-consent copy yet: the session the gate just loaded (refreshed from
+        // the server when it had to be) carries the account's user_metadata —
+        // let it fill an EMPTY copy, so an OK given on the web or the iPhone
+        // counts here too. Never over a copy this phone already holds.
+        if (uid != null && graph != null) runCatching { seedAIConsentFromSession(graph, uid) }
         val callSettings = if (uid != null) CallSettingsStore.load(context, uid) else CallSettings()
         val assistantOn = BuildConfig.ASSISTANT_ENABLED && (graph?.settings?.load()?.assistantEnabled ?: true)
         return CallEnv(
@@ -74,6 +80,16 @@ object AppCallEnvironment {
             // (can't happen in the app) → no OK: fail closed.
             aiConsent = hasAIConsent(graph, uid),
         )
+    }
+
+    /** Fill an empty (or another account's) AI-consent copy from the session
+     *  the phone holds for [uid] (core AIConsent.merge, Source.STORED). */
+    internal fun seedAIConsentFromSession(graph: tech.csalliance.unstuck.AppGraph, uid: String) {
+        val held = graph.aiConsent.value
+        if (held != null && held.userId == uid) return
+        val auth = graph.coordinator?.auth ?: return
+        if (auth.currentUserId != uid) return
+        graph.aiConsentSync.adopt(auth.storedAIConsent, uid, AIConsent.Source.STORED)
     }
 
     /** The account's AI-consent OK as this phone holds it (core AIConsent). */

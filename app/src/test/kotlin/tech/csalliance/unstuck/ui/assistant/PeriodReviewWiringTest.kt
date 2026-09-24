@@ -13,7 +13,8 @@ import org.junit.Test
  * get_period_review's app-side wiring (week-review-spec §5.2, §5.4, §6 (f)):
  * toolCaps rides on the TEXT request only, the voice prompt carries the
  * HOW DID IT GO rule and never toolCaps, and the voice guard's recap flag is
- * set only by an ok: review and cleared when the user next speaks.
+ * set only by an ok: review and cleared only when the app answers the user's
+ * next turn (never on a speech start — echo fires those).
  */
 class PeriodReviewWiringTest {
     private fun api() = AssistantToolsTest().FakeApi()
@@ -50,7 +51,7 @@ class PeriodReviewWiringTest {
         assertTrue(g.shouldCorrect())
         g.responseCreated(); assertFalse(g.shouldCorrect())   // the correction's follow-up
         // A failed review doesn't set it.
-        g.userSpeechStarted(modelOnAir = false)
+        g.userTookTurn()
         g.toolDispatched("get_period_review"); g.toolFinished("get_period_review", "error: unknown period \"x\"")
         assertFalse(g.recap)
         // An ok review does — and the SPOKEN review (a later response) passes.
@@ -58,9 +59,10 @@ class PeriodReviewWiringTest {
         assertTrue(g.recap)
         g.responseCreated(); g.transcriptDelta(review)
         assertFalse(g.shouldCorrect())
-        // Echo while the model is on air doesn't end it; the user's next turn does.
-        g.userSpeechStarted(modelOnAir = true); assertTrue(g.recap)
-        g.userSpeechStarted(modelOnAir = false); assertFalse(g.recap)
+        // Only the app answering the user's next turn ends it — the guard has no
+        // speech-start hook at all (loudspeaker echo of the review fires those).
+        assertTrue(g.recap)
+        g.userTookTurn(); assertFalse(g.recap)
         g.responseCreated(); g.transcriptDelta(review)
         assertTrue(g.shouldCorrect())
         // A barge-in the controller confirmed (it cancels the reply) is the user's

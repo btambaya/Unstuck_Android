@@ -151,7 +151,8 @@ fun renderInsights(
     zone: ZoneId = ZoneId.systemDefault(),
     /** The user's own area names in their order — the SAME list the Insights
      *  screen's "When focus happens" chart uses (DEFAULT_AREAS when they have
-     *  none), so the assistant's By area equals the screen (cross-check P1-1). */
+     *  none), so the assistant's By area equals the screen (cross-check P1-1);
+     *  an area a task carries that isn't on it is listed under its own name. */
     areas: List<String> = DEFAULT_AREAS,
 ): String {
     val start = insightsWindowStart(window, nowMs, zone)
@@ -175,13 +176,11 @@ fun renderInsights(
         val totalSec = scopedSessions.sumOf { it.actualSec }
         lines += "Focus: ${fmtFocus(totalSec)} across ${plural(scopedSessions.size, "session")}, median ${fmtFocus(medianSec(scopedSessions))}."
 
-        // By area — the screen's own list plus its "No area" bar.
-        val bars = weekdayAreaHours(scopedSessions, tasks, areas, withNoArea = true)
-        val areaLines = ArrayList<String>()
-        for ((i, area) in (areas + NO_AREA_LABEL).withIndex()) {
-            val hours = bars.sumOf { it.data[i] }
-            if (hours > 0) areaLines += "$area ${toFixed1(hours)}h"
-        }
+        // By area — the chart's own series: the user's areas, then any other
+        // area a task carries (under its own name), then "No area".
+        val bars = weekdayAreaBars(scopedSessions, tasks, areas)
+        val totals = areaTotals(bars)
+        val areaLines = bars.series.indices.filter { totals[it] > 0 }.map { "${bars.series[it].name} ${toFixed1(totals[it])}h" }
         if (areaLines.isNotEmpty()) lines += "By area: ${areaLines.joinToString(", ")}."
 
         // Peak slot — the Deep dive heatmap (7 days × 24 h, by the hours each
@@ -221,8 +220,10 @@ fun renderInsights(
     if (pauses.isEmpty()) {
         lines += "Pauses: none logged in this window."
     } else {
+        // Minutes on the page's rule, floor((sec + 30) / 60), from the summed
+        // seconds — the "What pauses you" card shows the same number.
         val top = pauses.take(MAX_PAUSES)
-            .joinToString(", ") { "${it.reason} ${it.count}x${if (it.minutes > 0) " (${jsRound(it.minutes)}m)" else ""}" }
+            .joinToString(", ") { "${it.reason} ${it.count}x${if (it.sec > 0) " (${periodMinutes(it.sec)}m)" else ""}" }
         lines += "Pauses: ${plural(reasonLogs.size, "reason")} logged; top: $top."
     }
 

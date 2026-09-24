@@ -272,6 +272,34 @@ class VoiceRealtimeClientTest {
         assertEquals(before, s.correctives())
     }
 
+    /** Cross-platform rule (2026-09-24): a spoken review's recap ends only when
+     *  the app answers a real user turn — never on a raw speech_started. The
+     *  loudspeaker's echo of the review fires one even after the reply left the
+     *  air, and ending the recap there turned the review's own "You finished …"
+     *  into a false claim and a forced tool call. */
+    @Test
+    fun `guard - a speech start does not end the review's recap, the user's answered turn does`() {
+        val (factory, s) = openSession { name, _ ->
+            if (name == "get_period_review") "ok: review of last week (Mon 14 Sep – Sun 20 Sep).\nDone: 1 task — \"Draft chapter 3\"." else "ok"
+        }
+        val review = "You finished \"Draft chapter 3\" and skipped \"Stretch\" once."
+        factory.created("r1")
+        factory.toolCall("get_period_review", "c1")
+        awaitToolOutput(s, 1)
+        factory.done("r1")
+        // Nothing on air (no audio was queued): a speech start here is what the
+        // review's echo tail looks like on a loudspeaker.
+        factory.message("""{"type":"input_audio_buffer.speech_started","item_id":"echo1"}""")
+        factory.created("r2"); factory.transcript("r2", review); factory.done("r2")
+        assertEquals("the spoken review is not a claim", 0, s.correctives())
+        // The user's next turn — words the controller judged theirs — ends it.
+        factory.message("""{"type":"input_audio_buffer.speech_started","item_id":"u1"}""")
+        factory.message("""{"type":"input_audio_buffer.speech_stopped"}""")
+        factory.message("""{"type":"conversation.item.input_audio_transcription.completed","item_id":"u1","transcript":"thanks, what's next today"}""")
+        factory.created("r3"); factory.transcript("r3", review); factory.done("r3")
+        assertEquals("after the user's turn the same words are a claim again", 1, s.correctives())
+    }
+
     @Test
     fun `tool calls are deduped across both event shapes and continue with ONE response create`() {
         var runs = 0

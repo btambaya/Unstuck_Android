@@ -1661,4 +1661,41 @@ class BargeInControllerTest {
         assertTrue(suggested)
         assertEquals(3, c.falseBargeIns)
     }
+
+    // ── the recap's end (cross-platform rule, 2026-09-24): the client ends a
+    // spoken review's recap when answeredTurns moves — a turn the app answers,
+    // never a raw speech start (the loudspeaker's echo of the review fires one).
+
+    @Test fun `29a answeredTurns counts only turns the app answers, never echo or a speech start`() {
+        val c = controller(speaker)
+        c.h(BargeInEvent.ResponseCreated("r1"), 0.0)
+        c.h(BargeInEvent.AudioDelta("r1"), 0.1)
+        said(c, "You finished the chapter draft and skipped stretch once.")
+        c.h(started("echo"), 1.0)                                    // the review's echo, on air
+        assertEquals("a speech start is no turn", 0, c.answeredTurns)
+        c.h(done("r1"), 1.2)
+        c.h(BargeInEvent.PlaybackDrained, 1.3)
+        c.h(stopped, 1.8)
+        c.h(tr("chapter draft and skipped stretch once", "echo", final = true), 1.9)
+        assertEquals("echo judged by its words is no turn", 0, c.answeredTurns)
+        c.h(started("tail"), 2.0)                                     // inside the drain grace
+        assertEquals(0, c.answeredTurns)
+        c.h(started("q"), 4.0)
+        c.h(stopped, 5.0)
+        c.h(tr("thanks what is next today", "q", final = true), 5.2)
+        assertEquals("the user's words, answered", 1, c.answeredTurns)
+        c.h(tr("thanks what is next today", "q", final = true), 5.3)
+        assertEquals("a re-sent transcript is not a second turn", 1, c.answeredTurns)
+    }
+
+    @Test fun `29b hold-to-talk - the release is the turn, its late transcript is not another`() {
+        val c = speaking(speaker, holdToTalk = true)
+        c.h(BargeInEvent.PttDown, 1.0)
+        assertEquals(0, c.answeredTurns)
+        c.h(BargeInEvent.PttUp, 2.0)
+        assertEquals(1, c.answeredTurns)
+        c.h(BargeInEvent.ResponseCreated("r2"), 2.3)
+        c.h(tr("how was my week", "h", final = true), 2.4)
+        assertEquals("the caption of the turn already answered", 1, c.answeredTurns)
+    }
 }

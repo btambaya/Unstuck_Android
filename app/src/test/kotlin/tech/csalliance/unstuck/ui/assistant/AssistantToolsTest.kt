@@ -511,6 +511,105 @@ class AssistantToolsTest {
         assertTrue(h.state.blocks.all { it.startTime == "07:00" && it.taskId == "r" })
     }
 
+    /** James's Park run (TestFlight build 51, Sunday 2026-09-13): "Saturday"
+     *  arrived as 2026-09-20 — a Sunday — and was written as given, so the
+     *  series began on the Sunday and the coming Saturday had nothing. Refused,
+     *  naming the Saturdays around it; nothing is written; the right date then
+     *  places the series from that Saturday. */
+    @Test fun `schedule_task refuses a weekly series onto a day it doesn't repeat on`() = runTest {
+        val h = makeApi { today = "2026-09-13"; tasks += task("p", "Park run", recurrence = Recurrence.Weekly(listOf(6))) }
+        assertEquals(
+            "error: \"Park run\" repeats every Saturday, but 2026-09-20 is a Sunday — nothing was scheduled. " +
+                "The nearest Saturdays: Saturday 2026-09-19, Saturday 2026-09-26. " +
+                "Call schedule_task again with the day the user meant; only if they asked for Sunday itself (a one-off move off its usual day), call it again with 2026-09-20 unchanged. " +
+                "To change the days it repeats on, call set_task_recurrence instead.",
+            h.run("schedule_task", "taskId" to "p", "date" to "2026-09-20", "startTime" to "08:30"),
+        )
+        assertTrue("nothing was written", h.state.blocks.isEmpty())
+        assertNull(h.state.tasks[0].moveCount)
+        assertEquals("ok: scheduled \"Park run\" 2026-09-19 08:30", h.run("schedule_task", "taskId" to "p", "date" to "2026-09-19", "startTime" to "08:30"))
+        assertEquals("2026-09-19", h.state.blocks.minOf { it.date })
+        assertTrue("every occurrence on a Saturday", h.state.blocks.all { jsDayOfWeek(it.date) == 6 && it.startTime == "08:30" })
+    }
+
+    /** "Just this week, do park run on Sunday": after the refusal, the SAME call
+     *  is the model's deliberate one-off move — this week's occurrence moves,
+     *  the series stays on Saturdays, and the result says it's off its days. */
+    @Test fun `the same off-day call again is a one-off move of an established series`() = runTest {
+        val sats = (0..55).map { addDaysIso("2026-09-13", it) }.filter { jsDayOfWeek(it) == 6 }
+        val h = makeApi {
+            today = "2026-09-13"
+            tasks += task("p", "Park run", recurrence = Recurrence.Weekly(listOf(6)))
+            blocks += sats.map { block("p$it", "p", it, "08:30") }
+        }
+        val before = h.state.blocks.toList()
+        val first = h.run("schedule_task", "taskId" to "p", "date" to "2026-09-20", "startTime" to "09:00")
+        assertTrue(first, first.startsWith("error: \"Park run\" repeats every Saturday, but 2026-09-20 is a Sunday — nothing was scheduled."))
+        assertEquals("an error changes nothing", before, h.state.blocks.toList())
+        assertEquals("ok: scheduled \"Park run\" 2026-09-20 09:00 — a one-off on a Sunday, off the days it repeats on",
+            h.run("schedule_task", "taskId" to "p", "date" to "2026-09-20", "startTime" to "09:00"))
+        assertEquals(1, h.state.blocks.count { it.date == "2026-09-20" })
+        assertFalse("this week's Saturday moved", h.state.blocks.any { it.date == "2026-09-19" })
+        assertTrue("the rest stay on Saturdays", h.state.blocks.filter { it.date > "2026-09-20" }.all { jsDayOfWeek(it.date) == 6 })
+        // A new turn (fresh scratch) is refused again.
+        val fresh = runAssistantTool("schedule_task", ToolArgs(json("taskId" to "p", "date" to "2026-09-27", "startTime" to "09:00")), h.api, TurnScratch())
+        assertTrue(fresh, fresh.startsWith("error: \"Park run\" repeats every Saturday, but 2026-09-27 is a Sunday"))
+    }
+
+    /** A day that already holds one of its occurrences (moved there by hand) is
+     *  retimed like any occurrence — no refusal. */
+    @Test fun `schedule_task on an off-day that already holds an occurrence retimes it`() = runTest {
+        val h = makeApi {
+            today = "2026-09-13"
+            tasks += task("p", "Park run", recurrence = Recurrence.Weekly(listOf(6)))
+            blocks += block("moved", "p", "2026-09-20", "08:30"); blocks += block("s26", "p", "2026-09-26", "08:30")
+        }
+        assertEquals("ok: scheduled \"Park run\" 2026-09-20 10:00", h.run("schedule_task", "taskId" to "p", "date" to "2026-09-20", "startTime" to "10:00"))
+        assertEquals("10:00", h.state.blocks.first { it.id == "moved" }.startTime)
+    }
+
+    /** The create-then-repeat variant of James's Park run: create_task on
+     *  "Saturday" sent as Sunday the 20th, then weekly on Saturday. The series
+     *  used to start from the Sunday slot and skip the coming Saturday. Refused
+     *  before anything is written; moved to the Saturday, the same call places
+     *  the series from the 19th. */
+    @Test fun `set_task_recurrence refuses weekly days that leave out the slot placed this turn`() = runTest {
+        val h = makeApi { today = "2026-09-13" }
+        val made = h.run("create_task", "name" to "Park run", "date" to "2026-09-20", "startTime" to "08:30")
+        val id = Regex("id=([\\w-]+)").find(made)!!.groupValues[1]
+        val tasksBefore = h.state.tasks.toList()
+        val blocksBefore = h.state.blocks.toList()
+        val refused = h.run("set_task_recurrence", "taskId" to id, "kind" to "weekly", "daysOfWeek" to listOf(6))
+        assertTrue(refused, refused.startsWith("error: \"Park run\" was just put on Sunday 2026-09-20, but weekly on Saturday leaves out Sundays — nothing changed. The nearest Saturdays: Saturday 2026-09-19, Saturday 2026-09-26."))
+        assertEquals("the task still doesn't repeat", tasksBefore, h.state.tasks.toList())
+        assertEquals("no slot moved", blocksBefore, h.state.blocks.toList())
+        // The model moves it to the Saturday the user meant, then repeats it.
+        assertEquals("ok: scheduled \"Park run\" 2026-09-19 08:30", h.run("schedule_task", "taskId" to id, "date" to "2026-09-19", "startTime" to "08:30"))
+        assertEquals("ok: \"Park run\" now repeats weekly on Sat at 08:30", h.run("set_task_recurrence", "taskId" to id, "kind" to "weekly", "daysOfWeek" to listOf(6)))
+        assertEquals("2026-09-19", h.state.blocks.minOf { it.date })
+        assertTrue("every occurrence on a Saturday", h.state.blocks.all { jsDayOfWeek(it.date) == 6 && it.startTime == "08:30" })
+    }
+
+    /** "Every Saturday, starting this Sunday" is possible: after the refusal the
+     *  SAME call goes through; a fresh turn is checked again. */
+    @Test fun `the same set_task_recurrence again starts the series from the placed day`() = runTest {
+        val h = makeApi { today = "2026-09-13" }
+        val made = h.run("create_task", "name" to "Park run", "date" to "2026-09-20", "startTime" to "08:30")
+        val id = Regex("id=([\\w-]+)").find(made)!!.groupValues[1]
+        val first = h.run("set_task_recurrence", "taskId" to id, "kind" to "weekly", "daysOfWeek" to listOf(6))
+        assertTrue(first, first.startsWith("error: \"Park run\" was just put on Sunday 2026-09-20"))
+        // The identical call is the model's "yes, from that Sunday".
+        assertEquals("ok: \"Park run\" now repeats weekly on Sat at 08:30",
+            h.run("set_task_recurrence", "taskId" to id, "kind" to "weekly", "daysOfWeek" to listOf(6)))
+        assertTrue(h.state.tasks.first { it.id == id }.recurrence is Recurrence.Weekly)
+        // A new turn whose slot is on a series day is not refused.
+        val later = makeApi { today = "2026-09-13" }
+        val made2 = later.run("create_task", "name" to "Swim", "date" to "2026-09-19", "startTime" to "07:00")
+        val id2 = Regex("id=([\\w-]+)").find(made2)!!.groupValues[1]
+        assertEquals("ok: \"Swim\" now repeats weekly on Sun, Sat at 07:00",
+            later.run("set_task_recurrence", "taskId" to id2, "kind" to "weekly", "daysOfWeek" to listOf(6, 0)))
+    }
+
     /** A lapsed series re-placed at an explicit time takes THAT time for the
      *  series — the history's 07:00 must not silently win. */
     @Test fun `schedule_task re-placing a lapsed series sets the series time`() = runTest {

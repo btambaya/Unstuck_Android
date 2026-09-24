@@ -178,9 +178,9 @@ class VoiceIntegrityGuard {
      *  judged theirs. */
     fun bargeIn() { transcript = ""; recap = false }
 
-    /** A hold-to-talk release: the user's new turn, committed before its reply
-     *  is asked for. Hold mode has no server VAD, so no speech start ends the
-     *  recap there. */
+    /** The app is answering a real user turn — a completed transcript the
+     *  barge-in controller judged theirs, or a hold-to-talk release
+     *  ([BargeInController.answeredTurns]): an earlier review no longer vouches. */
     fun userTookTurn() { recap = false }
 
     fun transcriptDelta(d: String) { transcript += d }
@@ -197,21 +197,18 @@ class VoiceIntegrityGuard {
         if (name == "get_period_review" && result.startsWith("ok:")) recap = true
     }
 
-    /** A get_period_review returned `ok:` since the user last spoke: the spoken
-     *  review describes THEIR past actions ("you finished the chapter draft"),
-     *  so the guard neutralises user-subject verbs until they speak again
-     *  (week-review-spec §5.4). A per-response flag isn't enough — the review
-     *  is spoken in a later response than the one that carried the call. */
+    /** A get_period_review returned `ok:` since the app last answered a user
+     *  turn: the spoken review describes THEIR past actions ("you finished the
+     *  chapter draft"), so the guard neutralises user-subject verbs until the
+     *  app answers them again (week-review-spec §5.4). A per-response flag isn't
+     *  enough — the review is spoken in a later response than the one that
+     *  carried the call. It ends ONLY on [userTookTurn] or a confirmed barge-in
+     *  ([bargeIn]) — never on a raw speech_started, which the loudspeaker's echo
+     *  of the review fires too, even just after it drained; nor on the
+     *  controller's UserTurn caption, which a late transcript of the question
+     *  being answered also produces (cross-platform rule, 2026-09-24). */
     var recap: Boolean = false
         private set
-
-    /** The user started speaking. While a reply is on air (in flight or still
-     *  playing) a speech start may be echo, so it doesn't end the recap here; a
-     *  real barge-in ends it through [bargeIn] when the controller cancels the
-     *  reply. A start with nothing on air is a new turn. (Not on the
-     *  controller's UserTurn caption: a late transcript of the question being
-     *  answered arrives as one too — in hold mode after the review already ran.) */
-    fun userSpeechStarted(modelOnAir: Boolean) { if (!modelOnAir) recap = false }
 
     /** A cancelled/incomplete response (barge-in) is not a claim. */
     fun responseCancelled() { wasCorrection = false }
@@ -596,7 +593,12 @@ class VoiceRealtimeClient(
     private fun dispatch(event: BargeInEvent, payload: String? = null): List<BargeInCommand> {
         if (stopped) return emptyList()
         val (cmds, stateAfter) = synchronized(ctlLock) {
+            val answeredBefore = ctl.answeredTurns
             val c = ctl.handle(event)
+            // The app is answering a real user turn (a transcript the controller
+            // judged theirs, or a hold-to-talk release): an earlier spoken review
+            // no longer vouches for "you finished …" — the recap ends HERE only.
+            if (ctl.answeredTurns != answeredBefore) guard.userTookTurn()
             val e = ctl.lastEchoScore
             val s = "${ctl.phase} gate=${ctl.gateOpen} server=${ctl.serverSpeaking} echo=${e.hits}/${e.heard} ref=${e.spoken}"
             execute(c, payload)
@@ -683,7 +685,7 @@ class VoiceRealtimeClient(
             // so the tail of the utterance is never cut and a short tap still sends
             // the audio it covered.
             BargeInCommand.CommitAndRespond -> {
-                guard.userTookTurn()   // their new turn: an earlier review no longer vouches
+                // (The recap already ended in dispatch: the controller counted this turn.)
                 audio.afterCaptureDrain {
                     send(buildJsonObject { put("type", "input_audio_buffer.commit") })
                     send(buildJsonObject { put("type", "response.create") })
@@ -767,10 +769,11 @@ class VoiceRealtimeClient(
             when (ev["type"]?.jsonPrimitive?.contentOrNull) {
                 // The server VAD opened a segment on this item: WHEN it began
                 // (a reply on air, or not) is what a transcript is judged by.
-                "input_audio_buffer.speech_started" -> {
-                    synchronized(ctlLock) { guard.userSpeechStarted(ctl.modelBusy) }
+                // A speech start never ends a spoken review's recap: the loudspeaker's
+                // echo of the review fires one too. The user's turn ends it, once the
+                // controller has judged the words theirs (dispatch).
+                "input_audio_buffer.speech_started" ->
                     dispatch(BargeInEvent.SpeechStarted(ev["item_id"]?.jsonPrimitive?.contentOrNull))
-                }
                 "input_audio_buffer.speech_stopped" -> dispatch(BargeInEvent.SpeechStopped)
                 "response.created" -> {
                     synchronized(ctlLock) { guard.responseCreated(); anyResponse = true }

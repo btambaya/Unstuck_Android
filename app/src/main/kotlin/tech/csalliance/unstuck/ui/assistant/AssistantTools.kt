@@ -19,6 +19,8 @@ import tech.csalliance.unstuck.core.logic.hmToMin
 import tech.csalliance.unstuck.core.logic.jsDayOfWeek
 import tech.csalliance.unstuck.core.logic.rejectPastDate
 import tech.csalliance.unstuck.core.logic.rejectPastTime
+import tech.csalliance.unstuck.core.logic.rejectOffSeriesDay
+import tech.csalliance.unstuck.core.logic.rejectOffSeriesPlacement
 import tech.csalliance.unstuck.core.logic.ReceiptArgs
 import tech.csalliance.unstuck.core.logic.ChosenDateAction
 import tech.csalliance.unstuck.core.logic.ChosenDateWrite
@@ -94,7 +96,12 @@ class TurnScratch {
     /** Task id → the block schedule_task placed for it, which a
      *  set_task_recurrence after it takes as the series' day and time. */
     val placedBlocks = HashMap<String, String>()
-    fun clear() { newTasks.clear(); newLists.clear(); placedBlocks.clear() }
+    /** Off-day calls already refused: schedule_task's "schedule|taskId|date" ([rejectOffSeriesDay])
+     *  and set_task_recurrence's "recurrence|taskId|date|days" ([rejectOffSeriesPlacement]).
+     *  The SAME call again is the model's deliberate choice after reading the
+     *  refusal (a one-off move / a series that starts there), and goes through. */
+    val offDayRefused = HashSet<String>()
+    fun clear() { newTasks.clear(); newLists.clear(); placedBlocks.clear(); offDayRefused.clear() }
 }
 
 /** Typed accessors over the model's JSON arguments. `str` treats blank as
@@ -383,6 +390,17 @@ private suspend fun renderSchedule(api: AssistantApi, range: String): String {
     return "ok:\n" + lines.joinToString("\n")
 }
 
+/** The display name of what a confirm-first call would destroy — the text
+ *  harness checks the user's message names it ([tech.csalliance.unstuck.core.logic.ConfirmFirstRules]).
+ *  Null when it can't be resolved (the executor then says "not found") or for
+ *  cancel_focus, which has only the running session to point at. */
+suspend fun confirmTargetName(name: String, args: ToolArgs, api: AssistantApi, scratch: TurnScratch): String? = when (name) {
+    "delete_task" -> findTask(args.str("taskId"), api, scratch)?.name
+    "delete_list", "leave_list" -> findList(args.str("listId"), api, scratch)?.name
+    "delete_area", "delete_tag" -> args.str("name")
+    else -> null
+}
+
 // ── the executor ──
 
 /** Execute one tool call. Returns a short result string the model reads on the
@@ -469,6 +487,18 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             val date = args.str("date") ?: return "error: date required"
             val startTime = args.str("startTime")
             rejectPastDate(api, date)?.let { return it }
+            // A weekly series onto a day it doesn't repeat on is refused ONCE,
+            // naming the right days — the model's date maths put James's
+            // Saturday Park run on a Sunday (TestFlight build 51). A day that
+            // already holds one of its occurrences (a one-off moved there) is
+            // fine, and the same call again is a deliberate one-off move.
+            var offDay: String? = null
+            if (api.getBlocks().none { it.taskId == t.id && isTaskBlock(it) && it.date == date }) {
+                rejectOffSeriesDay(t.name, t.recurrence, date, api.todayIso())?.let { refusal ->
+                    if (scratch.offDayRefused.add("schedule|${t.id}|$date")) return refusal
+                    offDay = WEEKDAY_NAMES_CAP[jsDayOfWeek(date)]
+                }
+            }
             // No time given AND the task has never had one: don't guess — ask,
             // suggesting a slot (Ahmad, 2026-09-01: "when confused, prompt").
             val own = api.getBlocks().firstOrNull { it.taskId == t.id && !it.done && !it.skipped && it.startTime.isNotEmpty() }
@@ -478,7 +508,8 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
             rejectPastTime(api, date, startTime ?: own?.startTime)?.let { return it }
             val landed = scheduleTask(api, t, date, startTime, scratch)
                 ?: return "error: \"${t.name}\" is already done on $date — nothing changed"
-            "ok: scheduled \"${t.name}\" $date $landed${if (startTime == null) " (kept its existing time — say so)" else ""}"
+            "ok: scheduled \"${t.name}\" $date $landed${if (startTime == null) " (kept its existing time — say so)" else ""}" +
+                (offDay?.let { " — a one-off on a $it, off the days it repeats on" } ?: "")
         }
 
         "update_task" -> {
@@ -554,6 +585,23 @@ private suspend fun runCoreTool(name: String, args: ToolArgs, api: AssistantApi,
                 if (days.any { it !in 0..6 }) return "error: daysOfWeek must be 0=Sunday … 6=Saturday"
             }
             if (kind == "none" && t.recurrence == null) return "error: \"${t.name}\" doesn't repeat — nothing changed"
+            // The slot placed for it earlier THIS turn (create_task / schedule_task
+            // with a date) on a day the new weekly days leave out: the Park run
+            // variant — create_task on Sunday 2026-09-20, then weekly on Saturday,
+            // started the series from the Sunday and never placed the coming
+            // Saturday. Refused ONCE before anything is written (web + iOS do the
+            // same); the same call again means the series really starts there.
+            if (kind == "weekly" && days != null) {
+                val today = api.todayIso()
+                val placed = scratch.placedBlocks[t.id]?.let { id ->
+                    api.getBlocks().firstOrNull { it.id == id && !it.done && !it.skipped && it.date >= today }
+                }
+                if (placed != null) {
+                    rejectOffSeriesPlacement(t.name, placed.date, days, today)?.let { refusal ->
+                        if (scratch.offDayRefused.add("recurrence|${t.id}|${placed.date}|${days.joinToString(",")}")) return refusal
+                    }
+                }
+            }
             val rec: Recurrence? = when (kind) {
                 "daily" -> Recurrence.Daily(until)
                 "weekly" -> Recurrence.Weekly(days ?: emptyList(), until)

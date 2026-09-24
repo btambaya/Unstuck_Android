@@ -112,11 +112,10 @@ class InsightsReadTest {
                 "ok: Insights, week so far (Mon 31 Aug – Wed 2 Sep).",
                 "Focus: 2h 45m across 5 sessions, median 30m.",
                 "By area: Work 1.4h, Health 1.3h.",
-                "Peak slot: Wed 11am–1pm (60 min).",
+                "Peak slot: Wed 10am–12pm (60 min).",
                 "Estimates: 40% of 5 estimated sessions landed within 5 min; 2 ran over, 1 ran under; actual vs estimate averages +7 min. Verdict: underestimating (things take longer than you plan).",
                 "Pauses: 4 reasons logged; top: phone call 2x (12m), snack 1x (3m), email 1x.",
-                "Interruptions: 2 captures mid-session, most around 6–9 min in.",
-                "Re-entry: 33% of 3 returns to a task came within 5 min.",
+                "Coming back: 33% of 3 timed pauses ended within 5 min.",
                 "Slipping: 1 task — \"Tax return\" (moved 4x, 1wk on list).",
                 "Captures: 3 — follow-up 1, idea 1, distraction 1.",
                 "Planned: 2 calendar blocks (1h 30m) dated in this window.",
@@ -217,10 +216,41 @@ class InsightsReadTest {
     @Test fun `lists at most five names and counts the rest`() {
         val tasks = (0 until 8).map { i -> tsk("t$i", "Chore $i", moveCount = 3 + i, createdAt = ago(1.0)) }
         val out = render(Data(tasks = tasks))
-        // slipping() itself caps at 6 — the same count the Report card shows.
-        assertTrue(out, out.contains("Slipping: 6 tasks — \"Chore 7\" (moved 10x, 0wk on list); \"Chore 6\""))
-        assertTrue(out, out.contains("\"Chore 3\" (moved 6x, 0wk on list) +1 more."))
+        // The TRUE count (slipping() no longer caps at 6) — the same count the Report card shows.
+        assertTrue(out, out.contains("Slipping: 8 tasks — \"Chore 7\" (moved 10x, 0wk on list); \"Chore 6\""))
+        assertTrue(out, out.contains("\"Chore 3\" (moved 6x, 0wk on list) +3 more."))
         assertFalse(out.contains("\"Chore 2\""))
+    }
+
+    // ---- analytics fixes 2026-09-24
+
+    @Test fun `by area uses the user's own areas plus No area, like the screen`() {
+        val custom = tsk("k", "Choir", lifeArea = "Music")
+        val none = tsk("n", "Loose end")
+        val sessions = listOf(
+            sessOn(custom, SEP, 1, 9, 0, 3600, "m1"),
+            sessOn(none, SEP, 1, 11, 0, 1800, "m2"),
+            Session(id = "m3", taskName = "Ad hoc", actualSec = 1800, completedAt = iso(localMillis(2026, 9, 1, 13, 30))),
+        )
+        val out = renderInsights(listOf(custom, none), sessions, emptyList(), emptyList(), emptyList(), IR_NOW, InsightsWindow.WEEK, areas = listOf("Music", "Work"))
+        assertTrue(out, out.contains("By area: Music 1.0h, No area 1.0h."))
+    }
+
+    @Test fun `accidental starts and forgotten timers are filtered like the screen`() {
+        val t = tsk("a", "Write report", lifeArea = "Work")
+        val sessions = listOf(
+            sessOn(t, SEP, 1, 9, 0, 20, "tiny"),                  // 20 s — never counts
+            sessOn(t, SEP, 1, 10, 0, 30 * 3600, "runaway"),      // 30 h, est 30 → counts 90 min
+        )
+        val out = render(Data(tasks = listOf(t), sessions = sessions))
+        assertTrue(out, out.contains("Focus: 1h 30m across 1 session, median 90m."))
+    }
+
+    @Test fun `repeating series and Later tasks never slip`() {
+        val series = tsk("r", "Stretch", createdAt = ago(40.0)).copy(recurrence = tech.csalliance.unstuck.core.model.Recurrence.Daily())
+        val parked = tsk("p", "Someday", createdAt = ago(40.0)).copy(later = true)
+        val out = render(Data(tasks = listOf(series, parked)))
+        assertTrue(out, out.contains("Slipping: none."))
     }
 
     // ---- calibration verdict

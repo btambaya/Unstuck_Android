@@ -304,4 +304,11 @@ data class LiveSession(
     //                        convergence (core.logic.resolveDivergence) and clears it.
     //                        Optional + default null → old persisted blobs decode.
     val divergedOffline: Boolean? = null,
+    //  [pendingReasonId] — the reason_logs row picked for the CURRENT pause
+    //                        ("why are you pausing?"). On resume (or a finish while
+    //                        paused) its duration_sec is written back with the pause
+    //                        length, which "What pauses you" and "How fast you come
+    //                        back" read (analytics fixes 2026-09-24, P0-3 / D5).
+    //                        Device-local; default null → old blobs decode.
+    val pendingReasonId: String? = null,
 )

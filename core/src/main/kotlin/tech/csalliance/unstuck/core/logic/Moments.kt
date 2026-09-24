@@ -485,7 +485,7 @@ private fun fridayReview(state: MomentState, tone: MomentTone): Candidate? {
     if (today.dowJs() != 5 || Time.hourOf(state.now) < 15) return null
 
     val weekStartIso = weekStartDate(today).toString()
-    val thisWeek = state.sessions.filter { s ->
+    val thisWeek = countableSessions(state.sessions).filter { s ->
         val d = dateOfStamp(s.completedAt) ?: return@filter false
         d >= weekStartIso && d <= state.todayIso
     }

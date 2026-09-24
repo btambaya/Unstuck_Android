@@ -45,8 +45,10 @@ object FocusCommands {
 
     fun resume(app: UnstuckApp, onComplete: () -> Unit = {}) = run(app, onComplete) { store ->
         store.getLiveSession()?.let {
-            val r = stampControl(it, FocusTimer.resume(it, System.currentTimeMillis()))
+            val now = System.currentTimeMillis()
+            val r = stampControl(it, FocusTimer.resume(it, now))
             store.setLiveSession(r)
+            recordPauseLength(store, app.graph.coordinator?.write, it, now)
             // Re-arm the ongoing notification's chronometer at the POST-resume start so
             // it doesn't count the pause gap (was left at the stale pre-pause start).
             FocusTimerService.update(app, paused = false, startMs = r.sessionStart)
@@ -61,6 +63,8 @@ object FocusCommands {
         val live = store.getLiveSession() ?: return@run
         val elapsed = FocusTimer.elapsedSec(live, System.currentTimeMillis())
         val write = app.graph.coordinator?.write
+        // Ending while paused: the pause's reason log gets its length too.
+        recordPauseLength(store, write, live, System.currentTimeMillis())
         val circle = app.graph.coordinator?.circle
         val sharedTitle = live.sharedTitle
         if (sharedTitle != null) {
@@ -110,6 +114,18 @@ object FocusCommands {
         }
         // Ending from the notification means the user is away → server may push the recap.
         runCatching { app.graph.coordinator?.notifications?.sessionRecap(task?.name ?: "", away = true) }
+    }
+
+    /** Write the pause's length back onto the reason log picked for it
+     *  ("why are you pausing?") — called with the session as it was BEFORE a
+     *  resume or a finish-while-paused. Nothing to do when no reason was
+     *  picked. "What pauses you" and "How fast you come back" read this
+     *  (analytics fixes 2026-09-24, P0-3 / D5; no client wrote it before). */
+    internal suspend fun recordPauseLength(store: LocalStore, write: tech.csalliance.unstuck.sync.WriteThrough?, before: LiveSession, now: Long) {
+        val (id, sec) = FocusTimer.pendingPauseLength(before, now) ?: return
+        val log = store.reasonLogs().first().firstOrNull { it.id == id } ?: return
+        if (log.durationSec == sec) return
+        runCatching { write?.upsertReasonLog(log.copy(durationSec = sec)) }
     }
 
     private inline fun run(app: UnstuckApp, crossinline onComplete: () -> Unit = {}, crossinline block: suspend (LocalStore) -> Unit) {

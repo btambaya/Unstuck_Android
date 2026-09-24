@@ -193,7 +193,7 @@ class AppViewModelAssistantApi(private val vm: AppViewModel) : AssistantApi {
         return vm.startFocusNow(row)
     }
     override suspend fun pauseFocus(): Boolean = vm.mutateLiveControl { FocusTimer.pause(it, vm.nowMs()) }
-    override suspend fun resumeFocus(): Boolean = vm.mutateLiveControl { FocusTimer.resume(it, vm.nowMs()) }
+    override suspend fun resumeFocus(): Boolean = vm.resumeFocusNow()
     override suspend fun extendFocus(minutes: Int): Boolean = vm.mutateLiveControl { FocusTimer.extend(it, minutes) }
     /** The Focus screen's Done (markDone) / Stop here path: finishFocusNow logs
      *  the Session row + totalFocused, then the timer notification and the

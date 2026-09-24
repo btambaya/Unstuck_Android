@@ -2,8 +2,9 @@ package tech.csalliance.unstuck.core.logic
 
 import tech.csalliance.unstuck.core.model.CalBlock
 
-// Port of lib/use-usable-today.ts. "Usable time today" — total scheduled minutes
-// minus meetings (external blocks) and soft placeholders (settle/lunch buffers).
+// Port of lib/use-usable-today.ts. "Usable time today" — scheduled minutes still
+// ahead of you (done and skipped blocks excluded) minus meetings (external
+// blocks) and soft placeholders (settle/lunch buffers).
 // The assistant's context strip shows the SAME number the Today rail does, so
 // one definition serves both.
 
@@ -27,7 +28,9 @@ data class UsableToday(
 )
 
 fun usableToday(allBlocks: List<CalBlock>, todayIso: String): UsableToday {
-    val blocks = allBlocks.filter { it.date == todayIso }
+    // Blocks already ticked off or skipped on purpose are not time you still
+    // have (cross-check P0-10: a skipped 30-min block read "30m usable").
+    val blocks = allBlocks.filter { it.date == todayIso && !it.done && !it.skipped }
     fun total(predicate: (CalBlock) -> Boolean) = blocks.filter(predicate).sumOf { it.durationMinutes }
     val totalScheduled = total { true }
     val meetingMins = total(::isExternalBlock)

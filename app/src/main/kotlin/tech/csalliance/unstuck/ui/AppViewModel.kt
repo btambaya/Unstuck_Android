@@ -61,6 +61,7 @@ import tech.csalliance.unstuck.sync.ProfileFactsService
 import tech.csalliance.unstuck.core.logic.InterviewFlag
 import tech.csalliance.unstuck.core.logic.labelNameTaken
 import tech.csalliance.unstuck.ui.onboarding.OnboardingGate
+import tech.csalliance.unstuck.surface.FocusCommands
 import tech.csalliance.unstuck.core.logic.relabelingArea
 import tech.csalliance.unstuck.core.logic.renamingTag
 import tech.csalliance.unstuck.core.logic.strippingTag
@@ -481,6 +482,12 @@ class AppViewModel(
     // --- helpers ---
 
     fun nowMs(): Long = nowProvider?.invoke() ?: System.currentTimeMillis()
+
+    // Insights: a one-shot period to open on — the Today pill's "Last week"
+    // variant sets it just before navigating; the screen consumes it once.
+    private var insightsOpenAt: Pair<tech.csalliance.unstuck.core.logic.InsightsSpan, Int>? = null
+    fun openInsightsAt(span: tech.csalliance.unstuck.core.logic.InsightsSpan, offset: Int) { insightsOpenAt = span to offset }
+    fun consumeInsightsOpenAt(): Pair<tech.csalliance.unstuck.core.logic.InsightsSpan, Int>? = insightsOpenAt.also { insightsOpenAt = null }
     fun isoNow(): String = ISO.format(Instant.now())
 
     private fun launchWrite(block: suspend () -> Unit) { viewModelScope.launch { block() } }
@@ -1997,7 +2004,17 @@ class AppViewModel(
     }
 
     fun pauseFocus() = launchWrite { mutateLive(control = true) { FocusTimer.pause(it, nowMs()) } }
-    fun resumeFocus() = launchWrite { mutateLive(control = true) { FocusTimer.resume(it, nowMs()) } }
+    fun resumeFocus() = launchWrite { resumeFocusNow() }
+
+    /** Resume, and write the pause's length onto the reason log picked for it
+     *  (analytics P0-3 / D5). FALSE when there is no live session. */
+    internal suspend fun resumeFocusNow(): Boolean {
+        val before = store.getLiveSession() ?: return false
+        val now = nowMs()
+        if (!mutateLive(control = true) { FocusTimer.resume(it, now) }) return false
+        FocusCommands.recordPauseLength(store, write, before, now)
+        return true
+    }
     fun setTreatment(t: FocusTreatment) = launchWrite {
         mutateLive { FocusTimer.setTreatment(it, t) }
         updateSettings { it.copy(treatment = t) }
@@ -2020,6 +2037,8 @@ class AppViewModel(
     internal suspend fun finishFocusNow(task: TaskItem, markDone: Boolean = false, onSharedTick: ((refusal: String?) -> Unit)? = null): Boolean {
         val live = store.getLiveSession() ?: return false
         val elapsed = FocusTimer.elapsedSec(live, nowMs())
+        // Finishing while paused: the pause's reason log gets its length too.
+        FocusCommands.recordPauseLength(store, write, live, nowMs())
         // Shared focus (T3, Option B): the task isn't in MY store — reflect the time
         // onto the OWNER's task via log_shared_focus (partner/assign only) instead of
         // writing an own Session row / totalFocused, and complete it via
@@ -2179,7 +2198,15 @@ class AppViewModel(
     }
 
     fun saveReasonLog(taskId: String?, reason: String, action: ReasonAction = ReasonAction.PAUSE, durationSec: Int? = null) = launchWrite {
-        write?.upsertReasonLog(ReasonLog(id = newUuid(), taskId = ownTaskIdFor(taskId), reason = reason, action = action, at = isoNow(), durationSec = durationSec))
+        val id = newUuid()
+        write?.upsertReasonLog(ReasonLog(id = id, taskId = ownTaskIdFor(taskId), reason = reason, action = action, at = isoNow(), durationSec = durationSec))
+        // A reason picked for the CURRENT pause: remember it on the live session so
+        // the resume (or a finish while paused) writes the pause's length back onto
+        // it (analytics P0-3 / D5). Device-local; not a shared control.
+        if (action == ReasonAction.PAUSE && durationSec == null) {
+            val cur = store.getLiveSession()
+            if (cur != null && cur.paused) store.setLiveSession(cur.copy(pendingReasonId = id))
+        }
     }
 
     /** The task a capture or pause reason filed on row [rowId] belongs to. Focus on

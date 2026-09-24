@@ -106,7 +106,9 @@ fun goldenHours(sessions: List<Session>, nowMs: Long, zone: ZoneId = ZoneId.syst
     val bins = IntArray(24)
     var total = 0
     var count = 0
-    for (s in sessions) {
+    // The shared D1 filter: accidental starts never count toward the 10, and a
+    // forgotten timer can't outvote real sessions.
+    for (s in countableSessions(sessions)) {
         if (s.actualSec <= 0) continue
         val endMs = Time.parseMillis(s.completedAt) ?: continue
         if (endMs < windowStart || endMs > nowMs) continue

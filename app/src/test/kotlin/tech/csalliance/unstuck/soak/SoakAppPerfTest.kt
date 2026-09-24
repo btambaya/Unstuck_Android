@@ -41,7 +41,7 @@ import tech.csalliance.unstuck.ui.assistant.nextLiveBlockByTask
 import tech.csalliance.unstuck.ui.assistant.topByDescendingStable
 import tech.csalliance.unstuck.ui.assistant.visibleAssistantTurns
 import tech.csalliance.unstuck.ui.calendar.layoutLanes
-import tech.csalliance.unstuck.ui.today.weekFocusMinutes
+import tech.csalliance.unstuck.ui.today.weekPill
 import java.time.Instant
 
 /**
@@ -341,7 +341,8 @@ class SoakAppPerfTest {
             sessions.filter { (now - (tech.csalliance.unstuck.core.time.Time.parseMillis(it.completedAt) ?: 0)) in 0..(7L * 86_400_000) }
                 .sumOf { it.actualSec } / 60
         }
-        Bench.run("A/B weekMin AFTER : parse hoisted out of the tick") { weekFocusMinutes(sessions, completedMs, now) }
+        val pillData = tech.csalliance.unstuck.core.logic.PeriodData(emptyList(), emptyList(), sessions, emptyList(), emptyList())
+        Bench.run("A/B weekMin AFTER : periodFacts week pill per tick (${completedMs.size} sessions)") { weekPill(pillData, now) }
 
         // 5. the whole context build.
         val api = SoakApi(tasks, blocks, sessions, captures, collections)

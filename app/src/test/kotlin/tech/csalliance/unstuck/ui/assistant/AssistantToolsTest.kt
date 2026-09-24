@@ -996,7 +996,8 @@ class AssistantToolsTest {
         assertEquals(Recurrence.Daily(), h.state.tasks[0].recurrence)
         assertEquals("ok: \"Gym\" no longer repeats", h.run("set_task_recurrence", "taskId" to "a", "kind" to "none"))
         assertNull(h.state.tasks[0].recurrence)
-        assertEquals("error: \"Gym\" doesn't repeat — nothing changed", h.run("set_task_recurrence", "taskId" to "a", "kind" to "none"))
+        // Already true: an ok that says nothing changed (Zubair's call, 2026-09-24).
+        assertEquals("ok: \"Gym\" already doesn't repeat — nothing to change", h.run("set_task_recurrence", "taskId" to "a", "kind" to "none"))
     }
 
     @Test fun `complete_task returns the id so the receipt undo targets THIS task (F8)`() = runTest {
@@ -2495,5 +2496,85 @@ class AssistantToolsTest {
         // The next-live-block lookup still attaches to the right row.
         assertEquals(TOMORROW, rows[0]["scheduledDate"]!!.jsonPrimitive.content)
         assertEquals("11:00", rows[0]["scheduledTime"]!!.jsonPrimitive.content)
+    }
+
+    // ── Zubair's iOS morning call, 2026-09-24 (session 1cbfac75): create_task with
+    // a date and time, then schedule_task for the very same slot; and "cancel the
+    // recurring" on a task that no longer repeated, answered with an error the
+    // model read as a failure ("It didn't change anything"). A wish that is
+    // already true is an ok that says nothing changed — no receipt, the store
+    // untouched. 1:1 with web lib/assistant/recurring-tools.test.ts. ──
+
+    private fun receipt(name: String, result: String, h: Harness, taskId: String? = null, kind: String? = null, date: String? = null, startTime: String? = null) =
+        tech.csalliance.unstuck.core.logic.deriveReceipt(
+            name, tech.csalliance.unstuck.core.logic.ReceiptArgs(taskId = taskId, kind = kind, date = date, startTime = startTime), result, h.state.tasks.toList(),
+        )
+
+    @Test fun `stopping the repeat on a task that does not repeat is ok, changes nothing and shows no receipt`() = runTest {
+        val h = makeApi { tasks += task("f", "Office Focus"); blocks += block("b1", "f", TOMORROW, "10:30") }
+        val before = h.state.tasks.toList() to h.state.blocks.toList()
+        val r = h.run("set_task_recurrence", "taskId" to "f", "kind" to "none", "daysOfWeek" to listOf(4))
+        assertEquals("ok: \"Office Focus\" already doesn't repeat — nothing to change", r)
+        assertEquals(before, h.state.tasks.toList() to h.state.blocks.toList())
+        assertNull(receipt("set_task_recurrence", r, h, taskId = "f", kind = "none"))
+    }
+
+    @Test fun `a real stop still reports the change, and its card reads Repeat removed, never Repeats none`() = runTest {
+        val h = makeApi { tasks += task("r", "Standup", recurrence = Recurrence.Daily()); blocks += block("r1", "r", TOMORROW, "07:00") }
+        val r = h.run("set_task_recurrence", "taskId" to "r", "kind" to "none")
+        assertEquals("ok: \"Standup\" no longer repeats (future occurrences removed)", r)
+        assertNull(h.state.tasks.first { it.id == "r" }.recurrence)
+        assertEquals("Repeat removed — “Standup”", receipt("set_task_recurrence", r, h, taskId = "r", kind = "none")?.label)
+        assertEquals("Repeats daily — “Standup”", receipt("set_task_recurrence", "ok: \"Standup\" now repeats daily at 07:00", h, taskId = "r", kind = "daily")?.label)
+    }
+
+    @Test fun `genuinely invalid recurrence calls are still refused, and change nothing`() = runTest {
+        val h = makeApi { tasks += task("f", "Office Focus") }
+        val before = h.state.tasks.toList() to h.state.blocks.toList()
+        assertEquals("error: unknown recurrence kind \"fortnightly\" — use daily, weekly, monthly, or none", h.run("set_task_recurrence", "taskId" to "f", "kind" to "fortnightly"))
+        assertEquals("error: weekly needs daysOfWeek (0=Sunday … 6=Saturday) — ask which days", h.run("set_task_recurrence", "taskId" to "f", "kind" to "weekly"))
+        assertEquals("error: task not found", h.run("set_task_recurrence", "taskId" to "nope", "kind" to "none"))
+        assertEquals(before, h.state.tasks.toList() to h.state.blocks.toList())
+    }
+
+    @Test fun `create_task with a date and time, then schedule_task for that slot - one block, an ok that says so, one receipt`() = runTest {
+        val h = makeApi()
+        val made = h.run("create_task", "name" to "Office Focus", "date" to TOMORROW, "startTime" to "10:30", "estimateMin" to 60)
+        val id = Regex("id=(\\S+)").find(made)!!.groupValues[1]
+        assertTrue(made, made.contains("— scheduled $TOMORROW 10:30"))
+        val before = h.state.tasks.toList() to h.state.blocks.toList()
+        val r = h.run("schedule_task", "taskId" to id, "date" to TOMORROW, "startTime" to "10:30")
+        assertEquals("ok: \"Office Focus\" is already on $TOMORROW at 10:30 — nothing to change", r)
+        assertEquals("nothing written", before, h.state.tasks.toList() to h.state.blocks.toList())
+        assertEquals(1, h.state.blocks.count { it.taskId == id })
+        assertNull(receipt("schedule_task", r, h, taskId = id, date = TOMORROW, startTime = "10:30"))
+        assertEquals("Created “Office Focus”", receipt("create_task", made, h)?.label)
+    }
+
+    @Test fun `the same slot matches however the time is written, and still anchors a repeat set after it`() = runTest {
+        val h = makeApi { tasks += task("f", "Office Focus"); blocks += block("b1", "f", TOMORROW, "09:30") }
+        assertEquals("ok: \"Office Focus\" is already on $TOMORROW at 09:30 — nothing to change",
+            h.run("schedule_task", "taskId" to "f", "date" to TOMORROW, "startTime" to "9:30"))
+        assertEquals("b1", h.scratch.placedBlocks["f"])
+        val r = h.run("set_task_recurrence", "taskId" to "f", "kind" to "weekly", "daysOfWeek" to listOf(jsDayOfWeek(TOMORROW)))
+        assertTrue(r, Regex("^ok: \"Office Focus\" now repeats weekly on \\w+ at 09:30$").matches(r))
+    }
+
+    @Test fun `a different time, a different day, or a done or skipped slot is a real schedule, not a no-op`() = runTest {
+        val h = makeApi { tasks += task("f", "Office Focus"); blocks += block("b1", "f", TOMORROW, "10:30") }
+        assertEquals("ok: scheduled \"Office Focus\" $TOMORROW 11:00", h.run("schedule_task", "taskId" to "f", "date" to TOMORROW, "startTime" to "11:00"))
+        assertEquals(TOMORROW to "11:00", h.state.blocks.first { it.id == "b1" }.let { it.date to it.startTime })
+        assertEquals("ok: scheduled \"Office Focus\" $NEXT_WEEK 11:00", h.run("schedule_task", "taskId" to "f", "date" to NEXT_WEEK, "startTime" to "11:00"))
+        assertEquals(NEXT_WEEK to "11:00", h.state.blocks.first { it.id == "b1" }.let { it.date to it.startTime })
+
+        val done = makeApi {
+            tasks += task("g", "Gym", recurrence = Recurrence.Daily())
+            blocks += listOf(block("g1", "g", TOMORROW, "07:00", done = true), block("g2", "g", addDaysIso(TODAY, 2), "07:00"))
+        }
+        assertEquals("error: \"Gym\" is already done on $TOMORROW — nothing changed",
+            done.run("schedule_task", "taskId" to "g", "date" to TOMORROW, "startTime" to "07:00"))
+        val skipped = makeApi { tasks += task("s", "Swim"); blocks += block("s1", "s", TOMORROW, "08:00", skipped = true) }
+        val r = skipped.run("schedule_task", "taskId" to "s", "date" to TOMORROW, "startTime" to "08:00")
+        assertFalse(r, r.contains("nothing to change"))
     }
 }

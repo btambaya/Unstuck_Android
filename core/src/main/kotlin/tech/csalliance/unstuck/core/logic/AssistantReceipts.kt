@@ -214,6 +214,13 @@ private val ECHO_TOOLS = setOf(
  *  since 2026-09-20; the pre-rewrite `ok: added to "Groceries"` still decodes. */
 private val ADDED_TO_LIST_RE = Regex("^ok: added \"(.*)\" to \"(.*)\"")
 
+/** The tail of an `ok:` line whose wish was ALREADY true, so nothing was
+ *  written: stopping a repeat on a task that doesn't repeat, scheduling a task
+ *  into the very slot it already has (AssistantTools, 2026-09-24 — Zubair's
+ *  call). A success for the model to say plainly — and no receipt, which
+ *  would claim a change (web receipts.ts `NOTHING_TO_CHANGE`). */
+const val NOTHING_TO_CHANGE = " — nothing to change"
+
 /** Build the receipt for one SUCCESSFUL tool call (result starts "ok").
  *  [tasks] resolves live entities for undo targets and quiet-win move counts
  *  (include this turn's scratch rows — the store lags the optimistic write);
@@ -221,6 +228,7 @@ private val ADDED_TO_LIST_RE = Regex("^ok: added \"(.*)\" to \"(.*)\"")
  *  read-only tools and unrecognized results — no receipt beats a wrong receipt. */
 fun deriveReceipt(name: String, args: ReceiptArgs, result: String, tasks: List<TaskItem>, tone: Tone = Tone.GENTLE): Receipt? {
     if (!result.startsWith("ok")) return null
+    if (result.endsWith(NOTHING_TO_CHANGE)) return null
     return when (name) {
         "create_task" -> {
             val nm = quotedFragment(result) ?: "task"
@@ -244,7 +252,9 @@ fun deriveReceipt(name: String, args: ReceiptArgs, result: String, tasks: List<T
         "set_task_recurrence" -> {
             val nm = args.taskId?.let { id -> tasks.firstOrNull { it.id == id }?.name }
             val suffix = if (nm != null) " — “$nm”" else ""
-            val label = if (args.kind != null) "Repeats ${args.kind}$suffix" else "Repeat removed$suffix"
+            // kind "none" is the stop: it read "Repeats none" on the card (web parity, 2026-09-24).
+            val kind = args.kind?.takeIf { it != "none" }
+            val label = if (kind != null) "Repeats $kind$suffix" else "Repeat removed$suffix"
             Receipt(ReceiptIcon.CALENDAR, label)
         }
         "complete_task" -> {

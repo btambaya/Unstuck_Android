@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 105
-        versionName = "0.5.21"
+        versionCode = 106
+        versionName = "0.5.22"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.21 — Connecting Google Calendar now goes through unstucknow.io (part of getting Unstuck verified by Google). Nothing else changes; if Google Calendar is already connected, it stays connected."
+    releaseNotes = "v0.5.22 — Insights, rebuilt: every number now comes from your real data (accidental few-second sessions and timers left running for hours no longer skew it), charts cover the whole day and week, and a new period picker shows this week, last week, any month or all time. New: what you got done, focus time and the days you showed up, a day-by-day rhythm, tasks you finally got unstuck on, plan vs followed through, and how your repeating tasks went. Ask the assistant \"how has my week been?\" for a short review of any past period."
 }
 
 dependencies {

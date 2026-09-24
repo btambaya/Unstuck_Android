@@ -61,7 +61,9 @@ import tech.csalliance.unstuck.core.logic.liveSharedBlocks
 import tech.csalliance.unstuck.core.logic.openedFrom
 import tech.csalliance.unstuck.core.logic.monthRange
 import tech.csalliance.unstuck.core.logic.sharedBlockLabel
-import tech.csalliance.unstuck.core.logic.taskForBlock
+import tech.csalliance.unstuck.core.logic.blockIsDone
+import tech.csalliance.unstuck.core.logic.isSharedBlockId
+import tech.csalliance.unstuck.core.model.CalBlock
 import tech.csalliance.unstuck.core.model.SharedWithMe
 import tech.csalliance.unstuck.core.model.TaskItem
 import tech.csalliance.unstuck.core.time.Clock
@@ -96,6 +98,10 @@ fun CalendarScreen(
     vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (SharedWithMe) -> Unit, onSearch: () -> Unit,
     onMenu: () -> Unit, onAvatar: () -> Unit, onNotifications: () -> Unit, notifUnread: Int, avatarInitials: String,
     onCreateAt: (String, String) -> Unit,
+    /** Start focus on a row from the Day or Week view's Edit-block sheet — the
+     *  shell's one focus entry (Today's), handed the row Today shows (an
+     *  occurrence for a series' block). */
+    onStartFocus: (TaskItem) -> Unit,
     /** One-shot Day/Week/Month request from the assistant's `open_screen` (week | month). */
     requestedView: String? = null,
     onViewApplied: () -> Unit = {},
@@ -118,8 +124,8 @@ fun CalendarScreen(
         }
         CalendarSyncBar(vm)
         when (view) {
-            "Day" -> DayGridScreen(vm, onOpen, onOpenShared, onCreateAt, initialDate = jumpDate)
-            "Week" -> WeekView(vm, onOpen, onOpenShared, onCreateAt)
+            "Day" -> DayGridScreen(vm, onOpen, onOpenShared, onCreateAt, onStartFocus = onStartFocus, initialDate = jumpDate)
+            "Week" -> WeekView(vm, onOpen, onOpenShared, onCreateAt, onStartFocus = onStartFocus)
             // Month gets the same onOpen / onOpenShared the other two views take: a row
             // in its day peek opens the task (or the read-only shared detail) directly.
             else -> MonthView(vm, onOpen, onOpenShared) { iso -> jumpDate = iso; view = "Day" }
@@ -280,8 +286,12 @@ internal fun calendarConnectCaption(outcome: CalendarConnectOutcome): String? = 
 }
 
 @Composable
-private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (SharedWithMe) -> Unit, onCreateAt: (String, String) -> Unit) {
+private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (SharedWithMe) -> Unit, onCreateAt: (String, String) -> Unit, onStartFocus: (TaskItem) -> Unit) {
     val c = UTheme.colors
+    val context = LocalContext.current
+    // A task block tapped → the Day view's Edit-block sheet (Start focus, Mark
+    // done / not done, Open task, time, duration, Unschedule), as on iOS and web.
+    var editingBlock by remember { mutableStateOf<CalBlock?>(null) }
     val blocksRaw by vm.blocks.collectAsStateWithLifecycle()
     // Skipped recurring occurrences are cancelled for that day — drop them.
     val blocks = remember(blocksRaw) { blocksRaw.filter { !it.skipped } }
@@ -386,7 +396,7 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
                     Modifier.weight(1f).fillMaxHeight()
                         .onGloballyPositioned { colW = with(weekDensity) { it.size.width.toDp() } }
                         // Tap an empty slot → create a task prefilled at that day + snapped time.
-                        // Blocks sit on top with their own tap (open detail), so they win their hits.
+                        // Blocks sit on top with their own tap (the Edit-block sheet), so they win their hits.
                         .pointerInput(d.toString()) {
                             detectTapGestures { off ->
                                 val totalMin = WSTART * 60 + ((off.y / weekHourPx) * 60).roundToInt()
@@ -406,8 +416,10 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
                             // Shared FIRST: an owner's block is display-only here.
                             val sb = sharedById[b.id]
                             val bt = if (sb == null && isTaskBlock(b)) b.taskId?.let { tasksById[it] } else null
-                            // For a recurring occurrence the completion lives on the block.
-                            val done = b.done || bt?.done == true
+                            // A repeating day is done on its own block, a one-off when its task
+                            // is (blockIsDone, the Edit-block sheet's rule). A shared block keeps
+                            // the owner's done.
+                            val done = if (sb != null) b.done else blockIsDone(b, bt)
                             val fill = when {
                                 sb != null -> c.primarySoft.copy(alpha = 0.45f)
                                 isTaskBlock(b) -> c.areaSwatch(tech.csalliance.unstuck.ui.components.areaColorFor(bt?.lifeArea, areas, c))
@@ -428,8 +440,13 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
                                             sb != null -> Modifier.dashedBorder(c.primaryDeep, 1.dp, 3.dp).clickable {
                                                 onOpenShared(sharedWithMe.firstOrNull { it.taskId == sb.taskId }?.openedFrom(sb) ?: sb.asSharedWithMe())
                                             }
-                                            isTaskBlock(b) -> Modifier.clickable { taskForBlock(b, tasks)?.let(onOpen) }
-                                            else -> Modifier
+                                            isTaskBlock(b) -> Modifier.clickable { editingBlock = b }
+                                            // A Google event / reserved time is view only, as in the Day
+                                            // view (and on iOS): its tap stops here with the Day view's
+                                            // hint, never falling through to create a task at its time.
+                                            else -> Modifier.pointerInput(b.id) {
+                                                detectTapGestures { android.widget.Toast.makeText(context, viewOnlyBlockHint(b), android.widget.Toast.LENGTH_SHORT).show() }
+                                            }
                                         },
                                     ),
                             ) { Text(if (sb != null) sharedBlockLabel(sb) else b.taskName, style = UFont.sans(8, FontWeight.Medium), color = if (done) c.ink3 else if (sb != null) c.primaryDeep else c.ink, maxLines = 1, textDecoration = if (done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null) }
@@ -440,6 +457,11 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
         }
         Box(Modifier.padding(16.dp)) {}
         }
+    }
+    // MY blocks only, as in the Day view: a shared block's tap opens the shared
+    // detail and never sets editingBlock; the guard keeps that true.
+    editingBlock?.takeUnless { isSharedBlockId(it.id) }?.let { blk ->
+        CalBlockEditSheet(vm, blk, onOpen = onOpen, onStartFocus = onStartFocus) { editingBlock = null }
     }
 }
 

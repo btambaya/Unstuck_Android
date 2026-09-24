@@ -34,6 +34,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import tech.csalliance.unstuck.core.logic.asSharedWithMe
+import tech.csalliance.unstuck.core.logic.blockIsDone
 import tech.csalliance.unstuck.core.logic.blockSlotText
 import tech.csalliance.unstuck.core.logic.dayPeek
 import tech.csalliance.unstuck.core.logic.openedFrom
@@ -91,6 +92,7 @@ fun MonthDayPeekSheet(
     val sharedRaw by vm.sharedBlocks.collectAsStateWithLifecycle()
     val sharedWithMe by vm.sharedWithMe.collectAsStateWithLifecycle()
     val tasks by vm.tasks.collectAsStateWithLifecycle()
+    val tasksById = remember(tasks) { tasks.associateBy { it.id } }
     val peek = remember(iso, blocksRaw, sharedRaw) { dayPeek(iso, blocksRaw, sharedRaw) }
     val clock = tech.csalliance.unstuck.ui.components.clockMode()
 
@@ -100,7 +102,9 @@ fun MonthDayPeekSheet(
         val task = taskForBlock(b, tasks)
         PeekRow(
             key = b.id, title = b.taskName, meta = blockSlotText(b.startTime, b.durationMinutes, clock),
-            done = b.done || task?.done == true, tint = c.primaryDeep, dashed = false,
+            // blockIsDone on the block's own task (not the occurrence row): the
+            // grids' and the Edit-block sheet's rule.
+            done = blockIsDone(b, b.taskId?.let { tasksById[it] }), tint = c.primaryDeep, dashed = false,
             onClick = task?.let { t -> { onOpen(t) } },
         )
     }

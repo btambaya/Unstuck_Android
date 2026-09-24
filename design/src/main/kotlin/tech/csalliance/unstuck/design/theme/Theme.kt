@@ -4,6 +4,7 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
@@ -106,6 +107,54 @@ object UTheme {
         @Composable get() = LocalUnstuckColors.current
 }
 
+/**
+ * Material3's colour roles on the Unstuck palette — what a STOCK Material3
+ * component draws when its call site passes no colours: a TextButton's label,
+ * an OutlinedTextField's focus ring / label / cursor, the text-selection
+ * handles, the DatePicker's selected day and today ring, the TimePicker's
+ * dial hand, time field and AM/PM, a menu or dialog's container.
+ *
+ * `primary` used to map to the palette's indigo, so each of those drew an
+ * indigo accent, and the roles left unset fell back to Material's baseline
+ * lavender and pink. Owner decision 2026-09-24: no indigo accents anywhere;
+ * selection is the black-and-white pair (ink fill, bg text), so the accent
+ * roles are that pair and the container roles are the app's own neutrals.
+ *
+ * The palette's own `primary` is NOT repainted: an area or collection whose
+ * colour a user picked as "indigo" still resolves to it through areaColor().
+ * `secondary` stays coral (what it already was).
+ */
+fun unstuckColorScheme(colors: UnstuckColors): ColorScheme {
+    val onInk = colors.bg
+    val base = if (colors.isDark) darkColorScheme() else lightColorScheme()
+    return base.copy(
+        // Accent roles → the selection pair.
+        primary = colors.ink, onPrimary = onInk,
+        primaryContainer = colors.ink, onPrimaryContainer = onInk,
+        inversePrimary = colors.bg,
+        tertiary = colors.ink2, onTertiary = onInk,
+        tertiaryContainer = colors.ink, onTertiaryContainer = onInk,
+        secondary = colors.coral, onSecondary = Color.White,
+        secondaryContainer = colors.bg2, onSecondaryContainer = colors.ink,
+        // Surfaces → the app's neutrals (never Material's lavender baseline).
+        background = colors.bg, onBackground = colors.ink,
+        surface = colors.surface, onSurface = colors.ink,
+        surfaceVariant = colors.bg2, onSurfaceVariant = colors.ink2,
+        // Tonal elevation composites surfaceTint over surface; surface over
+        // itself is no tint, so a sheet asking for c.surface gets exactly that.
+        surfaceTint = colors.surface,
+        inverseSurface = colors.ink, inverseOnSurface = colors.bg,
+        surfaceBright = colors.surface, surfaceDim = colors.bg2,
+        surfaceContainerLowest = colors.surface, surfaceContainerLow = colors.surface,
+        surfaceContainer = colors.surface, surfaceContainerHigh = colors.surface,
+        // The TimePicker's dial and unselected time field: `line` (not bg2),
+        // which still reads against the dialog's surface in dark mode.
+        surfaceContainerHighest = colors.line,
+        outline = colors.line, outlineVariant = colors.line,
+        error = colors.red,
+    )
+}
+
 @Composable
 fun UnstuckTheme(
     dark: Boolean = isSystemInDarkTheme(),
@@ -114,21 +163,9 @@ fun UnstuckTheme(
     content: @Composable () -> Unit,
 ) {
     // One palette. The accent choice (rose / forest) was retired with the slim
-    // settings (2026-09-24); the default indigo-coral palette is unchanged.
+    // settings (2026-09-24); the palette itself is unchanged.
     val colors = if (dark) UnstuckColors.dark else UnstuckColors.light
-    val scheme = if (dark) {
-        darkColorScheme(
-            primary = colors.primary, onPrimary = colors.bg, secondary = colors.coral,
-            background = colors.bg, onBackground = colors.ink, surface = colors.surface,
-            onSurface = colors.ink, error = colors.red, outline = colors.line,
-        )
-    } else {
-        lightColorScheme(
-            primary = colors.primary, onPrimary = Color.White, secondary = colors.coral,
-            background = colors.bg, onBackground = colors.ink, surface = colors.surface,
-            onSurface = colors.ink, error = colors.red, outline = colors.line,
-        )
-    }
+    val scheme = unstuckColorScheme(colors)
     CompositionLocalProvider(LocalUnstuckColors provides colors) {
         // The in-app text size folds into the font scale so every sp text
         // size responds, on top of the phone's own font size.

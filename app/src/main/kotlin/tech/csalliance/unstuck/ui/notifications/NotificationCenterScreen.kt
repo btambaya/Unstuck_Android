@@ -166,7 +166,8 @@ private fun kindLabel(kind: String): String = when (kind) {
 private fun accentFor(kind: String, c: tech.csalliance.unstuck.design.theme.UnstuckColors) = when (kind) {
     "paused_checkin", "atstart", "drifted" -> c.amber
     "session_recap" -> c.green
-    "morning_brief", "evening_preview", "daily_nudge" -> c.primaryDeep
+    // Neutral: these were indigo (owner decision 2026-09-24).
+    "morning_brief", "evening_preview", "daily_nudge" -> c.ink2
     else -> c.coral
 }
 

@@ -59,6 +59,8 @@ fun captureTagDot(tag: CaptureTag): Color {
         CaptureTag.EDIT -> c.blue
         CaptureTag.QUESTION -> c.green
         CaptureTag.DISTRACTION -> c.coral
-        else -> c.primary   // follow-up
+        // follow-up: neutral (it was indigo; owner decision 2026-09-24). ink3, not
+        // ink2, so the dot still shows on a selected (ink-filled) pill.
+        else -> c.ink3
     }
 }

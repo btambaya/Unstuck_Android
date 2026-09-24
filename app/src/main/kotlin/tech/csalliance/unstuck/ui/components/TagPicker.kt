@@ -52,7 +52,7 @@ fun TagPicker(vm: AppViewModel, selected: List<String>, onChange: (List<String>)
     Row(Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()), horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
         selected.forEach { name ->
             Row(
-                Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft)
+                Modifier.clip(RoundedCornerShape(999.dp)).background(c.ink)
                     .clickable(role = Role.Button) { onChange(selected - name) }
                     .minimumInteractiveComponentSize()
                     // One spoken label so the "✕" glyph isn't read as "times".
@@ -60,8 +60,8 @@ fun TagPicker(vm: AppViewModel, selected: List<String>, onChange: (List<String>)
                     .padding(horizontal = 10.dp, vertical = 5.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp),
             ) {
-                Text("#$name", style = UFont.sans(12, FontWeight.Medium), color = c.primaryDeep)
-                Text("✕", style = UFont.sans(11), color = c.primaryDeep)
+                Text("#$name", style = UFont.sans(12, FontWeight.Medium), color = c.bg)
+                Text("✕", style = UFont.sans(11), color = c.bg)
             }
         }
         Box {
@@ -94,7 +94,7 @@ fun TagPicker(vm: AppViewModel, selected: List<String>, onChange: (List<String>)
                             .padding(horizontal = 14.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp),
                     ) {
-                        Text(if (on) "✓" else " ", style = UFont.sans(13), color = c.primaryDeep)
+                        Text(if (on) "✓" else " ", style = UFont.sans(13), color = c.ink)
                         Text("#${tag.name}", style = UFont.sans(13), color = c.ink, modifier = Modifier.weight(1f))
                     }
                 }
@@ -104,7 +104,7 @@ fun TagPicker(vm: AppViewModel, selected: List<String>, onChange: (List<String>)
                         Modifier.widthIn(min = 200.dp).clickable(role = Role.Button) {
                             onChange(selected + vm.ensureTag(q)); query = ""
                         }.padding(horizontal = 14.dp, vertical = 10.dp),
-                    ) { Text("Create \"$q\"", style = UFont.sans(13, FontWeight.Medium), color = c.primaryDeep) }
+                    ) { Text("Create \"$q\"", style = UFont.sans(13, FontWeight.Medium), color = c.ink) }
                 }
             }
         }

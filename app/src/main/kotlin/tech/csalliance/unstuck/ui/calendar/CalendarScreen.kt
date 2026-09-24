@@ -74,6 +74,7 @@ import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import androidx.compose.ui.graphics.luminance
 
 // Week grid bounds (compact 6am–11pm window in a vertical scroll).
 private const val WSTART = 0
@@ -230,7 +231,7 @@ private fun CalendarSyncBar(vm: AppViewModel) {
                         if (busy) "Syncing…" else conns.joinToString(", ") { "Synced · " + it.accountEmail },
                         style = UFont.sans(12), color = c.ink3, modifier = Modifier.weight(1f),
                     )
-                    Text("Sync now", style = UFont.sans(12, FontWeight.Medium), color = if (busy) c.ink3 else c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(enabled = !busy) {
+                    Text("Sync now", style = UFont.sans(12, FontWeight.Medium), color = if (busy) c.ink3 else c.ink, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable(enabled = !busy) {
                         // A failed "Sync now" used to end silently: the pull never threw, so the
                         // old onFailure was dead (parity with iOS build 81, audit 2026-09-22 C18).
                         scope.launch { busy = true; error = null; error = calendarSyncCaption(vm.syncCalendar(), vm.calendarBackedOff); busy = false }
@@ -249,7 +250,7 @@ private fun CalendarSyncBar(vm: AppViewModel) {
             onDismissRequest = { disclose = null },
             title = { Text(GoogleConnectCopy.title(reconnect), style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
             text = { Text(GoogleConnectCopy.DISCLOSURE, style = UFont.sans(13), color = c.ink2) },
-            confirmButton = { androidx.compose.material3.TextButton(onClick = { disclose = null; openConsent() }) { Text("Continue to Google", color = c.primaryDeep) } },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { disclose = null; openConsent() }) { Text("Continue to Google", color = c.ink) } },
             dismissButton = { androidx.compose.material3.TextButton(onClick = { disclose = null }) { Text("Not now", color = c.ink2) } },
             containerColor = c.surface,
         )
@@ -333,17 +334,17 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
     Column(Modifier.fillMaxSize().padding(horizontal = 18.dp)) {
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Column(Modifier.weight(1f)) {
-                SectionLabel(if (weekOffset == 0) "This week" else "Week", color = c.primaryDeep)
+                SectionLabel(if (weekOffset == 0) "This week" else "Week")
                 Text(rangeLabel, style = UFont.serifItalic(24), color = c.ink, modifier = Modifier.padding(top = 4.dp))
             }
             // ‹ prev · (Today, when off the current week) · › next
             Text("‹", style = UFont.serifItalic(28), color = c.ink2, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { weekOffset-- }.padding(horizontal = 12.dp, vertical = 2.dp))
-            if (weekOffset != 0) Text("Today", style = UFont.sans(12, FontWeight.SemiBold), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { weekOffset = 0 }.padding(horizontal = 8.dp, vertical = 4.dp))
+            if (weekOffset != 0) Text("Today", style = UFont.sans(12, FontWeight.SemiBold), color = c.ink, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { weekOffset = 0 }.padding(horizontal = 8.dp, vertical = 4.dp))
             Text("›", style = UFont.serifItalic(28), color = c.ink2, modifier = Modifier.clip(RoundedCornerShape(999.dp)).clickable { weekOffset++ }.padding(horizontal = 12.dp, vertical = 2.dp))
         }
         Spacer(Modifier.height(10.dp))
         Row(Modifier.fillMaxWidth().padding(bottom = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            RollupStat("Focus planned", if (totalPlanned >= 60) "${totalPlanned / 60}h ${totalPlanned % 60}m" else "${totalPlanned}m", c.primarySoft, c.primaryDeep, Modifier.weight(1f))
+            RollupStat("Focus planned", if (totalPlanned >= 60) "${totalPlanned / 60}h ${totalPlanned % 60}m" else "${totalPlanned}m", c.bg2, c.ink, Modifier.weight(1f))
             RollupStat("Busiest", busiest?.let { dows[((it.dayOfWeek.value + 6) % 7)] } ?: "—", c.amberSoft, c.amberInk, Modifier.weight(1f))
             RollupStat("Lightest", lightest?.let { dows[((it.dayOfWeek.value + 6) % 7)] } ?: "—", c.greenSoft, c.greenInk, Modifier.weight(1f))
         }
@@ -409,7 +410,7 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
                             // For a recurring occurrence the completion lives on the block.
                             val done = b.done || bt?.done == true
                             val fill = when {
-                                sb != null -> c.primarySoft.copy(alpha = 0.45f)
+                                sb != null -> c.bg2
                                 isTaskBlock(b) -> c.areaSwatch(tech.csalliance.unstuck.ui.components.areaColorFor(bt?.lifeArea, areas, c))
                                 else -> c.blueSoft
                             }
@@ -425,14 +426,14 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
                                     // shared detail sheet (never the own-task detail, never create).
                                     .then(
                                         when {
-                                            sb != null -> Modifier.dashedBorder(c.primaryDeep, 1.dp, 3.dp).clickable {
+                                            sb != null -> Modifier.dashedBorder(c.ink2, 1.dp, 3.dp).clickable {
                                                 onOpenShared(sharedWithMe.firstOrNull { it.taskId == sb.taskId }?.openedFrom(sb) ?: sb.asSharedWithMe())
                                             }
                                             isTaskBlock(b) -> Modifier.clickable { taskForBlock(b, tasks)?.let(onOpen) }
                                             else -> Modifier
                                         },
                                     ),
-                            ) { Text(if (sb != null) sharedBlockLabel(sb) else b.taskName, style = UFont.sans(8, FontWeight.Medium), color = if (done) c.ink3 else if (sb != null) c.primaryDeep else c.ink, maxLines = 1, textDecoration = if (done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null) }
+                            ) { Text(if (sb != null) sharedBlockLabel(sb) else b.taskName, style = UFont.sans(8, FontWeight.Medium), color = if (done) c.ink3 else if (sb != null) c.ink2 else c.ink, maxLines = 1, textDecoration = if (done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null) }
                         }
                     }
                 }
@@ -449,6 +450,17 @@ private fun RollupStat(label: String, value: String, bg: androidx.compose.ui.gra
         Text(label, style = UFont.mono(9, FontWeight.Medium), color = fg)
         Text(value, style = UFont.sans(14, FontWeight.SemiBold), color = fg, modifier = Modifier.padding(top = 2.dp))
     }
+}
+
+/** A month cell's heat fill for a day at [t] (0…1 of the busiest day). */
+internal fun monthHeat(c: tech.csalliance.unstuck.design.theme.UnstuckColors, t: Float): androidx.compose.ui.graphics.Color =
+    lerp(c.bg2, c.ink3, 0.2f + 0.6f * t.coerceIn(0f, 1f))
+
+/** WCAG contrast ratio between two opaque colours. */
+internal fun contrastRatio(a: androidx.compose.ui.graphics.Color, b: androidx.compose.ui.graphics.Color): Float {
+    val la = a.luminance() + 0.05f
+    val lb = b.luminance() + 0.05f
+    return maxOf(la, lb) / minOf(la, lb)
 }
 
 @Composable
@@ -488,15 +500,15 @@ private fun MonthView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared
         Row(Modifier.fillMaxWidth().padding(top = 8.dp), verticalAlignment = Alignment.CenterVertically) {
             Text(ym.month.name.lowercase().replaceFirstChar { it.uppercase() } + " " + ym.year, style = UFont.serifItalic(24), color = c.ink, modifier = Modifier.weight(1f))
             Text("‹", style = UFont.serifItalic(24), color = c.ink2, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { ym = ym.minusMonths(1) }.padding(horizontal = 10.dp, vertical = 2.dp))
-            Text("Today", style = UFont.sans(12, FontWeight.Medium), color = c.primaryDeep, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { ym = java.time.YearMonth.now() }.padding(horizontal = 8.dp, vertical = 4.dp))
+            Text("Today", style = UFont.sans(12, FontWeight.Medium), color = c.ink, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { ym = java.time.YearMonth.now() }.padding(horizontal = 8.dp, vertical = 4.dp))
             Text("›", style = UFont.serifItalic(24), color = c.ink2, modifier = Modifier.clip(RoundedCornerShape(8.dp)).clickable { ym = ym.plusMonths(1) }.padding(horizontal = 10.dp, vertical = 2.dp))
         }
         Row(Modifier.fillMaxWidth().padding(top = 2.dp, bottom = 10.dp), verticalAlignment = Alignment.CenterVertically) {
             Text("How busy", style = UFont.mono(10, FontWeight.Medium), color = c.ink3, modifier = Modifier.weight(1f))
             // Legend for the per-day planned dots.
-            Box(Modifier.size(5.dp).clip(CircleShape).background(c.primaryDeep))
+            Box(Modifier.size(5.dp).clip(CircleShape).background(c.ink2))
             Text(" planned   ", style = UFont.mono(9), color = c.ink3)
-            Box(Modifier.size(5.dp).clip(CircleShape).border(1.dp, c.primaryDeep, CircleShape))
+            Box(Modifier.size(5.dp).clip(CircleShape).border(1.dp, c.ink2, CircleShape))
             Text(" shared", style = UFont.mono(9), color = c.ink3)
         }
         Row(Modifier.fillMaxWidth().padding(bottom = 4.dp), horizontalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -515,11 +527,17 @@ private fun MonthView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared
                                     val v = byDay[iso] ?: 0
                                     val t = (v.toFloat() / max).coerceIn(0f, 1f)
                                     val isToday = iso == todayIso
+                                    // The heat ramp is neutral (bg2 → ink3): it was indigo, and
+                                    // indigo is no longer an accent (owner decision 2026-09-24).
+                                    // ink3 sits where the indigo did in lightness, so the ramp reads
+                                    // the same; the day number takes whichever of bg / ink2 is the
+                                    // stronger contrast on its cell.
+                                    val fill = if (isToday) c.coral else if (v == 0) c.bg2 else monthHeat(c, t)
                                     val ownHere = iso in ownPlannedDays
                                     val sharedHere = iso in sharedPlannedDays
                                     Box(
                                         Modifier.weight(1f).aspectRatio(1f).clip(RoundedCornerShape(7.dp))
-                                            .background(if (isToday) c.coral else if (v == 0) c.bg2 else lerp(c.bg2, c.primary, 0.2f + 0.6f * t))
+                                            .background(fill)
                                             // EVERY day opens the same peek — what is on it, and a way into
                                             // each item. (Shared days used to open a sheet and planned days
                                             // only jumped to Day view.)
@@ -529,12 +547,12 @@ private fun MonthView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared
                                             },
                                         contentAlignment = Alignment.Center,
                                     ) {
-                                        val onDark = isToday || t > 0.5f
+                                        val onDark = isToday || contrastRatio(c.bg, fill) > contrastRatio(c.ink2, fill)
                                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                             Text("${d.dayOfMonth}", style = UFont.sans(11, FontWeight.SemiBold), color = if (onDark) c.bg else c.ink2, textAlign = TextAlign.Center)
                                             // ● own blocks planned · ○ shared blocks (the owner's slot).
                                             if (ownHere || sharedHere) {
-                                                val dot = if (onDark) c.bg else c.primaryDeep
+                                                val dot = if (onDark) c.bg else c.ink2
                                                 Row(Modifier.padding(top = 1.dp), horizontalArrangement = Arrangement.spacedBy(2.dp)) {
                                                     if (ownHere) Box(Modifier.size(4.dp).clip(CircleShape).background(dot))
                                                     if (sharedHere) Box(Modifier.size(4.dp).clip(CircleShape).border(1.dp, dot, CircleShape))

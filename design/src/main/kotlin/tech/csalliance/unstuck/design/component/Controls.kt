@@ -28,6 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -46,6 +47,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.ui.unit.dp
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
+import tech.csalliance.unstuck.design.theme.UnstuckColors
 
 /** M3 outlined text field with a notched floating label (radius 6dp).
  *  IME navigation: [imeAction] = Next moves focus to the next field below;
@@ -99,8 +101,14 @@ fun MdField(
     }
 }
 
-/** M3 switch — 44×26 pill, green when on. Mirrors M3 Switch a11y:
- *  Role.Switch + on/off state via toggleable, 48dp minimum interactive size. */
+/** The switch's track: brand coral when ON (owner decision 2026-09-24 — every
+ *  "on" switch in all three apps is coral; it was green here, indigo on iOS),
+ *  the `line2` hairline grey when off. The thumb stays white either way. */
+fun toggleTrackColor(c: UnstuckColors, checked: Boolean): Color = if (checked) c.coral else c.line2
+
+/** M3 switch — 44×26 pill, coral when on ([toggleTrackColor]). Mirrors M3 Switch
+ *  a11y: Role.Switch + on/off state via toggleable, 48dp minimum interactive size.
+ *  Every switch in the app is this one component, so they all follow. */
 @Composable
 fun MdToggle(checked: Boolean, onChange: (Boolean) -> Unit, modifier: Modifier = Modifier) {
     val c = UTheme.colors
@@ -114,11 +122,11 @@ fun MdToggle(checked: Boolean, onChange: (Boolean) -> Unit, modifier: Modifier =
                 role = Role.Switch,
                 onValueChange = onChange,
             )
-            .width(44.dp).height(26.dp).clip(CircleShape).background(if (checked) c.green else c.line2)
+            .width(44.dp).height(26.dp).clip(CircleShape).background(toggleTrackColor(c, checked))
             .padding(2.dp),
         contentAlignment = Alignment.CenterStart,
     ) {
-        Box(Modifier.offset(x = thumbX).size(22.dp).clip(CircleShape).background(androidx.compose.ui.graphics.Color.White))
+        Box(Modifier.offset(x = thumbX).size(22.dp).clip(CircleShape).background(Color.White))
     }
 }
 
@@ -135,7 +143,7 @@ fun MdSegment(options: List<String>, selected: String, modifier: Modifier = Modi
             val active = opt == selected
             Box(
                 Modifier.heightIn(min = 40.dp).clip(RoundedCornerShape(6.dp))
-                    .background(if (active) c.ink else androidx.compose.ui.graphics.Color.Transparent)
+                    .background(if (active) c.ink else Color.Transparent)
                     .selectable(selected = active, role = Role.RadioButton) { onSelect(opt) }
                     .padding(horizontal = 10.dp, vertical = 4.dp),
                 contentAlignment = Alignment.Center,

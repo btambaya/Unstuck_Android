@@ -244,7 +244,7 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
             if (shared) {
                 Text(
                     if (owner) "Shared with $memberCount" else if (canEdit) "Shared with you · you can edit" else "Shared with you · view only",
-                    style = UFont.sans(12, FontWeight.SemiBold), color = c.primaryDeep,
+                    style = UFont.sans(12, FontWeight.SemiBold), color = c.ink2,
                     modifier = Modifier.padding(top = 8.dp, start = 2.dp),
                 )
             }
@@ -337,7 +337,7 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
             onDismissRequest = { promoteTarget = null },
             title = { Text("Move to task", style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
             text = { Text("“${target.body}” becomes a task in your list. Keep everyone in the loop and the others can see when it's done — you'll pick a “by” time.", style = UFont.sans(13), color = c.ink2) },
-            confirmButton = { TextButton(onClick = { promoteTarget = null; pickByTimeThen(target) }) { Text("Keep everyone in the loop", color = c.primaryDeep) } },
+            confirmButton = { TextButton(onClick = { promoteTarget = null; pickByTimeThen(target) }) { Text("Keep everyone in the loop", color = c.ink) } },
             dismissButton = { TextButton(onClick = { promoteTarget = null; vm.moveItemToTask(col, target, AppViewModel.PromoteMode.SELF) }) { Text("Just me", color = c.ink2) } },
             containerColor = c.surface,
         )
@@ -621,7 +621,7 @@ private fun CollItemRow(
                 promotedLabel?.let { label ->
                     Text(
                         label, style = UFont.sans(11, FontWeight.Medium),
-                        color = if (overdue) c.red else if (promotedDone) c.greenInk else c.primaryDeep,
+                        color = if (overdue) c.red else if (promotedDone) c.greenInk else c.ink2,
                         modifier = Modifier.padding(top = 2.dp),
                     )
                 }

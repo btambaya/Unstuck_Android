@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.sp
 import tech.csalliance.unstuck.design.theme.Radius
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
+import tech.csalliance.unstuck.design.theme.UnstuckColors
 
 // Workhorse brand primitives, styled to the Android Mockups. Material-3 chrome
 // (AppBar, BottomNav, FAB, fields, toggles) lives in Chrome.kt / Controls.kt.
@@ -130,6 +131,14 @@ fun Chip(title: String, selected: Boolean = false, modifier: Modifier = Modifier
         Text(title, style = UFont.sans(13, FontWeight.Medium), color = if (selected) c.bg else c.ink2)
     }
 }
+
+/** A passive label pill — a tag, a share status, "SUGGESTED": the UNSELECTED
+ *  half of the app's selection pair (bg2 fill, line2 hairline ring; set the
+ *  text in ink2). These were indigo (primarySoft fill, primaryDeep text) until
+ *  the owner's 2026-09-24 decision: no indigo accents; selection is black and
+ *  white. The ring keeps the pill visible on a surface card in dark mode,
+ *  where bg2 and surface are a hair apart. A SELECTED chip is ink / bg. */
+fun Modifier.neutralPill(c: UnstuckColors): Modifier = this.clip(pill).background(c.bg2).border(1.dp, c.line2, pill)
 
 /** Eyebrow / section label — IBM Plex Mono, 10.5sp, 0.08em, uppercase. */
 @Composable

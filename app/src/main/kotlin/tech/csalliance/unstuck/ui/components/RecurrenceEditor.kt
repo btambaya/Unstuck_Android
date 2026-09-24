@@ -241,7 +241,7 @@ fun RecurrenceEditor(
                     dlg.datePicker.minDate = System.currentTimeMillis() - 60_000
                     dlg.show()
                 }
-                if (until != null) Text("Clear", style = UFont.sans(12), color = c.primaryDeep, modifier = Modifier.clickable(role = Role.Button, onClickLabel = "Clear end date") { onChange(withUntil(value, null)) }.minimumInteractiveComponentSize())
+                if (until != null) Text("Clear", style = UFont.sans(12), color = c.ink, modifier = Modifier.clickable(role = Role.Button, onClickLabel = "Clear end date") { onChange(withUntil(value, null)) }.minimumInteractiveComponentSize())
             }
         }
     }

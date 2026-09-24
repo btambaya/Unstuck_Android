@@ -96,6 +96,7 @@ import tech.csalliance.unstuck.ui.tour.tourAnchor
 import tech.csalliance.unstuck.ui.components.areaColorFor
 import tech.csalliance.unstuck.ui.components.dateEyebrow
 import tech.csalliance.unstuck.ui.components.greetingLine
+import tech.csalliance.unstuck.design.component.neutralPill
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -257,7 +258,7 @@ fun TodayScreen(
             }
         }
         Column(Modifier.padding(horizontal = 18.dp)) {
-            SectionLabel(dateEyebrow(now, tech.csalliance.unstuck.ui.components.clockMode()), color = c.primaryDeep)
+            SectionLabel(dateEyebrow(now, tech.csalliance.unstuck.ui.components.clockMode()))
             // Greet by first name on ONE line ("Good evening Maya.") — display name
             // from the same source Settings → Account reads (reactive, so it fills
             // in once auth hydrates); "Unstuck." when unset (iOS GreetingName.line).
@@ -511,8 +512,8 @@ private fun TaskRow(task: TaskItem, areaColor: Color, ageDays: Int? = null, shar
                 Text(task.lifeArea ?: "—", style = UFont.sans(12), color = c.ink3)
                 // Tags inline on the same line as the area (matches the Tasks list).
                 task.tags?.take(3)?.forEach { tn ->
-                    Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 7.dp, vertical = 2.dp)) {
-                        Text("#$tn", style = UFont.sans(10, FontWeight.Medium), color = c.primaryDeep)
+                    Box(Modifier.neutralPill(c).padding(horizontal = 7.dp, vertical = 2.dp)) {
+                        Text("#$tn", style = UFont.sans(10, FontWeight.Medium), color = c.ink2)
                     }
                 }
             }
@@ -520,11 +521,11 @@ private fun TaskRow(task: TaskItem, areaColor: Color, ageDays: Int? = null, shar
         if (visibleBadges.isNotEmpty()) {
             val label = if (visibleBadges.size == 1) visibleBadges.first().recipientName.substringBefore('@') else "${visibleBadges.size} people"
             Row(
-                Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 7.dp, vertical = 2.dp),
+                Modifier.neutralPill(c).padding(horizontal = 7.dp, vertical = 2.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(3.dp),
             ) {
-                Icon(Icons.Filled.Person, contentDescription = null, tint = c.primaryDeep, modifier = Modifier.size(10.dp))
-                Text(label, style = UFont.sans(10, FontWeight.Medium), color = c.primaryDeep, maxLines = 1)
+                Icon(Icons.Filled.Person, contentDescription = null, tint = c.ink2, modifier = Modifier.size(10.dp))
+                Text(label, style = UFont.sans(10, FontWeight.Medium), color = c.ink2, maxLines = 1)
             }
         }
         if (ageDays != null) {
@@ -550,7 +551,7 @@ private fun DelegatedSection(rows: List<TaskItem>, assignedOut: Map<String, Stri
         }
         rows.forEach { t ->
             Row(
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.primarySoft, RoundedCornerShape(12.dp)).clickable { onOpen(t) }.padding(horizontal = 13.dp, vertical = 11.dp),
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(12.dp)).clickable { onOpen(t) }.padding(horizontal = 13.dp, vertical = 11.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 Column(Modifier.weight(1f)) {
@@ -562,8 +563,8 @@ private fun DelegatedSection(rows: List<TaskItem>, assignedOut: Map<String, Stri
                     )
                     Text("assigned to ${assignedOut[t.id]?.substringBefore('@') ?: "someone"}", style = UFont.sans(12), color = c.ink3, modifier = Modifier.padding(top = 2.dp))
                 }
-                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 9.dp, vertical = 2.dp)) {
-                    Text(if (t.done) "done" else "assigned", style = UFont.sans(10, FontWeight.Bold), color = c.primaryDeep)
+                Box(Modifier.neutralPill(c).padding(horizontal = 9.dp, vertical = 2.dp)) {
+                    Text(if (t.done) "done" else "assigned", style = UFont.sans(10, FontWeight.Bold), color = c.ink2)
                 }
             }
         }

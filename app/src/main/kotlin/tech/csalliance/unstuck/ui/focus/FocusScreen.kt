@@ -432,7 +432,7 @@ fun FocusScreen(vm: AppViewModel, task: TaskItem, onClose: () -> Unit, autoCaptu
             onDismissRequest = { confirmExit = false },
             title = { Text(FocusOptionsCopy.LEAVE_TITLE, style = UFont.sans(16, FontWeight.SemiBold), color = c.ink) },
             text = { Text(FocusOptionsCopy.LEAVE_BODY, style = UFont.sans(13), color = c.ink2) },
-            confirmButton = { androidx.compose.material3.TextButton(onClick = { confirmExit = false; onClose() }) { Text(FocusOptionsCopy.LEAVE, color = c.primaryDeep) } },
+            confirmButton = { androidx.compose.material3.TextButton(onClick = { confirmExit = false; onClose() }) { Text(FocusOptionsCopy.LEAVE, color = c.ink) } },
             dismissButton = {
                 Row {
                     // Leave now and stop asking (Focus ⋯ → "Ask before I leave a session" turns it back on).

@@ -279,7 +279,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
                         // For a recurring occurrence the completion lives on the block.
                         val done = b.done || bt?.done == true
                         val fill = when {
-                            sb != null -> c.primarySoft.copy(alpha = 0.45f)
+                            sb != null -> c.bg2
                             b.kind == CalBlockKind.EXTERNAL -> c.blueSoft
                             isTaskBlock(b) -> c.areaSwatch(areaColorFor(bt?.lifeArea, areas, c))
                             else -> c.bg2
@@ -299,7 +299,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
                                 .clip(RoundedCornerShape(8.dp))
                                 .background(fill)
                                 // Shared blocks wear a dashed outline instead of the solid border.
-                                .then(if (sb != null) Modifier.dashedBorder(c.primaryDeep, 1.dp, 8.dp) else Modifier.border(1.dp, c.line, RoundedCornerShape(8.dp)))
+                                .then(if (sb != null) Modifier.dashedBorder(c.ink2, 1.dp, 8.dp) else Modifier.border(1.dp, c.line, RoundedCornerShape(8.dp)))
                                 // Shared (checked FIRST): tap → the read-only shared detail sheet.
                                 // No edit sheet, no long-press drag, no focus start — the owner's
                                 // block is theirs; we only look at it. Then task blocks: tap to
@@ -330,7 +330,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
                         ) {
                             Text(
                                 if (sb != null) sharedBlockLabel(sb) else b.taskName, style = UFont.sans(12, FontWeight.Medium),
-                                color = if (done) c.ink3 else if (sb != null) c.primaryDeep else c.ink, maxLines = 1,
+                                color = if (done) c.ink3 else if (sb != null) c.ink2 else c.ink, maxLines = 1,
                                 textDecoration = if (done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null,
                             )
                         }

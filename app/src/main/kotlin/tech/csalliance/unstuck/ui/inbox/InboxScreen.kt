@@ -174,7 +174,7 @@ private fun InboxCard(
         Text(cap.body, style = UFont.sans(14), color = c.ink2, modifier = Modifier.padding(top = 5.dp))
         Row(Modifier.fillMaxWidth().padding(top = 9.dp), verticalAlignment = Alignment.CenterVertically) {
             if (!archivedView) {
-                Action("Promote →", c.primaryDeep, FontWeight.Bold, onPromote)
+                Action("Promote →", c.ink, FontWeight.Bold, onPromote)
                 if (onOpen != null) { Spacer(Modifier.width(16.dp)); Action("Open", c.ink2, FontWeight.SemiBold, onOpen) }
             } else if (onOpen != null) {
                 Action("Open", c.ink2, FontWeight.SemiBold, onOpen)
@@ -203,7 +203,8 @@ private fun Action(label: String, color: Color, weight: FontWeight, onClick: () 
 }
 
 private fun tagColor(tag: CaptureTag, c: UnstuckColors): Color = when (tag) {
-    CaptureTag.FOLLOW_UP -> c.primaryDeep
+    // Neutral: follow-up was indigo (owner decision 2026-09-24).
+    CaptureTag.FOLLOW_UP -> c.ink2
     CaptureTag.IDEA -> c.amber
     CaptureTag.EDIT -> c.blue
     CaptureTag.QUESTION -> c.green

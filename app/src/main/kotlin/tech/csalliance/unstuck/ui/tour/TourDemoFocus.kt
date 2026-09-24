@@ -275,7 +275,7 @@ fun TourDemoCaptureSheet(onSave: () -> Unit, onDismiss: () -> Unit) {
                             "edit" -> c.blueSoft to c.blueInk
                             "question" -> c.greenSoft to c.greenInk
                             "distraction" -> c.coralSoft to c.ink
-                            else -> c.primarySoft to c.primaryDeep
+                            else -> c.ink to c.bg   // follow-up (the real sheet's pair)
                         }
                         Box(Modifier.clip(RoundedCornerShape(999.dp)).background(if (sel) selBg else c.surface).then(if (sel) Modifier else Modifier.border(1.dp, c.line2, RoundedCornerShape(999.dp))).clickable { tagIdx = i }.padding(horizontal = 11.dp, vertical = 5.dp)) {
                             Text(label, style = UFont.sans(12, FontWeight.Medium), color = if (sel) selFg else c.ink3)

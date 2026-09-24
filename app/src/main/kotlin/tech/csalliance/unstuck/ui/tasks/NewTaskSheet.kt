@@ -85,6 +85,7 @@ import tech.csalliance.unstuck.design.component.UButton
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.sync.InviteResult
 import tech.csalliance.unstuck.ui.AppViewModel
+import androidx.compose.foundation.border
 
 // Savers so the draft survives a config change (rotation / dark-mode flip / locale /
 // split-screen): Activity recreation must not silently discard a half-typed task.
@@ -430,8 +431,8 @@ fun NewTaskSheet(vm: AppViewModel, prefillDate: String? = null, prefillTime: Str
                             Modifier.clip(RoundedCornerShape(999.dp)).clickable { inviting = true; inviteResult = null; inviteErr = null }.padding(vertical = 2.dp),
                             verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            Icon(Icons.Filled.Add, contentDescription = null, tint = c.primaryDeep, modifier = Modifier.padding(start = 2.dp))
-                            Text("Add someone", style = tech.csalliance.unstuck.design.theme.UFont.sans(13, FontWeight.SemiBold), color = c.primaryDeep)
+                            Icon(Icons.Filled.Add, contentDescription = null, tint = c.ink, modifier = Modifier.padding(start = 2.dp))
+                            Text("Add someone", style = tech.csalliance.unstuck.design.theme.UFont.sans(13, FontWeight.SemiBold), color = c.ink)
                         }
                     }
 
@@ -580,8 +581,10 @@ private fun SharePickRow(name: String, relationship: String?, cur: ShareLevel?, 
     val c = UTheme.colors
     Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.bg2).padding(horizontal = 12.dp, vertical = 10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-            Box(Modifier.size(28.dp).clip(CircleShape).background(c.primary), contentAlignment = Alignment.Center) {
-                Text((name.trim().firstOrNull() ?: '?').uppercase(), style = tech.csalliance.unstuck.design.theme.UFont.sans(13, FontWeight.SemiBold), color = Color.White)
+            // Monogram in the app's neutral pair (ink2 on surface, line2 ring), as in
+            // ConnectionsContent — it was an indigo disc (owner decision 2026-09-24).
+            Box(Modifier.size(28.dp).clip(CircleShape).background(c.surface).border(1.dp, c.line2, CircleShape), contentAlignment = Alignment.Center) {
+                Text((name.trim().firstOrNull() ?: '?').uppercase(), style = tech.csalliance.unstuck.design.theme.UFont.sans(13, FontWeight.SemiBold), color = c.ink2)
             }
             Column(Modifier) {
                 Text(name, style = tech.csalliance.unstuck.design.theme.UFont.sans(14, FontWeight.SemiBold), color = c.ink, maxLines = 1)

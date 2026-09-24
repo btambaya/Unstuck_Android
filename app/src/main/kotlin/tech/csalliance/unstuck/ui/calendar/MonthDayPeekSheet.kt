@@ -100,7 +100,7 @@ fun MonthDayPeekSheet(
         val task = taskForBlock(b, tasks)
         PeekRow(
             key = b.id, title = b.taskName, meta = blockSlotText(b.startTime, b.durationMinutes, clock),
-            done = b.done || task?.done == true, tint = c.primaryDeep, dashed = false,
+            done = b.done || task?.done == true, tint = c.ink2, dashed = false,
             onClick = task?.let { t -> { onOpen(t) } },
         )
     }
@@ -110,7 +110,7 @@ fun MonthDayPeekSheet(
         PeekRow(
             key = sb.blockId, title = sb.title,
             meta = "${blockSlotText(sb.startTime, sb.durationMinutes, clock)} · ${shareFirstName(sb.ownerName)}",
-            done = sb.done, tint = c.primaryDeep, dashed = true,
+            done = sb.done, tint = c.ink2, dashed = true,
             onClick = { onOpenShared(sharedWithMe.firstOrNull { it.taskId == sb.taskId }?.openedFrom(sb) ?: sb.asSharedWithMe()) },
         )
     }
@@ -131,7 +131,7 @@ fun MonthDayPeekSheet(
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                 Text(peekDayTitle(iso), style = UFont.serifItalic(22), color = c.ink, modifier = Modifier.weight(1f))
                 Text(
-                    "Open in Day view", style = UFont.sans(12, FontWeight.Medium), color = c.primaryDeep,
+                    "Open in Day view", style = UFont.sans(12, FontWeight.Medium), color = c.ink,
                     modifier = Modifier.clip(RoundedCornerShape(999.dp))
                         .clickable(role = Role.Button, onClick = onOpenDay)
                         .padding(horizontal = 10.dp, vertical = 6.dp),

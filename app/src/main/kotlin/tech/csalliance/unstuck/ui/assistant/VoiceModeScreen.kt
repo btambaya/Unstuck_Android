@@ -478,7 +478,9 @@ fun VoiceModeScreen(vm: AppViewModel, onClose: () -> Unit) {
                 PulsingOrb(
                     active = state == VoiceState.SPEAKING || state == VoiceState.THINKING ||
                         (state == VoiceState.LISTENING && (!holdToTalk || holding)),
-                    color = if (state == VoiceState.SPEAKING) c.coral else c.primary,
+                    // Coral in every state — listening and thinking were indigo; the
+                    // orb is a coral element (owner decision 2026-09-24).
+                    color = c.coral,
                     gesture = orbGesture,
                 )
                 Text(

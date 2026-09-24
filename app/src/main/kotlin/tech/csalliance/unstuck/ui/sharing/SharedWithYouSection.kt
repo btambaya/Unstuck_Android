@@ -40,6 +40,7 @@ import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.design.component.neutralPill
 
 /** "Shared with you" — the quiet-company section: tasks other people in your circle
  *  shared WITH you, at the top of Today and of the Tasks list. view = read-only
@@ -87,7 +88,7 @@ fun SharedWithYouSection(
             Row(
                 // Row opens the read-only detail; the checkbox (below) has its own
                 // clickable that consumes the tap, so ticking never opens the sheet.
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.primarySoft, RoundedCornerShape(12.dp)).clickable { onOpen(s) }.padding(horizontal = 13.dp, vertical = 11.dp),
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(c.surface).border(1.dp, c.line, RoundedCornerShape(12.dp)).clickable { onOpen(s) }.padding(horizontal = 13.dp, vertical = 11.dp),
                 verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(12.dp),
             ) {
                 if (canComplete) {
@@ -119,8 +120,8 @@ fun SharedWithYouSection(
                         PartnerPresence(vm, s.taskId, modifier = Modifier.padding(top = 6.dp))
                     }
                 }
-                Box(Modifier.clip(RoundedCornerShape(999.dp)).background(c.primarySoft).padding(horizontal = 9.dp, vertical = 2.dp)) {
-                    Text(shareStatusLabel(s.level, done), style = UFont.sans(10, FontWeight.Bold), color = c.primaryDeep)
+                Box(Modifier.neutralPill(c).padding(horizontal = 9.dp, vertical = 2.dp)) {
+                    Text(shareStatusLabel(s.level, done), style = UFont.sans(10, FontWeight.Bold), color = c.ink2)
                 }
             }
         }

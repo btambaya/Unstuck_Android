@@ -216,6 +216,21 @@ class AnalyticsTest {
         assertEquals(3, INTERRUPTIONS_MIN_LINKED)
     }
 
+    // A forgotten timer (30 h, 25-min plan → counts 85 min) places its captures
+    // from its REAL start, like the heatmap — not from its clamped length, which
+    // put a capture 20 min in "hours before the start" and into bin 0.
+    @Test fun interruptionBinsUseTheRealStartOfARunaway() {
+        val end = Time.parseMillis("2026-01-02T16:00:00.000Z")!!
+        val s = sess("run", "t", 30 * 3600, iso(end)).copy(estimateMin = 25)
+        val c = cap("c", sessionId = "run", tag = CaptureTag.IDEA, at = iso(end - 30 * 3600_000L + 20 * 60_000))
+        val bins = interruptionBins(listOf(c), listOf(s), 3, 10)
+        assertEquals(1, bins[6])
+        assertEquals(0, bins[0])
+        // An accidental start links nothing.
+        val tiny = sess("tiny", "t", 30, "2026-01-01T10:30:00.000Z")
+        assertEquals(0, interruptionBins(listOf(cap("c2", sessionId = "tiny", tag = CaptureTag.IDEA, at = "2026-01-01T10:30:00.000Z")), listOf(tiny), 3, 10).sum())
+    }
+
     // P0-10 — usable time excludes blocks already done or skipped.
     @Test fun usableExcludesDoneAndSkipped() {
         fun b(id: String, mins: Int, done: Boolean = false, skipped: Boolean = false) =

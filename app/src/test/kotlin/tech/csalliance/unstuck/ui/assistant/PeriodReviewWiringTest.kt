@@ -63,6 +63,21 @@ class PeriodReviewWiringTest {
         g.userSpeechStarted(modelOnAir = false); assertFalse(g.recap)
         g.responseCreated(); g.transcriptDelta(review)
         assertTrue(g.shouldCorrect())
+        // A barge-in the controller confirmed (it cancels the reply) is the user's
+        // new turn: a fabricated write phrased at them must trip again.
+        val write = "You're all set — you've moved \"Dentist\" to Friday."
+        g.responseCreated(); assertFalse(g.shouldCorrect())   // the follow-up of the correction above
+        g.toolFinished("get_period_review", "ok: review of last week (Mon 14 Sep – Sun 20 Sep).")
+        g.responseCreated(); g.transcriptDelta(write)
+        assertFalse(g.shouldCorrect())   // still the review's turn: the recap waves it through
+        g.bargeIn(); assertFalse(g.recap)
+        g.responseCreated(); g.transcriptDelta(write)
+        assertTrue(g.shouldCorrect())
+        g.responseCreated(); assertFalse(g.shouldCorrect())   // the correction's follow-up
+        // So is a hold-to-talk release (no server VAD in hold mode).
+        g.toolFinished("get_period_review", "ok: review of last week (Mon 14 Sep – Sun 20 Sep).")
+        assertTrue(g.recap)
+        g.userTookTurn(); assertFalse(g.recap)
         // A real claim is never waved through, recap or not.
         val g2 = VoiceIntegrityGuard()
         g2.toolFinished("get_period_review", "ok: review of yesterday (Wed 23 Sep).")

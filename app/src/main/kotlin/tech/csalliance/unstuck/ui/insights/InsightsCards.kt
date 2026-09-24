@@ -252,13 +252,27 @@ internal fun PlanCard(plan: PlanFacts?, todayYear: Int, zone: ZoneId) {
                 }
             }
             if (plan.deadlines.isNotEmpty()) {
-                val names = plan.deadlines.take(2).joinToString(", ") { t ->
-                    "${periodCleanName(t.name)} (${periodDayOf(t.dueAt, zone)?.let { periodFmtDay(it, todayYear) } ?: "—"})"
-                }
-                Text("Due and still open: $names${if (plan.deadlines.size > 2) " +${plan.deadlines.size - 2} more" else ""}", style = UFont.sans(11), color = c.ink3)
+                // A deadline that passed unmet: still open, or finished after it
+                // (the review's "deadline missed" rule) — say which, never "missed".
+                Text(deadlineLine(plan.deadlines.map { t -> DeadlineItem(t.name, periodDayOf(t.dueAt, zone), t.done) }, todayYear), style = UFont.sans(11), color = c.ink3)
             }
         }
     }
+}
+
+/** One deadline that went by in the period: its name, due day and whether it
+ *  has been done since. */
+internal data class DeadlineItem(val name: String, val dueDay: String?, val doneLater: Boolean)
+
+/** "Went past its due date: Invoice Acme (due Fri 18 Sep), Gym bag (due Thu 17
+ *  Sep, done later) +1 more" — the first two, plain and neutral. */
+internal fun deadlineLine(items: List<DeadlineItem>, todayYear: Int): String {
+    val shown = items.take(2).joinToString(", ") { d ->
+        val bits = listOfNotNull(d.dueDay?.let { "due ${periodFmtDay(it, todayYear)}" }, "done later".takeIf { d.doneLater })
+        periodCleanName(d.name) + if (bits.isEmpty()) "" else " (${bits.joinToString(", ")})"
+    }
+    val head = if (items.size == 1) "Went past its due date" else "Went past their due dates"
+    return "$head: $shown${if (items.size > 2) " +${items.size - 2} more" else ""}"
 }
 
 @Composable

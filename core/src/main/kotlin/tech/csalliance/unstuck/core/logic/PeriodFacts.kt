@@ -112,8 +112,11 @@ data class SeriesDot(val date: String, val state: SeriesState)
 
 data class SeriesRhythm(val taskId: String, val name: String, val lifeArea: String?, val dots: List<SeriesDot>) {
     val kept: Int get() = dots.count { it.state == SeriesState.DONE }
-    /** Days already due (today and later are still to come). */
-    val soFar: Int get() = dots.count { it.state != SeriesState.UPCOMING }
+    /** Days that were due so far: done or still open. A day skipped on purpose
+     *  was a choice, not a day owed, so it never counts against them ("kept 5
+     *  of 6", not "of 7"); days still to come aren't due yet. Same as web
+     *  `due` / iOS `dueSoFar`. */
+    val soFar: Int get() = dots.count { it.state == SeriesState.DONE || it.state == SeriesState.OPEN }
 }
 
 /** A plain task finished in the period after waiting ≥ 7 days or being moved ≥ 2×. */

@@ -107,14 +107,18 @@ fun goldenHours(sessions: List<Session>, nowMs: Long, zone: ZoneId = ZoneId.syst
     var total = 0
     var count = 0
     // The shared D1 filter: accidental starts never count toward the 10, and a
-    // forgotten timer can't outvote real sessions.
-    for (s in countableSessions(sessions)) {
-        if (s.actualSec <= 0) continue
+    // forgotten timer can't outvote real sessions (it weighs its COUNTED
+    // length). Its start hour comes from its REAL length — the same start the
+    // Insights heatmap uses — not the clamped one, which put a timer forgotten
+    // overnight at 4am, hours after it really began.
+    for (s in sessions) {
+        val counted = countedSec(s)
+        if (counted <= 0) continue
         val endMs = Time.parseMillis(s.completedAt) ?: continue
         if (endMs < windowStart || endMs > nowMs) continue
         val startHour = Instant.ofEpochMilli(endMs - s.actualSec * 1000L).atZone(zone).hour
-        bins[startHour] += s.actualSec
-        total += s.actualSec
+        bins[startHour] += counted
+        total += counted
         count += 1
     }
     if (count < 10 || total <= 0) return null

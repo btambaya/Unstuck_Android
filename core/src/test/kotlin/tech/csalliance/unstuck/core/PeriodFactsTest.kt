@@ -118,11 +118,11 @@ class PeriodFactsTest {
         val wed = f.days.first { it.date == "2026-09-16" }
         assertEquals(3, wed.done); assertEquals(600, wed.focusSec)
         assertEquals(7, f.days.size); assertTrue(f.days.none { it.future })
-        // Repeating rhythm: Stretch kept 5 of 7 (one skipped on purpose, one open).
+        // Repeating rhythm: Stretch kept 5 of 6 (one open; the day skipped on purpose isn't owed).
         val stretch = f.series.first()
         assertEquals("Stretch", stretch.name)
         assertEquals(listOf(SeriesState.DONE, SeriesState.DONE, SeriesState.DONE, SeriesState.DONE, SeriesState.DONE, SeriesState.SKIPPED, SeriesState.OPEN), stretch.dots.map { it.state })
-        assertEquals(5, stretch.kept); assertEquals(7, stretch.soFar)
+        assertEquals(5, stretch.kept); assertEquals(6, stretch.soFar)
         assertEquals("Walk the dog", f.series[1].name)
         assertTrue(f.wins.isEmpty())
         assertEquals("Last week", insightsPeriodLabel(r, "2026-09-24"))

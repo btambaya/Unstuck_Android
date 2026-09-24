@@ -89,7 +89,10 @@ fun insightsWindowLabel(window: InsightsWindow): String = when (window) {
 // ---- small formatters
 
 /** Identical to the DeepDive "Focus this week" stat: `2h 45m`. */
-private fun fmtHM(sec: Int): String = "${sec / 3600}h ${(sec % 3600) / 60}m"
+/** Seconds as the Insights page shows them — rounded minutes, `45m` / `2h` /
+ *  `1h 5m` (the page's "Focused" card and get_period_review use the same rule,
+ *  so the model never quotes a number one minute off the screen). */
+private fun fmtFocus(sec: Int): String = periodDur(periodMinutes(sec))
 
 /** `Wed 2 Sep` — local getters only. */
 private fun fmtDay(ms: Long, zone: ZoneId): String {
@@ -170,7 +173,7 @@ fun renderInsights(
         lines += "Focus: no focus sessions in this window."
     } else {
         val totalSec = scopedSessions.sumOf { it.actualSec }
-        lines += "Focus: ${fmtHM(totalSec)} across ${plural(scopedSessions.size, "session")}, median ${jsRound(medianSec(scopedSessions) / 60.0)}m."
+        lines += "Focus: ${fmtFocus(totalSec)} across ${plural(scopedSessions.size, "session")}, median ${fmtFocus(medianSec(scopedSessions))}."
 
         // By area — the screen's own list plus its "No area" bar.
         val bars = weekdayAreaHours(scopedSessions, tasks, areas, withNoArea = true)
@@ -224,7 +227,7 @@ fun renderInsights(
     }
 
     // Interruptions: Report histogram — captures written mid-session, by minutes in.
-    val bins = interruptionBins(scopedCaptures, scopedSessions)
+    val bins = interruptionBins(scopedCaptures, rawScoped)
     val linked = bins.sum()
     // Same gate as the screen: fewer than 3 linked captures says nothing.
     if (linked >= INTERRUPTIONS_MIN_LINKED) {
@@ -271,7 +274,7 @@ fun renderInsights(
     }
     if (planned.isNotEmpty()) {
         val mins = planned.sumOf { it.durationMinutes }
-        lines += "Planned: ${plural(planned.size, "calendar block")} (${fmtHM(mins * 60)}) dated in this window."
+        lines += "Planned: ${plural(planned.size, "calendar block")} (${periodDur(mins)}) dated in this window."
     }
 
     // Worth noticing: the Report's own narrative cards — on OUR clock, so a

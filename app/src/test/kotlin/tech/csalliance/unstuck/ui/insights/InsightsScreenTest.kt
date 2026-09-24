@@ -143,7 +143,8 @@ class InsightsScreenTest {
         scrollTo("Plan vs followed through")
         compose.onNodeWithText("Followed through on 1 of 3 planned.").assertExists()
         scrollTo("Repeating tasks")
-        compose.onNodeWithText("kept 1 of 3 so far").assertExists()
+        // Done 21st, skipped 22nd on purpose (not owed), open 23rd, today still to come.
+        compose.onNodeWithText("kept 1 of 2 so far").assertExists()
     }
 
     @Test fun stepperReachesLastWeek() {

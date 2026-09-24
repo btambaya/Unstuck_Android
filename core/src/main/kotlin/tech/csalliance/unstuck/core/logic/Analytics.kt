@@ -92,16 +92,20 @@ fun calibrationHitRate(dots: List<CalibrationDot>, slackMin: Int = 5): Double {
 
 // H3 — interruption histogram (captures as the proxy)
 
-/** Captures linked to a session, by minutes into it. The session start is
- *  inferred as completedAt − actualSec, which ignores paused time, so a capture
- *  taken before a pause can read as "before the start": it is clamped into the
- *  first bin instead of being dropped (cross-check P0-11). The screen hides the
- *  chart below [INTERRUPTIONS_MIN_LINKED] linked captures. */
+/** Captures linked to a counted session, by minutes into it. Pass the RAW
+ *  sessions: the start is inferred as completedAt − the REAL actualSec (as the
+ *  heatmap does), so a forgotten timer's captures land where they were taken,
+ *  not hours "before the start" of its clamped length. That start still
+ *  ignores paused time, so a capture taken before a pause can read as before
+ *  the start: it is clamped into the first bin instead of being dropped
+ *  (cross-check P0-11). The screen hides the chart below
+ *  [INTERRUPTIONS_MIN_LINKED] linked captures. */
 fun interruptionBins(captures: List<Capture>, sessions: List<Session>, binMin: Int = 3, binCount: Int = 10): List<Int> {
     if (binCount < 1) return emptyList()
     val bins = IntArray(binCount)
     val sessionStart = HashMap<String, Double>()
-    for (s in countableSessions(sessions)) {
+    for (s in sessions) {
+        if (!isCountable(s)) continue
         Time.parseMillis(s.completedAt)?.let { sessionStart[s.id] = it - s.actualSec * 1000.0 }
     }
     for (c in captures) {

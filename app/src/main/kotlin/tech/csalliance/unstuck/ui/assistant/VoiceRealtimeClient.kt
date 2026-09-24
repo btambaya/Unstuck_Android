@@ -171,7 +171,17 @@ class VoiceIntegrityGuard {
         nextResponseToolBacked = false
     }
 
-    fun bargeIn() { transcript = "" }
+    /** The controller cut the reply because the USER took the floor (a
+     *  confirmed barge-in, the Interrupt button, a hold-to-talk press over a
+     *  reply): the next reply answers them, not the review, so the recap ends
+     *  too. Echo never gets here — the controller only cancels on speech it
+     *  judged theirs. */
+    fun bargeIn() { transcript = ""; recap = false }
+
+    /** A hold-to-talk release: the user's new turn, committed before its reply
+     *  is asked for. Hold mode has no server VAD, so no speech start ends the
+     *  recap there. */
+    fun userTookTurn() { recap = false }
 
     fun transcriptDelta(d: String) { transcript += d }
 
@@ -196,8 +206,11 @@ class VoiceIntegrityGuard {
         private set
 
     /** The user started speaking. While a reply is on air (in flight or still
-     *  playing) a speech start is echo or a barge-in (which cancels that reply
-     *  unscored), so only a start with nothing on air ends the recap. */
+     *  playing) a speech start may be echo, so it doesn't end the recap here; a
+     *  real barge-in ends it through [bargeIn] when the controller cancels the
+     *  reply. A start with nothing on air is a new turn. (Not on the
+     *  controller's UserTurn caption: a late transcript of the question being
+     *  answered arrives as one too — in hold mode after the review already ran.) */
     fun userSpeechStarted(modelOnAir: Boolean) { if (!modelOnAir) recap = false }
 
     /** A cancelled/incomplete response (barge-in) is not a claim. */
@@ -669,9 +682,12 @@ class VoiceRealtimeClient(
             // (the engine runs this on that thread, right behind the last append),
             // so the tail of the utterance is never cut and a short tap still sends
             // the audio it covered.
-            BargeInCommand.CommitAndRespond -> audio.afterCaptureDrain {
-                send(buildJsonObject { put("type", "input_audio_buffer.commit") })
-                send(buildJsonObject { put("type", "response.create") })
+            BargeInCommand.CommitAndRespond -> {
+                guard.userTookTurn()   // their new turn: an earlier review no longer vouches
+                audio.afterCaptureDrain {
+                    send(buildJsonObject { put("type", "input_audio_buffer.commit") })
+                    send(buildJsonObject { put("type", "response.create") })
+                }
             }
             is BargeInCommand.ForceGate -> audio.forceGate(cmd.open)
             is BargeInCommand.Ui -> onState(

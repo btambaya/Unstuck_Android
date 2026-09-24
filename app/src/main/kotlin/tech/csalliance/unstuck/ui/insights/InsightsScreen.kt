@@ -120,7 +120,8 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
     val facts = remember(data, range, now) { insightsFacts(data, range, now, zone) }
 
     // The window's rows, already filtered (sessions: counted ones; the heatmap
-    // takes the raw ones so it can place each session from its real start).
+    // and the interruptions chart take the raw ones so they can place each
+    // session from its real start).
     val sessions = facts.cur.sessions
     val captures = facts.cur.captures
     val reasons = facts.cur.pauses
@@ -165,11 +166,13 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                     month = span == InsightsSpan.MONTH,
                     hasHistory = earliest != null && earliest < range.from,
                     // From the current week/month, offer the one before as a link.
-                    previous = if (offset == 0 && span != InsightsSpan.ALL) {
-                        val prev = insightsFacts(data, insightsRange(span, -1, today, earliest), now, zone)
-                        if (prev.isEmpty) null else (if (span == InsightsSpan.WEEK) "Last week" else insightsPeriodLabel(prev.range, today)) +
-                            ": ${prev.doneCount} done · ${periodDur(periodMinutes(prev.focusSec))} focused"
-                    } else null,
+                    previous = remember(data, span, offset, today, earliest, now) {
+                        if (offset == 0 && span != InsightsSpan.ALL) {
+                            val prev = insightsFacts(data, insightsRange(span, -1, today, earliest), now, zone)
+                            if (prev.isEmpty) null else (if (span == InsightsSpan.WEEK) "Last week" else insightsPeriodLabel(prev.range, today)) +
+                                ": ${prev.doneCount} done · ${periodDur(periodMinutes(prev.focusSec))} focused"
+                        } else null
+                    },
                     onPrevious = { offset = -1 },
                 )
             }
@@ -240,7 +243,7 @@ fun InsightsScreen(vm: AppViewModel, deep: Boolean, onBack: () -> Unit, onToggle
                 if (dots.isNotEmpty()) item { CalibrationScatter(dots, hit) }
                 if (hasFocus) item { Heatmap(remember(rawSessions, zone) { hourDayHeatmap(rawSessions, zone) }) }
                 item {
-                    val interruptions = remember(captures, sessions) { interruptionBins(captures, sessions) }
+                    val interruptions = remember(captures, rawSessions) { interruptionBins(captures, rawSessions) }
                     // Fewer than 3 captures linked to a session say nothing (P0-11).
                     if (interruptions.sum() >= INTERRUPTIONS_MIN_LINKED) {
                         Histogram(

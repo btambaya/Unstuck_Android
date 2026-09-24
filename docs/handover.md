@@ -21,6 +21,11 @@ Single source of truth for "where is the Android build?". Update as phases land.
   TEXT request only, the §5.2 voice rule, the get_insights early-week note, the §5.4 recap-scoped fabrication guard (text + voice).
 - **Follow-ups (not tonight):** co-focus sessions for the recipient (P0-9), calendar month-cell meaning (P1-8), voice-minutes
   meter, meeting load; estimate accuracy per finished task; the Friday week-review moment is still not rendered.
+- **Review pass (same night):** the voice recap now also ends on a confirmed barge-in / Interrupt / hold-to-talk release (it
+  outlived the review into the user's next turn); "kept N of M" no longer counts days skipped on purpose (web/iOS parity);
+  the Plan card's deadline line says "done later" instead of calling a late-finished task "still open"; get_insights' Focus /
+  median / planned read like the page (rounded, `1h 40m`, not a floored `1h 39m`); golden hours and the interruptions chart
+  place a forgotten timer from its REAL start (as the heatmap does), weighted by its counted length.
 
 ## 2026-09-23 (night) — vc104 / 0.5.20: sign-up links that open the app; "account already exists"
 

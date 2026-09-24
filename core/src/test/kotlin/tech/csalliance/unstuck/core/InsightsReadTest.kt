@@ -156,7 +156,7 @@ class InsightsReadTest {
     @Test fun `sessions with no task link get an honest estimates line`() {
         val orphan = Session(id = "x", taskName = "Ad hoc", actualSec = 900, completedAt = ago(1.0))
         val out = render(Data(sessions = listOf(orphan)))
-        assertTrue(out.contains("Focus: 0h 15m across 1 session, median 15m."))
+        assertTrue(out.contains("Focus: 15m across 1 session, median 15m."))
         assertTrue(out.contains("Estimates: no sessions linked to an estimated task yet."))
         assertFalse(out.contains("Re-entry"))
         assertFalse(out.contains("Worth noticing"))
@@ -236,6 +236,14 @@ class InsightsReadTest {
         assertTrue(out, out.contains("By area: Music 1.0h, No area 1.0h."))
     }
 
+    @Test fun `focus total and median round like the page's Focused card`() {
+        // 49m 45s + 49m 50s = 99m 35s: the page (and get_period_review) says
+        // 1h 40m; the old floor said "1h 39m", one minute off the screen.
+        val t = tsk("a", "Write report", estimateMin = 45, lifeArea = "Work")
+        val out = render(Data(tasks = listOf(t), sessions = listOf(sessOn(t, SEP, 1, 9, 0, 49 * 60 + 45, "r1"), sessOn(t, SEP, 1, 11, 0, 49 * 60 + 50, "r2"))))
+        assertTrue(out, out.contains("Focus: 1h 40m across 2 sessions, median 50m."))
+    }
+
     @Test fun `accidental starts and forgotten timers are filtered like the screen`() {
         val t = tsk("a", "Write report", lifeArea = "Work")
         val sessions = listOf(
@@ -243,7 +251,7 @@ class InsightsReadTest {
             sessOn(t, SEP, 1, 10, 0, 30 * 3600, "runaway"),      // 30 h, est 30 → counts 90 min
         )
         val out = render(Data(tasks = listOf(t), sessions = sessions))
-        assertTrue(out, out.contains("Focus: 1h 30m across 1 session, median 90m."))
+        assertTrue(out, out.contains("Focus: 1h 30m across 1 session, median 1h 30m."))
     }
 
     @Test fun `repeating series and Later tasks never slip`() {
@@ -284,7 +292,7 @@ class InsightsReadTest {
     @Test fun `block dates compare as local calendar days even late at night`() {
         val lateNight = localMillis(2026, 9, 2, 23, 30)
         val out = render(Data(blocks = listOf(blk("2026-09-02", 45), blk("2026-09-03", 45)), now = lateNight))
-        assertTrue(out, out.contains("Planned: 1 calendar block (0h 45m) dated in this window."))
+        assertTrue(out, out.contains("Planned: 1 calendar block (45m) dated in this window."))
     }
 
     @Test fun `stays under the cap with long names, dropping insight detail first`() {

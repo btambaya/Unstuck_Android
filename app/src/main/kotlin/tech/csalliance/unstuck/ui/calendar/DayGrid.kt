@@ -337,8 +337,7 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
                                         // give a brief hint instead of feeling broken/unresponsive.
                                     } else Modifier.pointerInput(b.id) {
                                         detectTapGestures {
-                                            val msg = if (b.kind == CalBlockKind.EXTERNAL) "From Google Calendar — view only here." else "Reserved time."
-                                            android.widget.Toast.makeText(context, msg, android.widget.Toast.LENGTH_SHORT).show()
+                                            android.widget.Toast.makeText(context, viewOnlyBlockHint(b), android.widget.Toast.LENGTH_SHORT).show()
                                         }
                                     },
                                 )
@@ -423,6 +422,12 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
         }
     }
 }
+
+/** The hint a view-only block (a Google event, reserved time) gives when tapped
+ *  in the Day or Week grid. The tap stops there: it never falls through to the
+ *  grid's create-a-task-here. */
+internal fun viewOnlyBlockHint(b: CalBlock): String =
+    if (b.kind == CalBlockKind.EXTERNAL) "From Google Calendar — view only here." else "Reserved time."
 
 /** Tap a scheduled block → finish it, focus on it or open it; reschedule
  *  (free-slot chips), resize (duration chips) or unschedule. Mirrors the web

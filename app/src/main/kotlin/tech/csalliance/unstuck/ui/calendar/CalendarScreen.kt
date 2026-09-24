@@ -288,6 +288,7 @@ internal fun calendarConnectCaption(outcome: CalendarConnectOutcome): String? = 
 @Composable
 private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (SharedWithMe) -> Unit, onCreateAt: (String, String) -> Unit, onStartFocus: (TaskItem) -> Unit) {
     val c = UTheme.colors
+    val context = LocalContext.current
     // A task block tapped → the Day view's Edit-block sheet (Start focus, Mark
     // done / not done, Open task, time, duration, Unschedule), as on iOS and web.
     var editingBlock by remember { mutableStateOf<CalBlock?>(null) }
@@ -440,7 +441,12 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
                                                 onOpenShared(sharedWithMe.firstOrNull { it.taskId == sb.taskId }?.openedFrom(sb) ?: sb.asSharedWithMe())
                                             }
                                             isTaskBlock(b) -> Modifier.clickable { editingBlock = b }
-                                            else -> Modifier
+                                            // A Google event / reserved time is view only, as in the Day
+                                            // view (and on iOS): its tap stops here with the Day view's
+                                            // hint, never falling through to create a task at its time.
+                                            else -> Modifier.pointerInput(b.id) {
+                                                detectTapGestures { android.widget.Toast.makeText(context, viewOnlyBlockHint(b), android.widget.Toast.LENGTH_SHORT).show() }
+                                            }
                                         },
                                     ),
                             ) { Text(if (sb != null) sharedBlockLabel(sb) else b.taskName, style = UFont.sans(8, FontWeight.Medium), color = if (done) c.ink3 else if (sb != null) c.primaryDeep else c.ink, maxLines = 1, textDecoration = if (done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null) }

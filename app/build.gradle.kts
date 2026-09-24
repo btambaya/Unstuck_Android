@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 110
-        versionName = "0.5.26"
+        versionCode = 111
+        versionName = "0.5.27"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.26 — Repeat a task every 2, 3 or 4 weeks (Repeat → Every week · 2 · 3 · 4 weeks) and pick the starting week with the Starts chips; moving a repeating task to other days keeps its rhythm; the assistant can set these up too (\"every other Thursday\"). Today always shows your week pill now — tap it to open Insights."
+    releaseNotes = "v0.5.27 — Insights: \"+N more\" under a list now opens the rest of it (\"Show less\" folds it back). Today: the logo is now the same size as your profile picture, lined up with the page margins."every other Thursday\"). Today always shows your week pill now — tap it to open Insights."
 }
 
 dependencies {

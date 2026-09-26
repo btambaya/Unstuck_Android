@@ -7,6 +7,7 @@ import androidx.compose.ui.test.isRoot
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.room.Room
 import androidx.test.core.app.ApplicationProvider
@@ -104,7 +105,9 @@ class CalendarWeekBlockSheetTest {
         runBlocking {
             write.upsertTask(task("t1", "Write report"))
             write.upsertTask(task("tpl", "Stretch", recurrence = Recurrence.Daily()))
-            // Early hours, so every block sits in the grid's first screenful.
+            // Early hours. The Week grid opens about an hour before NOW on the
+            // current week (so its now line is in sight), so a tap scrolls the
+            // block into view first (tapBlock).
             write.upsertCalBlock(block("b1", "t1", "Write report", "01:00"))
             write.upsertCalBlock(block("occ1", "tpl", "Stretch", "03:00"))
             write.upsertCalBlock(block("g1", null, "Dentist", "05:00", kind = CalBlockKind.EXTERNAL, externalEventId = "evt-1"))
@@ -131,9 +134,14 @@ class CalendarWeekBlockSheetTest {
         compose.waitUntil(5_000) { runCatching { compose.onNodeWithText("Write report").assertExists() }.isSuccess }
     }
 
+    /** Scroll the grid to the block, then tap it, as a finger would. */
+    private fun tapBlock(name: String) {
+        compose.onNodeWithText(name).performScrollTo().performClick()
+    }
+
     @Test fun tappingATaskBlockOpensTheEditBlockSheet_notTheTaskScreen() {
         week()
-        compose.onNodeWithText("Write report").performClick()
+        tapBlock("Write report")
         compose.waitForIdle()
 
         compose.onNodeWithText(SHEET_TITLE).assertExists()
@@ -151,7 +159,7 @@ class CalendarWeekBlockSheetTest {
 
     @Test fun aRepeatingTasksBlockActsOnThatDay() {
         week()
-        compose.onNodeWithText("Stretch").performClick()
+        tapBlock("Stretch")
         compose.waitForIdle()
 
         compose.onNodeWithText(SHEET_TITLE).assertExists()
@@ -162,7 +170,7 @@ class CalendarWeekBlockSheetTest {
 
     @Test fun aGoogleEventOpensNoSheet() {
         week()
-        compose.onNodeWithText("Dentist").performClick()
+        tapBlock("Dentist")
         compose.waitForIdle()
 
         compose.onNodeWithText(SHEET_TITLE).assertDoesNotExist()

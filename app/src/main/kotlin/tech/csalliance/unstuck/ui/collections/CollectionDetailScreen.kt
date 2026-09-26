@@ -96,6 +96,7 @@ import tech.csalliance.unstuck.design.component.SectionLabel
 import tech.csalliance.unstuck.design.theme.UFont
 import tech.csalliance.unstuck.design.theme.UTheme
 import tech.csalliance.unstuck.ui.AppViewModel
+import tech.csalliance.unstuck.ui.components.dismissKeyboardOnDrag
 import tech.csalliance.unstuck.ui.components.keepInViewWhileTyping
 
 private val PALETTE = listOf("indigo", "coral", "green", "amber", "blue", "violet")
@@ -279,7 +280,9 @@ fun CollectionDetailScreen(vm: AppViewModel, collectionId: String, onBack: () ->
         // is what makes the scroll keep the focused field in sight (the edit, the
         // add field) and lets the whole list scroll above the keyboard. The bottom
         // bar isn't involved: this screen is a full-screen route drawn over it.
-        Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
+        // Dragging the list up or down lets the keyboard go (Ahmad 2026-09-26: it
+        // stayed up with the add row scrolled out of sight — dismissKeyboardOnDrag).
+        Column(Modifier.fillMaxSize().imePadding().dismissKeyboardOnDrag().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
             // Recolor swatches — owner only.
             if (owner) {
                 Row(Modifier.padding(top = 12.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {

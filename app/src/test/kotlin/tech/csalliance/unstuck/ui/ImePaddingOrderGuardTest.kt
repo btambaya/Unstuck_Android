@@ -43,6 +43,25 @@ class ImePaddingOrderGuardTest {
         )
     }
 
+    /** A screen that scrolls a field into view above the keyboard
+     *  (keepInViewWhileTyping) must also let the keyboard go when its list is
+     *  dragged (dismissKeyboardOnDrag). With the first and not the second, a
+     *  list dragged back up kept the keyboard over it with the focused field
+     *  scrolled out of sight (Ahmad 2026-09-26, KeyboardInsetsTest). */
+    @Test fun `a screen that keeps a field above the keyboard also lets the keyboard go on a drag`() {
+        val root = projectRoot()
+        val src = File(root, "app/src/main")
+        val offenders = src.walkTopDown()
+            .filter { it.isFile && it.extension == "kt" && it.name != "KeepInView.kt" }
+            .filter { f -> f.readText().let { "keepInViewWhileTyping(" in it && "dismissKeyboardOnDrag()" !in it } }
+            .map { it.relativeTo(root).path }
+            .toList()
+        assertTrue(
+            "these use keepInViewWhileTyping but their scroll has no dismissKeyboardOnDrag():\n" + offenders.joinToString("\n"),
+            offenders.isEmpty(),
+        )
+    }
+
     /** The pattern itself: it must catch the shape that shipped, and pass the fix. */
     @Test fun `the guard tells the two orders apart`() {
         assertTrue(insideTheScroll.containsMatchIn("Modifier.fillMaxSize().verticalScroll(rememberScrollState()).imePadding().padding(18.dp)"))

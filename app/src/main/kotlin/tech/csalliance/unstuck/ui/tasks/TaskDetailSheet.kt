@@ -83,6 +83,7 @@ import androidx.compose.material3.DropdownMenuItem
 import tech.csalliance.unstuck.ui.components.RecurrenceEditor
 import tech.csalliance.unstuck.ui.components.TagPicker
 import tech.csalliance.unstuck.ui.components.areaColorFor
+import tech.csalliance.unstuck.ui.components.dismissKeyboardOnDrag
 import tech.csalliance.unstuck.ui.components.keepInViewWhileTyping
 import tech.csalliance.unstuck.ui.tour.TourAnchorIds
 import tech.csalliance.unstuck.ui.tour.tourAnchor
@@ -200,7 +201,8 @@ fun TaskDetailScreen(vm: AppViewModel, task: TaskItem, onBack: () -> Unit, onSta
         // imePadding before verticalScroll: the keyboard must shrink the scroll's
         // viewport, or a field near the bottom (Capture a thought…, the call
         // notes) stays under it (see CollectionDetailScreen, KeyboardInsetsTest).
-        Column(Modifier.fillMaxSize().imePadding().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
+        // A drag up or down lets the keyboard go, as in a collection.
+        Column(Modifier.fillMaxSize().imePadding().dismissKeyboardOnDrag().verticalScroll(rememberScrollState()).padding(horizontal = 18.dp).padding(bottom = 30.dp)) {
             Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 AreaDotColor(areaColorFor(task.lifeArea, areas, c), size = 6)
                 SectionLabel("${(task.lifeArea ?: "Task").uppercase()} · TASK")

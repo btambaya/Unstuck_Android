@@ -5,8 +5,15 @@ import android.os.Looper
 import android.view.View
 import androidx.activity.ComponentActivity
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.test.assertIsFocused
+import androidx.compose.ui.test.assertIsNotFocused
 import androidx.compose.ui.test.getUnclippedBoundsInRoot
+import androidx.compose.ui.test.hasAnyDescendant
 import androidx.compose.ui.test.hasContentDescription
+import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.swipeDown
+import androidx.compose.ui.test.swipeLeft
+import androidx.compose.ui.test.swipeUp
 import androidx.compose.ui.test.hasScrollToIndexAction
 import androidx.compose.ui.test.hasSetTextAction
 import androidx.compose.ui.test.hasText
@@ -226,6 +233,8 @@ class KeyboardInsetsTest {
             }
             compose.waitForIdle()
             assertAboveTheKeyboard("the add field after adding \"$body\"", compose.onNode(hasSetTextAction() and hasText(INLINE_ADD)), below = PILL_BELOW)
+            // The list's own scroll back to the field is not a drag: the keyboard stays.
+            compose.onNode(hasSetTextAction() and hasText(INLINE_ADD)).assertIsFocused()
             compose.onNodeWithContentDescription(body).assertExists()
         }
     }
@@ -270,11 +279,100 @@ class KeyboardInsetsTest {
         assertAboveTheKeyboard("the item being edited in landscape", field, below = CARD_BELOW)
     }
 
+    // ── dragging the list with the keyboard up ───────────────────────────────
+
+    /** The list's vertical scroll (the one the [INLINE_ADD] field sits in). */
+    private fun theListScroll() = compose.onNode(hasScrollAction() and hasAnyDescendant(hasSetTextAction() and hasText(INLINE_ADD)))
+
+    /** THE report (Ahmad 2026-09-26): the list auto-scrolled to the add field
+     *  with the keyboard up; dragging it back up to the top must let the keyboard
+     *  go. It used to stay, with the add field scrolled away out of sight. And
+     *  once the keyboard is gone the list stays where the finger took it: it is
+     *  not yanked back down to the add field. */
+    @Test fun draggingTheListBackUpLetsTheKeyboardGo() {
+        openTheList(longList)
+        keyboard(KEYBOARD)
+        val add = compose.onNode(hasSetTextAction() and hasText(INLINE_ADD))
+        add.assertIsFocused()
+
+        theListScroll().performTouchInput { swipeDown() }
+        compose.waitForIdle()
+        add.assertIsNotFocused()
+
+        // Letting go of the field is what takes the keyboard down.
+        keyboard(0.dp)
+        val addTop = add.getUnclippedBoundsInRoot().top
+        assertTrue("the list stays where it was dragged, the add field below the screen: its top is $addTop, the screen ends at ${rootBottom()}", addTop >= rootBottom())
+    }
+
+    /** Dragging DOWN the list (toward the add field) lets the keyboard go too. */
+    @Test fun draggingTheListEitherWayLetsTheKeyboardGo() {
+        openTheList(longList)
+        keyboard(KEYBOARD)
+        val add = compose.onNode(hasSetTextAction() and hasText(INLINE_ADD))
+        theListScroll().performTouchInput { swipeUp() }
+        compose.waitForIdle()
+        add.assertIsNotFocused()
+    }
+
+    /** An item held to edit: dragging the list lets the keyboard go, but the
+     *  editor stays open with what was typed — nothing is saved or lost. */
+    @Test fun draggingTheListWhileEditingAnItemKeepsTheEdit() {
+        openTheList(longList)
+        keyboard(0.dp)
+        val field = holdTheLowestCoveredItem(longItems, KEYBOARD)
+        keyboard(KEYBOARD)
+        field.assertIsFocused()
+        field.performTextInput(" and more")
+        val typed = compose.onNode(hasSetTextAction() and hasText(" and more", substring = true))
+        typed.assertIsFocused()
+
+        theListScroll().performTouchInput { swipeDown() }
+        compose.waitForIdle()
+        typed.assertIsNotFocused()
+        typed.assertExists()
+        compose.onNodeWithContentDescription("Save").assertExists()
+    }
+
+    /** What still keeps the keyboard: a row's sideways swipe (its actions), and
+     *  the list's own scroll to the add field after each add (focus stays). */
+    @Test fun aSidewaysSwipeOnARowKeepsTheKeyboard() {
+        openTheList()
+        keyboard(KEYBOARD)
+        val add = compose.onNode(hasSetTextAction() and hasText(INLINE_ADD))
+        add.assertIsFocused()
+        compose.onNodeWithContentDescription(items[10].body).performTouchInput { swipeLeft() }
+        compose.waitForIdle()
+        add.assertIsFocused()
+    }
+
+    /** Same shape on the task screen: dragging it lets the capture field's keyboard go. */
+    @Test fun draggingTheTaskScreenLetsTheCaptureKeyboardGo() {
+        val capture = openATaskAndFocusTheCaptureField()
+        keyboard(KEYBOARD)
+        capture.assertIsFocused()
+        compose.onNode(hasScrollAction() and hasAnyDescendant(hasSetTextAction() and hasText(CAPTURE))).performTouchInput { swipeDown() }
+        compose.waitForIdle()
+        capture.assertIsNotFocused()
+    }
+
+    /** And on the Collections tab: dragging the grid lets the search keyboard go. */
+    @Test fun draggingTheCollectionsGridLetsTheSearchKeyboardGo() {
+        compose.onNode(hasText("Collections") and isSelectable()).performClick()
+        compose.waitForIdle()
+        val search = compose.onNode(hasSetTextAction() and hasText("Search collections"))
+        search.performClick()
+        compose.waitForIdle()
+        keyboard(KEYBOARD)
+        search.assertIsFocused()
+        compose.onNode(hasScrollToIndexAction()).performTouchInput { swipeUp() }
+        compose.waitForIdle()
+        search.assertIsNotFocused()
+    }
+
     // ── a task ───────────────────────────────────────────────────────────────
 
-    /** Same shape on the task screen: "Capture a thought…" is the last field in
-     *  its scroll. Scrolled to and tapped, the keyboard must not cover it. */
-    @Test fun theTaskCaptureFieldAtTheBottomEndsUpAboveTheKeyboard() {
+    private fun openATaskAndFocusTheCaptureField(): androidx.compose.ui.test.SemanticsNodeInteraction {
         vm.addTask("Write the sync notes")
         compose.waitUntil(WAIT_MS) {
             shadowOf(Looper.getMainLooper()).idle()
@@ -287,6 +385,13 @@ class KeyboardInsetsTest {
         capture.performScrollTo()
         capture.performClick()
         compose.waitForIdle()
+        return capture
+    }
+
+    /** Same shape on the task screen: "Capture a thought…" is the last field in
+     *  its scroll. Scrolled to and tapped, the keyboard must not cover it. */
+    @Test fun theTaskCaptureFieldAtTheBottomEndsUpAboveTheKeyboard() {
+        val capture = openATaskAndFocusTheCaptureField()
 
         keyboard(KEYBOARD)
         // The row it sits in (the field + Add) clears the keyboard too.

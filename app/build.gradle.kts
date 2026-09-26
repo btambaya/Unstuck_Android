@@ -49,8 +49,8 @@ android {
         applicationId = "io.unstucknow.app"
         minSdk = 26
         targetSdk = 35
-        versionCode = 117
-        versionName = "0.5.33"
+        versionCode = 118
+        versionName = "0.5.34"
         buildConfigField("String", "SUPABASE_URL", "\"$supabaseUrl\"")
         buildConfigField("String", "SUPABASE_ANON_KEY", "\"$supabaseAnonKey\"")
         // In-app feedback bubble — on for beta; flip to false (or repurpose the copy)
@@ -125,7 +125,7 @@ firebaseAppDistribution {
     // No group by default → only the two testers above are notified. Pass
     // -PappDistGroups=beta to release to the full beta group when told to.
     groups = (findProperty("appDistGroups") as String?) ?: ""
-    releaseNotes = "v0.5.33 — Completed tasks grouped (Today / Yesterday / Earlier this week / Last week / Earlier, tap to fold). The bell lists shared-list updates, shares and finished notifications; tap to open."
+    releaseNotes = "v0.5.34 — Dragging a list up or down now puts the keyboard away (collections, the Collections search, a task's capture box), so the add box no longer disappears behind it. The Week calendar shows the current-time line on today, like the Day view."
 }
 
 dependencies {

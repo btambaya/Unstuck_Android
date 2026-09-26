@@ -55,6 +55,7 @@ import androidx.compose.foundation.combinedClickable
 import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import tech.csalliance.unstuck.ui.components.dismissKeyboardOnDrag
 
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
@@ -76,7 +77,9 @@ fun CollectionsScreen(vm: AppViewModel, onOpen: (String) -> Unit, onNewCollectio
         AppBar(title = "Collections", leading = Leading.NONE, onSearch = onSearch, onNotifications = onNotifications, notifUnread = notifUnread, onAvatar = onAvatar, avatarInitials = avatarInitials)
         LazyVerticalGrid(
             columns = GridCells.Fixed(2),
-            modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp),
+            // Dragging the grid lets the search's keyboard go (the search field
+            // scrolls away with the grid; see dismissKeyboardOnDrag).
+            modifier = Modifier.fillMaxSize().padding(horizontal = 18.dp).dismissKeyboardOnDrag(),
             // Typing in the search, the keyboard covers the bottom of the grid (the
             // bottom bar stays down under it). Room at the end for the keyboard's
             // height, so every card can still be scrolled up above it. Nothing near

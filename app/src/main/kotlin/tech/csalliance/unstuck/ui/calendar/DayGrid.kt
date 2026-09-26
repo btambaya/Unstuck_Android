@@ -37,7 +37,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.boundsInWindow
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
@@ -162,18 +161,10 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
             scroll.scrollTo((((lt.hour - 1).coerceAtLeast(0)) * hourPx).toInt())
         }
     }
-    // Drive the NOW line from a coarse ticker so it advances while the screen
-    // is open (was inline LocalTime.now() with no clock-driven recomposition,
-    // so it froze at first composition). Only ticks on today.
-    var nowLt by remember { mutableStateOf(java.time.LocalTime.now()) }
-    LaunchedEffect(date) {
-        if (date == Clock.todayIso()) {
-            while (true) {
-                nowLt = java.time.LocalTime.now()
-                kotlinx.coroutines.delay(30_000)
-            }
-        }
-    }
+    // Drive the NOW line from a ticker so it advances while the screen is open
+    // (was inline LocalTime.now() with no clock-driven recomposition, so it froze
+    // at first composition). Steps as each minute begins; shared with the Week view.
+    val now by rememberCalendarNow()
     // Roll the viewed day forward across midnight if the user is still on "today",
     // so the NOW line + "Today" label don't get stuck on yesterday.
     LaunchedEffect(Unit) {
@@ -351,16 +342,13 @@ fun DayGridScreen(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared: (S
                         }
                     }
                 }
-                // "NOW" line on today's grid.
+                // "NOW" line on today's grid (NowLine.kt — the Week view draws the same one).
                 if (date == Clock.todayIso()) {
-                    val lt = nowLt
-                    val nowMin = lt.hour * 60 + lt.minute - START_HOUR * 60
-                    if (nowMin in 0..((END_HOUR - START_HOUR) * 60)) {
+                    val lt = now.toLocalTime()
+                    nowGridMinute(lt, START_HOUR, END_HOUR)?.let { nowMin ->
                         val topDp = HOUR_HEIGHT * (nowMin / 60f)
-                        Box(Modifier.padding(start = 64.dp, end = 12.dp).offset(y = topDp).fillMaxWidth().height(1.5.dp).background(c.coral))
-                        Box(Modifier.offset(y = (topDp - 8.dp).coerceAtLeast(0.dp)).padding(start = 8.dp).clip(RoundedCornerShape(999.dp)).background(c.coral).padding(horizontal = 6.dp, vertical = 1.dp)) {
-                            Text("NOW", style = UFont.mono(8, FontWeight.Bold), color = Color.White)
-                        }
+                        NowRule(Modifier.padding(start = 64.dp, end = 12.dp).offset(y = topDp).fillMaxWidth())
+                        NowPill(lt, clock, Modifier.offset(y = (topDp - 8.dp).coerceAtLeast(0.dp)).padding(start = 8.dp))
                     }
                 }
             }

@@ -18,6 +18,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.wrapContentWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
@@ -310,9 +311,17 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
     // the current week; 0 = the week containing today). Saveable so the viewed week
     // doesn't snap back to today on rotation.
     var weekOffset by rememberSaveable { mutableStateOf(0) }
-    val today = java.time.LocalDate.now()
+    // Now, stepping each minute (NowLine.kt, shared with the Day view): drives the
+    // now line and today's highlight, and rolls the week over at midnight
+    // (`days` was keyed on weekOffset alone, so it kept last week's dates past
+    // Sunday midnight while `today` had moved on).
+    val now by rememberCalendarNow()
+    val today = now.toLocalDate()
     val monday = today.minusDays(((today.dayOfWeek.value + 6) % 7).toLong()).plusWeeks(weekOffset.toLong())
-    val days = remember(weekOffset) { (0..6).map { monday.plusDays(it.toLong()) } }
+    val days = remember(monday) { (0..6).map { monday.plusDays(it.toLong()) } }
+    // Where "now" falls: today's column + the minute, only when today is in the
+    // visible week.
+    val nowMark = weekNowMark(now, days, WSTART, WEND)
     // The shared-block window follows the visible week (cached per window in the VM).
     LaunchedEffect(days) { vm.setSharedBlockRange(days.first().toString(), days.last().toString()) }
     val dows = listOf("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
@@ -369,22 +378,41 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
                 }
             }
         }
-        // The hour grid is the only part that scrolls.
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+        // The hour grid is the only part that scrolls. Showing this week, it opens
+        // about an hour before now, as the Day view does — the now line in sight
+        // rather than off below midnight's rows.
+        val gridScroll = rememberScrollState()
+        val gridHourPx = with(androidx.compose.ui.platform.LocalDensity.current) { WHOUR.toPx() }
+        LaunchedEffect(nowMark != null) {
+            if (nowMark != null) gridScroll.scrollTo((((nowMark.minute / 60) - 1).coerceAtLeast(0) * gridHourPx).toInt())
+        }
+        Column(Modifier.weight(1f).verticalScroll(gridScroll)) {
         // Hour grid: time gutter + 7 day columns with positioned blocks.
         Row(Modifier.fillMaxWidth().height(WHOUR * (WEND - WSTART)).padding(top = 6.dp)) {
             // Hour labels the phone's way — "14:00" / "2 PM", like the Day grid (it
             // read a bare "14" here while the Day grid said "2:00 PM"). One line,
             // never wrapped: a large font scale overhangs the first column instead.
             val clock = tech.csalliance.unstuck.ui.components.clockMode()
-            Column(Modifier.width(26.dp)) {
-                for (h in WSTART until WEND) {
-                    Box(Modifier.height(WHOUR)) {
-                        Text(
-                            tech.csalliance.unstuck.core.time.ClockFormat.hour(h, clock), style = UFont.mono(8), color = c.ink4,
-                            maxLines = 1, softWrap = false, overflow = androidx.compose.ui.text.style.TextOverflow.Visible,
-                        )
+            Box(Modifier.width(26.dp)) {
+                Column {
+                    for (h in WSTART until WEND) {
+                        Box(Modifier.height(WHOUR)) {
+                            Text(
+                                tech.csalliance.unstuck.core.time.ClockFormat.hour(h, clock), style = UFont.mono(8), color = c.ink4,
+                                maxLines = 1, softWrap = false, overflow = androidx.compose.ui.text.style.TextOverflow.Visible,
+                            )
+                        }
                     }
+                }
+                // The Day view's "NOW" pill, at the same height in the hour gutter
+                // (a little narrower, to fit this gutter).
+                nowMark?.let { m ->
+                    // Unbounded width: at a large font size it overhangs the first
+                    // column (as the hour labels do) instead of being cut off.
+                    NowPill(
+                        now.toLocalTime(), clock, horizontalPadding = 4.dp,
+                        modifier = Modifier.wrapContentWidth(Alignment.Start, unbounded = true).offset(y = (WHOUR * (m.minute / 60f) - 8.dp).coerceAtLeast(0.dp)),
+                    )
                 }
             }
             val weekDensity = androidx.compose.ui.platform.LocalDensity.current
@@ -452,6 +480,13 @@ private fun WeekView(vm: AppViewModel, onOpen: (TaskItem) -> Unit, onOpenShared:
                                     ),
                             ) { Text(if (sb != null) sharedBlockLabel(sb) else b.taskName, style = UFont.sans(8, FontWeight.Medium), color = if (done) c.ink3 else if (sb != null) c.ink2 else c.ink, maxLines = 1, textDecoration = if (done) androidx.compose.ui.text.style.TextDecoration.LineThrough else null) }
                         }
+                    }
+                    // Now: the Day view's line, across TODAY's column only, over its
+                    // blocks, with a dot on the column's leading edge.
+                    if (nowMark != null && days.getOrNull(nowMark.column) == d) {
+                        val y = WHOUR * (nowMark.minute / 60f)
+                        NowRule(Modifier.fillMaxWidth().offset(y = y))
+                        NowDot(Modifier.offset(x = -NOW_DOT_SIZE / 2, y = y + NOW_LINE_THICKNESS / 2 - NOW_DOT_SIZE / 2))
                     }
                 }
             }
